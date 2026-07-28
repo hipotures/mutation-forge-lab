@@ -172,7 +172,12 @@ class RichLiveSink:
         ):
             value = profile.get(key)
             if isinstance(value, int | float) and not isinstance(value, bool):
-                table.add_row(label, f"{value:.3f}", f"{value / measured * 100:.1f}%")
+                table.add_row(
+                    label,
+                    f"{value:.3f}",
+                    f"{value / measured * 100:.1f}%",
+                    style="bright_cyan" if key == "measured_total_seconds" else None,
+                )
         process_times = tuple(
             self._seconds(self.state.get(key))
             for key in ("real_seconds", "user_seconds", "system_seconds")

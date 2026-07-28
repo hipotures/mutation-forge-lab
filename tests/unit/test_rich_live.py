@@ -76,6 +76,9 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         assert rendered.index("measured total") < rendered.index("Time real/user/sys")
         assert "8.500 / 7.250 / 0.500" in rendered
         assert rendered.count("Time real/user/sys") == 1
+        profile_table = sink._profile_table()
+        assert profile_table is not None
+        assert profile_table.rows[-2].style == "bright_cyan"
     finally:
         sink.close()
 
