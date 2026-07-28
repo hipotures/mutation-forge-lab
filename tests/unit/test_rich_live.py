@@ -9,6 +9,21 @@ from mutation_forge.events import Event
 from mutation_forge.output.rich_live import RichLiveSink
 
 
+def test_rich_live_formats_evaluations_per_second() -> None:
+    assert RichLiveSink._rate(1467.452267324598) == "1467.45"
+
+
+def test_rich_live_places_timing_on_last_row() -> None:
+    sink = RichLiveSink(console=Console(file=io.StringIO(), force_terminal=False))
+    try:
+        output = io.StringIO()
+        Console(file=output, force_terminal=False, width=160).print(sink._render())
+        rendered = output.getvalue()
+        assert rendered.index("Latest event") < rendered.index("Time real/user/sys")
+    finally:
+        sink.close()
+
+
 def test_rich_live_renders_at_most_once_per_second_and_on_terminal_event() -> None:
     with patch("mutation_forge.output.rich_live.time.monotonic") as monotonic:
         monotonic.return_value = 0.0

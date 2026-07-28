@@ -59,13 +59,7 @@ class RichLiveSink:
             ("Baseline", self.state.get("baseline", "-")),
             ("Episodes", self.state.get("episodes_completed", 0)),
             ("Evaluations", self.state.get("evaluations", 0)),
-            ("Evaluations/s", self.state.get("evaluations_per_second", 0)),
-            (
-                "Time real/user/sys",
-                f"{self._seconds(self.state.get('real_seconds'))} / "
-                f"{self._seconds(self.state.get('user_seconds'))} / "
-                f"{self._seconds(self.state.get('system_seconds'))}",
-            ),
+            ("Evaluations/s", self._rate(self.state.get("evaluations_per_second"))),
             ("Initial score", self.state.get("initial_total", "-")),
             ("Current / best", f"{self.state.get('current_total', '-')} / "
              f"{self.state.get('best_total', '-')}"),
@@ -74,6 +68,12 @@ class RichLiveSink:
             ("Timeouts / crashes", f"{self.state.get('timeouts', 0)} / "
              f"{self.state.get('crashes', 0)}"),
             ("Latest event", self.state.get("latest_event", "none")),
+            (
+                "Time real/user/sys",
+                f"{self._seconds(self.state.get('real_seconds'))} / "
+                f"{self._seconds(self.state.get('user_seconds'))} / "
+                f"{self._seconds(self.state.get('system_seconds'))}",
+            ),
         )
         for label, value in rows:
             overview.add_row(str(label), str(value))
@@ -83,6 +83,12 @@ class RichLiveSink:
     def _seconds(value: JsonValue) -> str:
         if isinstance(value, int | float) and not isinstance(value, bool):
             return f"{value:.3f}"
+        return "-"
+
+    @staticmethod
+    def _rate(value: JsonValue) -> str:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return f"{value:.2f}"
         return "-"
 
     def close(self) -> None:
