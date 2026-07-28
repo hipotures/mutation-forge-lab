@@ -187,6 +187,10 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                         )
                     episodes.append(episode)
                     baseline_episodes += 1
+                    cumulative_timing_profile = aggregate_timing_profiles(
+                        (item.timing_profile for item in episodes),
+                        enabled=config.search.profiling_enabled,
+                    )
                     bus.emit(
                         "episode_completed",
                         baseline=baseline.policy_id,
@@ -199,11 +203,12 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                         legal_proposals=episode.legal_proposals,
                         invalid_proposals=episode.invalid_proposals,
                         episodes_completed=baseline_episodes,
-                        timing_profile=(
+                        episode_timing_profile=(
                             episode.timing_profile.as_dict()
                             if episode.timing_profile is not None
                             else None
                         ),
+                        timing_profile=cumulative_timing_profile,
                     )
 
         fitness = {

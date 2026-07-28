@@ -24,12 +24,18 @@ Each episode measures these non-overlapping phases with
 - `progress_reporting`: aggregate progress callbacks and their event sinks;
 - `finalization`: final graph serialization and canonical hashing.
 
-The episode profile is stored in `run_summary.json` and in the corresponding
-`episode_completed` event. The run summary and terminal event also contain an
-aggregate `timing_profile` with phase seconds, measured total, accounted time,
-unattributed time, and the dominant phase. Unattributed time covers loop
-control, deadline checks, timer overhead, and other work outside the named
-phases.
+The episode profile is stored in `run_summary.json` and as
+`episode_timing_profile` in the corresponding `episode_completed` event. That
+event also contains the cumulative run `timing_profile`, allowing Rich output
+to update a phase table after each episode. The final run summary and terminal
+event contain the complete aggregate profile with phase seconds, measured
+total, accounted time, unattributed time, and the dominant phase. Unattributed
+time covers loop control, deadline checks, timer overhead, and other work
+outside the named phases.
+
+Rich renders the cumulative phase table during the run. Its final table also
+shows process `real/user/sys` time below the profile totals. With profiling
+disabled, process time remains in the main overview panel.
 
 Profiles are timing observations only. They are excluded from the canonical
 summary hash. A valid overhead comparison uses identical configurations,

@@ -64,6 +64,13 @@ def test_json_and_rich_runs_have_same_canonical_summary(
     )
     assert json_events[-1]["timing_profile"]["enabled"] is True
     assert json_events[-1]["timing_profile"]["profiled_episodes"] == 2
+    completed_events = [
+        event for event in json_events if event["event_type"] == "episode_completed"
+    ]
+    assert [
+        event["timing_profile"]["profiled_episodes"] for event in completed_events
+    ] == [1, 2]
+    assert all(event["episode_timing_profile"] for event in completed_events)
     assert "\x1b" not in json_stdout
     assert all(
         {"schema_version", "timestamp", "run_id", "event_type"}.issubset(event)

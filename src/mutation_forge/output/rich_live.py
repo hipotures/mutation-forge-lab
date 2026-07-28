@@ -48,10 +48,11 @@ class RichLiveSink:
             self._last_refresh = now
 
     def _render(self) -> Group:
+        profile_table = self._profile_table()
         overview = Table.grid(padding=(0, 2))
         overview.add_column(style="cyan")
         overview.add_column()
-        rows = (
+        rows = [
             ("Run", self.state.get("run_id", "pending")),
             ("Stage", self.state.get("stage", "initializing")),
             ("HEG / backend", self.state.get("heg_commit", self.state.get("backend_id", "-"))),
@@ -69,16 +70,31 @@ class RichLiveSink:
              f"{self.state.get('crashes', 0)}"),
             ("Profile top / unattributed", self._profile_summary()),
             ("Latest event", self.state.get("latest_event", "none")),
-            (
-                "Time real/user/sys",
-                f"{self._seconds(self.state.get('real_seconds'))} / "
-                f"{self._seconds(self.state.get('user_seconds'))} / "
-                f"{self._seconds(self.state.get('system_seconds'))}",
-            ),
-        )
+        ]
+        if profile_table is None:
+            rows.append(
+                (
+                    "Time real/user/sys",
+                    f"{self._seconds(self.state.get('real_seconds'))} / "
+                    f"{self._seconds(self.state.get('user_seconds'))} / "
+                    f"{self._seconds(self.state.get('system_seconds'))}",
+                )
+            )
         for label, value in rows:
             overview.add_row(str(label), str(value))
-        return Group(Panel(overview, title="Mutation Forge Lab · Stage 1"))
+        overview_panel = Panel(overview, title="Mutation Forge Lab · Stage 1")
+        if profile_table is None:
+            return Group(overview_panel)
+        profile = self.state["timing_profile"]
+        assert isinstance(profile, dict)
+        profiled_episodes = profile.get("profiled_episodes", "-")
+        return Group(
+            overview_panel,
+            Panel(
+                profile_table,
+                title=f"Runtime profile · {profiled_episodes} episodes",
+            ),
+        )
 
     @staticmethod
     def _seconds(value: JsonValue) -> str:
@@ -110,6 +126,65 @@ class RichLiveSink:
         ):
             return "-"
         return f"{phase} {seconds:.3f}s / {unattributed * 100:.1f}%"
+
+    def _profile_table(self) -> Table | None:
+        profile = self.state.get("timing_profile")
+        if not isinstance(profile, dict) or profile.get("enabled") is not True:
+            return None
+        phases = profile.get("phase_seconds")
+        measured = profile.get("measured_total_seconds")
+        if (
+            not isinstance(phases, dict)
+            or not isinstance(measured, int | float)
+            or isinstance(measured, bool)
+            or measured <= 0
+        ):
+            return None
+
+        numeric_phases = [
+            (phase, seconds)
+            for phase, seconds in phases.items()
+            if isinstance(phase, str)
+            and isinstance(seconds, int | float)
+            and not isinstance(seconds, bool)
+        ]
+        if not numeric_phases:
+            return None
+
+        table = Table(box=None, padding=(0, 2))
+        table.add_column("Phase", style="cyan")
+        table.add_column("Seconds", justify="right", no_wrap=True)
+        table.add_column("Share", justify="right")
+        for phase, seconds in sorted(
+            numeric_phases, key=lambda item: item[1], reverse=True
+        ):
+            table.add_row(
+                phase,
+                f"{seconds:.3f}",
+                f"{seconds / measured * 100:.1f}%",
+            )
+
+        table.add_section()
+        for label, key in (
+            ("accounted", "accounted_seconds"),
+            ("unattributed", "unattributed_seconds"),
+            ("measured total", "measured_total_seconds"),
+        ):
+            value = profile.get(key)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                table.add_row(label, f"{value:.3f}", f"{value / measured * 100:.1f}%")
+        process_times = tuple(
+            self._seconds(self.state.get(key))
+            for key in ("real_seconds", "user_seconds", "system_seconds")
+        )
+        if all(value != "-" for value in process_times):
+            table.add_section()
+            table.add_row(
+                "Time real/user/sys",
+                " / ".join(process_times),
+                "",
+            )
+        return table
 
     def close(self) -> None:
         self.live.stop()
