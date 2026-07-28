@@ -58,6 +58,7 @@ def _doctor(heg_repo: Path, run_root: Path) -> int:
             "score",
             "exact_verify",
             "canonical_hash",
+            "state_hash",
             "apply_rewrite",
             "propose_rewrite",
         )

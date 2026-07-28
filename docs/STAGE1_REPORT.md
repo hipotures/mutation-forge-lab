@@ -132,3 +132,24 @@ a structural ranker beating random on a frozen toy benchmark.
 
 Recommendation: accept Stage 1 and review the Stage 2 safety design. Do not
 begin Stage 3 model integration or any HEG production work.
+
+## Post-Stage-1 hot-loop optimization
+
+After rebuilding the HEG protocol-v2 C++ score worker, profiling a longer
+80,000-evaluation run showed that per-candidate canonical hashing launched
+nauty `labelg` approximately once per evaluation. Duplicate and exact-zero
+submission sets now use HEG's label-sensitive stable graph6 hash. Canonical
+hashes remain in immutable dataset entries and final episode results.
+
+Using the identical stored configuration and C++ scorer:
+
+| Implementation | Seconds | Evaluations/s |
+|---|---:|---:|
+| Per-evaluation canonical hash | 318.166 | 251.441 |
+| Fast labeled state hash | 40.286 | 1985.822 |
+
+This is a 7.90× end-to-end speedup. Across all 16 episodes, initial, best, and
+final scores; every 5,000-point best-so-far curve; and final canonical graph
+hashes matched exactly. The duplicate count decreased from 53,450 to 48,466
+because it now measures labeled state identity rather than isomorphism. The
+duplicate metric does not affect controller decisions.

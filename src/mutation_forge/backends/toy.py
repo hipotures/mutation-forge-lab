@@ -108,6 +108,9 @@ class ToyBackend:
     def canonical_hash(self, graph: GraphState) -> str:
         return hashlib.sha256(self.serialize_graph6(graph).encode()).hexdigest()
 
+    def state_hash(self, graph: GraphState) -> str:
+        return hashlib.sha256(self.serialize_graph6(graph).encode()).hexdigest()
+
     def serialize_graph6(self, graph: GraphState) -> str:
         edge_text = ";".join(f"{u}-{v}" for u, v in graph.edges)
         return f"toy:{graph.order}:{edge_text}"

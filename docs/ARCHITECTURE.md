@@ -50,7 +50,11 @@ verifier, filesystem, database, process, or network.
 
 The HEG backend is read-only and its exact commit and dirty state are recorded.
 Its graph is converted through immutable edge tuples. Canonical hashing uses
-HEG's canonical graph6 key; serialization remains ordinary graph6.
+HEG's canonical graph6 key for immutable datasets and final result identities;
+serialization remains ordinary graph6. The per-evaluation duplicate and
+exact-submission sets use HEG's label-sensitive graph6 `stable_hash`, avoiding
+an external nauty `labelg` process in the hot loop. Stage 1 rewrites do not
+relabel vertices, so labeled equality is sufficient for these transient sets.
 
 ## Later package boundaries
 

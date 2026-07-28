@@ -49,7 +49,7 @@ def run_episode(
     duplicate = 0
     score_failures = 0
     policy_call_ms = 0.0
-    seen = {backend.canonical_hash(current)}
+    seen = {backend.state_hash(current)}
     exact_submissions: set[str] = set()
     source = TwoSwitchProposalSource(backend, baseline.operator_family)
     completed = 0
@@ -89,7 +89,7 @@ def run_episode(
             timed_out = True
             break
         legal += 1
-        candidate_hash = backend.canonical_hash(candidate)
+        candidate_hash = backend.state_hash(candidate)
         if candidate_hash in seen:
             duplicate += 1
         seen.add(candidate_hash)

@@ -15,6 +15,11 @@ normalized AUC; first improvement; exact-zero submissions; legal, invalid,
 no-op, and duplicate rates; policy latency; score failures; wall status; and
 the final graph.
 
+The duplicate rate uses a label-sensitive SHA-256 graph6 state hash. Stage 1
+rewrites preserve vertex labels, and duplicates do not gate controller
+acceptance. Isomorphism-canonical hashes remain reserved for immutable dataset
+and final result identities.
+
 The normalized best-so-far AUC is:
 
 ```text

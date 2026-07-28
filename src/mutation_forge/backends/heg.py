@@ -175,6 +175,9 @@ class HegBackend:
         canonical = self._plugin.canonical_key(self._to_heg(graph))
         return hashlib.sha256(canonical).hexdigest()
 
+    def state_hash(self, graph: GraphState) -> str:
+        return str(self._to_heg(graph).stable_hash())
+
     def serialize_graph6(self, graph: GraphState) -> str:
         return str(self._to_heg(graph).to_graph6())
 
