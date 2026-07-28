@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -7,6 +9,8 @@ from rich.table import Table
 
 from mutation_forge.events import Event
 from mutation_forge.models import JsonValue
+
+REFRESH_INTERVAL_SECONDS = 1.0
 
 
 class RichLiveSink:
@@ -21,10 +25,11 @@ class RichLiveSink:
         self.live = Live(
             self._render(),
             console=self.console,
-            refresh_per_second=4,
+            auto_refresh=False,
             transient=False,
         )
         self.live.start()
+        self._last_refresh = time.monotonic()
 
     def write(self, event: Event) -> None:
         self.state.update(event.payload)
@@ -36,8 +41,11 @@ class RichLiveSink:
             self.state["stage"] = "completed"
         elif event.event_type == "run_failed":
             self.state["stage"] = "failed"
-        refresh = event.event_type in {"run_completed", "run_failed"}
-        self.live.update(self._render(), refresh=refresh)
+        now = time.monotonic()
+        terminal = event.event_type in {"run_completed", "run_failed"}
+        if terminal or now - self._last_refresh >= REFRESH_INTERVAL_SECONDS:
+            self.live.update(self._render(), refresh=True)
+            self._last_refresh = now
 
     def _render(self) -> Group:
         overview = Table.grid(padding=(0, 2))

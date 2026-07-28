@@ -29,8 +29,8 @@ Run summaries report `real_seconds`, `user_seconds`, and `system_seconds`.
 User and system CPU combine the `mforge` process with its reaped children and
 exclude the outer `uv` launcher.
 
-The Rich display auto-refreshes at four frames per second. Progress events
-update its state without forcing an immediate redraw; terminal events refresh
+The Rich display updates its in-memory state for every progress event but
+builds and redraws the table at most once per second. Terminal events refresh
 immediately.
 
 Milestone reports include exact commands, test counts and outcomes, dataset
