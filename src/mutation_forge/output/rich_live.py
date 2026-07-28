@@ -167,7 +167,7 @@ class RichLiveSink:
         if not numeric_phases:
             return None
 
-        table = Table(box=box.MINIMAL, border_style="dim cyan", padding=(0, 2))
+        table = Table(box=box.MINIMAL, border_style="grey37", padding=(0, 2))
         table.add_column("Phase", style="cyan")
         table.add_column("Seconds", justify="right", no_wrap=True)
         table.add_column("Share", justify="right")

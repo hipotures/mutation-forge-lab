@@ -88,7 +88,7 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         profile_table = sink._profile_table()
         assert profile_table is not None
         assert profile_table.box is box.MINIMAL
-        assert profile_table.border_style == "dim cyan"
+        assert profile_table.border_style == "grey37"
         assert profile_table.rows[-1].style == "bright_cyan"
     finally:
         sink.close()
