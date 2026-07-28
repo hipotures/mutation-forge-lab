@@ -96,6 +96,56 @@ class DatasetEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class EpisodeTimingProfile:
+    measured_total_ns: int
+    scoring_ns: int
+    proposal_generation_ns: int
+    rewrite_application_ns: int
+    duplicate_detection_ns: int
+    controller_ns: int
+    exact_verification_ns: int
+    progress_reporting_ns: int
+    finalization_ns: int
+
+    def phase_nanoseconds(self) -> dict[str, int]:
+        return {
+            "scoring": self.scoring_ns,
+            "proposal_generation": self.proposal_generation_ns,
+            "rewrite_application": self.rewrite_application_ns,
+            "duplicate_detection": self.duplicate_detection_ns,
+            "controller": self.controller_ns,
+            "exact_verification": self.exact_verification_ns,
+            "progress_reporting": self.progress_reporting_ns,
+            "finalization": self.finalization_ns,
+        }
+
+    @property
+    def accounted_ns(self) -> int:
+        return sum(self.phase_nanoseconds().values())
+
+    @property
+    def unattributed_ns(self) -> int:
+        return max(0, self.measured_total_ns - self.accounted_ns)
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        phases = self.phase_nanoseconds()
+        dominant_phase, dominant_ns = max(phases.items(), key=lambda item: item[1])
+        return {
+            "phase_seconds": {
+                phase: nanoseconds / 1_000_000_000
+                for phase, nanoseconds in phases.items()
+            },
+            "measured_total_seconds": self.measured_total_ns / 1_000_000_000,
+            "accounted_seconds": self.accounted_ns / 1_000_000_000,
+            "unattributed_seconds": self.unattributed_ns / 1_000_000_000,
+            "unattributed_fraction": self.unattributed_ns
+            / max(1, self.measured_total_ns),
+            "dominant_phase": dominant_phase,
+            "dominant_seconds": dominant_ns / 1_000_000_000,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EpisodeResult:
     baseline: str
     entry_id: str
@@ -121,6 +171,7 @@ class EpisodeResult:
     elapsed_seconds: float
     final_graph6: str
     final_graph_hash: str
+    timing_profile: EpisodeTimingProfile | None = None
 
     def as_dict(self, *, include_timing: bool = True) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
@@ -150,4 +201,6 @@ class EpisodeResult:
         if include_timing:
             result["policy_call_ms"] = self.policy_call_ms
             result["elapsed_seconds"] = self.elapsed_seconds
+            if self.timing_profile is not None:
+                result["timing_profile"] = self.timing_profile.as_dict()
         return result

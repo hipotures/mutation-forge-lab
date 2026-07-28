@@ -162,6 +162,9 @@ def _inspect(path: Path, *, json_output: bool) -> int:
     fitness = summary.get("fitness")
     if isinstance(fitness, dict):
         console.print_json(json.dumps(fitness))
+    timing_profile = summary.get("timing_profile")
+    if isinstance(timing_profile, dict):
+        console.print_json(json.dumps(timing_profile))
     return 0
 
 

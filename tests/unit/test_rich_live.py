@@ -19,7 +19,26 @@ def test_rich_live_places_timing_on_last_row() -> None:
         output = io.StringIO()
         Console(file=output, force_terminal=False, width=160).print(sink._render())
         rendered = output.getvalue()
+        assert rendered.index("Profile top / unattributed") < rendered.index(
+            "Latest event"
+        )
         assert rendered.index("Latest event") < rendered.index("Time real/user/sys")
+    finally:
+        sink.close()
+
+
+def test_rich_live_formats_profile_summary() -> None:
+    sink = RichLiveSink(console=Console(file=io.StringIO(), force_terminal=False))
+    try:
+        sink.state["timing_profile"] = {
+            "enabled": True,
+            "dominant_phase": "proposal_generation",
+            "dominant_seconds": 12.34567,
+            "unattributed_fraction": 0.042,
+        }
+        assert sink._profile_summary() == "proposal_generation 12.346s / 4.2%"
+        sink.state["timing_profile"] = {"enabled": False}
+        assert sink._profile_summary() == "disabled"
     finally:
         sink.close()
 

@@ -21,6 +21,7 @@ from mutation_forge.config import LabConfig
 from mutation_forge.evaluation.dataset import build_dataset
 from mutation_forge.evaluation.episode import run_episode
 from mutation_forge.evaluation.fitness import aggregate_fitness
+from mutation_forge.evaluation.profiling import aggregate_timing_profiles
 from mutation_forge.events import EventBus, EventSink, JsonlSink
 from mutation_forge.models import EpisodeResult, JsonValue
 from mutation_forge.output.rich_live import RichLiveSink
@@ -162,6 +163,7 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                         witness_cap=config.score.witness_cap,
                         deadline=deadline,
                         progress=emit_progress,
+                        profiling_enabled=config.search.profiling_enabled,
                     )
                     if episode.timed_out:
                         raise TimeoutError("episode wall-time budget exhausted")
@@ -197,6 +199,11 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                         legal_proposals=episode.legal_proposals,
                         invalid_proposals=episode.invalid_proposals,
                         episodes_completed=baseline_episodes,
+                        timing_profile=(
+                            episode.timing_profile.as_dict()
+                            if episode.timing_profile is not None
+                            else None
+                        ),
                     )
 
         fitness = {
@@ -205,6 +212,10 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             )
             for baseline in config.proposals.operator_families
         }
+        timing_profile = aggregate_timing_profiles(
+            (episode.timing_profile for episode in episodes),
+            enabled=config.search.profiling_enabled,
+        )
         canonical_payload = _canonical_summary_payload(
             dataset_hash=cast(str, dataset["manifest_hash"]),
             episodes=episodes,
@@ -234,6 +245,7 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             "dataset_manifest_hash": cast(str, dataset["manifest_hash"]),
             "episodes": [episode.as_dict() for episode in episodes],
             "fitness": cast(dict[str, JsonValue], fitness),
+            "timing_profile": timing_profile,
             "run_id": run_id,
             "status": "completed",
             "summary_hash": summary_hash,
@@ -263,6 +275,7 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             real_seconds=elapsed,
             user_seconds=user_seconds,
             system_seconds=system_seconds,
+            timing_profile=timing_profile,
         )
         return BenchmarkResult(artifacts.path, summary)
     except Exception as error:

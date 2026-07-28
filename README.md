@@ -46,4 +46,5 @@ the reviewed HEG proposal operator differs.
 
 See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass
-results.
+results. See [docs/PROFILING.md](docs/PROFILING.md) for the aggregate runtime
+profile and an on/off overhead check.

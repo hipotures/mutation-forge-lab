@@ -23,5 +23,9 @@ Terminal events include `real_seconds`, `user_seconds`, and `system_seconds`.
 CPU values combine the `mforge` process with reaped child processes, including
 the persistent HEG score worker and external graph tools.
 
+When runtime profiling is enabled, `episode_completed` contains the aggregate
+episode `timing_profile`, while `run_completed` contains the aggregate run
+profile. No per-evaluation profiling events are emitted.
+
 Rich and JSON consume the same `Event` objects. Canonical run-summary equality,
 not terminal formatting, defines output parity.

@@ -41,6 +41,44 @@ def test_toy_episode_is_deterministic() -> None:
     assert backend.validate(backend.deserialize_graph6(first.final_graph6)).valid
 
 
+def test_episode_profiling_preserves_trajectory_and_accounts_time() -> None:
+    backend = ToyBackend()
+    graph = backend.generate_seed(order=30, seed=101)
+    kwargs = {
+        "backend": backend,
+        "initial_graph": graph,
+        "entry_id": "toy",
+        "graph_seed": 101,
+        "policy_seed": 1,
+        "baseline": HEG_UNIFORM_TWO_SWITCH,
+        "evaluations": 40,
+        "witness_cap": 64,
+    }
+    profiled = run_episode(
+        **kwargs,
+        deadline=time.monotonic() + 30,
+        profiling_enabled=True,
+    )
+    unprofiled = run_episode(
+        **kwargs,
+        deadline=time.monotonic() + 30,
+        profiling_enabled=False,
+    )
+
+    assert profiled.as_dict(include_timing=False) == unprofiled.as_dict(
+        include_timing=False
+    )
+    assert unprofiled.timing_profile is None
+    assert "timing_profile" not in unprofiled.as_dict()
+    assert profiled.timing_profile is not None
+    profile = profiled.timing_profile
+    assert profile.measured_total_ns >= profile.accounted_ns > 0
+    assert profile.unattributed_ns >= 0
+    serialized = profile.as_dict()
+    assert serialized["dominant_phase"] in profile.phase_nanoseconds()
+    assert serialized["measured_total_seconds"] > 0
+
+
 def test_episode_uses_fast_hash_in_hot_loop() -> None:
     backend = CountingToyBackend()
     graph = backend.generate_seed(order=30, seed=101)

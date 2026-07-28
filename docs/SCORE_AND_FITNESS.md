@@ -42,4 +42,6 @@ Aggregate fitness minimizes this frozen lexicographic vector:
 
 Timeouts and scoring failures increment failure episodes and cannot be
 reported as successful completion. Timing is reported but excluded from the
-canonical deterministic summary hash.
+canonical deterministic summary hash. The optional runtime profile follows
+the same rule; its phase, accounted, and unattributed times cannot affect
+trajectory or fitness identity.

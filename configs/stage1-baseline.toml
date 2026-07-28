@@ -22,6 +22,7 @@ witness_cap = 64
 controller = "fixed_ils_tabu"
 evaluations_per_episode = 2000
 proposal_pool_size = 1
+profiling_enabled = true
 
 [proposals]
 operator_families = [

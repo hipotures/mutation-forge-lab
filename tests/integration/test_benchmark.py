@@ -62,6 +62,8 @@ def test_json_and_rich_runs_have_same_canonical_summary(
         json_events[-1][field] >= 0
         for field in ("real_seconds", "user_seconds", "system_seconds")
     )
+    assert json_events[-1]["timing_profile"]["enabled"] is True
+    assert json_events[-1]["timing_profile"]["profiled_episodes"] == 2
     assert "\x1b" not in json_stdout
     assert all(
         {"schema_version", "timestamp", "run_id", "event_type"}.issubset(event)
@@ -78,9 +80,17 @@ def test_json_and_rich_runs_have_same_canonical_summary(
         assert result.summary["real_seconds"] > 0
         assert result.summary["user_seconds"] >= 0
         assert result.summary["system_seconds"] >= 0
+        timing_profile = result.summary["timing_profile"]
+        assert timing_profile["enabled"] is True
+        assert timing_profile["profiled_episodes"] == 2
+        assert timing_profile["measured_total_seconds"] > 0
+        assert timing_profile["accounted_seconds"] > 0
+        assert timing_profile["unattributed_seconds"] >= 0
+        assert timing_profile["dominant_phase"] in timing_profile["phase_seconds"]
         episodes = result.summary["episodes"]
         assert isinstance(episodes, list)
         assert all(episode["evaluations"] == 3 for episode in episodes)
+        assert all("timing_profile" in episode for episode in episodes)
 
 
 def test_interrupted_run_leaves_readable_failure_artifacts(

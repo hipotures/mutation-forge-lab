@@ -47,6 +47,7 @@ class SearchConfig:
     controller: str
     evaluations_per_episode: int
     proposal_pool_size: int
+    profiling_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,9 @@ def load_config(path: str | Path) -> LabConfig:
     controller = search.get("controller")
     if controller != "fixed_ils_tabu":
         raise ValueError("Stage 1 supports only search.controller='fixed_ils_tabu'")
+    profiling_enabled = search.get("profiling_enabled", True)
+    if not isinstance(profiling_enabled, bool):
+        raise ValueError("search.profiling_enabled must be a boolean")
     operator_families = _str_tuple(
         proposals.get("operator_families"), "proposals.operator_families"
     )
@@ -186,6 +190,7 @@ def load_config(path: str | Path) -> LabConfig:
             proposal_pool_size=_positive_int(
                 search.get("proposal_pool_size"), "search.proposal_pool_size"
             ),
+            profiling_enabled=profiling_enabled,
         ),
         proposals=ProposalConfig(
             operator_families=operator_families,

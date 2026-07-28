@@ -67,6 +67,7 @@ class RichLiveSink:
              f"{self.state.get('invalid_proposals', 0)}"),
             ("Timeouts / crashes", f"{self.state.get('timeouts', 0)} / "
              f"{self.state.get('crashes', 0)}"),
+            ("Profile top / unattributed", self._profile_summary()),
             ("Latest event", self.state.get("latest_event", "none")),
             (
                 "Time real/user/sys",
@@ -90,6 +91,25 @@ class RichLiveSink:
         if isinstance(value, int | float) and not isinstance(value, bool):
             return f"{value:.2f}"
         return "-"
+
+    def _profile_summary(self) -> str:
+        profile = self.state.get("timing_profile")
+        if not isinstance(profile, dict):
+            return "-"
+        if profile.get("enabled") is False:
+            return "disabled"
+        phase = profile.get("dominant_phase")
+        seconds = profile.get("dominant_seconds")
+        unattributed = profile.get("unattributed_fraction")
+        if (
+            not isinstance(phase, str)
+            or not isinstance(seconds, int | float)
+            or isinstance(seconds, bool)
+            or not isinstance(unattributed, int | float)
+            or isinstance(unattributed, bool)
+        ):
+            return "-"
+        return f"{phase} {seconds:.3f}s / {unattributed * 100:.1f}%"
 
     def close(self) -> None:
         self.live.stop()

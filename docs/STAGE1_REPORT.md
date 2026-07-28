@@ -153,3 +153,17 @@ final scores; every 5,000-point best-so-far curve; and final canonical graph
 hashes matched exactly. The duplicate count decreased from 53,450 to 48,466
 because it now measures labeled state identity rather than isomorphism. The
 duplicate metric does not affect controller decisions.
+
+## Aggregate runtime profiling
+
+The harness now supports HEG-style aggregate phase timers controlled by
+`search.profiling_enabled`. Per-episode and run-level summaries report scoring,
+proposal generation, rewrite application, duplicate detection, controller,
+exact verification, progress reporting, and finalization time, together with
+accounted and unattributed totals. The profile emits no per-evaluation events
+and is excluded from the canonical deterministic summary hash. Usage and the
+required on/off comparison are documented in `docs/PROFILING.md`.
+
+A balanced four-run smoke check measured 3.324 seconds with profiling and
+3.314 seconds without it, or 0.32% observed overhead. All four runs produced
+the same canonical summary hash.
