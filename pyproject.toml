@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mutation-forge-lab"
+version = "0.1.0"
+description = "A deterministic research harness for graph mutation policy experiments"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "CC0-1.0" }
+dependencies = [
+  "rich>=13.9,<15",
+]
+
+[project.scripts]
+mforge = "mutation_forge.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.15,<2",
+  "pytest>=8.3,<9",
+  "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mutation_forge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["mutation_forge"]

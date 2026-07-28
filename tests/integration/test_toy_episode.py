@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import time
+
+from mutation_forge.backends.toy import ToyBackend
+from mutation_forge.evaluation.episode import run_episode
+from mutation_forge.policies.baselines import HEG_UNIFORM_TWO_SWITCH
+
+
+def test_toy_episode_is_deterministic() -> None:
+    backend = ToyBackend()
+    graph = backend.generate_seed(order=30, seed=101)
+    kwargs = {
+        "backend": backend,
+        "initial_graph": graph,
+        "entry_id": "toy",
+        "graph_seed": 101,
+        "policy_seed": 1,
+        "baseline": HEG_UNIFORM_TWO_SWITCH,
+        "evaluations": 40,
+        "witness_cap": 64,
+    }
+    first = run_episode(**kwargs, deadline=time.monotonic() + 30)
+    second = run_episode(**kwargs, deadline=time.monotonic() + 30)
+    assert first.as_dict(include_timing=False) == second.as_dict(include_timing=False)
+    assert backend.validate(backend.deserialize_graph6(first.final_graph6)).valid
+
+
+def test_episode_stops_at_wall_deadline() -> None:
+    backend = ToyBackend()
+    graph = backend.generate_seed(order=30, seed=101)
+    result = run_episode(
+        backend=backend,
+        initial_graph=graph,
+        entry_id="toy",
+        graph_seed=101,
+        policy_seed=1,
+        baseline=HEG_UNIFORM_TWO_SWITCH,
+        evaluations=1000,
+        witness_cap=64,
+        deadline=time.monotonic() - 1,
+    )
+    assert result.timed_out
+    assert result.evaluations == 0

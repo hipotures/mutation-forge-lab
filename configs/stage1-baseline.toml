@@ -1,0 +1,31 @@
+schema_version = "1.0"
+
+[run]
+seed = 2026
+wall_seconds = 1800
+output = "rich"
+run_root = "./runs"
+
+[heg]
+repo = "../heg"
+
+[dataset]
+orders = [30, 32]
+graph_seeds = [101, 102, 103, 104, 105, 106, 107, 108]
+policy_seeds = [1, 2, 3]
+split = "baseline"
+
+[score]
+witness_cap = 64
+
+[search]
+controller = "fixed_ils_tabu"
+evaluations_per_episode = 2000
+proposal_pool_size = 1
+
+[proposals]
+operator_families = [
+  "heg_uniform_two_switch",
+  "heg_forbidden_cycle_break",
+]
+k_values = [2]

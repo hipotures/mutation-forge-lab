@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.local/schemas/ranker-v1-output.json",
+  "title": "Reserved ranker output boundary",
+  "description": "Intentionally inactive until the Stage 2 safety gate passes.",
+  "type": "object",
+  "additionalProperties": false
+}
