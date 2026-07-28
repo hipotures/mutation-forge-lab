@@ -19,5 +19,9 @@ prose. Bootstrap failures that occur before a run identifier/artifact exists
 may be reported on stderr. Once a run begins, a fatal error is persisted and
 emitted as the final `run_failed` event.
 
+Terminal events include `real_seconds`, `user_seconds`, and `system_seconds`.
+CPU values combine the `mforge` process with reaped child processes, including
+the persistent HEG score worker and external graph tools.
+
 Rich and JSON consume the same `Event` objects. Canonical run-summary equality,
 not terminal formatting, defines output parity.

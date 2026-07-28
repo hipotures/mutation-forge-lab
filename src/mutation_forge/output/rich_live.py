@@ -36,7 +36,8 @@ class RichLiveSink:
             self.state["stage"] = "completed"
         elif event.event_type == "run_failed":
             self.state["stage"] = "failed"
-        self.live.update(self._render(), refresh=True)
+        refresh = event.event_type in {"run_completed", "run_failed"}
+        self.live.update(self._render(), refresh=refresh)
 
     def _render(self) -> Group:
         overview = Table.grid(padding=(0, 2))
@@ -51,6 +52,12 @@ class RichLiveSink:
             ("Episodes", self.state.get("episodes_completed", 0)),
             ("Evaluations", self.state.get("evaluations", 0)),
             ("Evaluations/s", self.state.get("evaluations_per_second", 0)),
+            (
+                "Time real/user/sys",
+                f"{self._seconds(self.state.get('real_seconds'))} / "
+                f"{self._seconds(self.state.get('user_seconds'))} / "
+                f"{self._seconds(self.state.get('system_seconds'))}",
+            ),
             ("Initial score", self.state.get("initial_total", "-")),
             ("Current / best", f"{self.state.get('current_total', '-')} / "
              f"{self.state.get('best_total', '-')}"),
@@ -63,6 +70,12 @@ class RichLiveSink:
         for label, value in rows:
             overview.add_row(str(label), str(value))
         return Group(Panel(overview, title="Mutation Forge Lab · Stage 1"))
+
+    @staticmethod
+    def _seconds(value: JsonValue) -> str:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return f"{value:.3f}"
+        return "-"
 
     def close(self) -> None:
         self.live.stop()

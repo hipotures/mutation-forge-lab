@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import uuid
@@ -96,8 +97,10 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
         sinks.append(RichLiveSink())
     bus = EventBus(run_id, sinks)
     started = time.monotonic()
+    cpu_started = os.times()
     deadline = started + config.run.wall_seconds
     episodes: list[EpisodeResult] = []
+    backend_closed = False
 
     try:
         bus.emit(
@@ -208,7 +211,24 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             fitness=fitness,
         )
         summary_hash = canonical_json_hash(canonical_payload)
+        backend.close()
+        backend_closed = True
+        cpu_finished = os.times()
         elapsed = time.monotonic() - started
+        user_seconds = max(
+            0.0,
+            cpu_finished.user
+            + cpu_finished.children_user
+            - cpu_started.user
+            - cpu_started.children_user,
+        )
+        system_seconds = max(
+            0.0,
+            cpu_finished.system
+            + cpu_finished.children_system
+            - cpu_started.system
+            - cpu_started.children_system,
+        )
         summary: dict[str, JsonValue] = {
             "schema_version": "1.0",
             "dataset_manifest_hash": cast(str, dataset["manifest_hash"]),
@@ -218,6 +238,9 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             "status": "completed",
             "summary_hash": summary_hash,
             "elapsed_seconds": elapsed,
+            "real_seconds": elapsed,
+            "user_seconds": user_seconds,
+            "system_seconds": system_seconds,
             "evaluations": sum(episode.evaluations for episode in episodes),
             "evaluations_per_second": sum(
                 episode.evaluations for episode in episodes
@@ -237,16 +260,41 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             summary_hash=summary_hash,
             evaluations=cast(int, summary["evaluations"]),
             evaluations_per_second=cast(float, summary["evaluations_per_second"]),
+            real_seconds=elapsed,
+            user_seconds=user_seconds,
+            system_seconds=system_seconds,
         )
         return BenchmarkResult(artifacts.path, summary)
     except Exception as error:
+        if not backend_closed:
+            backend.close()
+            backend_closed = True
+        cpu_finished = os.times()
+        elapsed = time.monotonic() - started
+        user_seconds = max(
+            0.0,
+            cpu_finished.user
+            + cpu_finished.children_user
+            - cpu_started.user
+            - cpu_started.children_user,
+        )
+        system_seconds = max(
+            0.0,
+            cpu_finished.system
+            + cpu_finished.children_system
+            - cpu_started.system
+            - cpu_started.children_system,
+        )
         failure: dict[str, JsonValue] = {
             "schema_version": "1.0",
             "run_id": run_id,
             "status": "failed",
             "error_type": type(error).__name__,
             "error": str(error),
-            "elapsed_seconds": time.monotonic() - started,
+            "elapsed_seconds": elapsed,
+            "real_seconds": elapsed,
+            "user_seconds": user_seconds,
+            "system_seconds": system_seconds,
         }
         artifacts.write_json("run_summary.json", failure)
         manifest["status"] = "failed"
@@ -259,10 +307,14 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             error_type=type(error).__name__,
             error=str(error),
             run_path=str(artifacts.path),
+            real_seconds=elapsed,
+            user_seconds=user_seconds,
+            system_seconds=system_seconds,
         )
         raise
     finally:
-        backend.close()
+        if not backend_closed:
+            backend.close()
         bus.close()
 
 

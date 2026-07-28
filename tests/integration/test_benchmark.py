@@ -58,6 +58,10 @@ def test_json_and_rich_runs_have_same_canonical_summary(
     json_events = [json.loads(line) for line in json_stdout.splitlines()]
     assert json_events
     assert json_events[-1]["event_type"] == "run_completed"
+    assert all(
+        json_events[-1][field] >= 0
+        for field in ("real_seconds", "user_seconds", "system_seconds")
+    )
     assert "\x1b" not in json_stdout
     assert all(
         {"schema_version", "timestamp", "run_id", "event_type"}.issubset(event)
@@ -70,6 +74,10 @@ def test_json_and_rich_runs_have_same_canonical_summary(
         assert (result.run_path / "archive.sqlite3").is_file()
         assert (result.run_path / "dataset_manifest.json").is_file()
         assert result.summary["status"] == "completed"
+        assert result.summary["real_seconds"] == result.summary["elapsed_seconds"]
+        assert result.summary["real_seconds"] > 0
+        assert result.summary["user_seconds"] >= 0
+        assert result.summary["system_seconds"] >= 0
         episodes = result.summary["episodes"]
         assert isinstance(episodes, list)
         assert all(episode["evaluations"] == 3 for episode in episodes)
@@ -98,5 +106,12 @@ def test_interrupted_run_leaves_readable_failure_artifacts(
     ]
     assert summary["status"] == "failed"
     assert summary["error_type"] == "TimeoutError"
+    assert summary["real_seconds"] == summary["elapsed_seconds"]
+    assert summary["user_seconds"] >= 0
+    assert summary["system_seconds"] >= 0
     assert manifest["status"] == "failed"
     assert events[-1]["event_type"] == "run_failed"
+    assert all(
+        events[-1][field] >= 0
+        for field in ("real_seconds", "user_seconds", "system_seconds")
+    )
