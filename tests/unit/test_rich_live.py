@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 from unittest.mock import patch
 
+from rich import box
 from rich.console import Console
 
 from mutation_forge.events import Event
@@ -69,16 +70,21 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         rendered = output.getvalue()
         assert "Runtime profile · 2 episodes" in rendered
         assert rendered.index("proposal_generation") < rendered.index("scoring")
-        assert "accounted" in rendered
-        assert "unattributed" in rendered
-        assert "measured total" in rendered
+        assert "phases subtotal" in rendered
+        assert "other in episodes" in rendered
+        assert "episode wall total" in rendered
         assert "62.5%" in rendered
-        assert rendered.index("measured total") < rendered.index("Time real/user/sys")
+        assert rendered.index("episode wall total") < rendered.index(
+            "Run real/user/sys"
+        )
         assert "8.500 / 7.250 / 0.500" in rendered
-        assert rendered.count("Time real/user/sys") == 1
+        assert rendered.count("Run real/user/sys") == 1
+        assert "│" in rendered
+        assert "┼" in rendered
         profile_table = sink._profile_table()
         assert profile_table is not None
-        assert profile_table.rows[-2].style == "bright_cyan"
+        assert profile_table.box is box.MINIMAL
+        assert profile_table.rows[-3].style == "bright_cyan"
     finally:
         sink.close()
 

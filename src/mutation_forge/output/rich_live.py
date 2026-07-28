@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 
+from rich import box
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -151,7 +152,7 @@ class RichLiveSink:
         if not numeric_phases:
             return None
 
-        table = Table(box=None, padding=(0, 2))
+        table = Table(box=box.MINIMAL, padding=(0, 2))
         table.add_column("Phase", style="cyan")
         table.add_column("Seconds", justify="right", no_wrap=True)
         table.add_column("Share", justify="right")
@@ -166,9 +167,8 @@ class RichLiveSink:
 
         table.add_section()
         for label, key in (
-            ("accounted", "accounted_seconds"),
-            ("unattributed", "unattributed_seconds"),
-            ("measured total", "measured_total_seconds"),
+            ("phases subtotal", "accounted_seconds"),
+            ("other in episodes", "unattributed_seconds"),
         ):
             value = profile.get(key)
             if isinstance(value, int | float) and not isinstance(value, bool):
@@ -176,16 +176,22 @@ class RichLiveSink:
                     label,
                     f"{value:.3f}",
                     f"{value / measured * 100:.1f}%",
-                    style="bright_cyan" if key == "measured_total_seconds" else None,
                 )
+        table.add_section()
+        table.add_row(
+            "episode wall total",
+            f"{measured:.3f}",
+            "100.0%",
+            style="bright_cyan",
+        )
         process_times = tuple(
             self._seconds(self.state.get(key))
             for key in ("real_seconds", "user_seconds", "system_seconds")
         )
         if all(value != "-" for value in process_times):
-            table.add_section()
+            table.add_row("", "", "")
             table.add_row(
-                "Time real/user/sys",
+                "Run real/user/sys",
                 " / ".join(process_times),
                 "",
             )

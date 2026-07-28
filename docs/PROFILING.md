@@ -33,7 +33,9 @@ total, accounted time, unattributed time, and the dominant phase. Unattributed
 time covers loop control, deadline checks, timer overhead, and other work
 outside the named phases.
 
-Rich renders the cumulative phase table during the run. Its final table also
+Rich renders the cumulative phase table during the run. A minimal internal
+grid separates its columns and the phase, subtotal, and episode-total groups
+without adding a second outer frame inside the panel. Its final table also
 shows process `real/user/sys` time below the profile totals. With profiling
 disabled, process time remains in the main overview panel.
 
