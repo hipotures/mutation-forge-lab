@@ -7,6 +7,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from mutation_forge.events import Event
 from mutation_forge.models import JsonValue
@@ -50,6 +51,11 @@ class RichLiveSink:
 
     def _render(self) -> Group:
         profile_table = self._profile_table()
+        process_times = tuple(
+            self._seconds(self.state.get(key))
+            for key in ("real_seconds", "user_seconds", "system_seconds")
+        )
+        process_time_summary = " / ".join(process_times)
         overview = Table.grid(padding=(0, 2))
         overview.add_column(style="cyan")
         overview.add_column()
@@ -76,9 +82,7 @@ class RichLiveSink:
             rows.append(
                 (
                     "Time real/user/sys",
-                    f"{self._seconds(self.state.get('real_seconds'))} / "
-                    f"{self._seconds(self.state.get('user_seconds'))} / "
-                    f"{self._seconds(self.state.get('system_seconds'))}",
+                    process_time_summary,
                 )
             )
         for label, value in rows:
@@ -89,10 +93,21 @@ class RichLiveSink:
         profile = self.state["timing_profile"]
         assert isinstance(profile, dict)
         profiled_episodes = profile.get("profiled_episodes", "-")
+        profile_content = Group(profile_table)
+        if all(value != "-" for value in process_times):
+            profile_content = Group(
+                profile_table,
+                Text.assemble(
+                    "\n",
+                    ("Run real/user/sys", "cyan"),
+                    "  ",
+                    process_time_summary,
+                ),
+            )
         return Group(
             overview_panel,
             Panel(
-                profile_table,
+                profile_content,
                 title=f"Runtime profile · {profiled_episodes} episodes",
             ),
         )
@@ -152,7 +167,7 @@ class RichLiveSink:
         if not numeric_phases:
             return None
 
-        table = Table(box=box.MINIMAL, padding=(0, 2))
+        table = Table(box=box.MINIMAL, border_style="dim cyan", padding=(0, 2))
         table.add_column("Phase", style="cyan")
         table.add_column("Seconds", justify="right", no_wrap=True)
         table.add_column("Share", justify="right")
@@ -184,17 +199,6 @@ class RichLiveSink:
             "100.0%",
             style="bright_cyan",
         )
-        process_times = tuple(
-            self._seconds(self.state.get(key))
-            for key in ("real_seconds", "user_seconds", "system_seconds")
-        )
-        if all(value != "-" for value in process_times):
-            table.add_row("", "", "")
-            table.add_row(
-                "Run real/user/sys",
-                " / ".join(process_times),
-                "",
-            )
         return table
 
     def close(self) -> None:

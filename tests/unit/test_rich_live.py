@@ -79,12 +79,17 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         )
         assert "8.500 / 7.250 / 0.500" in rendered
         assert rendered.count("Run real/user/sys") == 1
+        process_line = next(
+            line for line in rendered.splitlines() if "Run real/user/sys" in line
+        )
+        assert process_line.count("│") == 2
         assert "│" in rendered
         assert "┼" in rendered
         profile_table = sink._profile_table()
         assert profile_table is not None
         assert profile_table.box is box.MINIMAL
-        assert profile_table.rows[-3].style == "bright_cyan"
+        assert profile_table.border_style == "dim cyan"
+        assert profile_table.rows[-1].style == "bright_cyan"
     finally:
         sink.close()
 

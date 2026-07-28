@@ -36,7 +36,8 @@ outside the named phases.
 Rich renders the cumulative phase table during the run. A minimal internal
 grid separates its columns and the phase, subtotal, and episode-total groups
 without adding a second outer frame inside the panel. Its final table also
-shows process `real/user/sys` time below the profile totals. With profiling
+shows process `real/user/sys` time on a separate line below the grid, so the
+long process-time value does not widen the phase columns. With profiling
 disabled, process time remains in the main overview panel.
 
 Profiles are timing observations only. They are excluded from the canonical
