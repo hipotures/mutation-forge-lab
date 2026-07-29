@@ -62,6 +62,9 @@ def run_episode(
         timing.duplicate_detection_ns += time.perf_counter_ns() - phase_started_ns
     exact_submissions: set[str] = set()
     source = TwoSwitchProposalSource(backend, baseline.operator_family)
+    record_proposal_timing = (
+        timing.record_proposal_phase if timing is not None else None
+    )
     completed = 0
     timed_out = False
 
@@ -75,11 +78,13 @@ def run_episode(
             current,
             policy_seed=effective_policy_seed,
             evaluation=evaluation,
+            record_timing=record_proposal_timing,
         )
         policy_elapsed_ns = time.perf_counter_ns() - policy_started_ns
         policy_call_ms += policy_elapsed_ns / 1_000_000
         if timing is not None:
             timing.proposal_generation_ns += policy_elapsed_ns
+            timing.proposal_generation_calls += 1
         if time.monotonic() >= deadline:
             timed_out = True
             break

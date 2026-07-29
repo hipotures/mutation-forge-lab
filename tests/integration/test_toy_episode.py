@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from mutation_forge.backends.toy import ToyBackend
 from mutation_forge.evaluation.episode import run_episode
 from mutation_forge.models import GraphState
@@ -77,6 +79,19 @@ def test_episode_profiling_preserves_trajectory_and_accounts_time() -> None:
     serialized = profile.as_dict()
     assert serialized["dominant_phase"] in profile.phase_nanoseconds()
     assert serialized["measured_total_seconds"] > 0
+    proposal_children = serialized["phase_children_seconds"]["proposal_generation"]
+    assert proposal_children["other"] > 0
+    assert sum(proposal_children.values()) == pytest.approx(
+        serialized["phase_seconds"]["proposal_generation"]
+    )
+    assert serialized["phase_calls"]["proposal_generation"] == 40
+    assert serialized["phase_children_calls"]["proposal_generation"] == {
+        "rng_setup": 0,
+        "graph_materialization": 0,
+        "operator_search": 0,
+        "proposal_packaging": 0,
+        "other": None,
+    }
 
 
 def test_episode_uses_fast_hash_in_hot_loop() -> None:

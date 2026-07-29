@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from mutation_forge.backends.base import ProposalTimingRecorder
 from mutation_forge.models import (
     ExactVerification,
     GraphScore,
@@ -218,26 +219,50 @@ class HegBackend:
         operator_family: str,
         policy_seed: int,
         evaluation: int,
+        record_timing: ProposalTimingRecorder | None = None,
     ) -> RewritePlan:
+        phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
         try:
             heg_operator = OPERATOR_MAP[operator_family]
         except KeyError as error:
             raise ValueError(f"unsupported HEG operator family: {operator_family}") from error
         rng = random.Random((policy_seed << 32) ^ evaluation)
+        if record_timing is not None:
+            record_timing("rng_setup", time.perf_counter_ns() - phase_started_ns)
+
+        phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
+        heg_graph = self._to_heg(graph)
+        if record_timing is not None:
+            record_timing(
+                "graph_materialization",
+                time.perf_counter_ns() - phase_started_ns,
+            )
+
+        phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
         result = self._plugin.mutate_with_delta(
-            self._to_heg(graph),
+            heg_graph,
             rng,
             {
                 "mode": "cubic_first",
                 "mutation_operator": heg_operator,
             },
         )
-        return RewritePlan(
+        if record_timing is not None:
+            record_timing("operator_search", time.perf_counter_ns() - phase_started_ns)
+
+        phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
+        rewrite = RewritePlan(
             removed_edges=tuple(result.removed_edges),
             added_edges=tuple(result.added_edges),
             operator_family=operator_family,
             metadata={"evaluation": evaluation},
         )
+        if record_timing is not None:
+            record_timing(
+                "proposal_packaging",
+                time.perf_counter_ns() - phase_started_ns,
+            )
+        return rewrite
 
     def close(self) -> None:
         if self._worker is not None:

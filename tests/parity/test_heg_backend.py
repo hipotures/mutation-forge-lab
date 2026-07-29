@@ -49,9 +49,29 @@ def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
             "heg_uniform_two_switch",
             "heg_forbidden_cycle_break",
         ):
+            proposal_timings: list[tuple[str, int]] = []
+
+            def record_timing(
+                phase: str,
+                elapsed_ns: int,
+                timings: list[tuple[str, int]] = proposal_timings,
+            ) -> None:
+                timings.append((phase, elapsed_ns))
+
             rewrite = backend.propose_rewrite(
-                graph, operator_family=operator, policy_seed=1, evaluation=1
+                graph,
+                operator_family=operator,
+                policy_seed=1,
+                evaluation=1,
+                record_timing=record_timing,
             )
+            assert [phase for phase, _ in proposal_timings] == [
+                "rng_setup",
+                "graph_materialization",
+                "operator_search",
+                "proposal_packaging",
+            ]
+            assert all(elapsed_ns > 0 for _, elapsed_ns in proposal_timings)
             candidate = backend.apply_rewrite(graph, rewrite)
             assert backend.validate(candidate).valid
     finally:

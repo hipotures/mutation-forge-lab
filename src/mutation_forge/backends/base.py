@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from mutation_forge.models import (
@@ -9,6 +10,8 @@ from mutation_forge.models import (
     GraphValidation,
     RewritePlan,
 )
+
+type ProposalTimingRecorder = Callable[[str, int], None]
 
 
 class GraphBackend(Protocol):
@@ -39,6 +42,7 @@ class GraphBackend(Protocol):
         operator_family: str,
         policy_seed: int,
         evaluation: int,
+        record_timing: ProposalTimingRecorder | None = None,
     ) -> RewritePlan: ...
 
     def close(self) -> None: ...

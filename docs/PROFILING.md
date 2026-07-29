@@ -24,6 +24,14 @@ Each episode measures these non-overlapping phases with
 - `progress_reporting`: aggregate progress callbacks and their event sinks;
 - `finalization`: final graph serialization and canonical hashing.
 
+For HEG-backed runs, `proposal_generation` expands into these child phases:
+
+- `rng_setup`: operator selection and deterministic RNG construction;
+- `graph_materialization`: conversion from `GraphState` to HEG `BitGraph`;
+- `operator_search`: the selected HEG mutation operator;
+- `proposal_packaging`: conversion of the operator delta to `RewritePlan`;
+- `other`: proposal wrapper and timer bookkeeping not attributed above.
+
 The episode profile is stored in `run_summary.json` and as
 `episode_timing_profile` in the corresponding `episode_completed` event. That
 event also contains the cumulative run `timing_profile`, allowing Rich output
@@ -40,6 +48,13 @@ shows process `real/user/sys` time on a separate line below the grid, so the
 long process-time value does not widen the phase columns. With profiling
 disabled, process time remains in the main overview panel.
 
+Child rows under `proposal_generation` form a tree. `Calls` counts the parent
+and each explicitly instrumented child; synthetic `other` has no meaningful
+call count. `Of parent` reports each child's share of proposal generation;
+`Of episode` reports every row's share of the measured episode total. The same
+hierarchy is available in JSON as `phase_children_seconds`, `phase_calls`, and
+`phase_children_calls`.
+
 Profiles are timing observations only. They are excluded from the canonical
 summary hash. A valid overhead comparison uses identical configurations,
 seeds, datasets, and evaluation budgets with only `profiling_enabled` changed,
@@ -50,8 +65,9 @@ alternate their order before interpreting a small wall-time difference.
 
 A balanced `on, off, off, on` smoke comparison on 2026-07-29 completed 8,000
 evaluations in every run and produced the same canonical summary hash four
-times. Mean benchmark real time was 3.324 seconds with profiling and 3.314
-seconds without it, an observed overhead of 0.32%.
+times. After adding proposal child timers, mean benchmark real time was 3.318
+seconds with profiling and 3.301 seconds without it, an observed overhead of
+0.49%.
 
 The two enabled runs attributed approximately 51% of measured episode time to
 proposal generation, 26% to scoring, 12% to duplicate detection, 8% to rewrite

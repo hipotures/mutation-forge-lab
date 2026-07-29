@@ -106,6 +106,15 @@ class EpisodeTimingProfile:
     exact_verification_ns: int
     progress_reporting_ns: int
     finalization_ns: int
+    proposal_rng_setup_ns: int
+    proposal_graph_materialization_ns: int
+    proposal_operator_search_ns: int
+    proposal_packaging_ns: int
+    proposal_generation_calls: int
+    proposal_rng_setup_calls: int
+    proposal_graph_materialization_calls: int
+    proposal_operator_search_calls: int
+    proposal_packaging_calls: int
 
     def phase_nanoseconds(self) -> dict[str, int]:
         return {
@@ -117,6 +126,30 @@ class EpisodeTimingProfile:
             "exact_verification": self.exact_verification_ns,
             "progress_reporting": self.progress_reporting_ns,
             "finalization": self.finalization_ns,
+        }
+
+    def proposal_phase_nanoseconds(self) -> dict[str, int]:
+        return {
+            "rng_setup": self.proposal_rng_setup_ns,
+            "graph_materialization": self.proposal_graph_materialization_ns,
+            "operator_search": self.proposal_operator_search_ns,
+            "proposal_packaging": self.proposal_packaging_ns,
+        }
+
+    def proposal_breakdown_nanoseconds(self) -> dict[str, int]:
+        phases = self.proposal_phase_nanoseconds()
+        phases["other"] = max(
+            0,
+            self.proposal_generation_ns - sum(phases.values()),
+        )
+        return phases
+
+    def proposal_phase_calls(self) -> dict[str, int]:
+        return {
+            "rng_setup": self.proposal_rng_setup_calls,
+            "graph_materialization": self.proposal_graph_materialization_calls,
+            "operator_search": self.proposal_operator_search_calls,
+            "proposal_packaging": self.proposal_packaging_calls,
         }
 
     @property
@@ -134,6 +167,23 @@ class EpisodeTimingProfile:
             "phase_seconds": {
                 phase: nanoseconds / 1_000_000_000
                 for phase, nanoseconds in phases.items()
+            },
+            "phase_children_seconds": {
+                "proposal_generation": {
+                    phase: nanoseconds / 1_000_000_000
+                    for phase, nanoseconds in (
+                        self.proposal_breakdown_nanoseconds().items()
+                    )
+                }
+            },
+            "phase_calls": {
+                "proposal_generation": self.proposal_generation_calls,
+            },
+            "phase_children_calls": {
+                "proposal_generation": {
+                    **self.proposal_phase_calls(),
+                    "other": None,
+                }
             },
             "measured_total_seconds": self.measured_total_ns / 1_000_000_000,
             "accounted_seconds": self.accounted_ns / 1_000_000_000,

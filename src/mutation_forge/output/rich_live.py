@@ -167,18 +167,83 @@ class RichLiveSink:
         if not numeric_phases:
             return None
 
-        table = Table(box=box.MINIMAL, border_style="grey37", padding=(0, 2))
-        table.add_column("Phase", style="cyan")
-        table.add_column("Seconds", justify="right", no_wrap=True)
-        table.add_column("Share", justify="right")
+        children_by_phase: dict[str, list[tuple[str, float]]] = {}
+        raw_children = profile.get("phase_children_seconds")
+        if isinstance(raw_children, dict):
+            for parent, raw_phase_children in raw_children.items():
+                if not isinstance(parent, str) or not isinstance(
+                    raw_phase_children, dict
+                ):
+                    continue
+                children_by_phase[parent] = [
+                    (child, float(seconds))
+                    for child, seconds in raw_phase_children.items()
+                    if isinstance(child, str)
+                    and isinstance(seconds, int | float)
+                    and not isinstance(seconds, bool)
+                ]
+
+        calls_by_phase: dict[str, int] = {}
+        raw_phase_calls = profile.get("phase_calls")
+        if isinstance(raw_phase_calls, dict):
+            calls_by_phase = {
+                phase: calls
+                for phase, calls in raw_phase_calls.items()
+                if isinstance(phase, str)
+                and isinstance(calls, int)
+                and not isinstance(calls, bool)
+            }
+
+        child_calls_by_phase: dict[str, dict[str, int | None]] = {}
+        raw_child_calls = profile.get("phase_children_calls")
+        if isinstance(raw_child_calls, dict):
+            for parent, raw_calls in raw_child_calls.items():
+                if not isinstance(parent, str) or not isinstance(raw_calls, dict):
+                    continue
+                child_calls_by_phase[parent] = {
+                    child: calls
+                    for child, calls in raw_calls.items()
+                    if isinstance(child, str)
+                    and (
+                        calls is None
+                        or (
+                            isinstance(calls, int)
+                            and not isinstance(calls, bool)
+                        )
+                    )
+                }
+
+        table = Table(box=box.MINIMAL, border_style="grey37", padding=(0, 1))
+        table.add_column("Phase", style="cyan", min_width=28)
+        table.add_column("Calls", justify="right", no_wrap=True)
+        table.add_column(Text("Wall [s]"), justify="right", no_wrap=True)
+        table.add_column("Of parent", justify="right", no_wrap=True)
+        table.add_column("Of episode", justify="right", no_wrap=True)
         for phase, seconds in sorted(
             numeric_phases, key=lambda item: item[1], reverse=True
         ):
+            phase_children = children_by_phase.get(phase, [])
             table.add_row(
                 phase,
+                f"{calls_by_phase[phase]:,}" if phase in calls_by_phase else "",
                 f"{seconds:.3f}",
+                "100.0%" if phase_children else "",
                 f"{seconds / measured * 100:.1f}%",
             )
+            for index, (child, child_seconds) in enumerate(phase_children):
+                connector = "└─" if index == len(phase_children) - 1 else "├─"
+                child_calls = child_calls_by_phase.get(phase, {})
+                child_call_text = ""
+                if child in child_calls:
+                    call_count = child_calls[child]
+                    child_call_text = "—" if call_count is None else f"{call_count:,}"
+                table.add_row(
+                    f"  {connector} {child}",
+                    child_call_text,
+                    f"{child_seconds:.3f}",
+                    f"{child_seconds / max(seconds, 1e-9) * 100:.1f}%",
+                    f"{child_seconds / measured * 100:.1f}%",
+                )
 
         table.add_section()
         for label, key in (
@@ -189,13 +254,17 @@ class RichLiveSink:
             if isinstance(value, int | float) and not isinstance(value, bool):
                 table.add_row(
                     label,
+                    "",
                     f"{value:.3f}",
+                    "",
                     f"{value / measured * 100:.1f}%",
                 )
         table.add_section()
         table.add_row(
             "episode wall total",
+            "",
             f"{measured:.3f}",
+            "",
             "100.0%",
             style="bright_cyan",
         )

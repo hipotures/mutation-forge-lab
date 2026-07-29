@@ -55,6 +55,25 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
                 "proposal_generation": 5.0,
                 "exact_verification": 0.0,
             },
+            "phase_children_seconds": {
+                "proposal_generation": {
+                    "rng_setup": 0.5,
+                    "graph_materialization": 1.0,
+                    "operator_search": 3.0,
+                    "proposal_packaging": 0.4,
+                    "other": 0.1,
+                }
+            },
+            "phase_calls": {"proposal_generation": 20},
+            "phase_children_calls": {
+                "proposal_generation": {
+                    "rng_setup": 20,
+                    "graph_materialization": 20,
+                    "operator_search": 20,
+                    "proposal_packaging": 20,
+                    "other": None,
+                }
+            },
             "measured_total_seconds": 8.0,
             "accounted_seconds": 7.0,
             "unattributed_seconds": 1.0,
@@ -66,10 +85,26 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         sink.state["user_seconds"] = 7.25
         sink.state["system_seconds"] = 0.5
         output = io.StringIO()
-        Console(file=output, force_terminal=False, width=120).print(sink._render())
+        Console(file=output, force_terminal=False, width=80).print(sink._render())
         rendered = output.getvalue()
         assert "Runtime profile · 2 episodes" in rendered
         assert rendered.index("proposal_generation") < rendered.index("scoring")
+        assert "Calls" in rendered
+        assert "Wall [s]" in rendered
+        assert "Of parent" in rendered
+        assert "Of episode" in rendered
+        assert "├─ rng_setup" in rendered
+        assert "└─ other" in rendered
+        operator_line = next(
+            line for line in rendered.splitlines() if "operator_search" in line
+        )
+        assert "60.0%" in operator_line
+        assert "37.5%" in operator_line
+        assert "20" in operator_line
+        other_line = next(
+            line for line in rendered.splitlines() if "└─ other" in line
+        )
+        assert "—" in other_line
         assert "phases subtotal" in rendered
         assert "other in episodes" in rendered
         assert "episode wall total" in rendered

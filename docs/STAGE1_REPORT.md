@@ -164,6 +164,6 @@ accounted and unattributed totals. The profile emits no per-evaluation events
 and is excluded from the canonical deterministic summary hash. Usage and the
 required on/off comparison are documented in `docs/PROFILING.md`.
 
-A balanced four-run smoke check measured 3.324 seconds with profiling and
-3.314 seconds without it, or 0.32% observed overhead. All four runs produced
-the same canonical summary hash.
+A balanced four-run smoke check after adding proposal child timers measured
+3.318 seconds with profiling and 3.301 seconds without it, or 0.49% observed
+overhead. All four runs produced the same canonical summary hash.

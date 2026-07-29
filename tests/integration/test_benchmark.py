@@ -94,6 +94,27 @@ def test_json_and_rich_runs_have_same_canonical_summary(
         assert timing_profile["accounted_seconds"] > 0
         assert timing_profile["unattributed_seconds"] >= 0
         assert timing_profile["dominant_phase"] in timing_profile["phase_seconds"]
+        proposal_children = timing_profile["phase_children_seconds"][
+            "proposal_generation"
+        ]
+        assert set(proposal_children) == {
+            "rng_setup",
+            "graph_materialization",
+            "operator_search",
+            "proposal_packaging",
+            "other",
+        }
+        assert sum(proposal_children.values()) == pytest.approx(
+            timing_profile["phase_seconds"]["proposal_generation"]
+        )
+        assert timing_profile["phase_calls"]["proposal_generation"] == 6
+        assert timing_profile["phase_children_calls"]["proposal_generation"] == {
+            "rng_setup": 6,
+            "graph_materialization": 6,
+            "operator_search": 6,
+            "proposal_packaging": 6,
+            "other": None,
+        }
         episodes = result.summary["episodes"]
         assert isinstance(episodes, list)
         assert all(episode["evaluations"] == 3 for episode in episodes)
