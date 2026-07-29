@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2b-context.v1.json",
+  "title": "Mutation Forge Stage 2B ranker context",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "order",
+    "forbidden_lengths",
+    "capped_cycle_counts",
+    "weighted_penalty",
+    "step",
+    "remaining_steps",
+    "stagnation",
+    "recent_best_improvement",
+    "recent_acceptance_rate",
+    "recent_duplicate_rate"
+  ],
+  "properties": {
+    "schema_version": {"const": "stage2b.context.v1"},
+    "order": {"type": "integer", "minimum": 4},
+    "forbidden_lengths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "capped_cycle_counts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "weighted_penalty": {"type": "integer", "minimum": 0},
+    "step": {"type": "integer", "minimum": 0},
+    "remaining_steps": {"type": "integer", "minimum": 0},
+    "stagnation": {"type": "integer", "minimum": 0},
+    "recent_best_improvement": {"type": "number"},
+    "recent_acceptance_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "recent_duplicate_rate": {"type": "number", "minimum": 0, "maximum": 1}
+  },
+  "x-alignment": "forbidden_lengths and capped_cycle_counts have equal length",
+  "x-canonical-encoding": "UTF-8 JSON with sorted keys and no NaN/Infinity"
+}

@@ -1,0 +1,70 @@
+schema_version = "stage2b.1"
+
+[run]
+run_root = "../runs"
+output = "rich"
+
+[repositories]
+project_repo = ".."
+heg_repo = "../../heg"
+frozen_project_commit = "e2d11bb86b4fa5dbc7ebfb441923e0f02e9799a9"
+frozen_heg_commit = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
+
+[pool]
+pool_size = 12
+k_values = [2, 3, 4]
+selectors = [
+  "uniform_random",
+  "sampled_forbidden_cycle_anchored",
+  "high_sampled_witness_load",
+  "remote_from_anchor",
+  "pairwise_distant_disjoint",
+  "mixed_exploit_explore",
+]
+selector_weights = [2, 2, 2, 1, 2, 3]
+retry_limit = 96
+matching_limit = 105
+
+[features]
+forbidden_lengths = [4, 5, 6, 7, 8, 9]
+witness_sample_cap = 32
+cycle_node_budget = 20000
+distance_query_budget = 256
+local_risk_budget = 2048
+
+[search]
+steps = 8
+witness_cap = 64
+
+[toy_gate]
+order = 8
+graph_seed = 101
+policy_seeds = [
+  1, 2, 3, 4, 5, 6, 7, 8,
+  9, 10, 11, 12, 13, 14, 15, 16,
+  17, 18, 19, 20, 21, 22, 23, 24,
+  25, 26, 27, 28, 29, 30, 31, 32,
+]
+bootstrap_samples = 512
+auc_relative_improvement_threshold = 0.10
+confidence_level = 0.95
+
+[heg_pilot]
+enabled = true
+order = 30
+graph_seeds = [101]
+policy_seeds = [1]
+steps = 2
+
+[sandbox]
+max_source_bytes = 12288
+max_ast_nodes = 500
+max_static_loop_bound = 256
+address_space_bytes = 134217728
+per_call_wall_seconds = 0.025
+total_wall_seconds = 60.0
+request_bytes = 65536
+response_bytes = 16384
+captured_output_bytes = 65536
+open_files = 16
+process_count = 1

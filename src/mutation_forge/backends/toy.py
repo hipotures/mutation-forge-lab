@@ -155,8 +155,8 @@ class ToyBackend:
     ) -> GraphState:
         removed = tuple(normalized_edge(edge) for edge in rewrite.removed_edges)
         added = tuple(normalized_edge(edge) for edge in rewrite.added_edges)
-        if len(removed) > 2 or len(added) > 2:
-            raise ValueError("Stage 1 rewrites are limited to two removed and added edges")
+        if len(removed) > 4 or len(added) > 4:
+            raise ValueError("rewrites are limited to four removed and added edges")
         if len(set(removed)) != len(removed) or len(set(added)) != len(added):
             raise ValueError("rewrite contains duplicate edges")
         current = set(graph.edges)

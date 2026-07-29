@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +22,12 @@ from mutation_forge.models import JsonValue
 from mutation_forge.sandbox.config import load_policy_config
 from mutation_forge.sandbox.policy import evaluate_policy, probe_policy
 from mutation_forge.sandbox.validation import validate_policy
+from mutation_forge.stage2b.config import Stage2BConfig, load_stage2b_config
+from mutation_forge.stage2b.evaluation import (
+    evaluate_source_policy,
+    inspect_proposals,
+    run_stage2b_compare,
+)
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -221,6 +228,12 @@ def _policy_evaluate(
     *,
     force_json: bool,
 ) -> int:
+    with config_path.open("rb") as handle:
+        schema_version = tomllib.load(handle).get("schema_version")
+    if schema_version == "stage2b.1":
+        result = evaluate_source_policy(path, load_stage2b_config(config_path))
+        _emit_policy_result(result, json_output=force_json)
+        return 0 if result["status"] == "completed" else 1
     config = load_policy_config(config_path)
     result = evaluate_policy(path, config)
     _emit_policy_result(
@@ -228,6 +241,44 @@ def _policy_evaluate(
         json_output=force_json or config.output == "json",
     )
     return 0 if result["status"] == "completed" else 1
+
+
+def _stage2b_policy_path(value: str, config: Stage2BConfig) -> Path:
+    builtins = {
+        "random": "fixtures/rankers/stage2b_random.py",
+        "structural": "fixtures/rankers/stage2b_structural.py",
+    }
+    relative = builtins.get(value.lower())
+    if relative is not None:
+        return config.repositories.project_repo / relative
+    return Path(value).resolve()
+
+
+def _policy_compare(
+    random_policy: str,
+    structural_policy: str,
+    config_path: Path,
+    *,
+    json_output: bool,
+) -> int:
+    config = load_stage2b_config(config_path)
+    result = run_stage2b_compare(
+        _stage2b_policy_path(random_policy, config),
+        _stage2b_policy_path(structural_policy, config),
+        config,
+    )
+    _emit_policy_result(
+        result,
+        json_output=json_output or config.run.output == "json",
+    )
+    return 0 if result["status"] == "completed" else 1
+
+
+def _proposals_inspect(config_path: Path, *, json_output: bool) -> int:
+    config = load_stage2b_config(config_path)
+    result = inspect_proposals(config)
+    _emit_policy_result(result, json_output=json_output)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -260,6 +311,15 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("run_b", type=Path)
     compare.add_argument("--json", action="store_true")
 
+    proposals = commands.add_parser("proposals")
+    proposal_commands = proposals.add_subparsers(
+        dest="proposals_command",
+        required=True,
+    )
+    proposals_inspect = proposal_commands.add_parser("inspect")
+    proposals_inspect.add_argument("--config", type=Path, required=True)
+    proposals_inspect.add_argument("--json", action="store_true")
+
     policy = commands.add_parser("policy")
     policy_commands = policy.add_subparsers(dest="policy_command", required=True)
     policy_validate = policy_commands.add_parser("validate")
@@ -272,6 +332,11 @@ def build_parser() -> argparse.ArgumentParser:
     policy_evaluate.add_argument("policy", type=Path)
     policy_evaluate.add_argument("--config", type=Path, required=True)
     policy_evaluate.add_argument("--json", action="store_true")
+    policy_compare = policy_commands.add_parser("compare")
+    policy_compare.add_argument("random_policy")
+    policy_compare.add_argument("structural_policy")
+    policy_compare.add_argument("--config", type=Path, required=True)
+    policy_compare.add_argument("--json", action="store_true")
     return parser
 
 
@@ -293,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
             return _inspect(args.run, json_output=args.json)
         if args.command == "compare":
             return _compare(args.run_a, args.run_b, json_output=args.json)
+        if args.command == "proposals" and args.proposals_command == "inspect":
+            return _proposals_inspect(args.config, json_output=args.json)
         if args.command == "policy" and args.policy_command == "validate":
             return _policy_validate(args.policy, json_output=args.json)
         if args.command == "policy" and args.policy_command == "probe":
@@ -302,6 +369,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.policy,
                 args.config,
                 force_json=args.json,
+            )
+        if args.command == "policy" and args.policy_command == "compare":
+            return _policy_compare(
+                args.random_policy,
+                args.structural_policy,
+                args.config,
+                json_output=args.json,
             )
     except Exception as error:
         if getattr(args, "json", False):

@@ -9,6 +9,18 @@ from typing import TypedDict, cast
 from mutation_forge.models import JsonValue
 
 PROBE_SCHEMA_VERSION = "stage2a.probe.v1"
+SCIENTIFIC_CONTEXT_SCHEMA_VERSION = "stage2b.context.v1"
+SCIENTIFIC_PROPOSAL_SCHEMA_VERSION = "stage2b.proposal.v1"
+SCIENTIFIC_SELECTOR_TAGS = frozenset(
+    {
+        "uniform_random",
+        "sampled_forbidden_cycle_anchored",
+        "high_sampled_witness_load",
+        "remote_from_anchor",
+        "pairwise_distant_disjoint",
+        "mixed_exploit_explore",
+    }
+)
 VALIDATOR_VERSION = "stage2a.validator.v1"
 BEHAVIOR_SCHEMA_VERSION = "stage2a.behavior.v1"
 ARTIFACT_SCHEMA_VERSION = "stage2a.artifact.v1"
@@ -33,6 +45,43 @@ class ProbeProposal(TypedDict):
     proposal_id: str
     kind: str
     features: dict[str, JsonValue]
+
+
+class ScientificContext(TypedDict):
+    schema_version: str
+    order: int
+    forbidden_lengths: list[int]
+    capped_cycle_counts: list[int]
+    weighted_penalty: int
+    step: int
+    remaining_steps: int
+    stagnation: int
+    recent_best_improvement: float
+    recent_acceptance_rate: float
+    recent_duplicate_rate: float
+
+
+class ScientificProposal(TypedDict):
+    schema_version: str
+    proposal_id: str
+    k: int
+    operator_family: str
+    selector_tags: list[str]
+    anchor_forbidden_length: int | None
+    broken_sampled_witnesses_by_length: list[int]
+    removed_edge_load_sum_by_length: list[int]
+    removed_edge_load_max_by_length: list[int]
+    minimum_distance_between_removed_edges: int
+    mean_distance_between_removed_edges: float
+    minimum_preexisting_distance_for_new_edges: int
+    mean_preexisting_distance_for_new_edges: float
+    local_triangle_risk: int
+    local_c4_risk: int
+    reconnection_span: float
+
+
+type RankerContext = ProbeContext | ScientificContext
+type RankerProposal = ProbeProposal | ScientificProposal
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +244,225 @@ def validate_probe_inputs(
     )
 
 
+def validate_ranker_inputs(
+    ctx: object,
+    proposal: object,
+    *,
+    max_request_bytes: int,
+) -> tuple[RankerContext, RankerProposal]:
+    normalized_ctx = canonical_plain_data(ctx)
+    normalized_proposal = canonical_plain_data(proposal)
+    if not isinstance(normalized_ctx, dict) or not isinstance(
+        normalized_proposal,
+        dict,
+    ):
+        raise ContractError(
+            "invalid_ranker_input",
+            "ctx and proposal must be mappings",
+        )
+    if normalized_ctx.get("schema_version") != SCIENTIFIC_CONTEXT_SCHEMA_VERSION:
+        return validate_probe_inputs(
+            normalized_ctx,
+            normalized_proposal,
+            max_request_bytes=max_request_bytes,
+        )
+    _validate_scientific_context(normalized_ctx)
+    _validate_scientific_proposal(normalized_proposal)
+    lengths = cast(list[JsonValue], normalized_ctx["forbidden_lengths"])
+    for name in (
+        "broken_sampled_witnesses_by_length",
+        "removed_edge_load_sum_by_length",
+        "removed_edge_load_max_by_length",
+    ):
+        vector = cast(list[JsonValue], normalized_proposal[name])
+        if len(vector) != len(lengths):
+            raise ContractError(
+                "invalid_proposal",
+                f"proposal.{name} must align with ctx.forbidden_lengths",
+                f"$.proposal.{name}",
+            )
+    anchor = normalized_proposal["anchor_forbidden_length"]
+    if anchor is not None and anchor not in lengths:
+        raise ContractError(
+            "invalid_proposal",
+            "anchor_forbidden_length must occur in ctx.forbidden_lengths",
+            "$.proposal.anchor_forbidden_length",
+        )
+    if (
+        len(canonical_json_bytes({"ctx": normalized_ctx, "proposal": normalized_proposal}))
+        > max_request_bytes
+    ):
+        raise ContractError(
+            "request_too_large",
+            f"request exceeds {max_request_bytes} bytes",
+        )
+    return (
+        cast(ScientificContext, normalized_ctx),
+        cast(ScientificProposal, normalized_proposal),
+    )
+
+
+def _require_exact_keys(
+    value: dict[str, JsonValue],
+    keys: set[str],
+    name: str,
+) -> None:
+    if set(value) != keys:
+        raise ContractError(
+            f"invalid_{name}",
+            f"{name} keys must be exactly {sorted(keys)}",
+            f"$.{name}",
+        )
+
+
+def _nonnegative_int(value: JsonValue, path: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ContractError("invalid_integer", "must be a non-negative integer", path)
+    return value
+
+
+def _finite_number(value: JsonValue, path: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        raise ContractError("invalid_number", "must be a finite number", path)
+    return value
+
+
+def _int_list(value: JsonValue, path: str) -> list[int]:
+    if not isinstance(value, list) or len(value) > 16:
+        raise ContractError("invalid_integer_list", "must be a bounded integer list", path)
+    result: list[int] = []
+    for index, item in enumerate(value):
+        result.append(_nonnegative_int(item, f"{path}[{index}]"))
+    return result
+
+
+def _validate_scientific_context(value: dict[str, JsonValue]) -> None:
+    keys = {
+        "schema_version",
+        "order",
+        "forbidden_lengths",
+        "capped_cycle_counts",
+        "weighted_penalty",
+        "step",
+        "remaining_steps",
+        "stagnation",
+        "recent_best_improvement",
+        "recent_acceptance_rate",
+        "recent_duplicate_rate",
+    }
+    _require_exact_keys(value, keys, "ctx")
+    if value["schema_version"] != SCIENTIFIC_CONTEXT_SCHEMA_VERSION:
+        raise ContractError("invalid_ctx", "unsupported scientific context schema")
+    order = _nonnegative_int(value["order"], "$.ctx.order")
+    if order < 4:
+        raise ContractError("invalid_ctx", "ctx.order must be at least four")
+    lengths = _int_list(value["forbidden_lengths"], "$.ctx.forbidden_lengths")
+    counts = _int_list(value["capped_cycle_counts"], "$.ctx.capped_cycle_counts")
+    if (
+        not lengths
+        or any(length < 1 for length in lengths)
+        or len(set(lengths)) != len(lengths)
+        or len(lengths) != len(counts)
+    ):
+        raise ContractError(
+            "invalid_ctx",
+            "forbidden lengths must be positive and unique; counts must align",
+        )
+    _nonnegative_int(value["weighted_penalty"], "$.ctx.weighted_penalty")
+    _nonnegative_int(value["step"], "$.ctx.step")
+    _nonnegative_int(value["remaining_steps"], "$.ctx.remaining_steps")
+    _nonnegative_int(value["stagnation"], "$.ctx.stagnation")
+    for name in (
+        "recent_best_improvement",
+        "recent_acceptance_rate",
+        "recent_duplicate_rate",
+    ):
+        number = _finite_number(value[name], f"$.ctx.{name}")
+        if name.endswith("_rate") and not 0 <= number <= 1:
+            raise ContractError("invalid_ctx", f"ctx.{name} must be in [0, 1]")
+
+
+def _validate_scientific_proposal(value: dict[str, JsonValue]) -> None:
+    keys = {
+        "schema_version",
+        "proposal_id",
+        "k",
+        "operator_family",
+        "selector_tags",
+        "anchor_forbidden_length",
+        "broken_sampled_witnesses_by_length",
+        "removed_edge_load_sum_by_length",
+        "removed_edge_load_max_by_length",
+        "minimum_distance_between_removed_edges",
+        "mean_distance_between_removed_edges",
+        "minimum_preexisting_distance_for_new_edges",
+        "mean_preexisting_distance_for_new_edges",
+        "local_triangle_risk",
+        "local_c4_risk",
+        "reconnection_span",
+    }
+    _require_exact_keys(value, keys, "proposal")
+    if value["schema_version"] != SCIENTIFIC_PROPOSAL_SCHEMA_VERSION:
+        raise ContractError("invalid_proposal", "unsupported scientific proposal schema")
+    proposal_id = value["proposal_id"]
+    if (
+        not isinstance(proposal_id, str)
+        or len(proposal_id) != 64
+        or any(character not in "0123456789abcdef" for character in proposal_id)
+    ):
+        raise ContractError(
+            "invalid_proposal",
+            "proposal_id must be a lowercase SHA-256 hex digest",
+        )
+    k = _nonnegative_int(value["k"], "$.proposal.k")
+    if k not in {2, 3, 4}:
+        raise ContractError("invalid_proposal", "proposal.k must be 2, 3, or 4")
+    if value["operator_family"] != f"legal_{k}_switch":
+        raise ContractError(
+            "invalid_proposal",
+            "operator_family must match proposal.k",
+        )
+    tags = value["selector_tags"]
+    if (
+        not isinstance(tags, list)
+        or not tags
+        or len(tags) > 8
+        or any(tag not in SCIENTIFIC_SELECTOR_TAGS for tag in tags)
+    ):
+        raise ContractError(
+            "invalid_proposal",
+            "selector_tags must contain reviewed selector names",
+        )
+    anchor = value["anchor_forbidden_length"]
+    if anchor is not None:
+        _nonnegative_int(anchor, "$.proposal.anchor_forbidden_length")
+    vector_names = (
+        "broken_sampled_witnesses_by_length",
+        "removed_edge_load_sum_by_length",
+        "removed_edge_load_max_by_length",
+    )
+    vector_lengths = {len(_int_list(value[name], f"$.proposal.{name}")) for name in vector_names}
+    if len(vector_lengths) != 1 or vector_lengths == {0}:
+        raise ContractError("invalid_proposal", "proposal feature vectors must align")
+    for name in (
+        "minimum_distance_between_removed_edges",
+        "minimum_preexisting_distance_for_new_edges",
+        "local_triangle_risk",
+        "local_c4_risk",
+    ):
+        _nonnegative_int(value[name], f"$.proposal.{name}")
+    for name in (
+        "mean_distance_between_removed_edges",
+        "mean_preexisting_distance_for_new_edges",
+        "reconnection_span",
+    ):
+        if _finite_number(value[name], f"$.proposal.{name}") < 0:
+            raise ContractError(
+                "invalid_proposal",
+                f"proposal.{name} must be non-negative",
+            )
+
+
 def _validate_typed_mapping(
     value: dict[str, JsonValue],
     *,
@@ -209,9 +477,7 @@ def _validate_typed_mapping(
         )
     for key, expected in required.items():
         item = value[key]
-        if not isinstance(item, expected) or (
-            expected is int and isinstance(item, bool)
-        ):
+        if not isinstance(item, expected) or (expected is int and isinstance(item, bool)):
             raise ContractError(
                 f"invalid_{name}",
                 f"{name}.{key} must be {expected.__name__}",
@@ -224,9 +490,7 @@ def freeze_plain_data(value: JsonValue) -> object:
     if isinstance(value, list):
         return tuple(freeze_plain_data(item) for item in value)
     if isinstance(value, dict):
-        return MappingProxyType(
-            {key: freeze_plain_data(item) for key, item in value.items()}
-        )
+        return MappingProxyType({key: freeze_plain_data(item) for key, item in value.items()})
     return value
 
 

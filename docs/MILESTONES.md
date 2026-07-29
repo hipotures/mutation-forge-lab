@@ -35,15 +35,21 @@ Stage 2A explicitly excludes generalized k-switches, final scientific
 features, random/structural HEG comparison, proposal pools, a full proposer,
 model/App Server use, evolution, held-out claims, and HEG integration.
 
+**Status: accepted.** Issue #5 is closed as completed and
+`docs/reports/STAGE2A_REPORT.md` records `GO_TO_STAGE_2B`. Frozen Stage 2B
+entry point: Mutation Forge
+`e2d11bb86b4fa5dbc7ebfb441923e0f02e9799a9`; HEG
+`fd97451b0f3d87400d1d955a2c6b1b18303344ff`.
+
 ## Stage 2B: proposal and feature evidence
 
-Stage 2B is blocked until issue #5 closes as completed with
-`GO_TO_STAGE_2B`. It may add host-generated legal k-switch pools for
-`2 <= k <= 4`, final bounded immutable feature schemas, fixture/random/
-structural rankers, penalties, and a preregistered toy comparison. It still
-uses no model. A full proposer remains blocked until ranker evidence exists.
-The Stage 2B report must make an explicit GO/NO-GO decision before any model
-use.
+Stage 2B is active after the Stage 2A gate. It adds host-generated legal
+k-switch pools for `2 <= k <= 4`, frozen bounded immutable scientific schemas,
+reviewed random/structural rankers through the Stage 2A worker, a
+preregistered paired toy comparison, and a bounded order-30 HEG pilot. It still
+uses no model and does not integrate a policy into HEG. A full proposer remains
+blocked until ranker evidence exists. The Stage 2B report must make an explicit
+`GO_TO_STAGE_3` or `NO_GO` decision before any model use.
 
 ## Stages 3–7
 

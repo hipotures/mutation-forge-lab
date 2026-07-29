@@ -1,6 +1,6 @@
 # Generated Python security boundary
 
-Generated Python is not executed in Stage 1. Stage 2A executes only one
+Generated Python is not executed in Stage 1. Stages 2A and 2B execute only one
 validated function:
 
 ```python
@@ -9,13 +9,16 @@ def priority(ctx, proposal):
     ...
 ```
 
-`ctx` and `proposal` use `stage2a.probe.v1`. They are exact string-keyed
+Stage 2A `ctx` and `proposal` use `stage2a.probe.v1`. They are exact string-keyed
 mappings containing probe IDs, counters, a proposal kind, and recursively
 bounded plain-data feature mappings. Values may be `None`, Boolean, bounded
 integer/finite float/string, lists or tuples, and string-keyed mappings.
 Canonical protocol JSON turns tuples into arrays; the worker recursively
-freezes arrays and mappings before the call. The schemas are execution probes,
-not final scientific features.
+freezes arrays and mappings before the call. Stage 2B separately freezes
+`stage2b.context.v1` and `stage2b.proposal.v1`. Those schemas expose only
+bounded relabeling-safe aggregates and opaque proposal IDs. The host retains
+the graph, rewrite, validation, scoring, cache, controller, and experiment
+state.
 
 Validation accepts exactly one undecorated top-level function with parameters
 `ctx, proposal`, local-name assignments, conditionals, bounded `for` loops,
@@ -52,5 +55,6 @@ Replay loads the persisted source and reproduces identity, outputs, and the
 signature without a model or network call.
 
 This is a narrow defense-in-depth contract, not a general Python sandbox and
-not proof that arbitrary Python is safe. Stage 2B, model use, a full proposer,
-and HEG integration remain separately gated.
+not proof that arbitrary Python is safe. Stage 2B reuses it only to rank
+host-validated declarative plans. Model use, a full proposer, evolution, graph
+authority, and HEG integration remain separately gated.

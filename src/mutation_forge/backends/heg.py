@@ -569,8 +569,8 @@ class HegBackend:
         *,
         record_score_profile: ScoreProfileRecorder | None = None,
     ) -> GraphState:
-        if len(rewrite.removed_edges) > 2 or len(rewrite.added_edges) > 2:
-            raise ValueError("Stage 1 rewrites are limited to two removed and added edges")
+        if len(rewrite.removed_edges) > 4 or len(rewrite.added_edges) > 4:
+            raise ValueError("rewrites are limited to four removed and added edges")
         if len(set(rewrite.removed_edges)) != len(rewrite.removed_edges):
             raise ValueError("rewrite contains duplicate removed edges")
         if len(set(rewrite.added_edges)) != len(rewrite.added_edges):

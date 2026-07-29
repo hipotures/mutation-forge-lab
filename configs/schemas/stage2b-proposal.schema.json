@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2b-proposal.v1.json",
+  "title": "Mutation Forge Stage 2B ranker proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "proposal_id",
+    "k",
+    "operator_family",
+    "selector_tags",
+    "anchor_forbidden_length",
+    "broken_sampled_witnesses_by_length",
+    "removed_edge_load_sum_by_length",
+    "removed_edge_load_max_by_length",
+    "minimum_distance_between_removed_edges",
+    "mean_distance_between_removed_edges",
+    "minimum_preexisting_distance_for_new_edges",
+    "mean_preexisting_distance_for_new_edges",
+    "local_triangle_risk",
+    "local_c4_risk",
+    "reconnection_span"
+  ],
+  "properties": {
+    "schema_version": {"const": "stage2b.proposal.v1"},
+    "proposal_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "k": {"enum": [2, 3, 4]},
+    "operator_family": {"enum": ["legal_2_switch", "legal_3_switch", "legal_4_switch"]},
+    "selector_tags": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "enum": [
+          "uniform_random",
+          "sampled_forbidden_cycle_anchored",
+          "high_sampled_witness_load",
+          "remote_from_anchor",
+          "pairwise_distant_disjoint",
+          "mixed_exploit_explore"
+        ]
+      }
+    },
+    "anchor_forbidden_length": {
+      "anyOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]
+    },
+    "broken_sampled_witnesses_by_length": {"$ref": "#/$defs/countVector"},
+    "removed_edge_load_sum_by_length": {"$ref": "#/$defs/countVector"},
+    "removed_edge_load_max_by_length": {"$ref": "#/$defs/countVector"},
+    "minimum_distance_between_removed_edges": {"type": "integer", "minimum": 0},
+    "mean_distance_between_removed_edges": {"type": "number", "minimum": 0},
+    "minimum_preexisting_distance_for_new_edges": {"type": "integer", "minimum": 0},
+    "mean_preexisting_distance_for_new_edges": {"type": "number", "minimum": 0},
+    "local_triangle_risk": {"type": "integer", "minimum": 0},
+    "local_c4_risk": {"type": "integer", "minimum": 0},
+    "reconnection_span": {"type": "number", "minimum": 0}
+  },
+  "$defs": {
+    "countVector": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"type": "integer", "minimum": 0}
+    }
+  },
+  "x-alignment": "three count vectors align with context.forbidden_lengths",
+  "x-authority": "No graph, vertices, backend, scorer, verifier, or hidden-test data"
+}

@@ -7,7 +7,7 @@ immutable dataset
       |
 fixed episode controller
       |
-reviewed proposal source ---- policy/ranker (Stage 2A probe-only)
+host-validated proposal pool ---- policy/ranker (Stage 2A worker)
       |
 declarative RewritePlan
       |
@@ -58,7 +58,11 @@ relabel vertices, so labeled equality is sufficient for these transient sets.
 
 ## Later package boundaries
 
-`sandbox` now implements the Stage 2A probe-only validator, isolated worker,
-behavior signature, replay, and artifacts. It is not connected to the Stage 1
-episode controller or HEG. `llm`, `archive`, and `evolution` remain inactive
-package boundaries; no model or evolutionary path exists.
+`sandbox` implements the Stage 2A validator, isolated worker, behavior
+signature, replay, and artifacts. Stage 2B reuses it for frozen plain-data
+scientific ranker payloads. `stage2b` generates bounded legal `k`-switch pools,
+computes host-owned aggregate features, presents identical immutable pools to
+paired rankers, and authoritatively scores selected plans only. It is not
+connected to the Stage 1 episode controller or integrated into HEG. `llm`,
+`archive`, and `evolution` remain inactive package boundaries; no model or
+evolutionary path exists.

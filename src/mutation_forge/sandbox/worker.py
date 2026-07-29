@@ -20,12 +20,12 @@ from typing import BinaryIO, cast
 from mutation_forge.models import JsonValue
 from mutation_forge.sandbox.contracts import (
     ContractError,
-    ProbeContext,
-    ProbeProposal,
+    RankerContext,
+    RankerProposal,
     SandboxLimits,
     freeze_plain_data,
     validate_priority,
-    validate_probe_inputs,
+    validate_ranker_inputs,
 )
 from mutation_forge.sandbox.errors import (
     ProtocolError,
@@ -180,7 +180,7 @@ def _child_main() -> int:
                 raise ProtocolError(f"unexpected request type: {request_type!r}")
             started_ns = time.perf_counter_ns()
             try:
-                ctx, proposal = validate_probe_inputs(
+                ctx, proposal = validate_ranker_inputs(
                     request.get("ctx"),
                     request.get("proposal"),
                     max_request_bytes=limits.request_bytes,
@@ -422,8 +422,8 @@ class PolicyWorker:
 
     def call(
         self,
-        ctx: ProbeContext,
-        proposal: ProbeProposal,
+        ctx: RankerContext,
+        proposal: RankerProposal,
     ) -> WorkerCallResult:
         if not self.usable:
             raise WorkerCrashError("failed or closed workers cannot be reused")
@@ -433,7 +433,7 @@ class PolicyWorker:
             self._failed = True
             self._terminate()
             raise WorkerTimeoutError("worker exceeded total wall limit")
-        normalized_ctx, normalized_proposal = validate_probe_inputs(
+        normalized_ctx, normalized_proposal = validate_ranker_inputs(
             ctx,
             proposal,
             max_request_bytes=self.limits.request_bytes,

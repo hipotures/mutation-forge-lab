@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2b-config.v1.json",
+  "title": "Mutation Forge Stage 2B preregistration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "repositories",
+    "pool",
+    "features",
+    "search",
+    "toy_gate",
+    "heg_pilot",
+    "sandbox"
+  ],
+  "properties": {
+    "schema_version": {"const": "stage2b.1"},
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_root", "output"],
+      "properties": {
+        "run_root": {"type": "string", "minLength": 1},
+        "output": {"enum": ["rich", "json"]}
+      }
+    },
+    "repositories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_repo",
+        "heg_repo",
+        "frozen_project_commit",
+        "frozen_heg_commit"
+      ],
+      "properties": {
+        "project_repo": {"type": "string", "minLength": 1},
+        "heg_repo": {"type": "string", "minLength": 1},
+        "frozen_project_commit": {"$ref": "#/$defs/gitSha"},
+        "frozen_heg_commit": {"$ref": "#/$defs/gitSha"}
+      }
+    },
+    "pool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pool_size",
+        "k_values",
+        "selectors",
+        "selector_weights",
+        "retry_limit",
+        "matching_limit"
+      ],
+      "properties": {
+        "pool_size": {"type": "integer", "minimum": 1, "maximum": 64},
+        "k_values": {
+          "type": "array",
+          "items": {"enum": [2, 3, 4]},
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true
+        },
+        "selectors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/selector"}
+        },
+        "selector_weights": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {"type": "integer", "minimum": 1, "maximum": 100}
+        },
+        "retry_limit": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "matching_limit": {"type": "integer", "minimum": 1, "maximum": 105}
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "forbidden_lengths",
+        "witness_sample_cap",
+        "cycle_node_budget",
+        "distance_query_budget",
+        "local_risk_budget"
+      ],
+      "properties": {
+        "forbidden_lengths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1, "maximum": 16}
+        },
+        "witness_sample_cap": {"type": "integer", "minimum": 1, "maximum": 256},
+        "cycle_node_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "distance_query_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "local_risk_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    },
+    "search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps", "witness_cap"],
+      "properties": {
+        "steps": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "witness_cap": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      }
+    },
+    "toy_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order",
+        "graph_seed",
+        "policy_seeds",
+        "bootstrap_samples",
+        "auc_relative_improvement_threshold",
+        "confidence_level"
+      ],
+      "properties": {
+        "order": {"type": "integer", "minimum": 1, "maximum": 100},
+        "graph_seed": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "policy_seeds": {
+          "type": "array",
+          "minItems": 32,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1, "maximum": 2147483647}
+        },
+        "bootstrap_samples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "auc_relative_improvement_threshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 10
+        },
+        "confidence_level": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        }
+      }
+    },
+    "heg_pilot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "order", "graph_seeds", "policy_seeds", "steps"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "order": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "graph_seeds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1, "maximum": 2147483647}
+        },
+        "policy_seeds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1, "maximum": 2147483647}
+        },
+        "steps": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_source_bytes",
+        "max_ast_nodes",
+        "max_static_loop_bound",
+        "address_space_bytes",
+        "per_call_wall_seconds",
+        "total_wall_seconds",
+        "request_bytes",
+        "response_bytes",
+        "captured_output_bytes",
+        "open_files",
+        "process_count"
+      ],
+      "properties": {
+        "max_source_bytes": {"type": "integer", "exclusiveMinimum": 0},
+        "max_ast_nodes": {"type": "integer", "exclusiveMinimum": 0},
+        "max_static_loop_bound": {"type": "integer", "exclusiveMinimum": 0},
+        "address_space_bytes": {"type": "integer", "exclusiveMinimum": 0},
+        "per_call_wall_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "total_wall_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "request_bytes": {"type": "integer", "exclusiveMinimum": 0},
+        "response_bytes": {"type": "integer", "exclusiveMinimum": 0},
+        "captured_output_bytes": {"type": "integer", "exclusiveMinimum": 0},
+        "open_files": {"type": "integer", "exclusiveMinimum": 0},
+        "process_count": {"type": "integer", "exclusiveMinimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "selector": {
+      "enum": [
+        "uniform_random",
+        "sampled_forbidden_cycle_anchored",
+        "high_sampled_witness_load",
+        "remote_from_anchor",
+        "pairwise_distant_disjoint",
+        "mixed_exploit_explore"
+      ]
+    }
+  },
+  "x-cross-field-validation": "selector weights align with selectors; runtime enforces all bounds and exact keys"
+}
