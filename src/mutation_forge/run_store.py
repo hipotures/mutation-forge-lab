@@ -7,6 +7,13 @@ from pathlib import Path
 from mutation_forge.events import Event
 
 SCHEMA_VERSION = "1.0"
+COMMIT_EVENT_TYPES = frozenset(
+    {
+        "episode_completed",
+        "run_completed",
+        "run_failed",
+    }
+)
 
 
 class RunStore:
@@ -61,7 +68,8 @@ class RunStore:
                 json.dumps(event.payload, sort_keys=True),
             ),
         )
-        self.connection.commit()
+        if event.event_type in COMMIT_EVENT_TYPES:
+            self.connection.commit()
 
     def finish(self, run_id: str, status: str, summary: dict[str, object]) -> None:
         self.connection.execute(

@@ -21,6 +21,8 @@ The manifest records Mutation Forge and HEG commits and dirty states, resolved
 configuration and hash, Python/OS/architecture, lock hash, schema versions,
 seeds, resource limits, timestamps, and terminal status. SQLite stores run and
 event metadata; larger immutable evidence remains in files.
+Event inserts are committed as one transaction at each episode boundary.
+Terminal run events also force a commit so a failed final episode is retained.
 
 Terminal states are explicit. Timeout, crash, incomplete execution, unknown
 verification, or scorer failure must never be relabeled as success.
