@@ -57,6 +57,7 @@ class FakeScenario:
     oversized: bool = False
     crash: bool = False
     unknown_notification: bool = False
+    thread_started_notification: str | None = None
 
 
 class FakeProcess:
@@ -124,6 +125,13 @@ class FakeProcess:
                 },
             )
         elif method == "thread/start":
+            if self.scenario.thread_started_notification == "nested-before-thread-response":
+                self.stdout.put(
+                    {
+                        "method": "thread/started",
+                        "params": {"thread": {"id": "thread-1"}},
+                    }
+                )
             self._response(
                 request_id,
                 {
@@ -142,11 +150,27 @@ class FakeProcess:
                     },
                 },
             )
+            if self.scenario.thread_started_notification in {"top-level", "nested"}:
+                notification_params: dict[str, Any] = {}
+                if self.scenario.thread_started_notification == "top-level":
+                    notification_params["threadId"] = "thread-1"
+                else:
+                    notification_params["thread"] = {"id": "thread-1"}
+                self.stdout.put(
+                    {"method": "thread/started", "params": notification_params}
+                )
         elif method == "turn/start":
             self._turn += 1
             if self.scenario.server_request:
                 self.stdout.put({"id": 901, "method": "item/toolCall", "params": {}})
             self._response(request_id, {"turn": {"id": "turn-1"}})
+            if self.scenario.thread_started_notification == "nested-after-turn-response":
+                self.stdout.put(
+                    {
+                        "method": "thread/started",
+                        "params": {"thread": {"id": "thread-1"}},
+                    }
+                )
             if self.scenario.unknown_notification:
                 self.stdout.put(
                     {

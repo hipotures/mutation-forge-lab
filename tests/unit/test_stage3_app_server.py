@@ -8,6 +8,7 @@ from mutation_forge.stage3.app_server import (
     AppServerLimits,
     CodexAppServerAdapter,
     IsolationError,
+    ProtocolError,
     TurnError,
     resolve_model_profile,
 )
@@ -41,6 +42,54 @@ def test_fixture_generation_and_late_usage() -> None:
     assert result.usage.total_tokens == 5
     assert scenario.enabled_skills == []
     adapter.close()
+
+
+def test_thread_started_accepts_top_level_thread_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    adapter._correlate_thread_started({"threadId": "thread-1"}, "thread-1")
+    adapter.close()
+
+
+def test_thread_started_accepts_nested_thread_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    adapter._correlate_thread_started({"thread": {"id": "thread-1"}}, "thread-1")
+    adapter.close()
+
+
+def test_thread_started_rejects_missing_thread_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    with pytest.raises(ProtocolError, match="valid thread ID"):
+        adapter._correlate_thread_started({}, "thread-1")
+    adapter.close()
+
+
+def test_thread_started_rejects_foreign_thread_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    with pytest.raises(ProtocolError, match="foreign"):
+        adapter._correlate_thread_started({"thread": {"id": "thread-2"}}, "thread-1")
+    adapter.close()
+
+
+def test_queued_nested_thread_started_is_consumed_before_turn_response() -> None:
+    adapter = make_adapter(FakeScenario(thread_started_notification="nested"))
+    assert adapter.generate("hello", "test:high").text == "fixture answer"
+    adapter.close()
+
+
+def test_thread_started_before_thread_start_response_is_rejected() -> None:
+    adapter = make_adapter(
+        FakeScenario(thread_started_notification="nested-before-thread-response")
+    )
+    with pytest.raises(ProtocolError, match="before thread/start response"):
+        adapter.generate("hello", "test:high")
+
+
+def test_thread_started_after_turn_start_response_is_rejected() -> None:
+    adapter = make_adapter(
+        FakeScenario(thread_started_notification="nested-after-turn-response")
+    )
+    with pytest.raises(ProtocolError, match="after turn/start response"):
+        adapter.generate("hello", "test:high")
 
 
 def test_missing_usage_fails_closed() -> None:

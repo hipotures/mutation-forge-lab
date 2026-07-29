@@ -678,6 +678,11 @@ class CodexAppServerAdapter:
             params_event = message.get("params")
             if not isinstance(method, str) or not isinstance(params_event, Mapping):
                 raise ProtocolError("malformed notification")
+            if method == "thread/started":
+                if turn_id is not None:
+                    raise ProtocolError("thread/started arrived after turn/start response")
+                self._correlate_thread_started(params_event, thread_id)
+                continue
             self._correlate_event(params_event, thread_id, turn_id)
             if method == "item/agentMessage/delta":
                 continue
@@ -822,6 +827,18 @@ class CodexAppServerAdapter:
             dict(raw),
         )
 
+    @staticmethod
+    def _correlate_thread_started(params: Mapping[str, Any], thread_id: str) -> None:
+        observed_thread = params.get("threadId", params.get("thread_id"))
+        if observed_thread is None:
+            thread = params.get("thread")
+            if isinstance(thread, Mapping):
+                observed_thread = thread.get("id")
+        if not isinstance(observed_thread, str) or not observed_thread:
+            raise ProtocolError("thread/started does not contain a valid thread ID")
+        if observed_thread != thread_id:
+            raise ProtocolError("foreign thread/started event")
+
     def _correlate_event(
         self, params: Mapping[str, Any], thread_id: str, turn_id: str | None
     ) -> None:
@@ -867,6 +884,8 @@ class CodexAppServerAdapter:
             if "id" in message:
                 self._deny_server_request(message)
                 continue
+            if method == "thread/start" and message.get("method") == "thread/started":
+                raise ProtocolError("thread/started arrived before thread/start response")
             if message.get("method") in {"error", "thread/status/changed"}:
                 continue
             # During setup only notifications are tolerated.
