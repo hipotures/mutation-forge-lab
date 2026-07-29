@@ -21,6 +21,8 @@ from mutation_forge.stage2c.config import (
     load_stage2c_config,
 )
 from mutation_forge.stage2c.evaluation import (
+    BoundedRecordWriter,
+    _canonical_cell_summary,
     _render_parity_proof,
     run_diagnostic_cell,
     run_pool_oracle,
@@ -87,6 +89,38 @@ def test_stage2c_rich_json_parity_is_measured() -> None:
     assert proof["equal"]
     assert proof["canonical_payload_sha256"] == proof["json_roundtrip_sha256"]
     assert proof["json_roundtrip_sha256"] == proof["rich_roundtrip_sha256"]
+
+
+def test_replay_hashes_exclude_timing_and_artifact_paths(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    config = _config(project_root)
+    first = BoundedRecordWriter(tmp_path / "first", config)
+    second = BoundedRecordWriter(tmp_path / "second", config)
+    first.write({"pool_hash": "a" * 64, "scoring_ns": 10})
+    second.write({"pool_hash": "a" * 64, "scoring_ns": 20})
+    first_manifest = first.close()
+    second_manifest = second.close()
+    assert first_manifest["raw_records_sha256"] != (
+        second_manifest["raw_records_sha256"]
+    )
+    assert first_manifest["canonical_records_sha256"] == (
+        second_manifest["canonical_records_sha256"]
+    )
+    first_cell = {
+        "canonical_hash": "b" * 64,
+        "timing_ns": {"ranker": 10},
+        "feature_diagnostics_artifact": "/first/run/cell.json",
+    }
+    second_cell = {
+        "canonical_hash": "b" * 64,
+        "timing_ns": {"ranker": 20},
+        "feature_diagnostics_artifact": "/second/run/cell.json",
+    }
+    assert _canonical_cell_summary(first_cell) == _canonical_cell_summary(
+        second_cell
+    )
 
 
 def test_diagnostic_oracle_is_opt_in_and_trajectory_isolated(

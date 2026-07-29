@@ -140,7 +140,8 @@ class BoundedRecordWriter:
         self._raw: BinaryIO | None = None
         self._gzip: gzip.GzipFile | None = None
         self._shards: list[dict[str, JsonValue]] = []
-        self._hasher = hashlib.sha256()
+        self._raw_hasher = hashlib.sha256()
+        self._canonical_hasher = hashlib.sha256()
 
     def _open_shard(self) -> None:
         self._close_shard()
@@ -186,7 +187,9 @@ class BoundedRecordWriter:
             self._open_shard()
         assert self._gzip is not None
         self._gzip.write(encoded)
-        self._hasher.update(encoded)
+        self._raw_hasher.update(encoded)
+        canonical_record = _canonical_bytes(_strip_timing(record)) + b"\n"
+        self._canonical_hasher.update(canonical_record)
         self.count += 1
         self.total_bytes += len(encoded)
         self._shard_uncompressed += len(encoded)
@@ -206,7 +209,8 @@ class BoundedRecordWriter:
             "schema_version": STAGE2C_DIAGNOSTIC_VERSION,
             "record_count": self.count,
             "uncompressed_bytes": self.total_bytes,
-            "canonical_records_sha256": self._hasher.hexdigest(),
+            "raw_records_sha256": self._raw_hasher.hexdigest(),
+            "canonical_records_sha256": self._canonical_hasher.hexdigest(),
             "shards": cast(list[JsonValue], self._shards),
             "bounds": {
                 "max_record_bytes": self.max_record_bytes,
@@ -755,6 +759,8 @@ def _episode(
                     "record_type": "pool",
                     "graph_seed": graph_seed,
                     "policy_seed": policy_seed,
+                    "order": graph.order,
+                    "horizon": horizon,
                     "step": step,
                     "static_source_graph": True,
                     **base,
@@ -776,6 +782,8 @@ def _episode(
     result: dict[str, JsonValue] = {
         "graph_seed": graph_seed,
         "policy_seed": policy_seed,
+        "order": graph.order,
+        "horizon": horizon,
         "initial_score": initial_score.total_capped_witnesses,
         "random_raw_best_so_far_curve": cast(list[JsonValue], random_raw_curve),
         "structural_raw_best_so_far_curve": cast(
@@ -1150,6 +1158,15 @@ def _cell_compact(cell: dict[str, JsonValue], *, artifact: str) -> dict[str, Jso
         ],
         "feature_diagnostics_artifact": artifact,
     }
+
+
+def _canonical_cell_summary(cell: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    without_artifact = {
+        key: value
+        for key, value in cell.items()
+        if key != "feature_diagnostics_artifact"
+    }
+    return cast(dict[str, JsonValue], _strip_timing(without_artifact))
 
 
 def _prepare_run(
@@ -1552,7 +1569,9 @@ def run_stage2c_matrix(config: Stage2CConfig) -> dict[str, JsonValue]:
         ):
             raise RuntimeError("matrix representative deterministic replay failed")
         record_manifest = writer.close()
-        canonical_cells = [_strip_timing(cell) for cell in compact_cells]
+        canonical_cells = [
+            _canonical_cell_summary(cell) for cell in compact_cells
+        ]
         matrix_identity: dict[str, JsonValue] = {
             "orders": list(config.matrix.orders),
             "graph_seeds": list(config.matrix.graph_seeds),
