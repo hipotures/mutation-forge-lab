@@ -5,10 +5,14 @@ import subprocess
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from mutation_forge.backends.base import ScoreProfileRecorder
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.evaluation.episode import run_episode
-from mutation_forge.models import GraphState
+from mutation_forge.models import GraphScore, GraphState
 from mutation_forge.policies.baselines import HEG_FORBIDDEN_CYCLE_BREAK
 
 
@@ -35,6 +39,7 @@ def test_heg_seed_score_and_graph6_parity(heg_repo: Path) -> None:
         )
         assert direct.to_graph6() == encoded
         score = backend.score(graph, witness_cap=64)
+        assert score is not None
         assert score.valid
         assert score.total_capped_witnesses == sum(
             count for _, count in score.capped_cycle_counts
@@ -146,7 +151,7 @@ def test_forbidden_witness_cache_tracks_current_graph_identity(
             for current in (graph, graph, equal_graph)
         ]
         assert rewrites[0] == rewrites[1] == rewrites[2]
-        assert len(materializations) == 2
+        assert len(materializations) == 0
         assert [
             (
                 profile["witness_cache_lookups"],
@@ -158,7 +163,7 @@ def test_forbidden_witness_cache_tracks_current_graph_identity(
         ] == [
             (1, 0, 1, 1),
             (1, 1, 0, 0),
-            (1, 0, 1, 1),
+            (1, 1, 0, 0),
         ]
 
         uncached_graph = uncached.generate_seed(order=30, seed=101)
@@ -217,3 +222,238 @@ def test_forbidden_witness_cache_preserves_episode_trajectory(
     finally:
         cached.close()
         uncached.close()
+
+
+def test_prepared_graph_cache_reuses_materialization_and_validation(
+    heg_repo: Path,
+) -> None:
+    cached = HegBackend(heg_repo)
+    uncached = HegBackend(heg_repo, prepared_graph_cache_enabled=False)
+    try:
+        cached_graph = cached.generate_seed(order=30, seed=101)
+        uncached_graph = uncached.generate_seed(order=30, seed=101)
+        cached_counters: dict[str, int] = {}
+        uncached_counters: dict[str, int] = {}
+
+        def recorder(target: dict[str, int]) -> ScoreProfileRecorder:
+            def record(event: str, payload: Mapping[str, int]) -> None:
+                for name, value in payload.items():
+                    key = f"{event}_{name}"
+                    target[key] = target.get(key, 0) + value
+
+            return record
+
+        cached_scores = [
+            cached.score(
+                GraphState(cached_graph.order, cached_graph.edges),
+                witness_cap=64,
+                record_profile=recorder(cached_counters),
+            )
+            for _ in range(2)
+        ]
+        uncached_scores = [
+            uncached.score(
+                GraphState(uncached_graph.order, uncached_graph.edges),
+                witness_cap=64,
+                record_profile=recorder(uncached_counters),
+            )
+            for _ in range(2)
+        ]
+
+        assert cached_scores == uncached_scores
+        assert all(score is not None for score in cached_scores)
+        assert cached_counters["prepared_cache_hits"] == 2
+        assert cached_counters.get("graph_materialization_calls", 0) == 0
+        assert cached_counters["validation_calls"] == 1
+        assert cached_counters["validation_cache_hits"] == 1
+        assert uncached_counters["prepared_cache_hits"] == 0
+        assert uncached_counters["graph_materialization_calls"] == 2
+        assert uncached_counters["validation_calls"] == 2
+    finally:
+        cached.close()
+        uncached.close()
+
+
+def test_heg_score_cutoff_is_inclusive_and_fail_closed(
+    heg_repo: Path,
+) -> None:
+    backend = HegBackend(heg_repo)
+    cutoff_disabled = HegBackend(heg_repo, score_cutoff_enabled=False)
+    try:
+        graph = backend.generate_seed(order=30, seed=101)
+        full_score = backend.score(graph, witness_cap=64)
+        assert full_score is not None
+        assert full_score.total_capped_witnesses > 0
+        counters: dict[str, int] = {}
+
+        def record(event: str, payload: Mapping[str, int]) -> None:
+            for name, value in payload.items():
+                key = f"{event}_{name}"
+                counters[key] = counters.get(key, 0) + value
+
+        dominated = backend.score(
+            graph,
+            witness_cap=64,
+            cutoff=full_score,
+            record_profile=record,
+        )
+        assert dominated is None
+        assert counters["cutoff_applied"] == 1
+        assert counters["worker_response_dominated_results"] == 1
+
+        disabled_graph = cutoff_disabled.generate_seed(order=30, seed=101)
+        disabled_score = cutoff_disabled.score(
+            disabled_graph,
+            witness_cap=64,
+            cutoff=full_score,
+            record_profile=record,
+        )
+        assert disabled_score == full_score
+        assert counters["cutoff_disabled"] == 1
+
+        zero_cutoff = GraphScore(
+            valid=True,
+            capped_cycle_counts=((4, 0), (8, 0), (16, 0)),
+            total_capped_witnesses=0,
+            weighted_penalty=0,
+            complete=True,
+            ordering_key=(0, 0, 0, 0, 45),
+        )
+        assert (
+            backend.score(
+                graph,
+                witness_cap=64,
+                cutoff=zero_cutoff,
+                record_profile=record,
+            )
+            == full_score
+        )
+        assert counters["cutoff_disabled"] == 2
+    finally:
+        backend.close()
+        cutoff_disabled.close()
+
+
+def test_heg_score_worker_restarts_after_one_crash(heg_repo: Path) -> None:
+    backend = HegBackend(heg_repo)
+    try:
+        graph = backend.generate_seed(order=30, seed=101)
+        expected = backend.score(graph, witness_cap=64)
+        assert expected is not None
+        worker = backend._worker  # noqa: SLF001
+        assert worker is not None
+        assert worker.process is not None
+        worker.process.kill()
+        worker.process.wait(timeout=2)
+        counters: dict[str, int] = {}
+
+        def record(event: str, payload: Mapping[str, int]) -> None:
+            for name, value in payload.items():
+                key = f"{event}_{name}"
+                counters[key] = counters.get(key, 0) + value
+
+        recovered = backend.score(
+            graph,
+            witness_cap=64,
+            record_profile=record,
+        )
+        assert recovered == expected
+        assert backend.score_implementation == "heg-cpp-score-worker"
+        assert counters["worker_failure_calls"] == 1
+        assert counters["worker_restart_attempts"] == 1
+        assert counters["worker_restart_successes"] == 1
+        assert counters.get("python_fallback_calls", 0) == 0
+    finally:
+        backend.close()
+
+
+def test_heg_score_worker_falls_back_after_restart_failure(
+    heg_repo: Path,
+) -> None:
+    backend = HegBackend(heg_repo)
+    reference = HegBackend(heg_repo)
+    worker_error = backend._worker_error  # noqa: SLF001
+
+    class AlwaysFailWorker:
+        def score(self, *args: Any, **kwargs: Any) -> None:
+            raise worker_error("synthetic worker failure")
+
+        def restart(self) -> None:
+            raise worker_error("synthetic restart failure")
+
+        def close(self) -> None:
+            return None
+
+    try:
+        graph = backend.generate_seed(order=30, seed=101)
+        expected = reference.score(
+            reference.generate_seed(order=30, seed=101),
+            witness_cap=64,
+        )
+        assert expected is not None
+        backend._worker = AlwaysFailWorker()  # noqa: SLF001
+        counters: dict[str, int] = {}
+
+        def record(event: str, payload: Mapping[str, int]) -> None:
+            for name, value in payload.items():
+                key = f"{event}_{name}"
+                counters[key] = counters.get(key, 0) + value
+
+        recovered = backend.score(
+            graph,
+            witness_cap=64,
+            record_profile=record,
+        )
+        assert recovered == expected
+        assert backend.score_implementation == "heg-python-bounded-reference"
+        assert counters["worker_failure_calls"] == 2
+        assert counters["worker_restart_attempts"] == 1
+        assert counters.get("worker_restart_successes", 0) == 0
+        assert counters["python_fallback_calls"] == 1
+    finally:
+        backend.close()
+        reference.close()
+
+
+@pytest.mark.parametrize("policy_seed", [1, 2, 3])
+def test_score_optimizations_preserve_episode_trajectory(
+    heg_repo: Path,
+    policy_seed: int,
+) -> None:
+    optimized = HegBackend(heg_repo)
+    baseline = HegBackend(
+        heg_repo,
+        score_cutoff_enabled=False,
+        prepared_graph_cache_enabled=False,
+    )
+    try:
+        kwargs = {
+            "entry_id": "score-optimization-parity",
+            "graph_seed": 101,
+            "policy_seed": policy_seed,
+            "run_seed": 7,
+            "baseline": HEG_FORBIDDEN_CYCLE_BREAK,
+            "evaluations": 80,
+            "witness_cap": 64,
+            "profiling_enabled": False,
+        }
+        optimized_result = run_episode(
+            backend=optimized,
+            initial_graph=optimized.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            score_cache_enabled=True,
+            **kwargs,
+        )
+        baseline_result = run_episode(
+            backend=baseline,
+            initial_graph=baseline.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            score_cache_enabled=False,
+            **kwargs,
+        )
+        assert optimized_result.as_dict(
+            include_timing=False
+        ) == baseline_result.as_dict(include_timing=False)
+    finally:
+        optimized.close()
+        baseline.close()

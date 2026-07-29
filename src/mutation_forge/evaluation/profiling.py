@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from mutation_forge.models import (
     DeepOperatorTimingProfile,
+    DeepScoreTimingProfile,
     EpisodeTimingProfile,
     JsonValue,
 )
@@ -21,6 +22,23 @@ DEEP_COUNTER_FIELDS = (
     "candidate_construction_ns",
     "connectivity_validation_ns",
     "graph_family_validation_ns",
+)
+DEEP_SCORE_EVENTS = frozenset(
+    {
+        "score_request",
+        "score_cache",
+        "score_result",
+        "prepared_cache",
+        "graph_materialization",
+        "validation_cache",
+        "validation",
+        "cutoff",
+        "worker_response",
+        "worker_failure",
+        "worker_restart",
+        "python_fallback",
+        "score_assembly",
+    }
 )
 
 
@@ -129,6 +147,28 @@ class DeepOperatorTimingAccumulator:
         )
 
 
+@dataclass(slots=True)
+class DeepScoreTimingAccumulator:
+    counters: dict[str, int]
+
+    def __init__(self) -> None:
+        self.counters = {}
+
+    def record(self, event: str, payload: Mapping[str, int]) -> None:
+        if event not in DEEP_SCORE_EVENTS:
+            raise ValueError(f"unknown deep score event: {event}")
+        for field, value in payload.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(
+                    f"deep score field {event}.{field} must be an integer"
+                )
+            key = f"{event}_{field}"
+            self.counters[key] = self.counters.get(key, 0) + value
+
+    def finish(self) -> DeepScoreTimingProfile:
+        return DeepScoreTimingProfile(dict(self.counters))
+
+
 def aggregate_timing_profiles(
     profiles: Iterable[tuple[str, EpisodeTimingProfile | None]],
     *,
@@ -233,4 +273,21 @@ def aggregate_deep_operator_profiles(
         "enabled": enabled,
         "profiled_episodes": len(collected),
         **serialized,
+    }
+
+
+def aggregate_deep_score_profiles(
+    profiles: Iterable[DeepScoreTimingProfile | None],
+) -> dict[str, JsonValue] | None:
+    collected = [profile for profile in profiles if profile is not None]
+    if not collected:
+        return None
+    merged: dict[str, int] = {}
+    for profile in collected:
+        for field, value in profile.counters.items():
+            merged[field] = merged.get(field, 0) + value
+    return {
+        "enabled": True,
+        "profiled_episodes": len(collected),
+        **DeepScoreTimingProfile(merged).as_dict(),
     }

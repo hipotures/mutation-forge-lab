@@ -288,6 +288,146 @@ class DeepOperatorTimingProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class DeepScoreTimingProfile:
+    counters: Mapping[str, int]
+
+    @staticmethod
+    def _node(
+        nanoseconds: int,
+        calls: int,
+    ) -> dict[str, JsonValue]:
+        return {
+            "seconds": nanoseconds / 1_000_000_000,
+            "calls": calls,
+        }
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        counter_names = (
+            "score_request_calls",
+            "score_result_full_results",
+            "score_result_dominated_results",
+            "score_result_failures",
+            "score_cache_lookups",
+            "score_cache_hits",
+            "score_cache_misses",
+            "score_cache_inserts",
+            "prepared_cache_lookups",
+            "prepared_cache_hits",
+            "prepared_cache_misses",
+            "validation_cache_lookups",
+            "validation_cache_hits",
+            "validation_cache_misses",
+            "cutoff_requests",
+            "cutoff_applied",
+            "cutoff_disabled",
+            "worker_response_calls",
+            "worker_failure_calls",
+            "worker_restart_attempts",
+            "worker_restart_successes",
+            "python_fallback_calls",
+        )
+        public_counters: dict[str, JsonValue] = {
+            name: self.counters.get(name, 0) for name in counter_names
+        }
+        materialization = self._node(
+            self.counters.get("graph_materialization_elapsed_ns", 0),
+            self.counters.get("graph_materialization_calls", 0),
+        )
+        validation = self._node(
+            self.counters.get("validation_elapsed_ns", 0),
+            self.counters.get("validation_calls", 0),
+        )
+        worker_roundtrip_ns = self.counters.get(
+            "worker_response_worker_roundtrip_ns", 0
+        )
+        protocol_phase_ns = {
+            "request_packing": self.counters.get(
+                "worker_response_request_packing_ns", 0
+            ),
+            "request_write": self.counters.get(
+                "worker_response_request_write_ns", 0
+            ),
+            "response_parsing": self.counters.get(
+                "worker_response_response_parsing_ns", 0
+            ),
+        }
+        response_read_ns = self.counters.get(
+            "worker_response_response_read_ns", 0
+        )
+        cycles: dict[str, JsonValue] = {}
+        cycle_elapsed_ns = 0
+        for length in (4, 8, 16):
+            prefix = f"worker_response_cycle_{length}"
+            elapsed_ns = self.counters.get(f"{prefix}_elapsed_ns", 0)
+            cycle_elapsed_ns += elapsed_ns
+            cycles[str(length)] = {
+                "calls": self.counters.get(f"{prefix}_calls", 0),
+                "seconds": elapsed_ns / 1_000_000_000,
+                "nodes": self.counters.get(f"{prefix}_nodes", 0),
+                "complete": self.counters.get(f"{prefix}_complete", 0),
+                "cutoff": self.counters.get(f"{prefix}_cutoff", 0),
+            }
+        protocol_phase_ns["worker_wait_and_read"] = max(
+            0,
+            response_read_ns - cycle_elapsed_ns,
+        )
+        known_worker_ns = sum(protocol_phase_ns.values()) + cycle_elapsed_ns
+        worker_calls = self.counters.get("worker_response_calls", 0)
+        worker_children: dict[str, JsonValue] = {
+            phase: self._node(protocol_phase_ns[phase], worker_calls)
+            for phase in ("request_packing", "request_write")
+        }
+        worker_children.update(
+            {
+                f"cycle_{length}": {
+                    "seconds": cycle["seconds"],
+                    "calls": cycle["calls"],
+                }
+                for length, cycle in cycles.items()
+                if isinstance(cycle, dict)
+            }
+        )
+        for phase in ("worker_wait_and_read", "response_parsing"):
+            worker_children[phase] = self._node(
+                protocol_phase_ns[phase],
+                worker_calls,
+            )
+        worker_children["other"] = self._node(
+            max(0, worker_roundtrip_ns - known_worker_ns),
+            0,
+        )
+        return {
+            "counters": public_counters,
+            "prepared_graph": {
+                "materialization": materialization,
+                "validation": validation,
+            },
+            "worker": {
+                "seconds": worker_roundtrip_ns / 1_000_000_000,
+                "calls": worker_calls,
+                "children": worker_children,
+                "protocol_overhead_seconds": max(
+                    0, worker_roundtrip_ns - cycle_elapsed_ns
+                )
+                / 1_000_000_000,
+            },
+            "score_assembly": self._node(
+                self.counters.get("score_assembly_elapsed_ns", 0),
+                self.counters.get("score_assembly_calls", 0),
+            ),
+            "worker_failures": self._node(
+                self.counters.get("worker_failure_elapsed_ns", 0),
+                self.counters.get("worker_failure_calls", 0),
+            ),
+            "python_fallback": self._node(
+                self.counters.get("python_fallback_elapsed_ns", 0),
+                self.counters.get("python_fallback_calls", 0),
+            ),
+            "cycles": cycles,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class EpisodeResult:
     baseline: str
     entry_id: str
@@ -315,6 +455,7 @@ class EpisodeResult:
     final_graph_hash: str
     timing_profile: EpisodeTimingProfile | None = None
     deep_operator_profile: DeepOperatorTimingProfile | None = None
+    deep_score_profile: DeepScoreTimingProfile | None = None
 
     def as_dict(self, *, include_timing: bool = True) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
@@ -350,4 +491,6 @@ class EpisodeResult:
                 result["deep_operator_profile"] = (
                     self.deep_operator_profile.as_dict()
                 )
+            if self.deep_score_profile is not None:
+                result["deep_score_profile"] = self.deep_score_profile.as_dict()
         return result

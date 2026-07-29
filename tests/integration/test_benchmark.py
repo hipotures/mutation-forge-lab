@@ -41,6 +41,9 @@ evaluations_per_episode = 3
 proposal_pool_size = 1
 profiling_enabled = {str(profiling_enabled).lower()}
 deep_profiling_enabled = {str(deep_profiling_enabled).lower()}
+score_cache_enabled = true
+score_cutoff_enabled = true
+prepared_graph_cache_enabled = true
 [proposals]
 operator_families = ["heg_uniform_two_switch", "heg_forbidden_cycle_break"]
 k_values = [2]
@@ -116,7 +119,7 @@ def test_json_and_rich_runs_have_same_canonical_summary(
             "proposal_generation"
         ]
         assert proposal_calls["rng_setup"] == 6
-        assert 2 <= proposal_calls["graph_materialization"] <= 6
+        assert 0 <= proposal_calls["graph_materialization"] <= 6
         assert proposal_calls["operator_search"] == 6
         assert proposal_calls["proposal_packaging"] == 6
         assert proposal_calls["other"] is None
@@ -148,6 +151,11 @@ def test_json_and_rich_runs_have_same_canonical_summary(
             "profiled_episodes": 0,
             "operators": {},
         }
+        assert "deep_score_profile" not in result.summary
+        assert all(
+            "deep_score_profile" not in episode
+            for episode in result.summary["episodes"]
+        )
 
 
 def test_deep_operator_profile_preserves_canonical_summary(
@@ -173,10 +181,33 @@ def test_deep_operator_profile_preserves_canonical_summary(
 
     assert disabled.summary["summary_hash"] == enabled.summary["summary_hash"]
     deep_profile = enabled.summary["deep_operator_profile"]
+    deep_score_profile = enabled.summary["deep_score_profile"]
     assert deep_profile["enabled"] is True
     assert deep_profile["profiled_episodes"] == 2
     assert enabled.summary["timing_profile"]["enabled"] is False
     assert enabled.summary["timing_profile"]["profiled_episodes"] == 0
+    assert deep_score_profile["enabled"] is True
+    assert deep_score_profile["profiled_episodes"] == 2
+    score_counters = deep_score_profile["counters"]
+    assert score_counters["score_cache_lookups"] == (
+        score_counters["score_cache_hits"]
+        + score_counters["score_cache_misses"]
+    )
+    assert score_counters["score_request_calls"] == (
+        score_counters["score_result_full_results"]
+        + score_counters["score_result_dominated_results"]
+        + score_counters["score_result_failures"]
+    )
+    score_worker = deep_score_profile["worker"]
+    assert sum(
+        child["seconds"] for child in score_worker["children"].values()
+    ) == pytest.approx(score_worker["seconds"])
+    cycle_seconds = sum(
+        cycle["seconds"] for cycle in deep_score_profile["cycles"].values()
+    )
+    assert score_worker["protocol_overhead_seconds"] == pytest.approx(
+        max(0, score_worker["seconds"] - cycle_seconds)
+    )
     operators = deep_profile["operators"]
     assert set(operators) == {
         "heg_uniform_two_switch",
@@ -202,6 +233,10 @@ def test_deep_operator_profile_preserves_canonical_summary(
     ]["calls"]
     assert all(
         "deep_operator_profile" in episode
+        for episode in enabled.summary["episodes"]
+    )
+    assert all(
+        "deep_score_profile" in episode
         for episode in enabled.summary["episodes"]
     )
 

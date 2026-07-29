@@ -246,6 +246,71 @@ def test_rich_live_renders_separate_deep_operator_profile() -> None:
         sink.close()
 
 
+def test_rich_live_renders_separate_deep_score_profile() -> None:
+    sink = RichLiveSink(console=Console(file=io.StringIO(), force_terminal=False))
+    try:
+        sink.state["timing_profile"] = {"enabled": False}
+        sink.state["deep_score_profile"] = {
+            "enabled": True,
+            "profiled_episodes": 2,
+            "counters": {
+                "score_result_full_results": 20,
+                "score_result_dominated_results": 70,
+                "score_result_failures": 1,
+                "score_cache_hits": 9,
+                "score_cache_misses": 81,
+                "score_cache_lookups": 90,
+                "worker_failure_calls": 1,
+                "worker_restart_successes": 1,
+                "python_fallback_calls": 0,
+            },
+            "prepared_graph": {
+                "materialization": {"seconds": 0.4, "calls": 80},
+                "validation": {"seconds": 0.2, "calls": 80},
+            },
+            "worker": {
+                "seconds": 4.0,
+                "calls": 81,
+                "protocol_overhead_seconds": 0.5,
+                "children": {
+                    "request_packing": {"seconds": 0.1, "calls": 0},
+                    "request_write": {"seconds": 0.1, "calls": 0},
+                    "worker_wait_and_read": {"seconds": 0.2, "calls": 0},
+                    "response_parsing": {"seconds": 0.1, "calls": 0},
+                    "cycle_4": {"seconds": 0.5, "calls": 81},
+                    "cycle_8": {"seconds": 1.0, "calls": 81},
+                    "cycle_16": {"seconds": 1.5, "calls": 81},
+                    "other": {"seconds": 0.5, "calls": 0},
+                },
+            },
+            "score_assembly": {"seconds": 0.3, "calls": 20},
+        }
+
+        output = io.StringIO()
+        Console(file=output, force_terminal=False, width=180).print(sink._render())
+        rendered = output.getvalue()
+        assert "Deep score profile · 2 episodes" in rendered
+        assert "worker_roundtrip" in rendered
+        assert "├─ cycle_4" in rendered
+        assert "├─ cycle_8" in rendered
+        assert "├─ cycle_16" in rendered
+        assert "graph_materialization" in rendered
+        assert "validation" in rendered
+        assert "score_assembly" in rendered
+        assert "hits / misses / lookups  9/81/90" in rendered
+        assert "full 20 · dominated 70 · failures 1" in rendered
+        assert "failures 1 · restarts 1 · fallbacks 0" in rendered
+        table = sink._deep_score_profile_table()
+        assert table is not None
+        assert table.box is box.MINIMAL
+        assert table.border_style == "grey37"
+
+        sink.state["deep_score_profile"] = {"enabled": False}
+        assert sink._deep_score_profile_table() is None
+    finally:
+        sink.close()
+
+
 def test_rich_live_renders_at_most_once_per_second_and_on_terminal_event() -> None:
     with patch("mutation_forge.output.rich_live.time.monotonic") as monotonic:
         monotonic.return_value = 0.0

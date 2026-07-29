@@ -68,7 +68,10 @@
         "evaluations_per_episode": {"type": "integer", "minimum": 1},
         "proposal_pool_size": {"type": "integer", "minimum": 1},
         "profiling_enabled": {"type": "boolean", "default": true},
-        "deep_profiling_enabled": {"type": "boolean", "default": false}
+        "deep_profiling_enabled": {"type": "boolean", "default": false},
+        "score_cache_enabled": {"type": "boolean", "default": true},
+        "score_cutoff_enabled": {"type": "boolean", "default": true},
+        "prepared_graph_cache_enabled": {"type": "boolean", "default": true}
       },
       "additionalProperties": false
     },

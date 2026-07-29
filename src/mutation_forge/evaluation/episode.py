@@ -6,9 +6,10 @@ from collections.abc import Callable
 from mutation_forge.backends.base import GraphBackend
 from mutation_forge.evaluation.profiling import (
     DeepOperatorTimingAccumulator,
+    DeepScoreTimingAccumulator,
     TimingAccumulator,
 )
-from mutation_forge.models import EpisodeResult, GraphState, JsonValue
+from mutation_forge.models import EpisodeResult, GraphScore, GraphState, JsonValue
 from mutation_forge.policies.baselines import BaselinePolicy
 from mutation_forge.proposals.two_switch import TwoSwitchProposalSource
 
@@ -37,16 +38,33 @@ def run_episode(
     progress: ProgressCallback | None = None,
     profiling_enabled: bool = True,
     deep_profiling_enabled: bool = False,
+    score_cache_enabled: bool = True,
 ) -> EpisodeResult:
     started = time.monotonic()
     timing = TimingAccumulator() if profiling_enabled else None
     deep_timing = (
         DeepOperatorTimingAccumulator() if deep_profiling_enabled else None
     )
+    deep_score_timing = (
+        DeepScoreTimingAccumulator() if deep_profiling_enabled else None
+    )
+    record_score_profile = (
+        deep_score_timing.record if deep_score_timing is not None else None
+    )
     timing_started_ns = time.perf_counter_ns() if timing is not None else 0
     phase_started_ns = time.perf_counter_ns() if timing is not None else 0
     current = initial_graph
-    initial_score = backend.score(current, witness_cap=witness_cap)
+    if deep_score_timing is not None:
+        deep_score_timing.record("score_request", {"calls": 1})
+    initial_score = backend.score(
+        current,
+        witness_cap=witness_cap,
+        record_profile=record_score_profile,
+    )
+    if initial_score is None:
+        raise RuntimeError("initial score cannot be cutoff-dominated")
+    if deep_score_timing is not None:
+        deep_score_timing.record("score_result", {"full_results": 1})
     if timing is not None:
         timing.scoring_ns += time.perf_counter_ns() - phase_started_ns
     current_score = initial_score
@@ -64,10 +82,15 @@ def run_episode(
     score_failures = 0
     policy_call_ms = 0.0
     phase_started_ns = time.perf_counter_ns() if timing is not None else 0
-    seen = {backend.state_hash(current)}
+    seen = {current}
     if timing is not None:
         timing.duplicate_detection_ns += time.perf_counter_ns() - phase_started_ns
-    exact_submissions: set[str] = set()
+    exact_submissions: set[GraphState] = set()
+    score_cache: dict[GraphState, GraphScore] = {}
+    if score_cache_enabled:
+        score_cache[current] = initial_score
+        if deep_score_timing is not None:
+            deep_score_timing.record("score_cache", {"inserts": 1})
     source = TwoSwitchProposalSource(backend, baseline.operator_family)
     record_proposal_timing = (
         timing.record_proposal_phase if timing is not None else None
@@ -108,7 +131,11 @@ def run_episode(
             continue
         phase_started_ns = time.perf_counter_ns() if timing is not None else 0
         try:
-            candidate = backend.apply_rewrite(current, rewrite)
+            candidate = backend.apply_rewrite(
+                current,
+                rewrite,
+                record_score_profile=record_score_profile,
+            )
         except ValueError:
             if timing is not None:
                 timing.rewrite_application_ns += (
@@ -131,19 +158,45 @@ def run_episode(
             break
         legal += 1
         phase_started_ns = time.perf_counter_ns() if timing is not None else 0
-        candidate_hash = backend.state_hash(candidate)
-        if candidate_hash in seen:
+        if candidate in seen:
             duplicate += 1
-        seen.add(candidate_hash)
+        seen.add(candidate)
         if timing is not None:
             timing.duplicate_detection_ns += time.perf_counter_ns() - phase_started_ns
         phase_started_ns = time.perf_counter_ns() if timing is not None else 0
+        if deep_score_timing is not None:
+            deep_score_timing.record("score_request", {"calls": 1})
+        candidate_score: GraphScore | None
         try:
-            candidate_score = backend.score(candidate, witness_cap=witness_cap)
+            cache_hit = score_cache_enabled and candidate in score_cache
+            if score_cache_enabled and deep_score_timing is not None:
+                deep_score_timing.record(
+                    "score_cache",
+                    {
+                        "lookups": 1,
+                        "hits": int(cache_hit),
+                        "misses": int(not cache_hit),
+                    },
+                )
+            if cache_hit:
+                candidate_score = score_cache[candidate]
+            else:
+                candidate_score = backend.score(
+                    candidate,
+                    witness_cap=witness_cap,
+                    cutoff=(
+                        current_score
+                        if current_score.total_capped_witnesses > 0
+                        else None
+                    ),
+                    record_profile=record_score_profile,
+                )
         except (RuntimeError, TimeoutError):
             if timing is not None:
                 timing.scoring_ns += time.perf_counter_ns() - phase_started_ns
             score_failures += 1
+            if deep_score_timing is not None:
+                deep_score_timing.record("score_result", {"failures": 1})
             phase_started_ns = time.perf_counter_ns() if timing is not None else 0
             curve.append(best_score.total_capped_witnesses)
             completed = evaluation
@@ -152,25 +205,43 @@ def run_episode(
             continue
         if timing is not None:
             timing.scoring_ns += time.perf_counter_ns() - phase_started_ns
+        if deep_score_timing is not None:
+            deep_score_timing.record(
+                "score_result",
+                {
+                    "full_results": int(candidate_score is not None),
+                    "dominated_results": int(candidate_score is None),
+                },
+            )
+        if (
+            score_cache_enabled
+            and not cache_hit
+            and candidate_score is not None
+        ):
+            score_cache[candidate] = candidate_score
+            if deep_score_timing is not None:
+                deep_score_timing.record("score_cache", {"inserts": 1})
         if time.monotonic() >= deadline:
             timed_out = True
             break
         phase_started_ns = time.perf_counter_ns() if timing is not None else 0
-        if candidate_score.ordering_key < current_score.ordering_key:
-            current = candidate
-            current_score = candidate_score
-        if candidate_score.ordering_key < best_score.ordering_key:
-            best_graph = candidate
-            best_score = candidate_score
-            if first_improvement is None:
-                first_improvement = evaluation
+        if candidate_score is not None:
+            if candidate_score.ordering_key < current_score.ordering_key:
+                current = candidate
+                current_score = candidate_score
+            if candidate_score.ordering_key < best_score.ordering_key:
+                best_graph = candidate
+                best_score = candidate_score
+                if first_improvement is None:
+                    first_improvement = evaluation
         if timing is not None:
             timing.controller_ns += time.perf_counter_ns() - phase_started_ns
         if (
-            candidate_score.total_capped_witnesses == 0
-            and candidate_hash not in exact_submissions
+            candidate_score is not None
+            and candidate_score.total_capped_witnesses == 0
+            and candidate not in exact_submissions
         ):
-            exact_submissions.add(candidate_hash)
+            exact_submissions.add(candidate)
             exact_zero_submissions += 1
             phase_started_ns = time.perf_counter_ns() if timing is not None else 0
             verification = backend.exact_verify(candidate)
@@ -254,5 +325,10 @@ def run_episode(
         timing_profile=timing_profile,
         deep_operator_profile=(
             deep_timing.finish() if deep_timing is not None else None
+        ),
+        deep_score_profile=(
+            deep_score_timing.finish()
+            if deep_score_timing is not None
+            else None
         ),
     )

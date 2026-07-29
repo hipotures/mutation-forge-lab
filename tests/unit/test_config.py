@@ -15,6 +15,9 @@ def test_stage1_smoke_config_loads(project_root: Path) -> None:
     assert config.proposals.k_values == (2,)
     assert config.search.profiling_enabled
     assert not config.search.deep_profiling_enabled
+    assert config.search.score_cache_enabled
+    assert config.search.score_cutoff_enabled
+    assert config.search.prepared_graph_cache_enabled
     assert len(config.stable_hash()) == 64
 
 
@@ -75,3 +78,28 @@ def test_stage1_rejects_non_boolean_deep_profiling(
     )
     with pytest.raises(ValueError, match="deep_profiling_enabled"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "score_cache_enabled",
+        "score_cutoff_enabled",
+        "prepared_graph_cache_enabled",
+    ],
+)
+def test_stage1_defaults_scoring_optimizations_on_and_rejects_non_boolean(
+    field: str,
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    source = (project_root / "configs" / "stage1-smoke.toml").read_text()
+    line = f"{field} = true\n"
+    legacy_path = tmp_path / f"legacy-{field}.toml"
+    legacy_path.write_text(source.replace(line, ""))
+    assert getattr(load_config(legacy_path).search, field)
+
+    invalid_path = tmp_path / f"invalid-{field}.toml"
+    invalid_path.write_text(source.replace(line, f"{field} = 1\n"))
+    with pytest.raises(ValueError, match=field):
+        load_config(invalid_path)

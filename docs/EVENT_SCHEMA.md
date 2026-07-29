@@ -28,5 +28,11 @@ When runtime profiling is enabled, `episode_completed` contains both
 `run_completed` contains the final aggregate run profile. No per-evaluation
 profiling events are emitted.
 
+When deep profiling is enabled, `episode_completed` additionally contains the
+episode and cumulative `deep_operator_profile` and `deep_score_profile`.
+`run_completed` contains both final aggregates. The score profile includes
+cache/cutoff/recovery counters and aggregate timing only; it does not emit
+per-score events.
+
 Rich and JSON consume the same `Event` objects. Canonical run-summary equality,
 not terminal formatting, defines output parity.

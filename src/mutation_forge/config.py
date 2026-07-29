@@ -49,6 +49,9 @@ class SearchConfig:
     proposal_pool_size: int
     profiling_enabled: bool
     deep_profiling_enabled: bool
+    score_cache_enabled: bool
+    score_cutoff_enabled: bool
+    prepared_graph_cache_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +140,15 @@ def load_config(path: str | Path) -> LabConfig:
     deep_profiling_enabled = search.get("deep_profiling_enabled", False)
     if not isinstance(deep_profiling_enabled, bool):
         raise ValueError("search.deep_profiling_enabled must be a boolean")
+    score_cache_enabled = search.get("score_cache_enabled", True)
+    if not isinstance(score_cache_enabled, bool):
+        raise ValueError("search.score_cache_enabled must be a boolean")
+    score_cutoff_enabled = search.get("score_cutoff_enabled", True)
+    if not isinstance(score_cutoff_enabled, bool):
+        raise ValueError("search.score_cutoff_enabled must be a boolean")
+    prepared_graph_cache_enabled = search.get("prepared_graph_cache_enabled", True)
+    if not isinstance(prepared_graph_cache_enabled, bool):
+        raise ValueError("search.prepared_graph_cache_enabled must be a boolean")
     operator_families = _str_tuple(
         proposals.get("operator_families"), "proposals.operator_families"
     )
@@ -196,6 +208,9 @@ def load_config(path: str | Path) -> LabConfig:
             ),
             profiling_enabled=profiling_enabled,
             deep_profiling_enabled=deep_profiling_enabled,
+            score_cache_enabled=score_cache_enabled,
+            score_cutoff_enabled=score_cutoff_enabled,
+            prepared_graph_cache_enabled=prepared_graph_cache_enabled,
         ),
         proposals=ProposalConfig(
             operator_families=operator_families,

@@ -12,7 +12,8 @@ profiling_enabled = true
 Set the value to `false` for a profiling-overhead control run. Older
 configuration files without the key retain the enabled default.
 
-HEG operator internals can be measured with a separate, opt-in deep profile:
+HEG operator and scoring internals can be measured with a separate, opt-in
+deep profile:
 
 ```toml
 [search]
@@ -20,32 +21,57 @@ deep_profiling_enabled = true
 ```
 
 Deep profiling is disabled by default and is independent of
-`profiling_enabled`. It enables HEG's `MutationProfileAccumulator` for every
-proposal and records witness search, witness-edge materialization, switch
-attempts, partner-edge sampling, candidate construction, connectivity
-validation, and graph-family validation. It does not enable the HEG mutation
-witness cache or change the search policy. The cache is part of normal
-`HegBackend` operation; deep profiling only exposes its lookup, hit, miss, and
-witness-search counters.
+`profiling_enabled`. For proposals, it enables HEG's
+`MutationProfileAccumulator` and records witness search, witness-edge
+materialization, switch attempts, partner-edge sampling, candidate
+construction, connectivity validation, and graph-family validation. For
+scoring, it records prepared-graph work, score-cache and cutoff counters,
+request packing and pipe I/O, C++ cycle-count time and nodes by forbidden
+length, score assembly, worker failures and restarts, and Python fallback.
+These measurements do not change the search policy.
 
-The aggregate result is stored as `deep_operator_profile` in
-`run_summary.json` and terminal events. Per-episode data is stored as
-`episodes[].deep_operator_profile`. Rich renders it in a separate
-`Deep operator profile` panel. Inclusive operator rows are broken into
-non-overlapping measured children; `other` is the untimed remainder, including
-early-rejection and operator-loop overhead that the current HEG interface does
-not expose separately.
+The aggregate results are stored as `deep_operator_profile` and
+`deep_score_profile` in `run_summary.json` and terminal events. Per-episode
+data uses the same names under `episodes[]`. Rich renders separate
+`Deep operator profile` and `Deep score profile` panels. Inclusive operator
+rows are broken into non-overlapping measured children; `other` is the untimed
+remainder, including early-rejection and operator-loop overhead that the
+current HEG interface does not expose separately.
 
-Deep profiling adds timers inside witness searches and switch attempts. Use it
-for diagnosis, not for throughput comparisons. Leave it disabled when
-measuring normal runtime performance.
+Deep profiling adds timers inside witness searches, switch attempts, and the
+score-worker Python protocol path. Use it for diagnosis, not for throughput
+comparisons. Leave it disabled when measuring normal runtime performance.
 
-`HegBackend` normally keeps one HEG `BitGraph` and one forbidden-witness
-context for the current immutable `GraphState`. Repeated targeted proposals
-against that same state reuse witness choices. An accepted graph replacement
-or a new episode supplies a new `GraphState`, causing one cache miss and
-witness search before reuse resumes. The context changes deterministic
-bookkeeping only; witness selection remains at the same RNG call site.
+Three scoring optimizations are enabled by default and can be disabled
+independently for ablation runs:
+
+```toml
+[search]
+score_cache_enabled = true
+score_cutoff_enabled = true
+prepared_graph_cache_enabled = true
+```
+
+The episode-local score cache stores only complete `GraphScore` results; worker
+failures and cutoff-dominated partial results are never cached. The inclusive
+worker cutoff is used only when the current objective and strict-improvement
+controller make rejection provably safe. Unsupported graph orders, score
+shapes, invalid scores, and heuristic-zero incumbents automatically use full
+scoring. The prepared-graph cache holds two immutable graph states so rewrite
+validation, scoring, serialization, and proposal generation can reuse
+`BitGraph` construction and validation.
+
+The persistent C++ worker is restarted once after a request failure. A second
+failure switches the backend to the bounded Python reference scorer for the
+rest of the run. Deep profile counters make both transitions visible.
+
+`HegBackend` normally keeps the current and most recent candidate HEG
+`BitGraph`, plus one forbidden-witness context for the current immutable
+`GraphState`. Repeated targeted proposals against that same state reuse
+witness choices. An accepted graph replacement or a new episode supplies a
+new logical state, causing one witness-cache miss and search before reuse
+resumes. The context changes deterministic bookkeeping only; witness selection
+remains at the same RNG call site.
 
 Each episode measures these non-overlapping phases with
 `time.perf_counter_ns()`:
@@ -53,7 +79,7 @@ Each episode measures these non-overlapping phases with
 - `scoring`: initial and candidate score calls;
 - `proposal_generation`: baseline mutation proposal generation;
 - `rewrite_application`: applying and validating a proposed rewrite;
-- `duplicate_detection`: state hashing and duplicate-set bookkeeping;
+- `duplicate_detection`: exact immutable-state set bookkeeping;
 - `controller`: acceptance, best-state, and curve bookkeeping;
 - `exact_verification`: exact checks for new heuristic-zero states;
 - `progress_reporting`: aggregate progress callbacks and their event sinks;
@@ -119,3 +145,13 @@ Paired cache-on/off targeted episodes produced identical logical results.
 Across two policy seeds, mean targeted episode time fell from 2.344 seconds to
 1.061 seconds. A 2,000-evaluation uniform control differed by 0.3%, within
 single-pair timing noise.
+
+A balanced `on, off, off, on` scoring-optimization ablation on 2026-07-29 used
+three policy seeds, both Stage 1 operators, and 30,000 evaluations per run.
+All four runs produced the same canonical summary hash. Enabling the score
+cache, safe worker cutoff, and prepared-graph cache together changed mean real
+time from 4.734 to 3.925 seconds, mean throughput from 6,337 to 7,643
+evaluations/s, and attributed scoring time from 2.577 to 1.688 seconds. On that
+machine and workload, this was 17.1% less wall time, 20.6% higher throughput,
+and 34.5% less scoring time. These measurements describe the combined bundle;
+the three switches exist so each component can be isolated in later runs.

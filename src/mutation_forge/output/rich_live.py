@@ -52,6 +52,7 @@ class RichLiveSink:
     def _render(self) -> Group:
         profile_table = self._profile_table()
         deep_profile_table = self._deep_profile_table()
+        deep_score_profile_table = self._deep_score_profile_table()
         process_times = tuple(
             self._seconds(self.state.get(key))
             for key in ("real_seconds", "user_seconds", "system_seconds")
@@ -120,6 +121,21 @@ class RichLiveSink:
                     deep_profile_table,
                     title=(
                         "Deep operator profile · "
+                        f"{profiled_episodes} episodes"
+                    ),
+                )
+            )
+        if deep_score_profile_table is not None:
+            deep_score_profile = self.state["deep_score_profile"]
+            assert isinstance(deep_score_profile, dict)
+            profiled_episodes = deep_score_profile.get(
+                "profiled_episodes", "-"
+            )
+            panels.append(
+                Panel(
+                    deep_score_profile_table,
+                    title=(
+                        "Deep score profile · "
                         f"{profiled_episodes} episodes"
                     ),
                 )
@@ -453,6 +469,149 @@ class RichLiveSink:
                 prefix="",
                 connector="",
             )
+        return table
+
+    def _deep_score_profile_table(self) -> Table | None:
+        profile = self.state.get("deep_score_profile")
+        if not isinstance(profile, dict) or profile.get("enabled") is not True:
+            return None
+        worker = profile.get("worker")
+        prepared = profile.get("prepared_graph")
+        counters = profile.get("counters")
+        assembly = profile.get("score_assembly")
+        if not all(
+            isinstance(value, dict)
+            for value in (worker, prepared, counters, assembly)
+        ):
+            return None
+        assert isinstance(worker, dict)
+        assert isinstance(prepared, dict)
+        assert isinstance(counters, dict)
+        assert isinstance(assembly, dict)
+
+        table = Table(box=box.MINIMAL, border_style="grey37", padding=(0, 1))
+        table.add_column("Scoring phase", style="cyan", min_width=28)
+        table.add_column("Calls", justify="right", no_wrap=True)
+        table.add_column(Text("Wall [s]"), justify="right", no_wrap=True)
+        table.add_column("Of parent", justify="right", no_wrap=True)
+        table.add_column("Details", no_wrap=True)
+
+        def numeric(node: dict[str, JsonValue], key: str) -> float:
+            value = node.get(key)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                return float(value)
+            return 0.0
+
+        worker_seconds = numeric(worker, "seconds")
+        worker_calls = worker.get("calls")
+        protocol_overhead = numeric(worker, "protocol_overhead_seconds")
+        table.add_row(
+            "worker_roundtrip",
+            (
+                f"{worker_calls:,}"
+                if isinstance(worker_calls, int)
+                and not isinstance(worker_calls, bool)
+                else "—"
+            ),
+            f"{worker_seconds:.3f}",
+            "100.0%",
+            f"protocol overhead {protocol_overhead:.3f}s",
+        )
+        children = worker.get("children")
+        if isinstance(children, dict):
+            child_items = [
+                (name, node)
+                for name, node in children.items()
+                if isinstance(name, str) and isinstance(node, dict)
+            ]
+            for index, (name, node) in enumerate(child_items):
+                seconds = numeric(node, "seconds")
+                calls = node.get("calls")
+                table.add_row(
+                    f"  {'└─' if index == len(child_items) - 1 else '├─'} {name}",
+                    (
+                        f"{calls:,}"
+                        if isinstance(calls, int)
+                        and not isinstance(calls, bool)
+                        and calls
+                        else "—"
+                    ),
+                    f"{seconds:.3f}",
+                    f"{seconds / max(worker_seconds, 1e-9) * 100:.1f}%",
+                    "",
+                )
+
+        table.add_section()
+        for label, key in (
+            ("graph_materialization", "materialization"),
+            ("validation", "validation"),
+        ):
+            prepared_node = prepared.get(key)
+            if not isinstance(prepared_node, dict):
+                continue
+            seconds = numeric(prepared_node, "seconds")
+            calls = prepared_node.get("calls")
+            table.add_row(
+                label,
+                (
+                    f"{calls:,}"
+                    if isinstance(calls, int) and not isinstance(calls, bool)
+                    else "—"
+                ),
+                f"{seconds:.3f}",
+                "",
+                "prepared graph work",
+            )
+        assembly_seconds = numeric(assembly, "seconds")
+        assembly_calls = assembly.get("calls")
+        table.add_row(
+            "score_assembly",
+            (
+                f"{assembly_calls:,}"
+                if isinstance(assembly_calls, int)
+                and not isinstance(assembly_calls, bool)
+                else "—"
+            ),
+            f"{assembly_seconds:.3f}",
+            "",
+            "",
+        )
+
+        table.add_section()
+        cache_detail = "{}/{}/{}".format(
+            counters.get("score_cache_hits", 0),
+            counters.get("score_cache_misses", 0),
+            counters.get("score_cache_lookups", 0),
+        )
+        table.add_row(
+            "score results",
+            "",
+            "",
+            "",
+            (
+                f"full {counters.get('score_result_full_results', 0)} · "
+                f"dominated {counters.get('score_result_dominated_results', 0)} · "
+                f"failures {counters.get('score_result_failures', 0)}"
+            ),
+        )
+        table.add_row(
+            "score cache",
+            "",
+            "",
+            "",
+            f"hits / misses / lookups  {cache_detail}",
+        )
+        table.add_row(
+            "worker recovery",
+            "",
+            "",
+            "",
+            (
+                f"failures {counters.get('worker_failure_calls', 0)} · "
+                f"restarts {counters.get('worker_restart_successes', 0)} · "
+                f"fallbacks {counters.get('python_fallback_calls', 0)}"
+            ),
+        )
         return table
 
     def close(self) -> None:

@@ -75,6 +75,8 @@ def _doctor(heg_repo: Path, run_root: Path) -> int:
         validation = backend.validate(seed)
         check("heg_seed_validation", validation.valid, "; ".join(validation.errors) or "valid")
         score = backend.score(seed, witness_cap=8)
+        if score is None:
+            raise RuntimeError("initial HEG score cannot be cutoff-dominated")
         check(
             "heg_scorer",
             score.valid,

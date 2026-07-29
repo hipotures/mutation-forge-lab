@@ -8,17 +8,23 @@ is incomplete. Worker failure is a failure, never an empty witness vector.
 
 A heuristic total of zero triggers exact verification. Only the exact verifier
 may return `VERIFIED`; the harness never labels heuristic zero as a verified
-counterexample.
+counterexample. Worker cutoff is disabled for a zero incumbent so that this
+verification side effect remains identical to full scoring.
 
 Each episode records initial, best, and final scores; best-so-far total curve;
 normalized AUC; first improvement; exact-zero submissions; legal, invalid,
 no-op, and duplicate rates; policy latency; score failures; wall status; and
 the final graph.
 
-The duplicate rate uses a label-sensitive SHA-256 graph6 state hash. Stage 1
-rewrites preserve vertex labels, and duplicates do not gate controller
-acceptance. Isomorphism-canonical hashes remain reserved for immutable dataset
-and final result identities.
+The duplicate rate uses exact equality of the immutable, normalized
+`GraphState`. Stage 1 rewrites preserve vertex labels, and duplicates do not
+gate controller acceptance. Isomorphism-canonical hashes remain reserved for
+immutable dataset and final result identities.
+
+Within an episode, complete deterministic scores are cached by exact
+`GraphState`. A duplicate still contributes to the duplicate rate and follows
+the same controller path, but does not require another worker request.
+Failures and cutoff-dominated partial results are not cached.
 
 The normalized best-so-far AUC is:
 

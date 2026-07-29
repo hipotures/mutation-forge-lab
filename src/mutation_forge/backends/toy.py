@@ -6,6 +6,7 @@ import random
 from mutation_forge.backends.base import (
     DeepProposalProfileRecorder,
     ProposalTimingRecorder,
+    ScoreProfileRecorder,
 )
 from mutation_forge.models import (
     ExactVerification,
@@ -74,7 +75,14 @@ class ToyBackend:
                 errors.append("graph must be connected")
         return GraphValidation(not errors, tuple(errors))
 
-    def score(self, graph: GraphState, *, witness_cap: int) -> GraphScore:
+    def score(
+        self,
+        graph: GraphState,
+        *,
+        witness_cap: int,
+        cutoff: GraphScore | None = None,
+        record_profile: ScoreProfileRecorder | None = None,
+    ) -> GraphScore | None:
         validation = self.validate(graph)
         if not validation.valid:
             return GraphScore(False, (), 10**9, 10**9, True, (1, 10**9, 10**9))
@@ -90,7 +98,7 @@ class ToyBackend:
         squares = twice_squares // 2
         capped = min(squares, witness_cap)
         complete = squares <= witness_cap
-        return GraphScore(
+        result = GraphScore(
             True,
             ((4, capped),),
             capped,
@@ -98,9 +106,17 @@ class ToyBackend:
             complete,
             (0, capped, capped * 16, 0, len(graph.edges)),
         )
+        if (
+            cutoff is not None
+            and cutoff.total_capped_witnesses > 0
+            and result.ordering_key >= cutoff.ordering_key
+        ):
+            return None
+        return result
 
     def exact_verify(self, graph: GraphState) -> ExactVerification:
         score = self.score(graph, witness_cap=2**31 - 1)
+        assert score is not None
         status = "VERIFIED" if score.total_capped_witnesses == 0 else "REJECTED"
         return ExactVerification(
             status=status,
@@ -130,7 +146,13 @@ class ToyBackend:
         )
         return GraphState(int(order_text), edges)
 
-    def apply_rewrite(self, graph: GraphState, rewrite: RewritePlan) -> GraphState:
+    def apply_rewrite(
+        self,
+        graph: GraphState,
+        rewrite: RewritePlan,
+        *,
+        record_score_profile: ScoreProfileRecorder | None = None,
+    ) -> GraphState:
         removed = tuple(normalized_edge(edge) for edge in rewrite.removed_edges)
         added = tuple(normalized_edge(edge) for edge in rewrite.added_edges)
         if len(removed) > 2 or len(added) > 2:
