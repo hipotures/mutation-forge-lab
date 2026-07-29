@@ -45,6 +45,22 @@ def test_generation_and_evaluation_worker_values_are_strict() -> None:
         commands.evaluate("unused.toml", "unused-run", workers=4)
 
 
+def test_stage3_auth_json_is_explicit_for_doctor_and_generation() -> None:
+    parser = build_parser()
+    for command in ("appserver-doctor", "generate"):
+        args = parser.parse_args(
+            [
+                "stage3",
+                command,
+                "--config",
+                "config.toml",
+                "--auth-json",
+                "/private/auth.json",
+            ]
+        )
+        assert args.auth_json == Path("/private/auth.json")
+
+
 def test_stage3_rich_and_json_render_the_same_canonical_state(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

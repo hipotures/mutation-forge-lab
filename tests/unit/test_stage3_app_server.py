@@ -92,6 +92,60 @@ def test_thread_started_after_turn_start_response_is_rejected() -> None:
         adapter.generate("hello", "test:high")
 
 
+def test_turn_completed_accepts_nested_turn_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    observed = adapter._correlate_event(
+        "turn/completed",
+        {"threadId": "thread-1", "turn": {"id": "turn-1"}},
+        "thread-1",
+        "turn-1",
+    )
+    assert observed == "turn-1"
+    adapter.close()
+
+
+def test_thread_status_does_not_require_turn_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    observed = adapter._correlate_event(
+        "thread/status/changed",
+        {"threadId": "thread-1", "status": {"type": "active"}},
+        "thread-1",
+        "turn-1",
+    )
+    assert observed is None
+    adapter.close()
+
+
+def test_turn_started_before_response_is_correlated_after_response() -> None:
+    adapter = make_adapter(FakeScenario(turn_started_before_response=True))
+    assert adapter.generate("hello", "test:high").text == "fixture answer"
+    adapter.close()
+
+
+def test_turn_completed_rejects_foreign_nested_turn_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    with pytest.raises(ProtocolError, match="foreign turn"):
+        adapter._correlate_event(
+            "turn/completed",
+            {"threadId": "thread-1", "turn": {"id": "turn-2"}},
+            "thread-1",
+            "turn-1",
+        )
+    adapter.close()
+
+
+def test_turn_completed_rejects_missing_turn_id() -> None:
+    adapter = make_adapter(FakeScenario())
+    with pytest.raises(ProtocolError, match="foreign turn"):
+        adapter._correlate_event(
+            "turn/completed",
+            {"threadId": "thread-1", "turn": {}},
+            "thread-1",
+            "turn-1",
+        )
+    adapter.close()
+
+
 def test_missing_usage_fails_closed() -> None:
     with pytest.raises(TurnError):
         make_adapter(FakeScenario(usage=None)).generate("hello", "test:high")

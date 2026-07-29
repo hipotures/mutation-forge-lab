@@ -268,11 +268,15 @@ def _emit_stage3(result: Mapping[str, Any], *, json_output: bool) -> None:
 def _stage3(args: argparse.Namespace) -> int:
     command = args.stage3_command
     if command == "appserver-doctor":
-        result = stage3_commands.appserver_doctor(args.config)
+        result = stage3_commands.appserver_doctor(args.config, auth_json=args.auth_json)
     elif command == "freeze":
         result = stage3_commands.freeze(args.config)
     elif command == "generate":
-        result = stage3_commands.generate(args.config, concurrency=args.concurrency)
+        result = stage3_commands.generate(
+            args.config,
+            concurrency=args.concurrency,
+            auth_json=args.auth_json,
+        )
     elif command == "validate":
         result = stage3_commands.validate(args.run)
     elif command == "evaluate":
@@ -489,6 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage3_commands_parser = stage3.add_subparsers(dest="stage3_command", required=True)
     stage3_doctor = stage3_commands_parser.add_parser("appserver-doctor")
     stage3_doctor.add_argument("--config", type=Path, required=True)
+    stage3_doctor.add_argument("--auth-json", type=Path)
     stage3_doctor.add_argument("--json", action="store_true")
     stage3_freeze = stage3_commands_parser.add_parser("freeze")
     stage3_freeze.add_argument("--config", type=Path, required=True)
@@ -496,6 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage3_generate = stage3_commands_parser.add_parser("generate")
     stage3_generate.add_argument("--config", type=Path, required=True)
     stage3_generate.add_argument("--concurrency", type=int, default=8)
+    stage3_generate.add_argument("--auth-json", type=Path)
     stage3_generate.add_argument("--json", action="store_true")
     stage3_validate = stage3_commands_parser.add_parser("validate")
     stage3_validate.add_argument("run", type=Path)

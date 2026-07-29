@@ -196,11 +196,16 @@ The Stage 3 commands render the same canonical state in Rich and JSON modes:
 
 ```console
 uv run mforge stage3 appserver-doctor \
-  --config configs/stage3-generation.toml --json
+  --config configs/stage3-generation.toml \
+  --auth-json ~/.codex/auth.json \
+  --json
 uv run mforge stage3 freeze \
   --config configs/stage3-generation.toml --json
 uv run mforge stage3 generate \
-  --config configs/stage3-generation.toml --concurrency 8 --json
+  --config configs/stage3-generation.toml \
+  --auth-json ~/.codex/auth.json \
+  --concurrency 8 \
+  --json
 uv run mforge stage3 validate RUN --json
 uv run mforge stage3 evaluate \
   --config configs/stage3-generation.toml --run RUN --workers 8 --json

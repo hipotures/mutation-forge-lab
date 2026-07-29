@@ -78,6 +78,81 @@ THIN_APP_SERVER_ARGS: tuple[str, ...] = (
     "mcp_servers={}",
 )
 
+MAX_AUTH_JSON_BYTES = 65_536
+
+
+def _install_authorized_auth(source: str | Path, codex_home: Path) -> None:
+    source_path = Path(source).expanduser()
+    if not source_path.is_absolute():
+        raise IsolationError("authorized auth file path must be absolute")
+    try:
+        source_stat = source_path.lstat()
+    except OSError as error:
+        raise IsolationError("authorized auth file is unavailable") from error
+    if (
+        source_path.is_symlink()
+        or not stat.S_ISREG(source_stat.st_mode)
+        or source_stat.st_uid != os.getuid()
+        or source_stat.st_mode & 0o077
+        or not 0 < source_stat.st_size <= MAX_AUTH_JSON_BYTES
+    ):
+        raise IsolationError("authorized auth file failed security validation")
+
+    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise IsolationError("authorized auth copy requires O_NOFOLLOW")
+    try:
+        source_fd = os.open(source_path, source_flags | no_follow)
+    except OSError as error:
+        raise IsolationError("authorized auth file could not be opened safely") from error
+    temporary = codex_home / ".auth.json.tmp"
+    destination_fd: int | None = None
+    try:
+        opened_stat = os.fstat(source_fd)
+        if (
+            opened_stat.st_dev != source_stat.st_dev
+            or opened_stat.st_ino != source_stat.st_ino
+            or opened_stat.st_size != source_stat.st_size
+            or not stat.S_ISREG(opened_stat.st_mode)
+        ):
+            raise IsolationError("authorized auth file changed during validation")
+        destination_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        remaining = opened_stat.st_size
+        while remaining:
+            chunk = os.read(source_fd, min(remaining, 16_384))
+            if not chunk:
+                raise IsolationError("authorized auth file changed during copy")
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                if written <= 0:
+                    raise IsolationError("authorized auth file could not be copied")
+                view = view[written:]
+            remaining -= len(chunk)
+        if os.read(source_fd, 1):
+            raise IsolationError("authorized auth file exceeds validated size")
+        os.fchmod(destination_fd, 0o600)
+        os.fsync(destination_fd)
+        os.close(destination_fd)
+        destination_fd = None
+        os.replace(temporary, codex_home / "auth.json")
+        directory_fd = os.open(codex_home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+        if temporary.exists():
+            temporary.unlink()
+
 
 @dataclass(frozen=True, slots=True)
 class IsolatedCapsule:
@@ -91,7 +166,12 @@ class IsolatedCapsule:
     codex_executable: str
 
     @classmethod
-    def create(cls, root: str | Path | None = None) -> IsolatedCapsule:
+    def create(
+        cls,
+        root: str | Path | None = None,
+        *,
+        auth_json: str | Path | None = None,
+    ) -> IsolatedCapsule:
         if root is None:
             parent = None
         else:
@@ -106,6 +186,12 @@ class IsolatedCapsule:
         for path in homes:
             path.mkdir(mode=0o700, exist_ok=True)
             path.chmod(0o700)
+        if auth_json is not None:
+            try:
+                _install_authorized_auth(auth_json, homes[0])
+            except Exception:
+                shutil.rmtree(base, ignore_errors=True)
+                raise
         # Do not inherit arbitrary user configuration, proxy credentials, or
         # token-bearing variables.  PATH is retained solely to locate codex.
         env: dict[str, str] = {"PATH": os.environ.get("PATH", "")}

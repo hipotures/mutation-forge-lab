@@ -58,6 +58,7 @@ class FakeScenario:
     crash: bool = False
     unknown_notification: bool = False
     thread_started_notification: str | None = None
+    turn_started_before_response: bool = False
 
 
 class FakeProcess:
@@ -163,6 +164,16 @@ class FakeProcess:
             self._turn += 1
             if self.scenario.server_request:
                 self.stdout.put({"id": 901, "method": "item/toolCall", "params": {}})
+            if self.scenario.turn_started_before_response:
+                self.stdout.put(
+                    {
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "turn-1", "status": "inProgress"},
+                        },
+                    }
+                )
             self._response(request_id, {"turn": {"id": "turn-1"}})
             if self.scenario.thread_started_notification == "nested-after-turn-response":
                 self.stdout.put(
@@ -171,6 +182,25 @@ class FakeProcess:
                         "params": {"thread": {"id": "thread-1"}},
                     }
                 )
+            if not self.scenario.turn_started_before_response:
+                self.stdout.put(
+                    {
+                        "method": "turn/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turn": {"id": "turn-1", "status": "inProgress"},
+                        },
+                    }
+                )
+            self.stdout.put(
+                {
+                    "method": "thread/status/changed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "status": {"type": "active"},
+                    },
+                }
+            )
             if self.scenario.unknown_notification:
                 self.stdout.put(
                     {
@@ -210,7 +240,6 @@ class FakeProcess:
                     "method": "turn/completed",
                     "params": {
                         "threadId": "thread-1",
-                        "turnId": "turn-1",
                         "turn": {"id": "turn-1", "status": self.scenario.terminal_status},
                     },
                 }

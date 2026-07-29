@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from .isolation import (
@@ -146,10 +147,12 @@ class AppServerGenerationProvider:
         *,
         process_factory: ProcessFactory | None = None,
         auth_checker: AuthChecker | None = None,
+        auth_json: str | Path | None = None,
         limits: AppServerLimits | None = None,
     ) -> None:
         self.process_factory = process_factory
         self.auth_checker = auth_checker
+        self.auth_json = auth_json
         self.limits = limits or AppServerLimits()
 
     @staticmethod
@@ -182,6 +185,7 @@ class AppServerGenerationProvider:
         adapter = CodexAppServerAdapter(
             process_factory=self.process_factory,
             auth_checker=self.auth_checker,
+            auth_json=self.auth_json,
             limits=self.limits,
             base_instructions=system_prompt,
         )
@@ -240,6 +244,7 @@ class AppServerGenerationProvider:
             adapter = CodexAppServerAdapter(
                 process_factory=self.process_factory,
                 auth_checker=self.auth_checker,
+                auth_json=self.auth_json,
                 limits=self.limits,
             )
             try:
@@ -334,6 +339,7 @@ class CodexAppServerAdapter:
         capsule: IsolatedCapsule | None = None,
         process_factory: ProcessFactory | None = None,
         auth_checker: AuthChecker | None = None,
+        auth_json: str | Path | None = None,
         limits: AppServerLimits | None = None,
         client_name: str = "mutation-forge-lab",
         client_title: str = "Mutation Forge Lab",
@@ -344,8 +350,10 @@ class CodexAppServerAdapter:
     ) -> None:
         if not base_instructions.strip():
             raise ValueError("base_instructions must be non-empty")
+        if capsule is not None and auth_json is not None:
+            raise ValueError("auth_json cannot be combined with an existing capsule")
         self._owns_capsule = capsule is None
-        self.capsule = capsule or IsolatedCapsule.create()
+        self.capsule = capsule or IsolatedCapsule.create(auth_json=auth_json)
         self.process_factory = process_factory or cast(ProcessFactory, subprocess.Popen)
         if auth_checker is None and process_factory is not None:
             raise ValueError("an injected process_factory requires an explicit auth_checker")
@@ -652,6 +660,7 @@ class CodexAppServerAdapter:
         request_id = self._send("turn/start", params)
         final: str | None = None
         turn_id: str | None = None
+        pending_turn_id: str | None = None
         usage_raw: Mapping[str, Any] | None = None
         terminal = False
         deadline = time.monotonic() + self.limits.turn_timeout
@@ -669,8 +678,12 @@ class CodexAppServerAdapter:
                         if not isinstance(raw_turn_id, str) or not raw_turn_id:
                             raise ProtocolError("turn/start returned no turn id")
                         turn_id = raw_turn_id
+                        if pending_turn_id is not None and pending_turn_id != turn_id:
+                            raise ProtocolError("foreign turn event before turn/start response")
                     if turn_id is None:
                         raise ProtocolError("turn/start returned no turn")
+                    if terminal:
+                        break
                     continue
                 self._deny_server_request(message)
                 continue
@@ -683,7 +696,18 @@ class CodexAppServerAdapter:
                     raise ProtocolError("thread/started arrived after turn/start response")
                 self._correlate_thread_started(params_event, thread_id)
                 continue
-            self._correlate_event(params_event, thread_id, turn_id)
+            observed_turn_id = self._correlate_event(
+                method,
+                params_event,
+                thread_id,
+                turn_id,
+            )
+            if turn_id is None and observed_turn_id is not None:
+                if pending_turn_id is not None and pending_turn_id != observed_turn_id:
+                    raise ProtocolError("conflicting turn events before turn/start response")
+                pending_turn_id = observed_turn_id
+            if method == "turn/started":
+                continue
             if method == "item/agentMessage/delta":
                 continue
             if method == "item/completed":
@@ -722,7 +746,9 @@ class CodexAppServerAdapter:
                 if status != "completed":
                     raise TurnError(f"turn ended with status {status!r}")
                 terminal = True
-                break
+                if turn_id is not None:
+                    break
+                continue
             if method == "error":
                 error = params_event.get("error")
                 will_retry = (
@@ -748,7 +774,12 @@ class CodexAppServerAdapter:
             if message.get("method") == "thread/tokenUsage/updated":
                 event = message.get("params", {})
                 if isinstance(event, Mapping):
-                    self._correlate_event(event, thread_id, turn_id)
+                    self._correlate_event(
+                        "thread/tokenUsage/updated",
+                        event,
+                        thread_id,
+                        turn_id,
+                    )
                 last = (
                     event.get("tokenUsage", {}).get("last")
                     if isinstance(event, Mapping) and isinstance(event.get("tokenUsage"), Mapping)
@@ -840,15 +871,26 @@ class CodexAppServerAdapter:
             raise ProtocolError("foreign thread/started event")
 
     def _correlate_event(
-        self, params: Mapping[str, Any], thread_id: str, turn_id: str | None
-    ) -> None:
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        thread_id: str,
+        turn_id: str | None,
+    ) -> str | None:
         observed_thread = params.get("threadId", params.get("thread_id"))
         if observed_thread != thread_id:
             raise ProtocolError("missing or foreign thread event")
-        if turn_id is not None:
-            observed_turn = params.get("turnId", params.get("turn_id"))
-            if observed_turn != turn_id:
-                raise ProtocolError("missing or foreign turn event")
+        if method == "thread/status/changed":
+            return None
+        observed_turn = params.get("turnId", params.get("turn_id"))
+        if observed_turn is None and method in {"turn/started", "turn/completed"}:
+            turn = params.get("turn")
+            if isinstance(turn, Mapping):
+                observed_turn = turn.get("id")
+        if not isinstance(observed_turn, str) or not observed_turn:
+            raise ProtocolError("missing or foreign turn event")
+        if turn_id is not None and observed_turn != turn_id:
+            raise ProtocolError("missing or foreign turn event")
         item = params.get("item")
         if isinstance(item, Mapping):
             item_id = item.get("id")
@@ -868,6 +910,7 @@ class CodexAppServerAdapter:
             if not isinstance(item_id, str) or not item_id:
                 raise ProtocolError("invalid item id")
             self._item_ids.add(item_id)
+        return observed_turn
 
     def _request(self, method: str, params: Json, *, timeout: float | None = None) -> Json:
         request_id = self._send(method, params)

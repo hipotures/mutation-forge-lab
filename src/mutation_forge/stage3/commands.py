@@ -116,7 +116,11 @@ def _auth_status(*, environment: Mapping[str, str] | None = None) -> dict[str, A
     return {"authenticated": authenticated, "source": "environment"}
 
 
-def appserver_doctor(config_path: str | Path) -> dict[str, Any]:
+def appserver_doctor(
+    config_path: str | Path,
+    *,
+    auth_json: str | Path | None = None,
+) -> dict[str, Any]:
     """Audit the installed protocol and private capsule without starting a thread."""
     config = load_stage3_config(config_path)
     checks: dict[str, Any] = {}
@@ -137,7 +141,7 @@ def appserver_doctor(config_path: str | Path) -> dict[str, Any]:
     capsule: IsolatedCapsule | None = None
     adapter: CodexAppServerAdapter | None = None
     try:
-        capsule = IsolatedCapsule.create()
+        capsule = IsolatedCapsule.create(auth_json=auth_json)
         checks["auth"] = _auth_status(environment=capsule.env)
         adapter = CodexAppServerAdapter(capsule=capsule, auth_checker=lambda _: False)
         catalog = adapter.model_catalog()
@@ -327,6 +331,7 @@ def generate(
     provider: Any | None = None,
     concurrency: int = 8,
     auth_checker: Any | None = None,
+    auth_json: str | Path | None = None,
 ) -> dict[str, Any]:
     if concurrency != 8:
         raise ValueError("Stage 3 generation concurrency is frozen at 8")
@@ -395,7 +400,7 @@ def generate(
     if auth_checker is not None:
         auth = auth_checker()
     elif provider is None:
-        capsule = IsolatedCapsule.create()
+        capsule = IsolatedCapsule.create(auth_json=auth_json)
         try:
             auth = _auth_status(environment=capsule.env)
         finally:
@@ -465,7 +470,7 @@ def generate(
             resource_open_files=config.limits.resource_open_files,
             resource_processes=config.limits.resource_processes,
         )
-        provider = AppServerGenerationProvider(limits=limits)
+        provider = AppServerGenerationProvider(auth_json=auth_json, limits=limits)
     output_schema = cast(
         Mapping[str, Any],
         json.loads(config.output_schema_path.read_text(encoding="utf-8")),
