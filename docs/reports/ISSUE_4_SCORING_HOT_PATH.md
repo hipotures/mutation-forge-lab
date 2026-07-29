@@ -255,8 +255,95 @@ gate with exact parity.
 
 ## Experiment 4: direct cutoff arithmetic
 
-Pending evidence from the first two experiments.
+The candidate replaced the bounded `1..limit` scan with the exact count at
+which partial total first equals the cutoff total, followed by at most one
+additional count. A same-binary flag selected the original or candidate path.
+
+Boundary tests covered inclusive and exclusive cutoffs, equal total,
+weighted-penalty and simplicity boundaries, the witness cap, and full-result
+cutoffs. The candidate also preserved three deterministic Mutation Forge
+episode trajectories.
+
+The balanced microbenchmark used eight alternating 10-second blocks per mode
+(80 seconds per path) with compact dominated responses:
+
+| Metric | Scanned | Direct | Direct change |
+|---|---:|---:|---:|
+| Requests | 2,506,774 | 2,497,802 | -0.36% |
+| Requests/s | 31,335 | 31,222 | -0.36% |
+| Worker round trip | 28.914 µs | 29.023 µs | +0.38% |
+
+The experimental worker SHA-256 was
+`3b77f446029c899f15b74f62abeae2bc3cbf5e528fc8212e97bf5a49bc043852`.
+All response assertions passed.
+
+**NO-GO.** The direct calculation was slightly slower, so the full-workload
+A/B was not justified. The flag, implementation, configuration, and tests
+were reverted completely.
 
 ## Final validation
 
-Pending.
+Retained implementation commits:
+
+- HEG `fab20312f5951235c977fc604be46e962b29e90`:
+  compact dominated responses;
+- Mutation Forge `670f1a9d49b347fb0415e5933b10808e3c9e20c6`:
+  compact-response integration;
+- HEG `fd97451b0f3d87400d1d955a2c6b1b18303344ff`:
+  one-entry prepared request plan;
+- Mutation Forge `9b3dee7`:
+  prepared-plan configuration and integration.
+
+The final worker was rebuilt from retained source at
+`/home/user/DEV/heg/_build/sglab-score-worker`; SHA-256:
+`4a1f927f0f2c7e2d6c8111ef832b7960a382c2613d3eec6ce36f978c4d982e60`.
+
+The final 800,000-evaluation deep profile is:
+
+`runs/stage1-20260729-114052-91ed871a`
+
+| Metric | Final value |
+|---|---:|
+| Real | 88.894 s |
+| Throughput | 8,999 evaluations/s |
+| Scoring | 45.135 s |
+| Proposal generation | 29.311 s |
+| Rewrite application | 10.021 s |
+| Duplicate detection | 1.942 s |
+| Progress reporting | 0.624 s |
+| Worker round trip | 33.991 s |
+| Protocol overhead | 22.032 s |
+| Cycle 16 | 11.432 s |
+| Cycle 8 | 0.526 s |
+| Cycle 4 | 0.001 s |
+
+Deep profiling deliberately disables compact dominated responses so all
+per-cycle records remain available. It reported 689 full scores, 799,327
+dominated scores, 498 score-cache hits, and zero worker failures, restarts, or
+fallbacks.
+
+The run's canonical summary hash differs from the starting reference because
+`dataset_manifest_hash` records the changed HEG revision. All 16 normalized
+timing/profile-free episode payloads are byte-for-byte identical to the
+reference deep run; no semantic episode field differs.
+
+HEG final validation passed all 346 unit tests and `make check`. The test
+runner emitted non-failing resource warnings at shutdown about three leaked
+multiprocessing semaphores and unclosed file descriptors.
+
+Mutation Forge final validation passed:
+
+- `uv run pytest`: 67 passed;
+- Ruff: all checks passed;
+- mypy: no issues in 32 files;
+- `git diff --check`;
+- `mforge doctor`: every check passed against clean HEG commit
+  `fd97451b0f3d87400d1d955a2c6b1b18303344ff`.
+
+Final smoke artifact:
+
+`runs/stage1-20260729-114548-478c9b35`
+
+It completed 8 episodes and 8,000 evaluations at 9,104 evaluations/s with
+score 83 → 64, 500 legal proposals, no invalid proposals, and no timeouts or
+crashes.
