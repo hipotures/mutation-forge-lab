@@ -484,6 +484,92 @@ def test_heg_score_cutoff_is_inclusive_and_fail_closed(
         cutoff_disabled.close()
 
 
+def test_heg_compacts_only_unprofiled_dominated_responses(
+    heg_repo: Path,
+) -> None:
+    backend = HegBackend(heg_repo)
+    try:
+        graph = backend.generate_seed(order=30, seed=101)
+        full_score = backend.score(graph, witness_cap=64)
+        assert full_score is not None
+        worker = backend._worker  # noqa: SLF001
+        assert worker is not None
+
+        with patch.object(worker, "score", wraps=worker.score) as score:
+            assert (
+                backend.score(
+                    graph,
+                    witness_cap=64,
+                    cutoff=full_score,
+                )
+                is None
+            )
+            assert score.call_args.kwargs["compact_dominated"] is True
+
+            counters: dict[str, int] = {}
+
+            def record(event: str, payload: Mapping[str, int]) -> None:
+                for name, value in payload.items():
+                    key = f"{event}_{name}"
+                    counters[key] = counters.get(key, 0) + value
+
+            assert (
+                backend.score(
+                    graph,
+                    witness_cap=64,
+                    cutoff=full_score,
+                    record_profile=record,
+                )
+                is None
+            )
+            assert score.call_args.kwargs["compact_dominated"] is False
+            assert counters["worker_response_dominated_results"] == 1
+            assert counters["worker_response_cycle_16_calls"] == 1
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("policy_seed", [1, 2, 3])
+def test_compact_dominated_preserves_episode_trajectory(
+    heg_repo: Path,
+    policy_seed: int,
+) -> None:
+    compact = HegBackend(heg_repo)
+    detailed = HegBackend(
+        heg_repo,
+        score_compact_dominated_enabled=False,
+    )
+    try:
+        kwargs = {
+            "entry_id": "compact-dominated-parity",
+            "graph_seed": 101,
+            "policy_seed": policy_seed,
+            "run_seed": 7,
+            "baseline": HEG_FORBIDDEN_CYCLE_BREAK,
+            "evaluations": 80,
+            "witness_cap": 64,
+            "profiling_enabled": False,
+        }
+        compact_result = run_episode(
+            backend=compact,
+            initial_graph=compact.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        detailed_result = run_episode(
+            backend=detailed,
+            initial_graph=detailed.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        assert compact_result.as_dict(
+            include_timing=False
+        ) == detailed_result.as_dict(include_timing=False)
+    finally:
+        compact.close()
+        detailed.close()
+
+
 def test_heg_score_worker_restarts_after_one_crash(heg_repo: Path) -> None:
     backend = HegBackend(heg_repo)
     try:

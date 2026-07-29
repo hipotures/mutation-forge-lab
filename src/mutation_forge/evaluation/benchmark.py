@@ -83,6 +83,9 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
         score_longest_first_enabled=(
             config.search.score_longest_first_enabled
         ),
+        score_compact_dominated_enabled=(
+            config.search.score_compact_dominated_enabled
+        ),
     )
     project_root = Path(__file__).resolve().parents[3]
     project_state = git_state(project_root)

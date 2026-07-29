@@ -63,6 +63,7 @@ class HegBackend:
         prepared_graph_cache_enabled: bool = True,
         prepared_proposal_handoff_enabled: bool = True,
         score_longest_first_enabled: bool = True,
+        score_compact_dominated_enabled: bool = True,
     ) -> None:
         self.repo = repo.resolve()
         source = self.repo / "src"
@@ -86,6 +87,9 @@ class HegBackend:
         self.score_implementation = "heg-cpp-score-worker"
         self._score_timeout_seconds = score_timeout_seconds
         self._score_longest_first_enabled = score_longest_first_enabled
+        self._score_compact_dominated_enabled = (
+            score_compact_dominated_enabled
+        )
         context_factory = getattr(self._plugin, "new_mutation_context", None)
         if context_factory is None:
             raise RuntimeError(
@@ -379,6 +383,11 @@ class HegBackend:
                     node_budget=node_budget,
                     cutoff=cutoff,
                     cutoff_inclusive=cutoff is not None,
+                    compact_dominated=(
+                        self._score_compact_dominated_enabled
+                        and recorder is None
+                        and cutoff is not None
+                    ),
                     profile_timing=recorder is not None,
                 )
             except self._worker_error:

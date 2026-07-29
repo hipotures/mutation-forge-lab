@@ -52,6 +52,7 @@ score_cutoff_enabled = true
 prepared_graph_cache_enabled = true
 prepared_proposal_handoff_enabled = true
 score_longest_first_enabled = true
+score_compact_dominated_enabled = true
 ```
 
 The episode-local score cache stores only complete `GraphScore` results; worker
@@ -81,6 +82,11 @@ domination before shorter lengths are visited. Complete scores retain the
 canonical increasing order, and worker responses are sorted before they cross
 the protocol boundary. Disabling the flag preserves the former increasing
 evaluation order for ablation and parity checks.
+
+With `score_compact_dominated_enabled`, non-profiled cutoff requests ask the
+worker to return a header-only dominated response. Full scores remain complete,
+and deep profiling always requests detailed per-cycle records. Disable the
+flag only for same-binary protocol ablation.
 
 `HegBackend` normally keeps the current and most recent candidate HEG
 `BitGraph`, plus one forbidden-witness context for the current immutable

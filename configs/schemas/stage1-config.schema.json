@@ -73,7 +73,11 @@
         "score_cutoff_enabled": {"type": "boolean", "default": true},
         "prepared_graph_cache_enabled": {"type": "boolean", "default": true},
         "prepared_proposal_handoff_enabled": {"type": "boolean", "default": true},
-        "score_longest_first_enabled": {"type": "boolean", "default": true}
+        "score_longest_first_enabled": {"type": "boolean", "default": true},
+        "score_compact_dominated_enabled": {
+          "type": "boolean",
+          "default": true
+        }
       },
       "additionalProperties": false
     },
