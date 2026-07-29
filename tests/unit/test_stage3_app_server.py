@@ -190,6 +190,84 @@ def test_item_started_after_turn_completion_is_rejected() -> None:
         make_adapter(FakeScenario(late_item=True)).generate("hello", "test:high")
 
 
+@pytest.mark.parametrize(
+    ("method", "after_completion"),
+    [
+        ("account/updated", False),
+        ("account/rateLimits/updated", False),
+        ("account/updated", True),
+        ("account/rateLimits/updated", True),
+    ],
+)
+def test_benign_global_notifications_are_consumed_before_correlation(
+    method: str,
+    after_completion: bool,
+) -> None:
+    adapter = make_adapter(
+        FakeScenario(
+            global_notification=method,
+            global_after_completion=after_completion,
+        )
+    )
+    assert adapter.generate("hello", "test:high").text == "fixture answer"
+    adapter.close()
+
+
+def test_malformed_global_notification_is_rejected() -> None:
+    adapter = make_adapter(FakeScenario())
+    with pytest.raises(ProtocolError, match="rate-limit"):
+        adapter._consume_global_notification("account/rateLimits/updated", {})
+    adapter.close()
+
+
+def test_model_reroute_is_rejected() -> None:
+    with pytest.raises(IsolationError, match="reroute"):
+        make_adapter(FakeScenario(model_rerouted=True)).generate(
+            "hello", "test:high"
+        )
+
+
+def test_completed_turn_must_contain_final_agent_item() -> None:
+    with pytest.raises(ProtocolError, match="absent from completed turn"):
+        make_adapter(FakeScenario(turn_completed_item_id="item-2")).generate(
+            "hello", "test:high"
+        )
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        {"id": "turn-1", "status": "inProgress"},
+        {"id": "turn-1", "items": [], "status": None},
+        {"id": "turn-1", "items": [{"id": "item-1"}], "status": "inProgress"},
+        {
+            "id": "turn-1",
+            "items": [
+                {"id": "item-1", "type": "agentMessage"},
+                {"id": "item-1", "type": "agentMessage"},
+            ],
+            "status": "inProgress",
+        },
+    ],
+)
+def test_turn_payload_validation_is_schema_strict(turn: dict[str, object]) -> None:
+    adapter = make_adapter(FakeScenario())
+    with pytest.raises(ProtocolError):
+        adapter._validated_turn({"turn": turn}, source="fixture")
+    adapter.close()
+
+
+def test_terminal_error_uses_top_level_will_retry() -> None:
+    with pytest.raises(TurnError, match="terminal app-server error"):
+        make_adapter(FakeScenario(error_will_retry=False)).generate(
+            "hello", "test:high"
+        )
+    with pytest.raises(IsolationError, match="server retry is forbidden"):
+        make_adapter(FakeScenario(error_will_retry=True)).generate(
+            "hello", "test:high"
+        )
+
+
 def test_turn_completed_rejects_foreign_nested_turn_id() -> None:
     adapter = make_adapter(FakeScenario())
     with pytest.raises(ProtocolError, match="foreign turn"):

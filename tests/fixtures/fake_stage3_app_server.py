@@ -65,6 +65,11 @@ class FakeScenario:
     delta_item_id: str | None = None
     completed_item_id: str | None = None
     late_item: bool = False
+    global_notification: str | None = None
+    global_after_completion: bool = False
+    model_rerouted: bool = False
+    error_will_retry: bool | None = None
+    turn_completed_item_id: str | None = None
 
 
 class FakeProcess:
@@ -170,6 +175,17 @@ class FakeProcess:
             self._turn += 1
             item_id = self.scenario.item_id
 
+            def emit_global_notification() -> None:
+                method_name = self.scenario.global_notification
+                if method_name == "account/rateLimits/updated":
+                    notification_params: dict[str, Any] = {"rateLimits": {}}
+                else:
+                    notification_params = {}
+                if method_name is not None:
+                    self.stdout.put(
+                        {"method": method_name, "params": notification_params}
+                    )
+
             def emit_item_started() -> None:
                 self.stdout.put(
                     {
@@ -194,13 +210,25 @@ class FakeProcess:
                         "method": "turn/started",
                         "params": {
                             "threadId": "thread-1",
-                            "turn": {"id": "turn-1", "status": "inProgress"},
+                            "turn": {
+                                "id": "turn-1",
+                                "items": [],
+                                "status": "inProgress",
+                            },
                         },
                     }
                 )
             if self.scenario.item_started_before_response:
                 emit_item_started()
-            self._response(request_id, {"turn": {"id": "turn-1"}})
+            if (
+                self.scenario.global_notification is not None
+                and not self.scenario.global_after_completion
+            ):
+                emit_global_notification()
+            self._response(
+                request_id,
+                {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}},
+            )
             if self.scenario.thread_started_notification == "nested-after-turn-response":
                 self.stdout.put(
                     {
@@ -214,7 +242,11 @@ class FakeProcess:
                         "method": "turn/started",
                         "params": {
                             "threadId": "thread-1",
-                            "turn": {"id": "turn-1", "status": "inProgress"},
+                            "turn": {
+                                "id": "turn-1",
+                                "items": [],
+                                "status": "inProgress",
+                            },
                         },
                     }
                 )
@@ -234,6 +266,31 @@ class FakeProcess:
                     {
                         "method": "fixture/unknown",
                         "params": {"threadId": "thread-1", "turnId": "turn-1"},
+                    }
+                )
+            if self.scenario.model_rerouted:
+                self.stdout.put(
+                    {
+                        "method": "model/rerouted",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "fromModel": "gpt-5.6-luna",
+                            "toModel": "other-model",
+                            "reason": "highRiskCyberActivity",
+                        },
+                    }
+                )
+            if self.scenario.error_will_retry is not None:
+                self.stdout.put(
+                    {
+                        "method": "error",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "error": {"message": "fixture"},
+                            "willRetry": self.scenario.error_will_retry,
+                        },
                     }
                 )
             if self.scenario.interleave:
@@ -269,12 +326,30 @@ class FakeProcess:
                     "method": "turn/completed",
                     "params": {
                         "threadId": "thread-1",
-                        "turn": {"id": "turn-1", "status": self.scenario.terminal_status},
+                        "turn": {
+                            "id": "turn-1",
+                            "items": [
+                                {
+                                    "id": (
+                                        self.scenario.turn_completed_item_id
+                                        or self.scenario.completed_item_id
+                                        or item_id
+                                    ),
+                                    "type": self.scenario.item_type,
+                                }
+                            ],
+                            "status": self.scenario.terminal_status,
+                        },
                     },
                 }
             )
             if self.scenario.late_item:
                 emit_item_started()
+            if (
+                self.scenario.global_notification is not None
+                and self.scenario.global_after_completion
+            ):
+                emit_global_notification()
             if self.scenario.usage is not None:
                 self.stdout.put(
                     {

@@ -41,6 +41,12 @@ _REASONING_DELTA_METHODS = frozenset(
         "item/reasoning/textDelta",
     }
 )
+_BENIGN_GLOBAL_METHODS = frozenset(
+    {
+        "account/updated",
+        "account/rateLimits/updated",
+    }
+)
 
 
 class AppServerError(RuntimeError):
@@ -672,6 +678,7 @@ class CodexAppServerAdapter:
         self._completed_item_ids.clear()
         request_id = self._send("turn/start", params)
         final: str | None = None
+        final_item_id: str | None = None
         turn_id: str | None = None
         pending_turn_id: str | None = None
         usage_raw: Mapping[str, Any] | None = None
@@ -686,11 +693,14 @@ class CodexAppServerAdapter:
                     if "error" in message:
                         raise TurnError("turn/start failed")
                     result = message.get("result")
-                    if isinstance(result, Mapping) and isinstance(result.get("turn"), Mapping):
-                        raw_turn_id = result["turn"].get("id")
-                        if not isinstance(raw_turn_id, str) or not raw_turn_id:
-                            raise ProtocolError("turn/start returned no turn id")
-                        turn_id = raw_turn_id
+                    if isinstance(result, Mapping):
+                        response_turn, _ = self._validated_turn(
+                            result,
+                            source="turn/start",
+                        )
+                        turn_id = cast(str, response_turn["id"])
+                        if response_turn.get("status") != "inProgress":
+                            raise ProtocolError("turn/start returned non-running turn")
                         if pending_turn_id is not None and pending_turn_id != turn_id:
                             raise ProtocolError("foreign turn event before turn/start response")
                     if turn_id is None:
@@ -704,6 +714,8 @@ class CodexAppServerAdapter:
             params_event = message.get("params")
             if not isinstance(method, str) or not isinstance(params_event, Mapping):
                 raise ProtocolError("malformed notification")
+            if self._consume_global_notification(method, params_event):
+                continue
             if method == "thread/started":
                 if turn_id is not None:
                     raise ProtocolError("thread/started arrived after turn/start response")
@@ -720,7 +732,15 @@ class CodexAppServerAdapter:
                     raise ProtocolError("conflicting turn events before turn/start response")
                 pending_turn_id = observed_turn_id
             if method == "turn/started":
+                started_turn, _ = self._validated_turn(
+                    params_event,
+                    source="turn/started",
+                )
+                if started_turn.get("status") != "inProgress":
+                    raise ProtocolError("turn/started returned non-running turn")
                 continue
+            if method == "model/rerouted":
+                raise IsolationError("model reroute is forbidden")
             if method == "item/started":
                 self._start_item(params_event)
                 continue
@@ -738,6 +758,7 @@ class CodexAppServerAdapter:
                         content = item.get("text")
                         if isinstance(content, str):
                             final = content
+                            final_item_id = cast(str, item["id"])
                 continue
             if method == "thread/tokenUsage/updated":
                 last = (
@@ -755,29 +776,31 @@ class CodexAppServerAdapter:
                     raise TurnError(f"terminal turn status: {status_type}")
                 continue
             if method == "turn/completed":
-                status = (
-                    params_event.get("turn", params_event).get("status")
-                    if isinstance(params_event.get("turn", params_event), Mapping)
-                    else None
+                completed_turn, completed_item_ids = self._validated_turn(
+                    params_event,
+                    source="turn/completed",
                 )
+                status = completed_turn.get("status")
                 if status != "completed":
                     raise TurnError(f"turn ended with status {status!r}")
                 if self._active_items:
                     raise ProtocolError("turn completed with active items")
+                if final_item_id is not None and final_item_id not in completed_item_ids:
+                    raise ProtocolError("final agent item is absent from completed turn")
                 terminal = True
                 if turn_id is not None:
                     break
                 continue
             if method == "error":
                 error = params_event.get("error")
-                will_retry = (
-                    error.get("willRetry")
-                    if isinstance(error, Mapping)
-                    else params_event.get("willRetry")
-                )
-                if will_retry is False:
+                will_retry = params_event.get("willRetry")
+                if not isinstance(error, Mapping):
+                    raise ProtocolError("malformed app-server error")
+                if not isinstance(will_retry, bool):
+                    raise ProtocolError("malformed app-server retry flag")
+                if not will_retry:
                     raise TurnError("terminal app-server error")
-                continue
+                raise IsolationError("server retry is forbidden")
             # Unknown notifications are protocol failures: silently ignoring one
             # could leave a turn pending indefinitely.
             raise ProtocolError(f"unknown app-server notification: {method}")
@@ -790,8 +813,15 @@ class CodexAppServerAdapter:
             message = self._read_message(usage_deadline)
             if message is None:
                 break
-            if message.get("method") == "thread/tokenUsage/updated":
-                event = message.get("params", {})
+            method = message.get("method")
+            event = message.get("params")
+            if (
+                isinstance(method, str)
+                and isinstance(event, Mapping)
+                and self._consume_global_notification(method, event)
+            ):
+                continue
+            if method == "thread/tokenUsage/updated":
                 if isinstance(event, Mapping):
                     self._correlate_event(
                         "thread/tokenUsage/updated",
@@ -806,8 +836,7 @@ class CodexAppServerAdapter:
                 )
                 if isinstance(last, Mapping):
                     usage_raw = dict(last)
-            elif message.get("method") == "thread/status/changed":
-                event = message.get("params")
+            elif method == "thread/status/changed":
                 if not isinstance(event, Mapping):
                     raise ProtocolError("malformed notification after turn completion")
                 self._correlate_event(
@@ -956,6 +985,40 @@ class CodexAppServerAdapter:
             raise ProtocolError("invalid item type")
         return item_id, item_type, item
 
+    @staticmethod
+    def _validated_turn(
+        params: Mapping[str, Any],
+        *,
+        source: str,
+    ) -> tuple[Mapping[str, Any], set[str]]:
+        """Validate the lifecycle fields also checked by frozen HEG's client."""
+        turn = params.get("turn")
+        if not isinstance(turn, Mapping):
+            raise ProtocolError(f"{source} returned no turn")
+        turn_id = turn.get("id")
+        status = turn.get("status")
+        items = turn.get("items")
+        if not isinstance(turn_id, str) or not turn_id:
+            raise ProtocolError(f"{source} returned no turn id")
+        if not isinstance(status, str) or not status:
+            raise ProtocolError(f"{source} returned no turn status")
+        if not isinstance(items, list):
+            raise ProtocolError(f"{source} returned malformed items")
+        item_ids: set[str] = set()
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ProtocolError(f"{source} returned malformed item")
+            item_id = item.get("id")
+            item_type = item.get("type")
+            if not isinstance(item_id, str) or not item_id:
+                raise ProtocolError(f"{source} item omitted id")
+            if not isinstance(item_type, str) or not item_type:
+                raise ProtocolError(f"{source} item omitted type")
+            if item_id in item_ids:
+                raise ProtocolError(f"{source} returned duplicate item id")
+            item_ids.add(item_id)
+        return turn, item_ids
+
     def _start_item(self, params: Mapping[str, Any]) -> None:
         item_id, item_type, _ = self._item_payload(params)
         if item_type not in _PASSIVE_ITEM_TYPES:
@@ -982,6 +1045,20 @@ class CodexAppServerAdapter:
         del self._active_items[item_id]
         self._completed_item_ids.add(item_id)
         return item
+
+    @staticmethod
+    def _consume_global_notification(method: str, params: Mapping[str, Any]) -> bool:
+        if method not in _BENIGN_GLOBAL_METHODS:
+            return False
+        if method == "account/rateLimits/updated" and not isinstance(
+            params.get("rateLimits"), Mapping
+        ):
+            raise ProtocolError("malformed account rate-limit notification")
+        for key in ("authMode", "planType"):
+            value = params.get(key)
+            if value is not None and not isinstance(value, str):
+                raise ProtocolError("malformed account notification")
+        return True
 
     def _request(self, method: str, params: Json, *, timeout: float | None = None) -> Json:
         request_id = self._send(method, params)
