@@ -6,6 +6,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -139,18 +140,24 @@ def test_forbidden_witness_cache_tracks_current_graph_identity(
             if phase == "graph_materialization":
                 materializations.append(1)
 
-        rewrites = [
-            backend.propose_rewrite(
-                current,
-                operator_family="heg_forbidden_cycle_break",
-                policy_seed=1,
-                evaluation=1,
-                record_timing=record_timing,
-                record_deep_profile=record_deep_profile,
-            )
-            for current in (graph, graph, equal_graph)
-        ]
+        with patch.object(
+            backend,
+            "_cached_prepared",
+            wraps=backend._cached_prepared,  # noqa: SLF001
+        ) as prepared_lookup:
+            rewrites = [
+                backend.propose_rewrite(
+                    current,
+                    operator_family="heg_forbidden_cycle_break",
+                    policy_seed=1,
+                    evaluation=1,
+                    record_timing=record_timing,
+                    record_deep_profile=record_deep_profile,
+                )
+                for current in (graph, graph, equal_graph)
+            ]
         assert rewrites[0] == rewrites[1] == rewrites[2]
+        assert prepared_lookup.call_count == 2
         assert len(materializations) == 0
         assert [
             (

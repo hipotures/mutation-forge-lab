@@ -580,27 +580,26 @@ class HegBackend:
         if record_timing is not None:
             record_timing("rng_setup", time.perf_counter_ns() - phase_started_ns)
 
-        prepared = self._cached_prepared(graph)
-        if prepared is not None:
-            heg_graph = prepared.graph
-            self._proposal_graph_state = graph
-            self._proposal_heg_graph = heg_graph
-        elif graph is self._proposal_graph_state:
+        if graph is self._proposal_graph_state:
             assert self._proposal_heg_graph is not None
             heg_graph = self._proposal_heg_graph
         else:
-            phase_started_ns = (
-                time.perf_counter_ns() if record_timing is not None else 0
-            )
-            heg_graph = self._to_heg(graph)
+            prepared = self._cached_prepared(graph)
+            if prepared is not None:
+                heg_graph = prepared.graph
+            else:
+                phase_started_ns = (
+                    time.perf_counter_ns() if record_timing is not None else 0
+                )
+                heg_graph = self._to_heg(graph)
+                self._store_prepared(graph, _PreparedGraph(heg_graph))
+                if record_timing is not None:
+                    record_timing(
+                        "graph_materialization",
+                        time.perf_counter_ns() - phase_started_ns,
+                    )
             self._proposal_graph_state = graph
             self._proposal_heg_graph = heg_graph
-            self._store_prepared(graph, _PreparedGraph(heg_graph))
-            if record_timing is not None:
-                record_timing(
-                    "graph_materialization",
-                    time.perf_counter_ns() - phase_started_ns,
-                )
 
         mutation_config: dict[str, Any] = {
             "mode": "cubic_first",

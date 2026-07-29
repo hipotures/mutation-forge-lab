@@ -147,11 +147,13 @@ Across two policy seeds, mean targeted episode time fell from 2.344 seconds to
 single-pair timing noise.
 
 A balanced `on, off, off, on` scoring-optimization ablation on 2026-07-29 used
-three policy seeds, both Stage 1 operators, and 30,000 evaluations per run.
-All four runs produced the same canonical summary hash. Enabling the score
-cache, safe worker cutoff, and prepared-graph cache together changed mean real
-time from 4.734 to 3.925 seconds, mean throughput from 6,337 to 7,643
-evaluations/s, and attributed scoring time from 2.577 to 1.688 seconds. On that
-machine and workload, this was 17.1% less wall time, 20.6% higher throughput,
-and 34.5% less scoring time. These measurements describe the combined bundle;
-the three switches exist so each component can be isolated in later runs.
+the 16-episode, 80,000-evaluation Stage 1 workload. All four runs produced the
+same canonical summary hash. Enabling the score cache, safe worker cutoff, and
+prepared-graph cache together changed mean real time from 12.704 to 10.246
+seconds, mean throughput from 6,302 to 7,808 evaluations/s, and attributed
+scoring time from 6.857 to 4.454 seconds. On that machine and workload, this
+was 19.3% less wall time, 23.9% higher throughput, and 35.0% less scoring time.
+Proposal generation improved by 3.7% after repeated current-state proposals
+were changed to use the identity fast path before consulting the prepared
+graph LRU. These measurements describe the combined bundle; the three
+switches exist so each component can be isolated in later runs.
