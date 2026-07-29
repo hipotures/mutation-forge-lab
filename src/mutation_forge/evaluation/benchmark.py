@@ -86,6 +86,9 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
         score_compact_dominated_enabled=(
             config.search.score_compact_dominated_enabled
         ),
+        score_prepared_request_cache_enabled=(
+            config.search.score_prepared_request_cache_enabled
+        ),
     )
     project_root = Path(__file__).resolve().parents[3]
     project_state = git_state(project_root)

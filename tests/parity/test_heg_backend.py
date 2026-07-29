@@ -570,6 +570,47 @@ def test_compact_dominated_preserves_episode_trajectory(
         detailed.close()
 
 
+@pytest.mark.parametrize("policy_seed", [1, 2, 3])
+def test_prepared_request_plan_preserves_episode_trajectory(
+    heg_repo: Path,
+    policy_seed: int,
+) -> None:
+    cached = HegBackend(heg_repo)
+    uncached = HegBackend(
+        heg_repo,
+        score_prepared_request_cache_enabled=False,
+    )
+    try:
+        kwargs = {
+            "entry_id": "prepared-request-plan-parity",
+            "graph_seed": 101,
+            "policy_seed": policy_seed,
+            "run_seed": 7,
+            "baseline": HEG_FORBIDDEN_CYCLE_BREAK,
+            "evaluations": 80,
+            "witness_cap": 64,
+            "profiling_enabled": False,
+        }
+        cached_result = run_episode(
+            backend=cached,
+            initial_graph=cached.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        uncached_result = run_episode(
+            backend=uncached,
+            initial_graph=uncached.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        assert cached_result.as_dict(
+            include_timing=False
+        ) == uncached_result.as_dict(include_timing=False)
+    finally:
+        cached.close()
+        uncached.close()
+
+
 def test_heg_score_worker_restarts_after_one_crash(heg_repo: Path) -> None:
     backend = HegBackend(heg_repo)
     try:

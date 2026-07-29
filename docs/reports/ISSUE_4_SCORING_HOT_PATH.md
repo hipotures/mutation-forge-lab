@@ -209,7 +209,49 @@ gate and the alternate full-workload throughput gate.
 
 ## Experiment 3: prepared request plan
 
-Pending evidence from the first two experiments.
+The retained Python worker keeps one prepared immutable request plan keyed by
+graph order, cycle lengths, limit, node budget, cutoff mode, inclusive mode,
+compact mode, and legacy ordering mode. It caches only validation results,
+word count, packed length bytes, payload size, and the fixed frame prefix.
+Graph rows, request IDs, cutoff values, and flags remain dynamic. A mismatch
+replaces the single entry.
+
+The balanced 60-second-per-mode microbenchmark produced:
+
+| Metric | Uncached | Cached | Change |
+|---|---:|---:|---:|
+| Requests/s | 29,300 | 30,795 | +5.1% |
+| Request packing | 2.684 µs | 2.654 µs | -1.1% |
+| Worker round trip | 29.517 µs | 29.490 µs | -0.1% |
+
+Validation and plan lookup occur outside the existing request-packing timer,
+so the targeted subphase does not capture most of the avoided Python work.
+The full-workload gate was therefore required.
+
+The balanced cached, uncached, uncached, cached A/B used three policy seeds,
+24 episodes, and 1,200,000 evaluations per run:
+
+| Mode | Mean real | Mean evaluations/s | Mean scoring |
+|---|---:|---:|---:|
+| Uncached | 112.085 s | 10,745 | 55.231 s |
+| Cached | 108.270 s | 11,125 | 51.882 s |
+| Change | -3.4% | +3.5% | -6.1% |
+
+Paired throughput gains were +3.58% and +3.49%. Artifacts:
+
+- cached: `runs/stage1-20260729-111645-953ce55a`
+- uncached: `runs/stage1-20260729-111833-8ee12597`
+- uncached: `runs/stage1-20260729-112025-5ae617ce`
+- cached: `runs/stage1-20260729-112218-f5f4895d`
+
+All four runs shared canonical summary hash
+`ee85dab2eec4fcf08e554ef8cec26ea003769c98e100df9d8b9bab6ff69aee5e`
+and timing-free episode-payload SHA-256
+`914d1daa7b4976d7b4e796cec532cce60646bbc168389604f4bd0e915fbefeb0`.
+No failures, timeouts, crashes, restarts, or fallbacks occurred.
+
+**GO.** The one-entry request plan cleared the 2% full-workload throughput
+gate with exact parity.
 
 ## Experiment 4: direct cutoff arithmetic
 

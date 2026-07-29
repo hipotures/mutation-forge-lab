@@ -77,6 +77,10 @@
         "score_compact_dominated_enabled": {
           "type": "boolean",
           "default": true
+        },
+        "score_prepared_request_cache_enabled": {
+          "type": "boolean",
+          "default": true
         }
       },
       "additionalProperties": false

@@ -55,6 +55,7 @@ class SearchConfig:
     prepared_proposal_handoff_enabled: bool
     score_longest_first_enabled: bool
     score_compact_dominated_enabled: bool
+    score_prepared_request_cache_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +177,14 @@ def load_config(path: str | Path) -> LabConfig:
         raise ValueError(
             "search.score_compact_dominated_enabled must be a boolean"
         )
+    score_prepared_request_cache_enabled = search.get(
+        "score_prepared_request_cache_enabled",
+        True,
+    )
+    if not isinstance(score_prepared_request_cache_enabled, bool):
+        raise ValueError(
+            "search.score_prepared_request_cache_enabled must be a boolean"
+        )
     operator_families = _str_tuple(
         proposals.get("operator_families"), "proposals.operator_families"
     )
@@ -244,6 +253,9 @@ def load_config(path: str | Path) -> LabConfig:
             score_longest_first_enabled=score_longest_first_enabled,
             score_compact_dominated_enabled=(
                 score_compact_dominated_enabled
+            ),
+            score_prepared_request_cache_enabled=(
+                score_prepared_request_cache_enabled
             ),
         ),
         proposals=ProposalConfig(

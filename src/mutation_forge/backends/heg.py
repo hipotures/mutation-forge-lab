@@ -64,6 +64,7 @@ class HegBackend:
         prepared_proposal_handoff_enabled: bool = True,
         score_longest_first_enabled: bool = True,
         score_compact_dominated_enabled: bool = True,
+        score_prepared_request_cache_enabled: bool = True,
     ) -> None:
         self.repo = repo.resolve()
         source = self.repo / "src"
@@ -89,6 +90,9 @@ class HegBackend:
         self._score_longest_first_enabled = score_longest_first_enabled
         self._score_compact_dominated_enabled = (
             score_compact_dominated_enabled
+        )
+        self._score_prepared_request_cache_enabled = (
+            score_prepared_request_cache_enabled
         )
         context_factory = getattr(self._plugin, "new_mutation_context", None)
         if context_factory is None:
@@ -262,6 +266,9 @@ class HegBackend:
                 timeout_seconds=self._score_timeout_seconds,
                 memory_limit_bytes=64 * 1024 * 1024,
                 cutoff_longest_first=self._score_longest_first_enabled,
+                prepared_request_cache_enabled=(
+                    self._score_prepared_request_cache_enabled
+                ),
             )
         return self._worker
 

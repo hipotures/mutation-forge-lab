@@ -53,6 +53,7 @@ prepared_graph_cache_enabled = true
 prepared_proposal_handoff_enabled = true
 score_longest_first_enabled = true
 score_compact_dominated_enabled = true
+score_prepared_request_cache_enabled = true
 ```
 
 The episode-local score cache stores only complete `GraphScore` results; worker
@@ -87,6 +88,11 @@ With `score_compact_dominated_enabled`, non-profiled cutoff requests ask the
 worker to return a header-only dominated response. Full scores remain complete,
 and deep profiling always requests detailed per-cycle records. Disable the
 flag only for same-binary protocol ablation.
+
+`score_prepared_request_cache_enabled` keeps one validated immutable worker
+request plan for repeated requests with the same order, lengths, limits, and
+protocol mode. Dynamic graph rows, request IDs, cutoffs, and flags are never
+cached.
 
 `HegBackend` normally keeps the current and most recent candidate HEG
 `BitGraph`, plus one forbidden-witness context for the current immutable
