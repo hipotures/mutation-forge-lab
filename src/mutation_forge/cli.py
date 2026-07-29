@@ -18,6 +18,9 @@ from mutation_forge.config import LabConfig, load_config
 from mutation_forge.evaluation.benchmark import load_summary, run_benchmark
 from mutation_forge.evaluation.dataset import build_dataset
 from mutation_forge.models import JsonValue
+from mutation_forge.sandbox.config import load_policy_config
+from mutation_forge.sandbox.policy import evaluate_policy, probe_policy
+from mutation_forge.sandbox.validation import validate_policy
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -192,6 +195,41 @@ def _compare(left_path: Path, right_path: Path, *, json_output: bool) -> int:
     return 0
 
 
+def _emit_policy_result(result: object, *, json_output: bool) -> None:
+    canonical = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    if json_output:
+        print(canonical)
+    else:
+        Console().print_json(canonical)
+
+
+def _policy_validate(path: Path, *, json_output: bool) -> int:
+    result = validate_policy(path.read_text()).as_dict()
+    _emit_policy_result(result, json_output=json_output)
+    return 0 if result["valid"] else 1
+
+
+def _policy_probe(path: Path, *, json_output: bool) -> int:
+    result = probe_policy(path.read_text())
+    _emit_policy_result(result, json_output=json_output)
+    return 0 if result["status"] == "completed" else 1
+
+
+def _policy_evaluate(
+    path: Path,
+    config_path: Path,
+    *,
+    force_json: bool,
+) -> int:
+    config = load_policy_config(config_path)
+    result = evaluate_policy(path, config)
+    _emit_policy_result(
+        result,
+        json_output=force_json or config.output == "json",
+    )
+    return 0 if result["status"] == "completed" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mforge")
     parser.add_argument("--version", action="version", version=__version__)
@@ -221,6 +259,19 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("run_a", type=Path)
     compare.add_argument("run_b", type=Path)
     compare.add_argument("--json", action="store_true")
+
+    policy = commands.add_parser("policy")
+    policy_commands = policy.add_subparsers(dest="policy_command", required=True)
+    policy_validate = policy_commands.add_parser("validate")
+    policy_validate.add_argument("policy", type=Path)
+    policy_validate.add_argument("--json", action="store_true")
+    policy_probe = policy_commands.add_parser("probe")
+    policy_probe.add_argument("policy", type=Path)
+    policy_probe.add_argument("--json", action="store_true")
+    policy_evaluate = policy_commands.add_parser("evaluate")
+    policy_evaluate.add_argument("policy", type=Path)
+    policy_evaluate.add_argument("--config", type=Path, required=True)
+    policy_evaluate.add_argument("--json", action="store_true")
     return parser
 
 
@@ -242,6 +293,16 @@ def main(argv: list[str] | None = None) -> int:
             return _inspect(args.run, json_output=args.json)
         if args.command == "compare":
             return _compare(args.run_a, args.run_b, json_output=args.json)
+        if args.command == "policy" and args.policy_command == "validate":
+            return _policy_validate(args.policy, json_output=args.json)
+        if args.command == "policy" and args.policy_command == "probe":
+            return _policy_probe(args.policy, json_output=args.json)
+        if args.command == "policy" and args.policy_command == "evaluate":
+            return _policy_evaluate(
+                args.policy,
+                args.config,
+                force_json=args.json,
+            )
     except Exception as error:
         if getattr(args, "json", False):
             print(

@@ -1,0 +1,24 @@
+schema_version = "stage2a.1"
+
+[run]
+run_root = "../runs"
+output = "rich"
+
+[repositories]
+project_repo = ".."
+heg_repo = "../../heg"
+frozen_project_commit = "3b9beba058f472d6f0cad5b6210f34c6dbf96731"
+frozen_heg_commit = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
+
+[sandbox]
+max_source_bytes = 12288
+max_ast_nodes = 500
+max_static_loop_bound = 256
+address_space_bytes = 134217728
+per_call_wall_seconds = 0.025
+total_wall_seconds = 60.0
+request_bytes = 65536
+response_bytes = 16384
+captured_output_bytes = 65536
+open_files = 16
+process_count = 1

@@ -1,1 +1,1 @@
-"""Reserved Stage 2 package boundary; no generated code executes in Stage 1."""
+"""Deterministic Stage 2A policy validation and isolated execution."""

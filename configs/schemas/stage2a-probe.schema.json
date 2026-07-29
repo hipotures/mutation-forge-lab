@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2a-probe.v1.json",
+  "title": "Mutation Forge Stage 2A probe request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ctx",
+    "proposal"
+  ],
+  "properties": {
+    "ctx": {
+      "$ref": "#/$defs/context"
+    },
+    "proposal": {
+      "$ref": "#/$defs/proposal"
+    }
+  },
+  "$defs": {
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_id",
+        "step",
+        "budget_remaining",
+        "features"
+      ],
+      "properties": {
+        "probe_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "budget_remaining": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "features": {
+          "$ref": "#/$defs/plainMapping"
+        }
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "kind",
+        "features"
+      ],
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "features": {
+          "$ref": "#/$defs/plainMapping"
+        }
+      }
+    },
+    "plainMapping": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/plainValue"
+      }
+    },
+    "plainValue": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "maxLength": 4096
+        },
+        {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/plainValue"
+          }
+        },
+        {
+          "$ref": "#/$defs/plainMapping"
+        }
+      ]
+    }
+  },
+  "x-runtime-bounds": {
+    "schema_version": "stage2a.probe.v1",
+    "canonical_encoding": "UTF-8 JSON with sorted keys and no NaN/Infinity",
+    "max_depth": 8,
+    "max_request_bytes": 65536,
+    "max_string_utf8_bytes": 4096,
+    "max_key_utf8_bytes": 128,
+    "max_integer_bits": 4096,
+    "max_abs_float": 1e100
+  }
+}
