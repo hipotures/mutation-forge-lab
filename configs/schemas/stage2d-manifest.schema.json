@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2d-manifest.schema.json",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "stage2d.manifest.v1"},
+    "config_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "manifest_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "episode_count": {"const": 512},
+    "shard_count": {"const": 8},
+    "episodes_per_shard": {"const": 64},
+    "episodes": {"maxItems": 512, "minItems": 512, "type": "array"},
+    "shards": {"maxItems": 8, "minItems": 8, "type": "array"},
+    "cpu_topology": {"type": "object"},
+    "thread_environment": {"type": "object"}
+  },
+  "required": ["schema_version", "config_sha256", "manifest_sha256", "episode_count", "shard_count", "episodes_per_shard", "episodes", "shards", "cpu_topology", "thread_environment"],
+  "title": "Mutation Forge Stage 2D immutable episode manifest",
+  "type": "object"
+}

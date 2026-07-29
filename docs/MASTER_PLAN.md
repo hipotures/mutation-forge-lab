@@ -33,16 +33,21 @@ generation, program search, generalization, and production consideration.
    diagnostics, and a frozen exploratory discrimination matrix. Primary
    diagnosis: `BENCHMARK_SATURATION`. Decision:
    `DESIGN_STAGE_2D_PREREGISTRATION`.
-5. **Stage 3 — Codex App Server generation (blocked).** A schema-derived thin
+5. **Stage 2D — preregistered independent trajectories (approved; pending
+   result).** Exactly eight immutable shards containing 512 paired toy
+   episodes over orders 10/12, independent strict-improvement graph states,
+   unchanged Stage 2B rankers, hierarchical paired bootstrap gates, and one
+   complete deterministic replay.
+6. **Stage 3 — Codex App Server generation (blocked).** A schema-derived thin
    inference adapter, isolated authentication/configuration, structured
    output, saved evidence, and exact token usage.
-6. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
+7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
-7. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
+8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
    unseen order, preregistered comparisons, and uncertainty estimates.
-8. **Stage 6 — independent verification and red-team review.** Safety and
+9. **Stage 6 — independent verification and red-team review.** Safety and
    scientific-validity audit with reproducible artifacts.
-9. **Stage 7 — HEG integration decision.** An explicit GO/NO-GO report before
+10. **Stage 7 — HEG integration decision.** An explicit GO/NO-GO report before
    any production integration.
 
 Stages 1 and 2A are accepted. Stage 2B is completed and validated, issue #6 is
@@ -54,6 +59,15 @@ reinterpreted as positive evidence. Stage 2C is completed and records
 `BENCHMARK_SATURATION` with `DESIGN_STAGE_2D_PREREGISTRATION`. This recommends
 only a separately specified and approved future preregistration; it does not
 execute Stage 2D, clear `NO_GO`, or unlock Stage 3.
+
+Issue #8 separately approved Stage 2D under a strict two-phase discipline.
+The preregistration freezes the runner, config, schemas, ordered 512-episode
+manifest, eight shard assignments, unchanged ranker identities, primary and
+secondary metrics, hierarchical bootstrap, thresholds, exclusions, resource
+controls, and replay requirements before any confirmatory result. The
+confirmatory phase cannot modify those inputs or analyses. Stage 3 remains
+blocked until the final Stage 2D report is reviewed and integrated with
+`GO_TO_STAGE_3`.
 
 ## Scientific controls
 

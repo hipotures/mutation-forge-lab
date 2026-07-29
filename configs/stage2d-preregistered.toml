@@ -1,0 +1,53 @@
+schema_version = "stage2d.1"
+
+[run]
+run_root = "../runs"
+max_episode_bytes = 524288
+max_shard_bytes = 134217728
+
+[repositories]
+project_repo = ".."
+heg_repo = "../../heg"
+frozen_stage2c_commit = "06ae4e7e5d958bb47ba0acba2e686afd7023b51b"
+frozen_heg_commit = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
+preregistration_tag = "stage2d-preregistered-v1"
+
+[inputs]
+stage2b_config = "stage2b-preregistered.toml"
+random_policy = "../fixtures/rankers/stage2b_random.py"
+structural_policy = "../fixtures/rankers/stage2b_structural.py"
+manifest = "manifests/stage2d-episodes-v1.json"
+
+[experiment]
+backend = "toy"
+orders = [10, 12]
+graph_seeds = [201, 202, 203, 204, 205, 206, 207, 208]
+policy_seeds = [
+  1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
+  1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016,
+  1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024,
+  1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032,
+]
+horizon = 32
+shard_count = 8
+episodes_per_shard = 64
+
+[statistics]
+bootstrap_samples = 10000
+bootstrap_seed = 2026072902
+confidence_level = 0.95
+primary_order = 10
+secondary_order = 12
+relative_median_threshold = 0.10
+minimum_nonnegative_graph_seeds = 6
+
+[resources]
+max_concurrent_shards = 8
+minimum_reserved_physical_cores = 8
+thread_count = 1
+
+[identity]
+random_source_sha256 = "d4994fb96bdc3c23b8b24d9bca041f2822bc30329bcf8f9cdbd2e277e65b0612"
+random_ast_sha256 = "f7f502b0319df5dc32ef0f8476024c4986dcb3422ef2e03b117a3d394bbfc7b7"
+structural_source_sha256 = "68aba299d7735198d38a8d30e221ef99cdbb7d846c502aca41691c49ceef87be"
+structural_ast_sha256 = "5b017c2ba79953e31b224df91e060d4af27c3b212695a03e8650ec91e8b0ad81"

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2d-config.schema.json",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "stage2d.1"},
+    "run": {
+      "additionalProperties": false,
+      "properties": {
+        "run_root": {"type": "string"},
+        "max_episode_bytes": {"maximum": 1048576, "minimum": 1, "type": "integer"},
+        "max_shard_bytes": {"maximum": 268435456, "minimum": 1, "type": "integer"}
+      },
+      "required": ["run_root", "max_episode_bytes", "max_shard_bytes"],
+      "type": "object"
+    },
+    "repositories": {
+      "additionalProperties": false,
+      "properties": {
+        "project_repo": {"type": "string"},
+        "heg_repo": {"type": "string"},
+        "frozen_stage2c_commit": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+        "frozen_heg_commit": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+        "preregistration_tag": {"minLength": 1, "type": "string"}
+      },
+      "required": ["project_repo", "heg_repo", "frozen_stage2c_commit", "frozen_heg_commit", "preregistration_tag"],
+      "type": "object"
+    },
+    "inputs": {
+      "additionalProperties": false,
+      "properties": {
+        "stage2b_config": {"type": "string"},
+        "random_policy": {"type": "string"},
+        "structural_policy": {"type": "string"},
+        "manifest": {"type": "string"}
+      },
+      "required": ["stage2b_config", "random_policy", "structural_policy", "manifest"],
+      "type": "object"
+    },
+    "experiment": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"const": "toy"},
+        "orders": {"const": [10, 12]},
+        "graph_seeds": {"const": [201, 202, 203, 204, 205, 206, 207, 208]},
+        "policy_seeds": {
+          "items": {"maximum": 1032, "minimum": 1001, "type": "integer"},
+          "maxItems": 32,
+          "minItems": 32,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "horizon": {"const": 32},
+        "shard_count": {"const": 8},
+        "episodes_per_shard": {"const": 64}
+      },
+      "required": ["backend", "orders", "graph_seeds", "policy_seeds", "horizon", "shard_count", "episodes_per_shard"],
+      "type": "object"
+    },
+    "statistics": {
+      "additionalProperties": false,
+      "properties": {
+        "bootstrap_samples": {"const": 10000},
+        "bootstrap_seed": {"const": 2026072902},
+        "confidence_level": {"const": 0.95},
+        "primary_order": {"const": 10},
+        "secondary_order": {"const": 12},
+        "relative_median_threshold": {"const": 0.1},
+        "minimum_nonnegative_graph_seeds": {"const": 6}
+      },
+      "required": ["bootstrap_samples", "bootstrap_seed", "confidence_level", "primary_order", "secondary_order", "relative_median_threshold", "minimum_nonnegative_graph_seeds"],
+      "type": "object"
+    },
+    "resources": {
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrent_shards": {"const": 8},
+        "minimum_reserved_physical_cores": {"const": 8},
+        "thread_count": {"const": 1}
+      },
+      "required": ["max_concurrent_shards", "minimum_reserved_physical_cores", "thread_count"],
+      "type": "object"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "random_source_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "random_ast_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "structural_source_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "structural_ast_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+      },
+      "required": ["random_source_sha256", "random_ast_sha256", "structural_source_sha256", "structural_ast_sha256"],
+      "type": "object"
+    }
+  },
+  "required": ["schema_version", "run", "repositories", "inputs", "experiment", "statistics", "resources", "identity"],
+  "title": "Mutation Forge Stage 2D preregistration configuration",
+  "type": "object"
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2d-episode.schema.json",
+  "properties": {
+    "schema_version": {"const": "stage2d.episode.v1"},
+    "episode_id": {"pattern": "^o(10|12)-g02(0[1-8])-p10(0[1-9]|[12][0-9]|3[0-2])$", "type": "string"},
+    "order": {"enum": [10, 12]},
+    "graph_seed": {"maximum": 208, "minimum": 201, "type": "integer"},
+    "policy_seed": {"maximum": 1032, "minimum": 1001, "type": "integer"},
+    "horizon": {"const": 32},
+    "random": {"type": "object"},
+    "structural": {"type": "object"},
+    "steps": {"maxItems": 32, "minItems": 32, "type": "array"},
+    "selected_score_calls": {"const": 64},
+    "oracle_score_calls": {"const": 0},
+    "network_calls": {"const": 0},
+    "model_calls": {"const": 0},
+    "app_server_calls": {"const": 0}
+  },
+  "required": ["schema_version", "episode_id", "order", "graph_seed", "policy_seed", "horizon", "random", "structural", "steps", "selected_score_calls", "oracle_score_calls", "network_calls", "model_calls", "app_server_calls"],
+  "title": "Mutation Forge Stage 2D paired trajectory episode",
+  "type": "object"
+}

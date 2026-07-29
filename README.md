@@ -39,6 +39,13 @@ execution or Stage 3. Oracle scores are computed after policy selections are
 fixed, are separately accounted, and cannot affect the historical gate or
 normal Stage 2B commands.
 
+Stage 2D is an approved, two-phase confirmatory follow-up. Its checked-in
+preregistration freezes 512 paired real trajectories over toy orders 10 and
+12 into exactly eight immutable shards before any confirmatory result is
+observed. The retained Stage 2B random and structural rankers are unchanged.
+Stage 2B remains `NO_GO`; Stage 3 remains blocked until the complete primary
+run and deterministic replay produce a reviewed Stage 2D decision.
+
 ## Setup and checks
 
 Python 3.12 or newer and the read-only sibling repository at `../heg` are
@@ -139,6 +146,36 @@ rank records, deterministic replay evidence, and terminal status under
 `runs/stage2c-*`. Normal Stage 1/2A/2B commands remain selected-only and have no
 oracle switch. Diagnostic execution does not use a network, model, or App
 Server.
+
+## Stage 2D preregistered trajectories
+
+The coordinator plans and reduces; immutable shard workers only execute their
+assigned episode IDs from the annotated `stage2d-preregistered-v1` tag:
+
+```console
+uv run mforge stage2d plan \
+  --config configs/stage2d-preregistered.toml --json
+uv run mforge stage2d run-shard \
+  --config configs/stage2d-preregistered.toml \
+  --shard shard-00 --output-dir RUN/shard-00 --json
+uv run mforge stage2d reduce \
+  --config configs/stage2d-preregistered.toml \
+  --input-root RUN --output-dir RUN/reduction --workers 8 --json
+uv run mforge stage2d verify-replay \
+  --primary PRIMARY/reduction/summary.json \
+  --replay REPLAY/reduction/summary.json \
+  --output PRIMARY/replay-verification.json --json
+```
+
+Each policy owns its current graph and score. A strict accepted improvement
+advances only that policy; after states diverge, each policy generates a
+bounded pool independently from its own graph using the same
+outcome-independent episode/step seed. Only the selected plan is scored.
+Shard artifacts are bounded gzip JSONL with exactly-once assignment checks,
+timing-stripped canonical hashes, CPU affinity and single-thread environment
+evidence, and terminal status. The second complete run is replay evidence,
+never an additional statistical sample. No Stage 2D command has a model,
+network, App Server, oracle, evolution, or HEG-write path.
 
 See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass

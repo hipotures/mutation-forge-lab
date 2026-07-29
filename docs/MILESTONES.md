@@ -77,9 +77,30 @@ Stage 3, model use, evolution, full proposer work, and HEG policy integration
 remain blocked. Evidence is retained in
 `docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md`.
 
+## Stage 2D: preregistered independent-trajectory confirmation
+
+Stage 2D is approved as a separate two-phase confirmatory benchmark. Phase 1
+freezes the runner, schemas, unchanged Stage 2B ranker identities, toy orders
+10/12, graph seeds 201–208, policy seeds 1001–1032, horizon 32, 10,000-sample
+hierarchical paired bootstrap, eleven-part gate, and exactly eight 64-episode
+shards. The immutable annotated tag is `stage2d-preregistered-v1`. No
+confirmatory episode may run before that tag and its commit are pushed and
+recorded on issue #8.
+
+Phase 2 runs all eight shards twice from clean detached preregistration
+checkouts. Policies follow independent strict-improvement trajectories and
+generate independent pools after their graphs diverge. The replay must match
+all timing-stripped episode records, shard hashes, aggregate hash, statistics,
+and gate result. The only terminal decisions are `GO_TO_STAGE_3`, `NO_GO`, and
+`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`.
+
+**Status: preregistration implementation in progress; confirmatory result not
+yet observed.** Stage 2B remains `NO_GO`. Stage 3, model use, evolution, full
+proposer work, and HEG policy integration remain blocked.
+
 ## Stages 3–7
 
-Stages 3–7 remain blocked by the Stage 2B `NO_GO`. Stage 3 would add
+Stages 3–7 remain blocked pending a reviewed Stage 2D result. Stage 3 would add
 schema-derived Codex App Server generation only after a separately approved
 GO. Stage 4 would add archived evolutionary search. Stage 5 would freeze and
 evaluate held-out generalization. Stage 6 would perform independent

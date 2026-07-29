@@ -34,6 +34,13 @@ from mutation_forge.stage2c.evaluation import (
     run_stage2c_control,
     run_stage2c_matrix,
 )
+from mutation_forge.stage2d.config import load_stage2d_config
+from mutation_forge.stage2d.evaluation import (
+    plan_stage2d,
+    reduce_stage2d,
+    run_stage2d_shard,
+    verify_stage2d_replay,
+)
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -216,6 +223,36 @@ def _emit_policy_result(result: object, *, json_output: bool) -> None:
         Console().print_json(canonical)
 
 
+def _stage2d(args: argparse.Namespace) -> int:
+    if args.stage2d_command == "verify-replay":
+        result = verify_stage2d_replay(
+            args.primary,
+            args.replay,
+            args.output,
+        )
+    else:
+        config = load_stage2d_config(args.config)
+        if args.stage2d_command == "plan":
+            result = plan_stage2d(config)
+        elif args.stage2d_command == "run-shard":
+            result = run_stage2d_shard(
+                config,
+                args.shard,
+                args.output_dir,
+            )
+        elif args.stage2d_command == "reduce":
+            result = reduce_stage2d(
+                config,
+                args.input_root,
+                args.output_dir,
+                bootstrap_workers=args.workers,
+            )
+        else:
+            raise ValueError(f"unknown Stage 2D command {args.stage2d_command!r}")
+    _emit_policy_result(result, json_output=args.json)
+    return 0
+
+
 def _policy_validate(path: Path, *, json_output: bool) -> int:
     result = validate_policy(path.read_text()).as_dict()
     _emit_policy_result(result, json_output=json_output)
@@ -390,6 +427,31 @@ def build_parser() -> argparse.ArgumentParser:
         diagnostic = diagnostic_commands.add_parser(name)
         diagnostic.add_argument("--config", type=Path, required=True)
         diagnostic.add_argument("--json", action="store_true")
+
+    stage2d = commands.add_parser("stage2d")
+    stage2d_commands = stage2d.add_subparsers(
+        dest="stage2d_command",
+        required=True,
+    )
+    stage2d_plan = stage2d_commands.add_parser("plan")
+    stage2d_plan.add_argument("--config", type=Path, required=True)
+    stage2d_plan.add_argument("--json", action="store_true")
+    stage2d_shard = stage2d_commands.add_parser("run-shard")
+    stage2d_shard.add_argument("--config", type=Path, required=True)
+    stage2d_shard.add_argument("--shard", required=True)
+    stage2d_shard.add_argument("--output-dir", type=Path, required=True)
+    stage2d_shard.add_argument("--json", action="store_true")
+    stage2d_reduce = stage2d_commands.add_parser("reduce")
+    stage2d_reduce.add_argument("--config", type=Path, required=True)
+    stage2d_reduce.add_argument("--input-root", type=Path, required=True)
+    stage2d_reduce.add_argument("--output-dir", type=Path, required=True)
+    stage2d_reduce.add_argument("--workers", type=int, default=1)
+    stage2d_reduce.add_argument("--json", action="store_true")
+    stage2d_replay = stage2d_commands.add_parser("verify-replay")
+    stage2d_replay.add_argument("--primary", type=Path, required=True)
+    stage2d_replay.add_argument("--replay", type=Path, required=True)
+    stage2d_replay.add_argument("--output", type=Path, required=True)
+    stage2d_replay.add_argument("--json", action="store_true")
     return parser
 
 
@@ -436,6 +498,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.config,
                 json_output=args.json,
             )
+        if args.command == "stage2d":
+            return _stage2d(args)
     except Exception as error:
         if getattr(args, "json", False):
             print(

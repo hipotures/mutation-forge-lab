@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2d-reduction.schema.json",
+  "properties": {
+    "schema_version": {"const": "stage2d.reduction.v1"},
+    "status": {"const": "completed"},
+    "episode_count": {"const": 512},
+    "aggregate_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "canonical_episode_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "shard_hashes": {"maxProperties": 8, "minProperties": 8, "type": "object"},
+    "metrics": {"type": "object"},
+    "validation": {"type": "object"},
+    "decision": {"const": "AWAITING_DETERMINISTIC_REPLAY"}
+  },
+  "required": ["schema_version", "status", "episode_count", "aggregate_sha256", "canonical_episode_sha256", "shard_hashes", "metrics", "validation", "decision"],
+  "title": "Mutation Forge Stage 2D deterministic reduction",
+  "type": "object"
+}
