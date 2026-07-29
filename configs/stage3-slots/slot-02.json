@@ -1,0 +1,7 @@
+{
+  "schema_version": "stage3.slot.v1",
+  "slot_id": "slot-02",
+  "brief": "Piecewise arithmetic strategy with bounded if statements that switches emphasis when stagnation or remaining_steps changes.",
+  "generation_mode": "new_strategy",
+  "focus": "piecewise"
+}

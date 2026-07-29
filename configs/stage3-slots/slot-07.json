@@ -1,0 +1,7 @@
+{
+  "schema_version": "stage3.slot.v1",
+  "slot_id": "slot-07",
+  "brief": "A conservative unconstrained safe baseline using only documented fields, finite arithmetic, and no unsupported assumptions.",
+  "generation_mode": "new_strategy",
+  "focus": "unconstrained-safe"
+}

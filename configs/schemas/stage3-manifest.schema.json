@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage3-manifest.v1.json",
+  "title": "Stage 3 development episode manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "episode_count", "shard_count", "episodes_per_shard", "episodes", "shards", "manifest_sha256"],
+  "properties": {
+    "schema_version": {"const": "stage3.manifest.v1"},
+    "episode_count": {"const": 128},
+    "shard_count": {"const": 8},
+    "episodes_per_shard": {"const": 16},
+    "episodes": {"type": "array", "minItems": 128, "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["episode_id", "order", "graph_seed", "policy_seed", "horizon", "shard_id"], "properties": {"episode_id": {"type": "string", "pattern": "^o(10|12)-g03(01|02|03|04)-p30(0[1-9]|1[0-6])$"}, "order": {"enum": [10, 12]}, "graph_seed": {"enum": [301, 302, 303, 304]}, "policy_seed": {"type": "integer", "minimum": 3001, "maximum": 3016}, "horizon": {"const": 32}, "shard_id": {"pattern": "^shard-0[0-7]$"}}}},
+    "shards": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["shard_id", "episode_ids", "episode_count"], "properties": {"shard_id": {"pattern": "^shard-0[0-7]$"}, "episode_ids": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "string"}}, "episode_count": {"const": 16}}}},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -41,6 +42,7 @@ from mutation_forge.stage2d.evaluation import (
     run_stage2d_shard,
     verify_stage2d_replay,
 )
+from mutation_forge.stage3 import commands as stage3_commands
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -253,6 +255,36 @@ def _stage2d(args: argparse.Namespace) -> int:
     return 0
 
 
+def _emit_stage3(result: Mapping[str, Any], *, json_output: bool) -> None:
+    payload = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if json_output:
+        print(payload)
+    else:
+        # Rich renders the exact same canonical object; only presentation
+        # whitespace differs, and no command logic is duplicated here.
+        Console().print_json(payload)
+
+
+def _stage3(args: argparse.Namespace) -> int:
+    command = args.stage3_command
+    if command == "appserver-doctor":
+        result = stage3_commands.appserver_doctor(args.config)
+    elif command == "freeze":
+        result = stage3_commands.freeze(args.config)
+    elif command == "generate":
+        result = stage3_commands.generate(args.config, concurrency=args.concurrency)
+    elif command == "validate":
+        result = stage3_commands.validate(args.run)
+    elif command == "evaluate":
+        result = stage3_commands.evaluate(args.config, args.run, workers=args.workers)
+    elif command == "verify-replay":
+        result = stage3_commands.verify_replay(args.primary, args.replay)
+    else:
+        raise ValueError(f"unknown Stage 3 command {command!r}")
+    _emit_stage3(result, json_output=args.json)
+    return 0 if result.get("status") in {"completed", "ok"} else 1
+
+
 def _policy_validate(path: Path, *, json_output: bool) -> int:
     result = validate_policy(path.read_text()).as_dict()
     _emit_policy_result(result, json_output=json_output)
@@ -452,6 +484,31 @@ def build_parser() -> argparse.ArgumentParser:
     stage2d_replay.add_argument("--replay", type=Path, required=True)
     stage2d_replay.add_argument("--output", type=Path, required=True)
     stage2d_replay.add_argument("--json", action="store_true")
+
+    stage3 = commands.add_parser("stage3")
+    stage3_commands_parser = stage3.add_subparsers(dest="stage3_command", required=True)
+    stage3_doctor = stage3_commands_parser.add_parser("appserver-doctor")
+    stage3_doctor.add_argument("--config", type=Path, required=True)
+    stage3_doctor.add_argument("--json", action="store_true")
+    stage3_freeze = stage3_commands_parser.add_parser("freeze")
+    stage3_freeze.add_argument("--config", type=Path, required=True)
+    stage3_freeze.add_argument("--json", action="store_true")
+    stage3_generate = stage3_commands_parser.add_parser("generate")
+    stage3_generate.add_argument("--config", type=Path, required=True)
+    stage3_generate.add_argument("--concurrency", type=int, default=8)
+    stage3_generate.add_argument("--json", action="store_true")
+    stage3_validate = stage3_commands_parser.add_parser("validate")
+    stage3_validate.add_argument("run", type=Path)
+    stage3_validate.add_argument("--json", action="store_true")
+    stage3_evaluate = stage3_commands_parser.add_parser("evaluate")
+    stage3_evaluate.add_argument("--config", type=Path, required=True)
+    stage3_evaluate.add_argument("--run", type=Path, required=True)
+    stage3_evaluate.add_argument("--workers", type=int, default=8)
+    stage3_evaluate.add_argument("--json", action="store_true")
+    stage3_replay = stage3_commands_parser.add_parser("verify-replay")
+    stage3_replay.add_argument("primary", type=Path)
+    stage3_replay.add_argument("replay", type=Path)
+    stage3_replay.add_argument("--json", action="store_true")
     return parser
 
 
@@ -500,20 +557,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "stage2d":
             return _stage2d(args)
+        if args.command == "stage3":
+            return _stage3(args)
     except Exception as error:
         if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "schema_version": "1.0",
-                        "event_type": "run_failed",
-                        "status": "failed",
-                        "error_type": type(error).__name__,
-                        "error": str(error),
-                    },
-                    sort_keys=True,
-                )
-            )
+            failure = {
+                "schema_version": "1.0",
+                "event_type": "run_failed",
+                "status": "failed",
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
+            print(json.dumps(failure, sort_keys=True, separators=(",", ":")))
         else:
             Console(stderr=True).print(f"[red]{type(error).__name__}: {error}[/red]")
         return 1

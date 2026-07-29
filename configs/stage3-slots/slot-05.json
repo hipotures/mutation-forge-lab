@@ -1,0 +1,7 @@
+{
+  "schema_version": "stage3.slot.v1",
+  "slot_id": "slot-05",
+  "brief": "Use selector_tags as categorical evidence while remaining robust to unknown ordering and avoiding absolute identifiers.",
+  "generation_mode": "new_strategy",
+  "focus": "selector-aware"
+}

@@ -1,8 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mutation-forge.invalid/schemas/stage3-generated-policy.v1.json",
-  "title": "Stage 3 generated policy output",
-  "description": "Strict one-shot generation response; source is validated independently.",
+  "title": "Stage 3 generated ranker policy",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "source", "design_summary", "used_fields", "assumptions"],
