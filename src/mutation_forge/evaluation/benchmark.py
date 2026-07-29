@@ -188,7 +188,7 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                     episodes.append(episode)
                     baseline_episodes += 1
                     cumulative_timing_profile = aggregate_timing_profiles(
-                        (item.timing_profile for item in episodes),
+                        ((item.baseline, item.timing_profile) for item in episodes),
                         enabled=config.search.profiling_enabled,
                     )
                     bus.emit(
@@ -218,7 +218,7 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             for baseline in config.proposals.operator_families
         }
         timing_profile = aggregate_timing_profiles(
-            (episode.timing_profile for episode in episodes),
+            ((episode.baseline, episode.timing_profile) for episode in episodes),
             enabled=config.search.profiling_enabled,
         )
         canonical_payload = _canonical_summary_payload(

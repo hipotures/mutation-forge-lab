@@ -115,6 +115,24 @@ def test_json_and_rich_runs_have_same_canonical_summary(
             "proposal_packaging": 6,
             "other": None,
         }
+        operator_seconds = timing_profile["phase_grandchildren_seconds"][
+            "proposal_generation"
+        ]["operator_search"]
+        assert set(operator_seconds) == {
+            "heg_uniform_two_switch",
+            "heg_forbidden_cycle_break",
+        }
+        assert sum(operator_seconds.values()) == pytest.approx(
+            proposal_children["operator_search"]
+        )
+        operator_calls = timing_profile["phase_grandchildren_calls"][
+            "proposal_generation"
+        ]["operator_search"]
+        assert operator_calls == {
+            "heg_uniform_two_switch": 3,
+            "heg_forbidden_cycle_break": 3,
+        }
+        assert sum(operator_calls.values()) == 6
         episodes = result.summary["episodes"]
         assert isinstance(episodes, list)
         assert all(episode["evaluations"] == 3 for episode in episodes)

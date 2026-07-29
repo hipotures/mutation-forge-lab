@@ -74,6 +74,22 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
                     "other": None,
                 }
             },
+            "phase_grandchildren_seconds": {
+                "proposal_generation": {
+                    "operator_search": {
+                        "heg_uniform_two_switch": 1.0,
+                        "heg_forbidden_cycle_break": 2.0,
+                    }
+                }
+            },
+            "phase_grandchildren_calls": {
+                "proposal_generation": {
+                    "operator_search": {
+                        "heg_uniform_two_switch": 8,
+                        "heg_forbidden_cycle_break": 12,
+                    }
+                }
+            },
             "measured_total_seconds": 8.0,
             "accounted_seconds": 7.0,
             "unattributed_seconds": 1.0,
@@ -101,6 +117,29 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         assert "60.0%" in operator_line
         assert "37.5%" in operator_line
         assert "20" in operator_line
+        wide_output = io.StringIO()
+        profile_table = sink._profile_table()
+        assert profile_table is not None
+        Console(file=wide_output, force_terminal=False, width=160).print(profile_table)
+        wide_rendered = wide_output.getvalue()
+        uniform_line = next(
+            line
+            for line in wide_rendered.splitlines()
+            if "heg_uniform_two_switch" in line
+        )
+        forbidden_line = next(
+            line
+            for line in wide_rendered.splitlines()
+            if "heg_forbidden_cycle_break" in line
+        )
+        assert "│  ├─ heg_uniform_two_switch" in uniform_line
+        assert "8" in uniform_line
+        assert "33.3%" in uniform_line
+        assert "12.5%" in uniform_line
+        assert "│  └─ heg_forbidden_cycle_break" in forbidden_line
+        assert "12" in forbidden_line
+        assert "66.7%" in forbidden_line
+        assert "25.0%" in forbidden_line
         other_line = next(
             line for line in rendered.splitlines() if "└─ other" in line
         )
@@ -120,11 +159,15 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         assert process_line.count("│") == 2
         assert "│" in rendered
         assert "┼" in rendered
-        profile_table = sink._profile_table()
-        assert profile_table is not None
         assert profile_table.box is box.MINIMAL
         assert profile_table.border_style == "grey37"
         assert profile_table.rows[-1].style == "bright_cyan"
+
+        profile = sink.state["timing_profile"]
+        assert isinstance(profile, dict)
+        del profile["phase_grandchildren_seconds"]
+        del profile["phase_grandchildren_calls"]
+        assert sink._profile_table() is not None
     finally:
         sink.close()
 

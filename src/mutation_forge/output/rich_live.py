@@ -213,6 +213,46 @@ class RichLiveSink:
                     )
                 }
 
+        grandchildren_by_phase: dict[tuple[str, str], list[tuple[str, float]]] = {}
+        raw_grandchildren = profile.get("phase_grandchildren_seconds")
+        if isinstance(raw_grandchildren, dict):
+            for phase, raw_phase_children in raw_grandchildren.items():
+                if not isinstance(phase, str) or not isinstance(
+                    raw_phase_children, dict
+                ):
+                    continue
+                for child, raw_grandchildren_by_child in raw_phase_children.items():
+                    if not isinstance(child, str) or not isinstance(
+                        raw_grandchildren_by_child, dict
+                    ):
+                        continue
+                    grandchildren_by_phase[(phase, child)] = [
+                        (grandchild, float(seconds))
+                        for grandchild, seconds in raw_grandchildren_by_child.items()
+                        if isinstance(grandchild, str)
+                        and isinstance(seconds, int | float)
+                        and not isinstance(seconds, bool)
+                    ]
+
+        grandchild_calls_by_phase: dict[tuple[str, str], dict[str, int | None]] = {}
+        raw_grandchild_calls = profile.get("phase_grandchildren_calls")
+        if isinstance(raw_grandchild_calls, dict):
+            for phase, raw_phase_children in raw_grandchild_calls.items():
+                if not isinstance(phase, str) or not isinstance(raw_phase_children, dict):
+                    continue
+                for child, raw_calls in raw_phase_children.items():
+                    if not isinstance(child, str) or not isinstance(raw_calls, dict):
+                        continue
+                    grandchild_calls_by_phase[(phase, child)] = {
+                        grandchild: calls
+                        for grandchild, calls in raw_calls.items()
+                        if isinstance(grandchild, str)
+                        and (
+                            calls is None
+                            or (isinstance(calls, int) and not isinstance(calls, bool))
+                        )
+                    }
+
         table = Table(box=box.MINIMAL, border_style="grey37", padding=(0, 1))
         table.add_column("Phase", style="cyan", min_width=28)
         table.add_column("Calls", justify="right", no_wrap=True)
@@ -231,7 +271,8 @@ class RichLiveSink:
                 f"{seconds / measured * 100:.1f}%",
             )
             for index, (child, child_seconds) in enumerate(phase_children):
-                connector = "└─" if index == len(phase_children) - 1 else "├─"
+                child_is_last = index == len(phase_children) - 1
+                connector = "└─" if child_is_last else "├─"
                 child_calls = child_calls_by_phase.get(phase, {})
                 child_call_text = ""
                 if child in child_calls:
@@ -244,6 +285,27 @@ class RichLiveSink:
                     f"{child_seconds / max(seconds, 1e-9) * 100:.1f}%",
                     f"{child_seconds / measured * 100:.1f}%",
                 )
+                grandchildren = grandchildren_by_phase.get((phase, child), [])
+                for grandchild_index, (
+                    grandchild,
+                    grandchild_seconds,
+                ) in enumerate(grandchildren):
+                    grandchild_connector = (
+                        "└─" if grandchild_index == len(grandchildren) - 1 else "├─"
+                    )
+                    parent_branch = "   " if child_is_last else "│  "
+                    grandchild_calls = grandchild_calls_by_phase.get((phase, child), {})
+                    grandchild_call_text = ""
+                    if grandchild in grandchild_calls:
+                        call_count = grandchild_calls[grandchild]
+                        grandchild_call_text = "—" if call_count is None else f"{call_count:,}"
+                    table.add_row(
+                        f"  {parent_branch}{grandchild_connector} {grandchild}",
+                        grandchild_call_text,
+                        f"{grandchild_seconds:.3f}",
+                        (f"{grandchild_seconds / max(child_seconds, 1e-9) * 100:.1f}%"),
+                        f"{grandchild_seconds / measured * 100:.1f}%",
+                    )
 
         table.add_section()
         for label, key in (

@@ -69,19 +69,33 @@ class TimingAccumulator:
 
 
 def aggregate_timing_profiles(
-    profiles: Iterable[EpisodeTimingProfile | None],
+    profiles: Iterable[tuple[str, EpisodeTimingProfile | None]],
     *,
     enabled: bool,
 ) -> dict[str, JsonValue]:
-    collected = [profile for profile in profiles if profile is not None]
+    collected = [
+        (baseline, profile)
+        for baseline, profile in profiles
+        if profile is not None
+    ]
     phase_totals: dict[str, int] = {}
     proposal_phase_totals: dict[str, int] = {}
     proposal_phase_calls: dict[str, int] = {}
+    operator_seconds_by_baseline: dict[str, int] = {}
+    operator_calls_by_baseline: dict[str, int] = {}
     proposal_generation_calls = 0
     measured_total_ns = 0
-    for profile in collected:
+    for baseline, profile in collected:
         measured_total_ns += profile.measured_total_ns
         proposal_generation_calls += profile.proposal_generation_calls
+        operator_seconds_by_baseline[baseline] = (
+            operator_seconds_by_baseline.get(baseline, 0)
+            + profile.proposal_operator_search_ns
+        )
+        operator_calls_by_baseline[baseline] = (
+            operator_calls_by_baseline.get(baseline, 0)
+            + profile.proposal_operator_search_calls
+        )
         for phase, nanoseconds in profile.phase_nanoseconds().items():
             phase_totals[phase] = phase_totals.get(phase, 0) + nanoseconds
         for phase, nanoseconds in profile.proposal_breakdown_nanoseconds().items():
@@ -97,6 +111,9 @@ def aggregate_timing_profiles(
     dominant_ns = 0
     if phase_totals:
         dominant_phase, dominant_ns = max(phase_totals.items(), key=lambda item: item[1])
+    operator_calls_json: dict[str, JsonValue] = {
+        baseline: calls for baseline, calls in operator_calls_by_baseline.items()
+    }
     return {
         "enabled": enabled,
         "profiled_episodes": len(collected),
@@ -114,6 +131,19 @@ def aggregate_timing_profiles(
             "proposal_generation": {
                 **proposal_phase_calls,
                 "other": None,
+            }
+        },
+        "phase_grandchildren_seconds": {
+            "proposal_generation": {
+                "operator_search": {
+                    baseline: nanoseconds / 1_000_000_000
+                    for baseline, nanoseconds in operator_seconds_by_baseline.items()
+                }
+            }
+        },
+        "phase_grandchildren_calls": {
+            "proposal_generation": {
+                "operator_search": operator_calls_json,
             }
         },
         "measured_total_seconds": measured_total_ns / 1_000_000_000,
