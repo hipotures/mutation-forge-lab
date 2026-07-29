@@ -43,18 +43,27 @@ entry point: Mutation Forge
 
 ## Stage 2B: proposal and feature evidence
 
-Stage 2B is active after the Stage 2A gate. It adds host-generated legal
+Stage 2B added host-generated legal
 k-switch pools for `2 <= k <= 4`, frozen bounded immutable scientific schemas,
 reviewed random/structural rankers through the Stage 2A worker, a
-preregistered paired toy comparison, and a bounded order-30 HEG pilot. It still
-uses no model and does not integrate a policy into HEG. A full proposer remains
-blocked until ranker evidence exists. The Stage 2B report must make an explicit
-`GO_TO_STAGE_3` or `NO_GO` decision before any model use.
+preregistered paired toy comparison, and a bounded order-30 HEG pilot.
+
+**Status: completed and validated; `NO_GO`.** Issue #6 is closed as completed.
+Safety, determinism, boundedness, fairness, artifact durability, and the HEG
+pilot passed, but the preregistered efficacy gate failed: structural achieved
+0.0% relative median normalized best-so-far AUC improvement against a required
+10%, and the paired bootstrap interval included zero. The implementation and
+negative evidence remain retained in `docs/reports/STAGE2B_REPORT.md`.
+
+Stage 3, model use, evolution, full proposer work, and HEG policy integration
+remain blocked. The failed gate must not be reinterpreted by changing its
+threshold, dataset, benchmark result, or scientific interpretation.
 
 ## Stages 3–7
 
-Stage 3 adds schema-derived Codex App Server generation only after a safety GO.
-Stage 4 adds archived evolutionary search. Stage 5 freezes and evaluates
-held-out generalization. Stage 6 performs independent verification and
-red-team review. Stage 7 alone may recommend HEG policy integration after the
-final scientific GO.
+Stages 3–7 remain blocked by the Stage 2B `NO_GO`. Stage 3 would add
+schema-derived Codex App Server generation only after a separately approved
+GO. Stage 4 would add archived evolutionary search. Stage 5 would freeze and
+evaluate held-out generalization. Stage 6 would perform independent
+verification and red-team review. Stage 7 alone could recommend HEG policy
+integration after a final scientific GO.

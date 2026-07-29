@@ -23,13 +23,14 @@ generation, program search, generalization, and production consideration.
    `e2d11bb86b4fa5dbc7ebfb441923e0f02e9799a9` and HEG
    `fd97451b0f3d87400d1d955a2c6b1b18303344ff`.
 3. **Stage 2B — proposal and scientific-feature evidence without a model
-   (current).** Host-generated legal k-switch pools, bounded immutable
-   features, fixture/random/structural rankers, a preregistered toy comparison,
-   and a bounded non-held-out HEG pilot. No full proposer is permitted before
-   ranker evidence.
-4. **Stage 3 — Codex App Server generation.** A schema-derived thin inference
-   adapter, isolated authentication/configuration, structured output, saved
-   evidence, and exact token usage.
+   (completed; `NO_GO`).** Host-generated legal k-switch pools, bounded
+   immutable features, fixture/random/structural rankers, a preregistered toy
+   comparison, and a bounded non-held-out HEG pilot. Issue #6 is closed as
+   completed. The preregistered efficacy gate failed, and the implementation
+   plus negative evidence remain retained.
+4. **Stage 3 — Codex App Server generation (blocked).** A schema-derived thin
+   inference adapter, isolated authentication/configuration, structured
+   output, saved evidence, and exact token usage.
 5. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 6. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
@@ -39,11 +40,12 @@ generation, program search, generalization, and production consideration.
 8. **Stage 7 — HEG integration decision.** An explicit GO/NO-GO report before
    any production integration.
 
-Stages 1 and 2A are accepted. Issue #5 is closed as completed and
-`docs/reports/STAGE2A_REPORT.md` records `GO_TO_STAGE_2B`, so work is limited
-to Stage 2B. No model use is allowed before a Stage 2B `GO_TO_STAGE_3`. No full
-proposer may precede ranker evidence, and no HEG policy integration may
-precede the final scientific GO.
+Stages 1 and 2A are accepted. Stage 2B is completed and validated, issue #6 is
+closed as completed, and `docs/reports/STAGE2B_REPORT.md` records **`NO_GO`**
+after the preregistered efficacy gate failed. Stage 3, model use, evolution,
+full proposer work, and HEG policy integration remain blocked. The Stage 2B
+implementation and negative evidence are retained and must not be altered or
+reinterpreted as positive evidence.
 
 ## Scientific controls
 

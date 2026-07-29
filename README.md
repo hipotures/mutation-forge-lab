@@ -19,11 +19,15 @@ deterministic, resource-bounded runtime for one reviewed
 not call a model, evolve programs, execute a full proposer, or integrate a
 policy into HEG.
 
-Stage 2B starts from that accepted entry point. It adds host-generated,
-host-validated legal `k`-switch pools for `k = 2, 3, 4`, freezes the first
-scientific context/proposal schemas, and compares reviewed deterministic
-random and structural rankers over identical pools. Stage 2B still makes no
-model or network call and is not a held-out or HEG-superiority claim.
+Stage 2B is completed and validated. Issue #6 is closed as completed. The
+implementation adds host-generated, host-validated legal `k`-switch pools for
+`k = 2, 3, 4`, freezes the first scientific context/proposal schemas, and
+compares reviewed deterministic random and structural rankers over identical
+pools. The preregistered efficacy gate failed: the structural ranker did not
+clear the required improvement over random, so the final decision is
+**`NO_GO`**. The implementation and negative evidence remain retained.
+Stage 3, model use, evolution, full proposer work, and HEG policy integration
+remain blocked.
 
 ## Setup and checks
 
@@ -106,7 +110,7 @@ See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass
 results. The historical Stage 1 report is unchanged; accepted Stage 2A status
 is in [docs/reports/STAGE2A_REPORT.md](docs/reports/STAGE2A_REPORT.md), and
-current Stage 2B evidence is in
+completed Stage 2B implementation and negative evidence are retained in
 [docs/reports/STAGE2B_REPORT.md](docs/reports/STAGE2B_REPORT.md). See
 [docs/PROFILING.md](docs/PROFILING.md) for the aggregate runtime profile and
 an on/off overhead check.
