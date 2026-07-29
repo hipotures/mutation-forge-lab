@@ -59,6 +59,12 @@ class FakeScenario:
     unknown_notification: bool = False
     thread_started_notification: str | None = None
     turn_started_before_response: bool = False
+    item_started_before_response: bool = False
+    item_type: str = "agentMessage"
+    item_id: str = "item-1"
+    delta_item_id: str | None = None
+    completed_item_id: str | None = None
+    late_item: bool = False
 
 
 class FakeProcess:
@@ -162,6 +168,24 @@ class FakeProcess:
                 )
         elif method == "turn/start":
             self._turn += 1
+            item_id = self.scenario.item_id
+
+            def emit_item_started() -> None:
+                self.stdout.put(
+                    {
+                        "method": "item/started",
+                        "params": {
+                            "threadId": "thread-1",
+                            "turnId": "turn-1",
+                            "startedAtMs": 1,
+                            "item": {
+                                "id": item_id,
+                                "type": self.scenario.item_type,
+                            },
+                        },
+                    }
+                )
+
             if self.scenario.server_request:
                 self.stdout.put({"id": 901, "method": "item/toolCall", "params": {}})
             if self.scenario.turn_started_before_response:
@@ -174,6 +198,8 @@ class FakeProcess:
                         },
                     }
                 )
+            if self.scenario.item_started_before_response:
+                emit_item_started()
             self._response(request_id, {"turn": {"id": "turn-1"}})
             if self.scenario.thread_started_notification == "nested-after-turn-response":
                 self.stdout.put(
@@ -201,6 +227,8 @@ class FakeProcess:
                     },
                 }
             )
+            if not self.scenario.item_started_before_response:
+                emit_item_started()
             if self.scenario.unknown_notification:
                 self.stdout.put(
                     {
@@ -215,7 +243,7 @@ class FakeProcess:
                         "params": {
                             "threadId": "thread-1",
                             "turnId": "turn-1",
-                            "itemId": "item-1",
+                            "itemId": self.scenario.delta_item_id or item_id,
                             "delta": "fixture",
                         },
                     }
@@ -226,9 +254,10 @@ class FakeProcess:
                     "params": {
                         "threadId": "thread-1",
                         "turnId": "turn-1",
+                        "completedAtMs": 2,
                         "item": {
-                            "id": "item-1",
-                            "type": "agentMessage",
+                            "id": self.scenario.completed_item_id or item_id,
+                            "type": self.scenario.item_type,
                             "phase": "final_answer",
                             "text": self.scenario.final_text,
                         },
@@ -244,6 +273,8 @@ class FakeProcess:
                     },
                 }
             )
+            if self.scenario.late_item:
+                emit_item_started()
             if self.scenario.usage is not None:
                 self.stdout.put(
                     {

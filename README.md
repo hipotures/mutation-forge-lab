@@ -213,11 +213,12 @@ uv run mforge stage3 verify-replay PRIMARY REPLAY --json
 ```
 
 `freeze`, `validate`, and replay are model-free. `generate` requires the
-immutable `stage3-generation-frozen-v1` tag and a supported authenticated
-private Codex home. On the recorded host that authentication precondition is
-unavailable, so the command terminates with zero provider/model calls and
-`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Do not bypass the boundary with copied
-or linked credentials.
+immutable preregistration tag and an explicitly authorized `auth.json`. The
+adapter copies only that file into each private Codex home with bounded,
+fail-closed permission checks; it never loads the user's Codex configuration,
+skills, plugins, hooks, memories, or trust settings. Earlier protocol-failure
+evidence remains retained, and each compatibility correction receives a new
+immutable freeze tag instead of moving an existing tag.
 
 See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass

@@ -122,6 +122,74 @@ def test_turn_started_before_response_is_correlated_after_response() -> None:
     adapter.close()
 
 
+def test_item_started_before_turn_response_is_correlated_after_response() -> None:
+    adapter = make_adapter(FakeScenario(item_started_before_response=True))
+    assert adapter.generate("hello", "test:high").text == "fixture answer"
+    adapter.close()
+
+
+def test_item_lifecycle_accepts_passive_user_and_reasoning_items() -> None:
+    adapter = make_adapter(FakeScenario())
+    for item_id, item_type in (("user-1", "userMessage"), ("reason-1", "reasoning")):
+        started = {"item": {"id": item_id, "type": item_type}}
+        adapter._start_item(started)
+        assert adapter._complete_item(started)["type"] == item_type
+    adapter.close()
+
+
+def test_item_delta_rejects_foreign_item_id() -> None:
+    with pytest.raises(ProtocolError, match="active item"):
+        make_adapter(FakeScenario(delta_item_id="item-2")).generate(
+            "hello", "test:high"
+        )
+
+
+def test_item_completed_rejects_foreign_item_id() -> None:
+    with pytest.raises(ProtocolError, match="active item"):
+        make_adapter(FakeScenario(completed_item_id="item-2")).generate(
+            "hello", "test:high"
+        )
+
+
+def test_item_started_rejects_tool_item_type() -> None:
+    with pytest.raises(IsolationError, match="unsupported app-server item type"):
+        make_adapter(FakeScenario(item_type="commandExecution")).generate(
+            "hello", "test:high"
+        )
+
+
+def test_item_event_rejects_foreign_thread_or_turn() -> None:
+    adapter = make_adapter(FakeScenario())
+    with pytest.raises(ProtocolError, match="thread"):
+        adapter._correlate_event(
+            "item/started",
+            {
+                "threadId": "thread-2",
+                "turnId": "turn-1",
+                "item": {"id": "item-1", "type": "agentMessage"},
+            },
+            "thread-1",
+            "turn-1",
+        )
+    with pytest.raises(ProtocolError, match="turn"):
+        adapter._correlate_event(
+            "item/started",
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-2",
+                "item": {"id": "item-1", "type": "agentMessage"},
+            },
+            "thread-1",
+            "turn-1",
+        )
+    adapter.close()
+
+
+def test_item_started_after_turn_completion_is_rejected() -> None:
+    with pytest.raises(ProtocolError, match="after turn completion"):
+        make_adapter(FakeScenario(late_item=True)).generate("hello", "test:high")
+
+
 def test_turn_completed_rejects_foreign_nested_turn_id() -> None:
     adapter = make_adapter(FakeScenario())
     with pytest.raises(ProtocolError, match="foreign turn"):

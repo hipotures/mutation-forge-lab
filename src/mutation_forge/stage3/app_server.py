@@ -33,6 +33,15 @@ from .isolation import (
 
 Json = dict[str, Any]
 
+_PASSIVE_ITEM_TYPES = frozenset({"userMessage", "agentMessage", "reasoning"})
+_REASONING_DELTA_METHODS = frozenset(
+    {
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/textDelta",
+    }
+)
+
 
 class AppServerError(RuntimeError):
     """Base error for protocol, isolation, and process failures."""
@@ -374,7 +383,8 @@ class CodexAppServerAdapter:
         self._stdout_queue: queue.Queue[Any] = queue.Queue(maxsize=256)
         self._reader_stop = threading.Event()
         self._event_count = 0
-        self._item_ids: set[str] = set()
+        self._active_items: dict[str, str] = {}
+        self._completed_item_ids: set[str] = set()
         self._last_status: str = "new"
         self._diagnostics: list[Mapping[str, Any]] = []
         self._lock = threading.RLock()
@@ -657,6 +667,9 @@ class CodexAppServerAdapter:
         thread = self._thread
         if thread is None:
             raise AppServerError("thread failed to start")
+        if self._active_items:
+            raise ProtocolError("previous turn left active items")
+        self._completed_item_ids.clear()
         request_id = self._send("turn/start", params)
         final: str | None = None
         turn_id: str | None = None
@@ -708,17 +721,21 @@ class CodexAppServerAdapter:
                 pending_turn_id = observed_turn_id
             if method == "turn/started":
                 continue
+            if method == "item/started":
+                self._start_item(params_event)
+                continue
             if method == "item/agentMessage/delta":
+                self._correlate_item_delta(params_event, "agentMessage")
+                continue
+            if method in _REASONING_DELTA_METHODS:
+                self._correlate_item_delta(params_event, "reasoning")
                 continue
             if method == "item/completed":
-                item = params_event.get("item")
-                if isinstance(item, Mapping) and item.get("type") in {
-                    "agentMessage",
-                    "agent_message",
-                }:
+                item = self._complete_item(params_event)
+                if item.get("type") == "agentMessage":
                     phase = item.get("phase")
                     if phase == "final_answer" or phase is None:
-                        content = item.get("text", item.get("content"))
+                        content = item.get("text")
                         if isinstance(content, str):
                             final = content
                 continue
@@ -745,6 +762,8 @@ class CodexAppServerAdapter:
                 )
                 if status != "completed":
                     raise TurnError(f"turn ended with status {status!r}")
+                if self._active_items:
+                    raise ProtocolError("turn completed with active items")
                 terminal = True
                 if turn_id is not None:
                     break
@@ -787,8 +806,24 @@ class CodexAppServerAdapter:
                 )
                 if isinstance(last, Mapping):
                     usage_raw = dict(last)
+            elif message.get("method") == "thread/status/changed":
+                event = message.get("params")
+                if not isinstance(event, Mapping):
+                    raise ProtocolError("malformed notification after turn completion")
+                self._correlate_event(
+                    "thread/status/changed",
+                    event,
+                    thread_id,
+                    turn_id,
+                )
+                status = event.get("status")
+                status_type = status.get("type") if isinstance(status, Mapping) else status
+                if status_type in {"systemError", "failed", "interrupted", "cancelled"}:
+                    raise TurnError(f"terminal turn status: {status_type}")
             elif "id" in message:
                 self._deny_server_request(message)
+            else:
+                raise ProtocolError("unexpected notification after turn completion")
         if final is None:
             raise TurnError("no final_answer item")
         usage = self._usage(usage_raw)
@@ -894,10 +929,8 @@ class CodexAppServerAdapter:
         item = params.get("item")
         if isinstance(item, Mapping):
             item_id = item.get("id")
-            if item_id is not None:
-                if not isinstance(item_id, str) or not item_id:
-                    raise ProtocolError("invalid item id")
-                self._item_ids.add(item_id)
+            if item_id is not None and (not isinstance(item_id, str) or not item_id):
+                raise ProtocolError("invalid item id")
             for key in ("threadId", "thread_id"):
                 if key in item and item[key] != thread_id:
                     raise ProtocolError("foreign item thread")
@@ -906,11 +939,49 @@ class CodexAppServerAdapter:
                     if key in item and item[key] != turn_id:
                         raise ProtocolError("foreign item turn")
         item_id = params.get("itemId", params.get("item_id"))
-        if item_id is not None:
-            if not isinstance(item_id, str) or not item_id:
-                raise ProtocolError("invalid item id")
-            self._item_ids.add(item_id)
+        if item_id is not None and (not isinstance(item_id, str) or not item_id):
+            raise ProtocolError("invalid item id")
         return observed_turn
+
+    @staticmethod
+    def _item_payload(params: Mapping[str, Any]) -> tuple[str, str, Mapping[str, Any]]:
+        item = params.get("item")
+        if not isinstance(item, Mapping):
+            raise ProtocolError("item notification has no item")
+        item_id = item.get("id")
+        item_type = item.get("type")
+        if not isinstance(item_id, str) or not item_id:
+            raise ProtocolError("invalid item id")
+        if not isinstance(item_type, str) or not item_type:
+            raise ProtocolError("invalid item type")
+        return item_id, item_type, item
+
+    def _start_item(self, params: Mapping[str, Any]) -> None:
+        item_id, item_type, _ = self._item_payload(params)
+        if item_type not in _PASSIVE_ITEM_TYPES:
+            raise IsolationError(f"unsupported app-server item type: {item_type}")
+        if item_id in self._active_items or item_id in self._completed_item_ids:
+            raise ProtocolError("duplicate item/started")
+        self._active_items[item_id] = item_type
+
+    def _correlate_item_delta(
+        self,
+        params: Mapping[str, Any],
+        expected_type: str,
+    ) -> None:
+        item_id = params.get("itemId")
+        if not isinstance(item_id, str) or not item_id:
+            raise ProtocolError("item delta has no valid item ID")
+        if self._active_items.get(item_id) != expected_type:
+            raise ProtocolError("item delta does not match an active item")
+
+    def _complete_item(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        item_id, item_type, item = self._item_payload(params)
+        if self._active_items.get(item_id) != item_type:
+            raise ProtocolError("item/completed does not match an active item")
+        del self._active_items[item_id]
+        self._completed_item_ids.add(item_id)
+        return item
 
     def _request(self, method: str, params: Json, *, timeout: float | None = None) -> Json:
         request_id = self._send(method, params)
