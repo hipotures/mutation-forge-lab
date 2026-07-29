@@ -112,13 +112,14 @@ def test_json_and_rich_runs_have_same_canonical_summary(
             timing_profile["phase_seconds"]["proposal_generation"]
         )
         assert timing_profile["phase_calls"]["proposal_generation"] == 6
-        assert timing_profile["phase_children_calls"]["proposal_generation"] == {
-            "rng_setup": 6,
-            "graph_materialization": 6,
-            "operator_search": 6,
-            "proposal_packaging": 6,
-            "other": None,
-        }
+        proposal_calls = timing_profile["phase_children_calls"][
+            "proposal_generation"
+        ]
+        assert proposal_calls["rng_setup"] == 6
+        assert 2 <= proposal_calls["graph_materialization"] <= 6
+        assert proposal_calls["operator_search"] == 6
+        assert proposal_calls["proposal_packaging"] == 6
+        assert proposal_calls["other"] is None
         operator_seconds = timing_profile["phase_grandchildren_seconds"][
             "proposal_generation"
         ]["operator_search"]
@@ -190,6 +191,15 @@ def test_deep_operator_profile_preserves_canonical_summary(
     forbidden_children = operators["heg_forbidden_cycle_break"]["children"]
     assert "witness_search" in forbidden_children
     assert "switch_attempts" in forbidden_children
+    forbidden = operators["heg_forbidden_cycle_break"]
+    counters = forbidden["counters"]
+    assert counters["witness_cache_lookups"] == forbidden["calls"]
+    assert counters["witness_cache_hits"] + counters[
+        "witness_cache_misses"
+    ] == counters["witness_cache_lookups"]
+    assert counters["witness_cache_misses"] == forbidden_children[
+        "witness_search"
+    ]["calls"]
     assert all(
         "deep_operator_profile" in episode
         for episode in enabled.summary["episodes"]

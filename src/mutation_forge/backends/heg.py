@@ -30,7 +30,13 @@ OPERATOR_MAP = {
 class HegBackend:
     backend_id = "heg-erdos-gyarfas-connected-cubic"
 
-    def __init__(self, repo: Path, *, score_timeout_seconds: float = 2.0) -> None:
+    def __init__(
+        self,
+        repo: Path,
+        *,
+        score_timeout_seconds: float = 2.0,
+        mutation_witness_cache_enabled: bool = True,
+    ) -> None:
         self.repo = repo.resolve()
         source = self.repo / "src"
         if not (source / "sglab").is_dir():
@@ -49,6 +55,17 @@ class HegBackend:
         self._worker_disabled = False
         self.score_implementation = "heg-cpp-score-worker"
         self._score_timeout_seconds = score_timeout_seconds
+        context_factory = getattr(self._plugin, "new_mutation_context", None)
+        if context_factory is None:
+            raise RuntimeError(
+                "configured HEG repository does not support mutation witness caching"
+            )
+        self._mutation_witness_cache_enabled = mutation_witness_cache_enabled
+        self._mutation_witness_context = context_factory(
+            cache_enabled=mutation_witness_cache_enabled
+        )
+        self._proposal_graph_state: GraphState | None = None
+        self._proposal_heg_graph: Any | None = None
         self.commit = self._git("rev-parse", "HEAD")
         self.dirty = bool(self._git("status", "--short"))
 
@@ -234,18 +251,30 @@ class HegBackend:
         if record_timing is not None:
             record_timing("rng_setup", time.perf_counter_ns() - phase_started_ns)
 
-        phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
-        heg_graph = self._to_heg(graph)
-        if record_timing is not None:
-            record_timing(
-                "graph_materialization",
-                time.perf_counter_ns() - phase_started_ns,
+        if graph is self._proposal_graph_state:
+            assert self._proposal_heg_graph is not None
+            heg_graph = self._proposal_heg_graph
+        else:
+            phase_started_ns = (
+                time.perf_counter_ns() if record_timing is not None else 0
             )
+            heg_graph = self._to_heg(graph)
+            self._proposal_graph_state = graph
+            self._proposal_heg_graph = heg_graph
+            if record_timing is not None:
+                record_timing(
+                    "graph_materialization",
+                    time.perf_counter_ns() - phase_started_ns,
+                )
 
         mutation_config: dict[str, Any] = {
             "mode": "cubic_first",
             "mutation_operator": heg_operator,
         }
+        if heg_operator == "forbidden_cycle_break_switch":
+            mutation_config["forbidden_witness_context"] = (
+                self._mutation_witness_context
+            )
         deep_profile = None
         if record_deep_profile is not None:
             profile_factory = getattr(self._plugin, "new_mutation_profile", None)
@@ -275,7 +304,9 @@ class HegBackend:
             deep_profile.record_operator(heg_operator, operator_elapsed_ns)
             record_deep_profile(
                 operator_family,
-                deep_profile.payload(cache_enabled=False),
+                deep_profile.payload(
+                    cache_enabled=self._mutation_witness_cache_enabled
+                ),
             )
 
         phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
@@ -293,6 +324,9 @@ class HegBackend:
         return rewrite
 
     def close(self) -> None:
+        self._mutation_witness_context.invalidate()
+        self._proposal_graph_state = None
+        self._proposal_heg_graph = None
         if self._worker is not None:
             self._worker.close()
             self._worker = None

@@ -24,7 +24,9 @@ Deep profiling is disabled by default and is independent of
 proposal and records witness search, witness-edge materialization, switch
 attempts, partner-edge sampling, candidate construction, connectivity
 validation, and graph-family validation. It does not enable the HEG mutation
-witness cache or change the search policy.
+witness cache or change the search policy. The cache is part of normal
+`HegBackend` operation; deep profiling only exposes its lookup, hit, miss, and
+witness-search counters.
 
 The aggregate result is stored as `deep_operator_profile` in
 `run_summary.json` and terminal events. Per-episode data is stored as
@@ -37,6 +39,13 @@ not expose separately.
 Deep profiling adds timers inside witness searches and switch attempts. Use it
 for diagnosis, not for throughput comparisons. Leave it disabled when
 measuring normal runtime performance.
+
+`HegBackend` normally keeps one HEG `BitGraph` and one forbidden-witness
+context for the current immutable `GraphState`. Repeated targeted proposals
+against that same state reuse witness choices. An accepted graph replacement
+or a new episode supplies a new `GraphState`, causing one cache miss and
+witness search before reuse resumes. The context changes deterministic
+bookkeeping only; witness selection remains at the same RNG call site.
 
 Each episode measures these non-overlapping phases with
 `time.perf_counter_ns()`:
@@ -76,9 +85,11 @@ disabled, process time remains in the main overview panel.
 
 Child rows under `proposal_generation` form a tree. `Calls` counts the parent
 and each explicitly instrumented child; synthetic `other` has no meaningful
-call count. `Of parent` reports each child's share of proposal generation;
-`Of episode` reports every row's share of the measured episode total. The same
-hierarchy is available in JSON as `phase_children_seconds`, `phase_calls`, and
+call count. `graph_materialization` counts actual `GraphState` to `BitGraph`
+conversions, so its count decreases when the current-graph cache is reused.
+`Of parent` reports each child's share of proposal generation; `Of episode`
+reports every row's share of the measured episode total. The same hierarchy is
+available in JSON as `phase_children_seconds`, `phase_calls`, and
 `phase_children_calls`.
 
 Profiles are timing observations only. They are excluded from the canonical
@@ -100,3 +111,11 @@ proposal generation, 26% to scoring, 12% to duplicate detection, 8% to rewrite
 application, and 0.3% to progress reporting. Unattributed time was 0.3%.
 These figures describe that machine and smoke workload; they are evidence that
 the profiler is cheap, not a portable performance guarantee.
+
+A current-graph witness-cache audit on 2026-07-29 recorded 5,000 targeted
+operator calls, 5,000 cache lookups, 4,987 hits, 13 misses, and 13 witness
+searches: a 99.74% hit rate with all cache accounting identities satisfied.
+Paired cache-on/off targeted episodes produced identical logical results.
+Across two policy seeds, mean targeted episode time fell from 2.344 seconds to
+1.061 seconds. A 2,000-evaluation uniform control differed by 0.3%, within
+single-pair timing noise.

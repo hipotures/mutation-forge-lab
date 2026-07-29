@@ -138,8 +138,10 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             bus.emit("baseline_started", baseline=baseline.policy_id)
             baseline_episodes = 0
             for entry in entries:
-                initial_graph = backend.deserialize_graph6(cast(str, entry["graph6"]))
                 for policy_seed in config.dataset.policy_seeds:
+                    initial_graph = backend.deserialize_graph6(
+                        cast(str, entry["graph6"])
+                    )
                     if time.monotonic() >= deadline:
                         raise TimeoutError("run wall-time budget exhausted")
                     bus.emit(
