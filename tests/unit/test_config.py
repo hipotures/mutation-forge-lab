@@ -18,6 +18,7 @@ def test_stage1_smoke_config_loads(project_root: Path) -> None:
     assert config.search.score_cache_enabled
     assert config.search.score_cutoff_enabled
     assert config.search.prepared_graph_cache_enabled
+    assert config.search.prepared_proposal_handoff_enabled
     assert len(config.stable_hash()) == 64
 
 
@@ -86,6 +87,7 @@ def test_stage1_rejects_non_boolean_deep_profiling(
         "score_cache_enabled",
         "score_cutoff_enabled",
         "prepared_graph_cache_enabled",
+        "prepared_proposal_handoff_enabled",
     ],
 )
 def test_stage1_defaults_scoring_optimizations_on_and_rejects_non_boolean(

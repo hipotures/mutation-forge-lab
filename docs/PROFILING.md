@@ -50,6 +50,7 @@ independently for ablation runs:
 score_cache_enabled = true
 score_cutoff_enabled = true
 prepared_graph_cache_enabled = true
+prepared_proposal_handoff_enabled = true
 ```
 
 The episode-local score cache stores only complete `GraphScore` results; worker
@@ -64,6 +65,14 @@ validation, scoring, serialization, and proposal generation can reuse
 The persistent C++ worker is restarted once after a request failure. A second
 failure switches the backend to the bounded Python reference scorer for the
 rest of the run. Deep profile counters make both transitions visible.
+
+The prepared-proposal handoff is a bounded, backend-owned one-entry bridge
+between HEG proposal generation and rewrite application. It reuses only the
+exact `RewritePlan` object returned for the same source `GraphState`; replaced,
+copied, modified, or externally constructed plans use the full reconstruction
+and validation path. The handoff is consumed on application, replaced by every
+new proposal, and cleared on graph deserialization, seed generation, or backend
+close.
 
 `HegBackend` normally keeps the current and most recent candidate HEG
 `BitGraph`, plus one forbidden-witness context for the current immutable

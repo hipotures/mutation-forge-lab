@@ -77,6 +77,9 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
         prepared_graph_cache_enabled=(
             config.search.prepared_graph_cache_enabled
         ),
+        prepared_proposal_handoff_enabled=(
+            config.search.prepared_proposal_handoff_enabled
+        ),
     )
     project_root = Path(__file__).resolve().parents[3]
     project_state = git_state(project_root)

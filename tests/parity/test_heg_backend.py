@@ -13,7 +13,7 @@ import pytest
 from mutation_forge.backends.base import ScoreProfileRecorder
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.evaluation.episode import run_episode
-from mutation_forge.models import GraphScore, GraphState
+from mutation_forge.models import GraphScore, GraphState, RewritePlan
 from mutation_forge.policies.baselines import HEG_FORBIDDEN_CYCLE_BREAK
 
 
@@ -117,6 +117,149 @@ def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
             assert backend.validate(candidate).valid
     finally:
         backend.close()
+
+
+def test_prepared_proposal_handoff_is_exact_bounded_and_fail_closed(
+    heg_repo: Path,
+) -> None:
+    backend = HegBackend(heg_repo, prepared_graph_cache_enabled=False)
+    try:
+        graph = backend.generate_seed(order=30, seed=101)
+        rewrite = backend.propose_rewrite(
+            graph,
+            operator_family="heg_uniform_two_switch",
+            policy_seed=1,
+            evaluation=1,
+        )
+        assert backend._prepared_proposal is not None  # noqa: SLF001
+        with (
+            patch.object(
+                backend,
+                "_to_heg",
+                wraps=backend._to_heg,  # noqa: SLF001
+            ) as materialize,
+            patch.object(
+                backend._plugin,  # noqa: SLF001
+                "validate_graph",
+                wraps=backend._plugin.validate_graph,  # noqa: SLF001
+            ) as validate,
+        ):
+            candidate = backend.apply_rewrite(graph, rewrite)
+        assert materialize.call_count == 0
+        assert validate.call_count == 0
+        assert backend.validate(candidate).valid
+        assert backend._prepared_proposal is None  # noqa: SLF001
+
+        stale_rewrite = backend.propose_rewrite(
+            candidate,
+            operator_family="heg_uniform_two_switch",
+            policy_seed=1,
+            evaluation=2,
+        )
+        current_rewrite = backend.propose_rewrite(
+            candidate,
+            operator_family="heg_uniform_two_switch",
+            policy_seed=1,
+            evaluation=3,
+        )
+        assert backend._prepared_proposal is not None  # noqa: SLF001
+        assert backend._prepared_proposal.rewrite is current_rewrite  # noqa: SLF001
+        with patch.object(
+            backend._plugin,  # noqa: SLF001
+            "validate_graph",
+            wraps=backend._plugin.validate_graph,  # noqa: SLF001
+        ) as validate:
+            backend.apply_rewrite(candidate, stale_rewrite)
+        assert validate.call_count == 1
+        assert backend._prepared_proposal is None  # noqa: SLF001
+
+        rewrite = backend.propose_rewrite(
+            candidate,
+            operator_family="heg_uniform_two_switch",
+            policy_seed=1,
+            evaluation=4,
+        )
+        copied_rewrite = RewritePlan(
+            rewrite.removed_edges,
+            rewrite.added_edges,
+            rewrite.operator_family,
+            dict(rewrite.metadata),
+        )
+        with patch.object(
+            backend._plugin,  # noqa: SLF001
+            "validate_graph",
+            wraps=backend._plugin.validate_graph,  # noqa: SLF001
+        ) as validate:
+            backend.apply_rewrite(candidate, copied_rewrite)
+        assert validate.call_count == 1
+
+        rewrite = backend.propose_rewrite(
+            candidate,
+            operator_family="heg_uniform_two_switch",
+            policy_seed=1,
+            evaluation=5,
+        )
+        equal_source = GraphState(candidate.order, candidate.edges)
+        with patch.object(
+            backend._plugin,  # noqa: SLF001
+            "validate_graph",
+            wraps=backend._plugin.validate_graph,  # noqa: SLF001
+        ) as validate:
+            backend.apply_rewrite(equal_source, rewrite)
+        assert validate.call_count == 1
+
+        backend.propose_rewrite(
+            candidate,
+            operator_family="heg_uniform_two_switch",
+            policy_seed=1,
+            evaluation=6,
+        )
+        backend.deserialize_graph6(backend.serialize_graph6(candidate))
+        assert backend._prepared_proposal is None  # noqa: SLF001
+    finally:
+        backend.close()
+    assert backend._prepared_proposal is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize("policy_seed", [1, 2, 3])
+def test_prepared_proposal_handoff_preserves_episode_trajectory(
+    heg_repo: Path,
+    policy_seed: int,
+) -> None:
+    enabled = HegBackend(heg_repo)
+    disabled = HegBackend(
+        heg_repo,
+        prepared_proposal_handoff_enabled=False,
+    )
+    try:
+        kwargs = {
+            "entry_id": "prepared-proposal-parity",
+            "graph_seed": 101,
+            "policy_seed": policy_seed,
+            "run_seed": 7,
+            "baseline": HEG_FORBIDDEN_CYCLE_BREAK,
+            "evaluations": 80,
+            "witness_cap": 64,
+            "profiling_enabled": False,
+        }
+        enabled_result = run_episode(
+            backend=enabled,
+            initial_graph=enabled.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        disabled_result = run_episode(
+            backend=disabled,
+            initial_graph=disabled.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        assert enabled_result.as_dict(
+            include_timing=False
+        ) == disabled_result.as_dict(include_timing=False)
+    finally:
+        enabled.close()
+        disabled.close()
 
 
 def test_forbidden_witness_cache_tracks_current_graph_identity(

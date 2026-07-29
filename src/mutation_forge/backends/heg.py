@@ -39,6 +39,17 @@ class _PreparedGraph:
     validation_context: Any | None = None
 
 
+@dataclass(slots=True)
+class _PreparedProposal:
+    source: GraphState
+    rewrite: RewritePlan
+    removed_edges: tuple[tuple[int, int], ...]
+    added_edges: tuple[tuple[int, int], ...]
+    operator_family: str
+    evaluation: int
+    graph: Any
+
+
 class HegBackend:
     backend_id = "heg-erdos-gyarfas-connected-cubic"
 
@@ -50,6 +61,7 @@ class HegBackend:
         mutation_witness_cache_enabled: bool = True,
         score_cutoff_enabled: bool = True,
         prepared_graph_cache_enabled: bool = True,
+        prepared_proposal_handoff_enabled: bool = True,
     ) -> None:
         self.repo = repo.resolve()
         source = self.repo / "src"
@@ -67,6 +79,7 @@ class HegBackend:
         self._worker_error = worker_module.ScoreWorkerError
         self._cycle_count_result = worker_module.CycleCountResult
         self._validation_context_class = target_base.GraphValidationContext
+        self._validation_result_class = target_base.ValidationResult
         self._worker: Any | None = None
         self._worker_disabled = False
         self.score_implementation = "heg-cpp-score-worker"
@@ -85,6 +98,10 @@ class HegBackend:
         self._score_cutoff_enabled = score_cutoff_enabled
         self._prepared_graph_cache_enabled = prepared_graph_cache_enabled
         self._prepared_graphs: OrderedDict[GraphState, _PreparedGraph] = OrderedDict()
+        self._prepared_proposal_handoff_enabled = (
+            prepared_proposal_handoff_enabled
+        )
+        self._prepared_proposal: _PreparedProposal | None = None
         self.commit = self._git("rev-parse", "HEAD")
         self.dirty = bool(self._git("status", "--short"))
 
@@ -216,6 +233,7 @@ class HegBackend:
         return prepared.validation
 
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
+        self._prepared_proposal = None
         graph = self._plugin.generate_seed(
             random.Random(seed), {"order": order, "mode": "cubic_first"}
         )
@@ -519,6 +537,7 @@ class HegBackend:
         return str(self._prepare(graph).graph.to_graph6())
 
     def deserialize_graph6(self, value: str) -> GraphState:
+        self._prepared_proposal = None
         heg_graph = self._model.BitGraph.from_graph6(value)
         graph = self._from_heg(heg_graph)
         self._store_prepared(graph, _PreparedGraph(heg_graph))
@@ -537,6 +556,38 @@ class HegBackend:
             raise ValueError("rewrite contains duplicate removed edges")
         if len(set(rewrite.added_edges)) != len(rewrite.added_edges):
             raise ValueError("rewrite contains duplicate added edges")
+        prepared_proposal = self._prepared_proposal
+        self._prepared_proposal = None
+        if (
+            prepared_proposal is not None
+            and graph is prepared_proposal.source
+            and rewrite is prepared_proposal.rewrite
+            and rewrite.removed_edges == prepared_proposal.removed_edges
+            and rewrite.added_edges == prepared_proposal.added_edges
+            and rewrite.operator_family == prepared_proposal.operator_family
+            and len(rewrite.metadata) == 1
+            and rewrite.metadata.get("evaluation")
+            == prepared_proposal.evaluation
+        ):
+            candidate = self._from_heg(prepared_proposal.graph)
+            if candidate.order != graph.order:
+                raise ValueError("rewrite changed graph order")
+            validation_result = self._validation_result_class(
+                True,
+                "valid HEG mutation result",
+            )
+            self._store_prepared(
+                candidate,
+                _PreparedGraph(
+                    prepared_proposal.graph,
+                    GraphValidation(True),
+                    self._validation_context_class(
+                        prepared_proposal.graph,
+                        validation_result,
+                    ),
+                ),
+            )
+            return candidate
         current = set(graph.edges)
         removed = set(rewrite.removed_edges)
         if not removed.issubset(current):
@@ -571,6 +622,7 @@ class HegBackend:
         record_timing: ProposalTimingRecorder | None = None,
         record_deep_profile: DeepProposalProfileRecorder | None = None,
     ) -> RewritePlan:
+        self._prepared_proposal = None
         phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
         try:
             heg_operator = OPERATOR_MAP[operator_family]
@@ -650,6 +702,16 @@ class HegBackend:
             operator_family=operator_family,
             metadata={"evaluation": evaluation},
         )
+        if self._prepared_proposal_handoff_enabled:
+            self._prepared_proposal = _PreparedProposal(
+                source=graph,
+                rewrite=rewrite,
+                removed_edges=rewrite.removed_edges,
+                added_edges=rewrite.added_edges,
+                operator_family=rewrite.operator_family,
+                evaluation=evaluation,
+                graph=result.graph,
+            )
         if record_timing is not None:
             record_timing(
                 "proposal_packaging",
@@ -661,6 +723,7 @@ class HegBackend:
         self._mutation_witness_context.invalidate()
         self._proposal_graph_state = None
         self._proposal_heg_graph = None
+        self._prepared_proposal = None
         self._prepared_graphs.clear()
         if self._worker is not None:
             self._worker.close()

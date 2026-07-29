@@ -27,6 +27,7 @@ deep_profiling_enabled = false
 score_cache_enabled = true
 score_cutoff_enabled = true
 prepared_graph_cache_enabled = true
+prepared_proposal_handoff_enabled = true
 
 [proposals]
 operator_families = [

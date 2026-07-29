@@ -52,6 +52,7 @@ class SearchConfig:
     score_cache_enabled: bool
     score_cutoff_enabled: bool
     prepared_graph_cache_enabled: bool
+    prepared_proposal_handoff_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +150,14 @@ def load_config(path: str | Path) -> LabConfig:
     prepared_graph_cache_enabled = search.get("prepared_graph_cache_enabled", True)
     if not isinstance(prepared_graph_cache_enabled, bool):
         raise ValueError("search.prepared_graph_cache_enabled must be a boolean")
+    prepared_proposal_handoff_enabled = search.get(
+        "prepared_proposal_handoff_enabled",
+        True,
+    )
+    if not isinstance(prepared_proposal_handoff_enabled, bool):
+        raise ValueError(
+            "search.prepared_proposal_handoff_enabled must be a boolean"
+        )
     operator_families = _str_tuple(
         proposals.get("operator_families"), "proposals.operator_families"
     )
@@ -211,6 +220,9 @@ def load_config(path: str | Path) -> LabConfig:
             score_cache_enabled=score_cache_enabled,
             score_cutoff_enabled=score_cutoff_enabled,
             prepared_graph_cache_enabled=prepared_graph_cache_enabled,
+            prepared_proposal_handoff_enabled=(
+                prepared_proposal_handoff_enabled
+            ),
         ),
         proposals=ProposalConfig(
             operator_families=operator_families,
