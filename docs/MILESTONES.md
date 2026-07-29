@@ -59,6 +59,24 @@ Stage 3, model use, evolution, full proposer work, and HEG policy integration
 remain blocked. The failed gate must not be reinterpreted by changing its
 threshold, dataset, benchmark result, or scientific interpretation.
 
+## Stage 2C: diagnostic follow-up
+
+Stage 2C reproduced the exact Stage 2B control, added bounded rank/metric and
+feature diagnostics, isolated an opt-in full-pool oracle from normal search,
+and executed the frozen non-confirmatory orders 8/10/12 discrimination matrix.
+
+**Status: completed and validated; diagnostic only.** The primary diagnosis is
+`BENCHMARK_SATURATION`: the order-8 benchmark and best-so-far metric collapsed
+distinct policy behavior despite universal pool headroom and substantially
+better immediate structural selections. The next-step decision is
+`DESIGN_STAGE_2D_PREREGISTRATION`.
+
+That decision does not approve or execute Stage 2D. Any Stage 2D benchmark
+must be frozen and approved in a separate issue. Stage 2B remains `NO_GO`, and
+Stage 3, model use, evolution, full proposer work, and HEG policy integration
+remain blocked. Evidence is retained in
+`docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md`.
+
 ## Stages 3–7
 
 Stages 3–7 remain blocked by the Stage 2B `NO_GO`. Stage 3 would add

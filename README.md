@@ -29,12 +29,15 @@ clear the required improvement over random, so the final decision is
 Stage 3, model use, evolution, full proposer work, and HEG policy integration
 remain blocked.
 
-Stage 2C is a diagnostic follow-up to that retained `NO_GO`. It reproduces the
-immutable Stage 2B control, measures rank/tie/metric behavior, and provides an
-explicitly opt-in full-pool oracle for toy diagnostics only. Oracle scores are
-computed after policy selections are fixed, are separately accounted, and
-cannot affect the historical gate or normal Stage 2B commands. Stage 2C is
-exploratory and cannot authorize Stage 3.
+Stage 2C is completed as a diagnostic follow-up to that retained `NO_GO`. It
+reproduced the immutable Stage 2B control, measured rank/tie/metric behavior,
+and used an explicitly opt-in full-pool oracle for toy diagnostics only. The
+primary diagnosis is `BENCHMARK_SATURATION`; the next-step decision is
+`DESIGN_STAGE_2D_PREREGISTRATION`. That decision recommends only the design of
+a separate, future, approved preregistration. It does not authorize Stage 2D
+execution or Stage 3. Oracle scores are computed after policy selections are
+fixed, are separately accounted, and cannot affect the historical gate or
+normal Stage 2B commands.
 
 ## Setup and checks
 
@@ -142,6 +145,9 @@ See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 results. The historical Stage 1 report is unchanged; accepted Stage 2A status
 is in [docs/reports/STAGE2A_REPORT.md](docs/reports/STAGE2A_REPORT.md), and
 completed Stage 2B implementation and negative evidence are retained in
-[docs/reports/STAGE2B_REPORT.md](docs/reports/STAGE2B_REPORT.md). See
+[docs/reports/STAGE2B_REPORT.md](docs/reports/STAGE2B_REPORT.md). The Stage 2C
+diagnosis and still-blocked next step are in
+[docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md](docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md).
+See
 [docs/PROFILING.md](docs/PROFILING.md) for the aggregate runtime profile and
 an on/off overhead check.

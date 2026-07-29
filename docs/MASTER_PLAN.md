@@ -28,16 +28,21 @@ generation, program search, generalization, and production consideration.
    comparison, and a bounded non-held-out HEG pilot. Issue #6 is closed as
    completed. The preregistered efficacy gate failed, and the implementation
    plus negative evidence remain retained.
-4. **Stage 3 — Codex App Server generation (blocked).** A schema-derived thin
+4. **Stage 2C — diagnostic follow-up (completed; diagnostic only).** Exact
+   Stage 2B control replay, isolated full-pool toy oracle, rank/metric/feature
+   diagnostics, and a frozen exploratory discrimination matrix. Primary
+   diagnosis: `BENCHMARK_SATURATION`. Decision:
+   `DESIGN_STAGE_2D_PREREGISTRATION`.
+5. **Stage 3 — Codex App Server generation (blocked).** A schema-derived thin
    inference adapter, isolated authentication/configuration, structured
    output, saved evidence, and exact token usage.
-5. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
+6. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
-6. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
+7. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
    unseen order, preregistered comparisons, and uncertainty estimates.
-7. **Stage 6 — independent verification and red-team review.** Safety and
+8. **Stage 6 — independent verification and red-team review.** Safety and
    scientific-validity audit with reproducible artifacts.
-8. **Stage 7 — HEG integration decision.** An explicit GO/NO-GO report before
+9. **Stage 7 — HEG integration decision.** An explicit GO/NO-GO report before
    any production integration.
 
 Stages 1 and 2A are accepted. Stage 2B is completed and validated, issue #6 is
@@ -45,7 +50,10 @@ closed as completed, and `docs/reports/STAGE2B_REPORT.md` records **`NO_GO`**
 after the preregistered efficacy gate failed. Stage 3, model use, evolution,
 full proposer work, and HEG policy integration remain blocked. The Stage 2B
 implementation and negative evidence are retained and must not be altered or
-reinterpreted as positive evidence.
+reinterpreted as positive evidence. Stage 2C is completed and records
+`BENCHMARK_SATURATION` with `DESIGN_STAGE_2D_PREREGISTRATION`. This recommends
+only a separately specified and approved future preregistration; it does not
+execute Stage 2D, clear `NO_GO`, or unlock Stage 3.
 
 ## Scientific controls
 
