@@ -39,10 +39,12 @@ generation, program search, generalization, and production consideration.
    strict-improvement graph states, unchanged Stage 2B rankers, hierarchical
    paired bootstrap gates, and one complete deterministic replay. All eleven
    preregistered gates passed.
-6. **Stage 3 — Codex App Server generation (not started; separate approval
-   required).** A schema-derived thin inference adapter, isolated
-   authentication/configuration, structured output, saved evidence, and
-   exact token usage.
+6. **Stage 3 — Codex App Server generation (implemented and frozen;
+   `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`).** The schema-derived adapter,
+   isolated capsules, strict structured output, eight-slot campaign,
+   Stage 2A validation/replay, development runner, and gates passed offline
+   validation. The required private Codex home was unauthenticated, so the
+   campaign stopped before any live model turn.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
@@ -67,8 +69,17 @@ controls, and replay requirements before any confirmatory result. The
 confirmatory phase did not modify those inputs or analyses. All eleven gates
 passed and `docs/reports/STAGE2D_CONFIRMATORY_REPORT.md` records
 `GO_TO_STAGE_3`. Stage 2D is non-held-out toy evidence, not a held-out
-generalization claim or HEG superiority claim. Stage 3 has not started and
-requires a separate issue and explicit user approval.
+generalization claim or HEG superiority claim.
+
+Issue #9 separately authorized Stage 3. Its implementation is frozen at
+`a3bd09a0fcbc846c7b33b6c720eda96d136da87a` with annotated tag
+`stage3-generation-frozen-v1`. Offline protocol discovery verified
+`gpt-5.6-luna` with `high` effort, but isolated-home authentication was
+unavailable. Mutation Forge stopped before `thread/start` or `turn/start`,
+made zero provider/model calls, and returned
+`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. No development performance evidence
+was observed. Stage 4 and later stages remain blocked pending explicit review
+and a supported isolated authentication mechanism.
 
 ## Scientific controls
 

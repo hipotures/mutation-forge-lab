@@ -45,8 +45,19 @@ immutable shards before any confirmatory result was observed. All eleven
 preregistered gates passed, including exact primary/replay identity, and the
 decision is **`GO_TO_STAGE_3`**. Stage 2B remains the historical `NO_GO`; the
 Stage 2D result neither rewrites that evidence nor constitutes held-out
-generalization or HEG superiority. Stage 3 has not started and requires a
-separate issue and explicit user approval.
+generalization or HEG superiority.
+
+Stage 3 issue #9 is implemented, preregistered, and offline-validated on
+`agent/stage3-issue-9`. The immutable generation freeze is commit
+`a3bd09a0fcbc846c7b33b6c720eda96d136da87a`, tagged
+`stage3-generation-frozen-v1`. The installed App Server advertised the exact
+frozen `gpt-5.6-luna`/`high` profile, but the required private Codex home was
+not authenticated and no supported isolated reference to the existing auth
+store was available. The run failed closed before any model thread or turn:
+the terminal decision is **`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`** with zero
+provider/model calls. Stage 4, evolution, full proposer work, held-out
+evaluation, and HEG policy integration remain blocked. See
+`docs/reports/STAGE3_REPORT.md`.
 
 ## Setup and checks
 
@@ -179,6 +190,30 @@ evidence, and terminal status. The second complete run is replay evidence,
 never an additional statistical sample. No Stage 2D command has a model,
 network, App Server, oracle, evolution, or HEG-write path.
 
+## Stage 3 frozen one-shot pipeline
+
+The Stage 3 commands render the same canonical state in Rich and JSON modes:
+
+```console
+uv run mforge stage3 appserver-doctor \
+  --config configs/stage3-generation.toml --json
+uv run mforge stage3 freeze \
+  --config configs/stage3-generation.toml --json
+uv run mforge stage3 generate \
+  --config configs/stage3-generation.toml --concurrency 8 --json
+uv run mforge stage3 validate RUN --json
+uv run mforge stage3 evaluate \
+  --config configs/stage3-generation.toml --run RUN --workers 8 --json
+uv run mforge stage3 verify-replay PRIMARY REPLAY --json
+```
+
+`freeze`, `validate`, and replay are model-free. `generate` requires the
+immutable `stage3-generation-frozen-v1` tag and a supported authenticated
+private Codex home. On the recorded host that authentication precondition is
+unavailable, so the command terminates with zero provider/model calls and
+`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Do not bypass the boundary with copied
+or linked credentials.
+
 See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass
 results. The historical Stage 1 report is unchanged; accepted Stage 2A status
@@ -187,6 +222,8 @@ completed Stage 2B implementation and negative evidence are retained in
 [docs/reports/STAGE2B_REPORT.md](docs/reports/STAGE2B_REPORT.md). The Stage 2C
 diagnosis and still-blocked next step are in
 [docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md](docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md).
+The frozen Stage 3 implementation and infrastructure result are in
+[docs/reports/STAGE3_REPORT.md](docs/reports/STAGE3_REPORT.md).
 See
 [docs/PROFILING.md](docs/PROFILING.md) for the aggregate runtime profile and
 an on/off overhead check.

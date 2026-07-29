@@ -97,14 +97,29 @@ and gate result. The only terminal decisions are `GO_TO_STAGE_3`, `NO_GO`, and
 **Status: completed and validated; `GO_TO_STAGE_3`.** All eleven
 preregistered gates passed, including exact primary/replay identity. Stage 2B
 remains the historical `NO_GO`. This non-held-out toy result is neither a
-held-out generalization claim nor evidence of HEG superiority. Stage 3 has not
-started and requires a separate issue and explicit user approval.
+held-out generalization claim nor evidence of HEG superiority.
 
-## Stages 3–7
+## Stage 3: frozen App Server one-shot generation
 
-Stage 3 has not started despite the Stage 2D `GO_TO_STAGE_3`; it requires a
-separate issue and explicit user approval before any model or App Server work.
+Issue #9 implemented and froze the current App Server adapter, schema-derived
+prompt capsule, strict eight-slot campaign, Stage 2A validation/replay,
+immutable 128-episode development runner, reducer, bootstrap, champion rule,
+and twelve-part gate. Freeze commit
+`a3bd09a0fcbc846c7b33b6c720eda96d136da87a` is retained by annotated tag
+`stage3-generation-frozen-v1`.
+
+**Status: implemented and offline-validated;
+`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`.** The no-inference doctor verified the
+installed protocol, exact `gpt-5.6-luna`/`high` profile, and CPU budget. The
+fresh private Codex home was not authenticated, and no supported isolated
+auth-store reference was available. Execution failed closed with zero
+provider/model calls before any model thread or turn. No candidate or
+development metric was observed. See `docs/reports/STAGE3_REPORT.md`.
+
+## Stages 4–7
+
 Stage 4 would add archived evolutionary search. Stage 5 would freeze and
 evaluate held-out generalization. Stage 6 would perform independent
 verification and red-team review. Stage 7 alone could recommend HEG policy
-integration after a final scientific GO.
+integration after a final scientific GO. All remain blocked; Stage 3's
+infrastructure result does not authorize any of them.
