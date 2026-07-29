@@ -62,6 +62,7 @@ class HegBackend:
         score_cutoff_enabled: bool = True,
         prepared_graph_cache_enabled: bool = True,
         prepared_proposal_handoff_enabled: bool = True,
+        score_longest_first_enabled: bool = True,
     ) -> None:
         self.repo = repo.resolve()
         source = self.repo / "src"
@@ -84,6 +85,7 @@ class HegBackend:
         self._worker_disabled = False
         self.score_implementation = "heg-cpp-score-worker"
         self._score_timeout_seconds = score_timeout_seconds
+        self._score_longest_first_enabled = score_longest_first_enabled
         context_factory = getattr(self._plugin, "new_mutation_context", None)
         if context_factory is None:
             raise RuntimeError(
@@ -255,6 +257,7 @@ class HegBackend:
             self._worker = self._worker_class(
                 timeout_seconds=self._score_timeout_seconds,
                 memory_limit_bytes=64 * 1024 * 1024,
+                cutoff_longest_first=self._score_longest_first_enabled,
             )
         return self._worker
 

@@ -45,6 +45,7 @@ score_cache_enabled = true
 score_cutoff_enabled = true
 prepared_graph_cache_enabled = true
 prepared_proposal_handoff_enabled = true
+score_longest_first_enabled = true
 [proposals]
 operator_families = ["heg_uniform_two_switch", "heg_forbidden_cycle_break"]
 k_values = [2]

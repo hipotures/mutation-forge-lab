@@ -51,6 +51,7 @@ score_cache_enabled = true
 score_cutoff_enabled = true
 prepared_graph_cache_enabled = true
 prepared_proposal_handoff_enabled = true
+score_longest_first_enabled = true
 ```
 
 The episode-local score cache stores only complete `GraphScore` results; worker
@@ -73,6 +74,13 @@ copied, modified, or externally constructed plans use the full reconstruction
 and validation path. The handoff is consumed on application, replaced by every
 new proposal, and cleared on graph deserialization, seed generation, or backend
 close.
+
+With `score_longest_first_enabled`, cutoff requests evaluate forbidden cycle
+lengths from longest to shortest so a capped long-cycle count can prove
+domination before shorter lengths are visited. Complete scores retain the
+canonical increasing order, and worker responses are sorted before they cross
+the protocol boundary. Disabling the flag preserves the former increasing
+evaluation order for ablation and parity checks.
 
 `HegBackend` normally keeps the current and most recent candidate HEG
 `BitGraph`, plus one forbidden-witness context for the current immutable

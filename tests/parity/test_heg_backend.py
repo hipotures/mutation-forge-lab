@@ -607,3 +607,44 @@ def test_score_optimizations_preserve_episode_trajectory(
     finally:
         optimized.close()
         baseline.close()
+
+
+@pytest.mark.parametrize("policy_seed", [1, 2, 3])
+def test_score_longest_first_preserves_episode_trajectory(
+    heg_repo: Path,
+    policy_seed: int,
+) -> None:
+    longest_first = HegBackend(heg_repo)
+    increasing = HegBackend(
+        heg_repo,
+        score_longest_first_enabled=False,
+    )
+    try:
+        kwargs = {
+            "entry_id": "score-order-parity",
+            "graph_seed": 101,
+            "policy_seed": policy_seed,
+            "run_seed": 7,
+            "baseline": HEG_FORBIDDEN_CYCLE_BREAK,
+            "evaluations": 80,
+            "witness_cap": 64,
+            "profiling_enabled": False,
+        }
+        longest_result = run_episode(
+            backend=longest_first,
+            initial_graph=longest_first.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        increasing_result = run_episode(
+            backend=increasing,
+            initial_graph=increasing.generate_seed(order=30, seed=101),
+            deadline=time.monotonic() + 30,
+            **kwargs,
+        )
+        assert longest_result.as_dict(
+            include_timing=False
+        ) == increasing_result.as_dict(include_timing=False)
+    finally:
+        longest_first.close()
+        increasing.close()

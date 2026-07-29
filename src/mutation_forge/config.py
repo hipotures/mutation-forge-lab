@@ -53,6 +53,7 @@ class SearchConfig:
     score_cutoff_enabled: bool
     prepared_graph_cache_enabled: bool
     prepared_proposal_handoff_enabled: bool
+    score_longest_first_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +159,14 @@ def load_config(path: str | Path) -> LabConfig:
         raise ValueError(
             "search.prepared_proposal_handoff_enabled must be a boolean"
         )
+    score_longest_first_enabled = search.get(
+        "score_longest_first_enabled",
+        True,
+    )
+    if not isinstance(score_longest_first_enabled, bool):
+        raise ValueError(
+            "search.score_longest_first_enabled must be a boolean"
+        )
     operator_families = _str_tuple(
         proposals.get("operator_families"), "proposals.operator_families"
     )
@@ -223,6 +232,7 @@ def load_config(path: str | Path) -> LabConfig:
             prepared_proposal_handoff_enabled=(
                 prepared_proposal_handoff_enabled
             ),
+            score_longest_first_enabled=score_longest_first_enabled,
         ),
         proposals=ProposalConfig(
             operator_families=operator_families,
