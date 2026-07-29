@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage2c-config.schema.json",
+  "title": "Mutation Forge Stage 2C diagnostic configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "repositories",
+    "control",
+    "matrix",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "stage2c.1"
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_root",
+        "output",
+        "max_artifact_bytes",
+        "max_record_bytes",
+        "record_shard_bytes",
+        "max_record_count",
+        "max_record_total_bytes"
+      ],
+      "properties": {
+        "run_root": {"type": "string", "minLength": 1},
+        "output": {"enum": ["rich", "json"]},
+        "max_artifact_bytes": {"type": "integer", "minimum": 1, "maximum": 16777216},
+        "max_record_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "record_shard_bytes": {"type": "integer", "minimum": 1, "maximum": 16777216},
+        "max_record_count": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_record_total_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        }
+      }
+    },
+    "repositories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_repo",
+        "heg_repo",
+        "frozen_project_commit",
+        "frozen_heg_commit"
+      ],
+      "properties": {
+        "project_repo": {"type": "string", "minLength": 1},
+        "heg_repo": {"type": "string", "minLength": 1},
+        "frozen_project_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "frozen_heg_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage2b_config",
+        "durable_result",
+        "expected_config_hash",
+        "expected_behavior_hash",
+        "expected_random_median_auc",
+        "expected_structural_median_auc",
+        "expected_relative_improvement",
+        "expected_ci"
+      ],
+      "properties": {
+        "stage2b_config": {"type": "string", "minLength": 1},
+        "durable_result": {"type": "string", "minLength": 1},
+        "expected_config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "expected_behavior_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "expected_random_median_auc": {"type": "number"},
+        "expected_structural_median_auc": {"type": "number"},
+        "expected_relative_improvement": {"type": "number"},
+        "expected_ci": {
+          "type": "array",
+          "prefixItems": [{"type": "number"}, {"type": "number"}],
+          "items": false
+        }
+      }
+    },
+    "matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["orders", "graph_seeds", "policy_seeds", "horizons"],
+      "properties": {
+        "orders": {"const": [8, 10, 12]},
+        "graph_seeds": {"const": [101, 102, 103, 104]},
+        "policy_seeds": {
+          "const": [
+            1, 2, 3, 4, 5, 6, 7, 8,
+            9, 10, 11, 12, 13, 14, 15, 16,
+            17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32
+          ]
+        },
+        "horizons": {"const": [8, 16, 32]}
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "top_k_values",
+        "feature_sample_cap",
+        "distinct_value_cap",
+        "near_constant_epsilon"
+      ],
+      "properties": {
+        "top_k_values": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1, "maximum": 16}
+        },
+        "feature_sample_cap": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "distinct_value_cap": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "near_constant_epsilon": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

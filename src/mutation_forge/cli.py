@@ -28,6 +28,12 @@ from mutation_forge.stage2b.evaluation import (
     inspect_proposals,
     run_stage2b_compare,
 )
+from mutation_forge.stage2c.config import load_stage2c_config
+from mutation_forge.stage2c.evaluation import (
+    run_pool_oracle,
+    run_stage2c_control,
+    run_stage2c_matrix,
+)
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -281,6 +287,43 @@ def _proposals_inspect(config_path: Path, *, json_output: bool) -> int:
     return 0
 
 
+def _stage2c_diagnostic(
+    command: str,
+    config_path: Path,
+    *,
+    json_output: bool,
+) -> int:
+    resolved_config_path = config_path
+    supplied_stage2b_control = False
+    if command == "stage2c-control":
+        with config_path.open("rb") as handle:
+            schema_version = tomllib.load(handle).get("schema_version")
+        if schema_version == "stage2b.1":
+            supplied_stage2b_control = True
+            resolved_config_path = config_path.parent / "stage2c-diagnostic.toml"
+    config = load_stage2c_config(resolved_config_path)
+    if (
+        supplied_stage2b_control
+        and config.control.stage2b_config != config_path.resolve()
+    ):
+        raise ValueError(
+            "Stage 2C control command must reference its frozen Stage 2B config"
+        )
+    if command == "stage2c-control":
+        result = run_stage2c_control(config)
+    elif command == "pool-oracle":
+        result = run_pool_oracle(config)
+    elif command == "stage2c-matrix":
+        result = run_stage2c_matrix(config)
+    else:
+        raise ValueError(f"unsupported diagnostic command: {command}")
+    _emit_policy_result(
+        result,
+        json_output=json_output or config.run.output == "json",
+    )
+    return 0 if result["status"] == "completed" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mforge")
     parser.add_argument("--version", action="version", version=__version__)
@@ -337,6 +380,16 @@ def build_parser() -> argparse.ArgumentParser:
     policy_compare.add_argument("structural_policy")
     policy_compare.add_argument("--config", type=Path, required=True)
     policy_compare.add_argument("--json", action="store_true")
+
+    diagnostics = commands.add_parser("diagnostics")
+    diagnostic_commands = diagnostics.add_subparsers(
+        dest="diagnostics_command",
+        required=True,
+    )
+    for name in ("stage2c-control", "pool-oracle", "stage2c-matrix"):
+        diagnostic = diagnostic_commands.add_parser(name)
+        diagnostic.add_argument("--config", type=Path, required=True)
+        diagnostic.add_argument("--json", action="store_true")
     return parser
 
 
@@ -374,6 +427,12 @@ def main(argv: list[str] | None = None) -> int:
             return _policy_compare(
                 args.random_policy,
                 args.structural_policy,
+                args.config,
+                json_output=args.json,
+            )
+        if args.command == "diagnostics":
+            return _stage2c_diagnostic(
+                args.diagnostics_command,
                 args.config,
                 json_output=args.json,
             )

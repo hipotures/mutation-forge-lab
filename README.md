@@ -29,6 +29,13 @@ clear the required improvement over random, so the final decision is
 Stage 3, model use, evolution, full proposer work, and HEG policy integration
 remain blocked.
 
+Stage 2C is a diagnostic follow-up to that retained `NO_GO`. It reproduces the
+immutable Stage 2B control, measures rank/tie/metric behavior, and provides an
+explicitly opt-in full-pool oracle for toy diagnostics only. Oracle scores are
+computed after policy selections are fixed, are separately accounted, and
+cannot affect the historical gate or normal Stage 2B commands. Stage 2C is
+exploratory and cannot authorize Stage 3.
+
 ## Setup and checks
 
 Python 3.12 or newer and the read-only sibling repository at `../heg` are
@@ -105,6 +112,30 @@ experiment state. Only each ranker's selected plan is authoritatively scored;
 there is no hidden best-of-pool scoring. The schemas are
 [stage2b-context.schema.json](configs/schemas/stage2b-context.schema.json) and
 [stage2b-proposal.schema.json](configs/schemas/stage2b-proposal.schema.json).
+
+## Stage 2C diagnostics
+
+The checked-in Stage 2C configuration freezes the exploratory orders, graph
+seeds, policy seeds, horizons, unchanged Stage 2B pool/feature/worker budgets,
+artifact bounds, and expected Stage 2B control identities before execution:
+
+```console
+uv run mforge diagnostics stage2c-control \
+  --config configs/stage2b-preregistered.toml --json
+uv run mforge diagnostics pool-oracle \
+  --config configs/stage2c-diagnostic.toml --json
+uv run mforge diagnostics stage2c-matrix \
+  --config configs/stage2c-diagnostic.toml --json
+```
+
+The control command fails closed on any mismatch with the published Stage 2B
+metrics or identities. `pool-oracle` and `stage2c-matrix` are the only commands
+that enable full-pool toy scoring. They persist separately timed oracle
+accounting, trajectory-parity proofs, feature statistics, bounded canonical
+rank records, deterministic replay evidence, and terminal status under
+`runs/stage2c-*`. Normal Stage 1/2A/2B commands remain selected-only and have no
+oracle switch. Diagnostic execution does not use a network, model, or App
+Server.
 
 See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass
