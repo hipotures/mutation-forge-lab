@@ -39,12 +39,14 @@ execution or Stage 3. Oracle scores are computed after policy selections are
 fixed, are separately accounted, and cannot affect the historical gate or
 normal Stage 2B commands.
 
-Stage 2D is an approved, two-phase confirmatory follow-up. Its checked-in
-preregistration freezes 512 paired real trajectories over toy orders 10 and
-12 into exactly eight immutable shards before any confirmatory result is
-observed. The retained Stage 2B random and structural rankers are unchanged.
-Stage 2B remains `NO_GO`; Stage 3 remains blocked until the complete primary
-run and deterministic replay produce a reviewed Stage 2D decision.
+Stage 2D is completed and validated. Its checked-in preregistration froze 512
+paired real trajectories over toy orders 10 and 12 into exactly eight
+immutable shards before any confirmatory result was observed. All eleven
+preregistered gates passed, including exact primary/replay identity, and the
+decision is **`GO_TO_STAGE_3`**. Stage 2B remains the historical `NO_GO`; the
+Stage 2D result neither rewrites that evidence nor constitutes held-out
+generalization or HEG superiority. Stage 3 has not started and requires a
+separate issue and explicit user approval.
 
 ## Setup and checks
 

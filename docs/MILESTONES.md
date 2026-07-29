@@ -94,15 +94,17 @@ all timing-stripped episode records, shard hashes, aggregate hash, statistics,
 and gate result. The only terminal decisions are `GO_TO_STAGE_3`, `NO_GO`, and
 `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`.
 
-**Status: preregistration implementation in progress; confirmatory result not
-yet observed.** Stage 2B remains `NO_GO`. Stage 3, model use, evolution, full
-proposer work, and HEG policy integration remain blocked.
+**Status: completed and validated; `GO_TO_STAGE_3`.** All eleven
+preregistered gates passed, including exact primary/replay identity. Stage 2B
+remains the historical `NO_GO`. This non-held-out toy result is neither a
+held-out generalization claim nor evidence of HEG superiority. Stage 3 has not
+started and requires a separate issue and explicit user approval.
 
 ## Stages 3–7
 
-Stages 3–7 remain blocked pending a reviewed Stage 2D result. Stage 3 would add
-schema-derived Codex App Server generation only after a separately approved
-GO. Stage 4 would add archived evolutionary search. Stage 5 would freeze and
+Stage 3 has not started despite the Stage 2D `GO_TO_STAGE_3`; it requires a
+separate issue and explicit user approval before any model or App Server work.
+Stage 4 would add archived evolutionary search. Stage 5 would freeze and
 evaluate held-out generalization. Stage 6 would perform independent
 verification and red-team review. Stage 7 alone could recommend HEG policy
 integration after a final scientific GO.

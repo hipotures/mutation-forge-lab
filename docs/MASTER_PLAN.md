@@ -33,14 +33,16 @@ generation, program search, generalization, and production consideration.
    diagnostics, and a frozen exploratory discrimination matrix. Primary
    diagnosis: `BENCHMARK_SATURATION`. Decision:
    `DESIGN_STAGE_2D_PREREGISTRATION`.
-5. **Stage 2D — preregistered independent trajectories (approved; pending
-   result).** Exactly eight immutable shards containing 512 paired toy
-   episodes over orders 10/12, independent strict-improvement graph states,
-   unchanged Stage 2B rankers, hierarchical paired bootstrap gates, and one
-   complete deterministic replay.
-6. **Stage 3 — Codex App Server generation (blocked).** A schema-derived thin
-   inference adapter, isolated authentication/configuration, structured
-   output, saved evidence, and exact token usage.
+5. **Stage 2D — preregistered independent trajectories (completed and
+   validated; `GO_TO_STAGE_3`).** Exactly eight immutable shards containing
+   512 paired toy episodes over orders 10/12, independent
+   strict-improvement graph states, unchanged Stage 2B rankers, hierarchical
+   paired bootstrap gates, and one complete deterministic replay. All eleven
+   preregistered gates passed.
+6. **Stage 3 — Codex App Server generation (not started; separate approval
+   required).** A schema-derived thin inference adapter, isolated
+   authentication/configuration, structured output, saved evidence, and
+   exact token usage.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
@@ -51,23 +53,22 @@ generation, program search, generalization, and production consideration.
    any production integration.
 
 Stages 1 and 2A are accepted. Stage 2B is completed and validated, issue #6 is
-closed as completed, and `docs/reports/STAGE2B_REPORT.md` records **`NO_GO`**
-after the preregistered efficacy gate failed. Stage 3, model use, evolution,
-full proposer work, and HEG policy integration remain blocked. The Stage 2B
-implementation and negative evidence are retained and must not be altered or
-reinterpreted as positive evidence. Stage 2C is completed and records
-`BENCHMARK_SATURATION` with `DESIGN_STAGE_2D_PREREGISTRATION`. This recommends
-only a separately specified and approved future preregistration; it does not
-execute Stage 2D, clear `NO_GO`, or unlock Stage 3.
+closed as completed, and `docs/reports/STAGE2B_REPORT.md` records the
+historical **`NO_GO`** after its preregistered efficacy gate failed. The Stage
+2B implementation and negative evidence remain retained and must not be
+altered or reinterpreted as positive evidence. Stage 2C is completed and
+records `BENCHMARK_SATURATION` with `DESIGN_STAGE_2D_PREREGISTRATION`.
 
 Issue #8 separately approved Stage 2D under a strict two-phase discipline.
-The preregistration freezes the runner, config, schemas, ordered 512-episode
+The preregistration froze the runner, config, schemas, ordered 512-episode
 manifest, eight shard assignments, unchanged ranker identities, primary and
 secondary metrics, hierarchical bootstrap, thresholds, exclusions, resource
 controls, and replay requirements before any confirmatory result. The
-confirmatory phase cannot modify those inputs or analyses. Stage 3 remains
-blocked until the final Stage 2D report is reviewed and integrated with
-`GO_TO_STAGE_3`.
+confirmatory phase did not modify those inputs or analyses. All eleven gates
+passed and `docs/reports/STAGE2D_CONFIRMATORY_REPORT.md` records
+`GO_TO_STAGE_3`. Stage 2D is non-held-out toy evidence, not a held-out
+generalization claim or HEG superiority claim. Stage 3 has not started and
+requires a separate issue and explicit user approval.
 
 ## Scientific controls
 
