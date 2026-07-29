@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from mutation_forge.models import (
@@ -12,6 +12,9 @@ from mutation_forge.models import (
 )
 
 type ProposalTimingRecorder = Callable[[str, int], None]
+type DeepProposalProfileRecorder = Callable[
+    [str, Mapping[str, int | float | bool]], None
+]
 
 
 class GraphBackend(Protocol):
@@ -43,6 +46,7 @@ class GraphBackend(Protocol):
         policy_seed: int,
         evaluation: int,
         record_timing: ProposalTimingRecorder | None = None,
+        record_deep_profile: DeepProposalProfileRecorder | None = None,
     ) -> RewritePlan: ...
 
     def close(self) -> None: ...

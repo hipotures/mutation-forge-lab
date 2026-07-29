@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mutation_forge.backends.base import GraphBackend, ProposalTimingRecorder
+from mutation_forge.backends.base import (
+    DeepProposalProfileRecorder,
+    GraphBackend,
+    ProposalTimingRecorder,
+)
 from mutation_forge.models import GraphState, RewritePlan
 
 
@@ -18,6 +22,7 @@ class TwoSwitchProposalSource:
         policy_seed: int,
         evaluation: int,
         record_timing: ProposalTimingRecorder | None = None,
+        record_deep_profile: DeepProposalProfileRecorder | None = None,
     ) -> RewritePlan:
         return self.backend.propose_rewrite(
             graph,
@@ -25,4 +30,5 @@ class TwoSwitchProposalSource:
             policy_seed=policy_seed,
             evaluation=evaluation,
             record_timing=record_timing,
+            record_deep_profile=record_deep_profile,
         )

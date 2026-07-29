@@ -1,9 +1,27 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from mutation_forge.models import EpisodeTimingProfile, JsonValue
+from mutation_forge.models import (
+    DeepOperatorTimingProfile,
+    EpisodeTimingProfile,
+    JsonValue,
+)
+
+DEEP_COUNTER_FIELDS = (
+    "witness_cache_lookups",
+    "witness_cache_hits",
+    "witness_cache_misses",
+    "witness_searches",
+    "witness_search_ns",
+    "witness_edge_materialization_ns",
+    "switch_attempts",
+    "partner_edge_sampling_ns",
+    "candidate_construction_ns",
+    "connectivity_validation_ns",
+    "graph_family_validation_ns",
+)
 
 
 @dataclass(slots=True)
@@ -65,6 +83,49 @@ class TimingAccumulator:
             ),
             proposal_operator_search_calls=self.proposal_operator_search_calls,
             proposal_packaging_calls=self.proposal_packaging_calls,
+        )
+
+
+@dataclass(slots=True)
+class DeepOperatorTimingAccumulator:
+    operator_counters: dict[str, dict[str, int]]
+
+    def __init__(self) -> None:
+        self.operator_counters = {}
+
+    def record(
+        self,
+        operator: str,
+        payload: Mapping[str, int | float | bool],
+    ) -> None:
+        counters = self.operator_counters.setdefault(operator, {})
+        if operator == "heg_uniform_two_switch":
+            operator_ns = payload.get("uniform_ns", 0)
+            operator_calls = payload.get("uniform_evaluations", 0)
+        else:
+            operator_ns = payload.get("targeted_ns", 0)
+            operator_calls = payload.get("targeted_evaluations", 0)
+        if isinstance(operator_ns, int) and not isinstance(operator_ns, bool):
+            counters["operator_search_ns"] = (
+                counters.get("operator_search_ns", 0) + operator_ns
+            )
+        if isinstance(operator_calls, int) and not isinstance(
+            operator_calls, bool
+        ):
+            counters["operator_search_calls"] = (
+                counters.get("operator_search_calls", 0) + operator_calls
+            )
+        for field in DEEP_COUNTER_FIELDS:
+            value = payload.get(field, 0)
+            if isinstance(value, int) and not isinstance(value, bool):
+                counters[field] = counters.get(field, 0) + value
+
+    def finish(self) -> DeepOperatorTimingProfile:
+        return DeepOperatorTimingProfile(
+            operator_counters={
+                operator: dict(counters)
+                for operator, counters in self.operator_counters.items()
+            }
         )
 
 
@@ -152,4 +213,24 @@ def aggregate_timing_profiles(
         "unattributed_fraction": unattributed_ns / max(1, measured_total_ns),
         "dominant_phase": dominant_phase,
         "dominant_seconds": dominant_ns / 1_000_000_000,
+    }
+
+
+def aggregate_deep_operator_profiles(
+    profiles: Iterable[DeepOperatorTimingProfile | None],
+    *,
+    enabled: bool,
+) -> dict[str, JsonValue]:
+    collected = [profile for profile in profiles if profile is not None]
+    merged: dict[str, dict[str, int]] = {}
+    for profile in collected:
+        for operator, counters in profile.operator_counters.items():
+            aggregate = merged.setdefault(operator, {})
+            for field, value in counters.items():
+                aggregate[field] = aggregate.get(field, 0) + value
+    serialized = DeepOperatorTimingProfile(merged).as_dict()
+    return {
+        "enabled": enabled,
+        "profiled_episodes": len(collected),
+        **serialized,
     }

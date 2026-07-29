@@ -51,6 +51,7 @@ class RichLiveSink:
 
     def _render(self) -> Group:
         profile_table = self._profile_table()
+        deep_profile_table = self._deep_profile_table()
         process_times = tuple(
             self._seconds(self.state.get(key))
             for key in ("real_seconds", "user_seconds", "system_seconds")
@@ -88,29 +89,42 @@ class RichLiveSink:
         for label, value in rows:
             overview.add_row(str(label), str(value))
         overview_panel = Panel(overview, title="Mutation Forge Lab · Stage 1")
-        if profile_table is None:
-            return Group(overview_panel)
-        profile = self.state["timing_profile"]
-        assert isinstance(profile, dict)
-        profiled_episodes = profile.get("profiled_episodes", "-")
-        profile_content = Group(profile_table)
-        if all(value != "-" for value in process_times):
-            profile_content = Group(
-                profile_table,
-                Text.assemble(
-                    "\n",
-                    ("Run real/user/sys", "cyan"),
-                    "  ",
-                    process_time_summary,
-                ),
+        panels: list[Panel] = [overview_panel]
+        if profile_table is not None:
+            profile = self.state["timing_profile"]
+            assert isinstance(profile, dict)
+            profiled_episodes = profile.get("profiled_episodes", "-")
+            profile_content = Group(profile_table)
+            if all(value != "-" for value in process_times):
+                profile_content = Group(
+                    profile_table,
+                    Text.assemble(
+                        "\n",
+                        ("Run real/user/sys", "cyan"),
+                        "  ",
+                        process_time_summary,
+                    ),
+                )
+            panels.append(
+                Panel(
+                    profile_content,
+                    title=f"Runtime profile · {profiled_episodes} episodes",
+                )
             )
-        return Group(
-            overview_panel,
-            Panel(
-                profile_content,
-                title=f"Runtime profile · {profiled_episodes} episodes",
-            ),
-        )
+        if deep_profile_table is not None:
+            deep_profile = self.state["deep_operator_profile"]
+            assert isinstance(deep_profile, dict)
+            profiled_episodes = deep_profile.get("profiled_episodes", "-")
+            panels.append(
+                Panel(
+                    deep_profile_table,
+                    title=(
+                        "Deep operator profile · "
+                        f"{profiled_episodes} episodes"
+                    ),
+                )
+            )
+        return Group(*panels)
 
     @staticmethod
     def _seconds(value: JsonValue) -> str:
@@ -330,6 +344,115 @@ class RichLiveSink:
             "100.0%",
             style="bright_cyan",
         )
+        return table
+
+    def _deep_profile_table(self) -> Table | None:
+        profile = self.state.get("deep_operator_profile")
+        if not isinstance(profile, dict) or profile.get("enabled") is not True:
+            return None
+        operators = profile.get("operators")
+        if not isinstance(operators, dict) or not operators:
+            return None
+
+        table = Table(box=box.MINIMAL, border_style="grey37", padding=(0, 1))
+        table.add_column("Operator / phase", style="cyan", min_width=32)
+        table.add_column("Calls", justify="right", no_wrap=True)
+        table.add_column(Text("Wall [s]"), justify="right", no_wrap=True)
+        table.add_column("Of parent", justify="right", no_wrap=True)
+        table.add_column("Of operator", justify="right", no_wrap=True)
+        table.add_column("Details", no_wrap=True)
+
+        def add_node(
+            name: str,
+            node: dict[str, JsonValue],
+            *,
+            parent_seconds: float,
+            operator_seconds: float,
+            prefix: str,
+            connector: str,
+        ) -> None:
+            seconds = node.get("seconds")
+            if (
+                not isinstance(seconds, int | float)
+                or isinstance(seconds, bool)
+            ):
+                return
+            calls = node.get("calls")
+            call_text = (
+                f"{calls:,}"
+                if isinstance(calls, int) and not isinstance(calls, bool)
+                else "—"
+            )
+            details = ""
+            counters = node.get("counters")
+            if isinstance(counters, dict):
+                timing_scope = counters.get("timing_scope")
+                if isinstance(timing_scope, str):
+                    details = timing_scope
+                lookups = counters.get("witness_cache_lookups")
+                hits = counters.get("witness_cache_hits")
+                misses = counters.get("witness_cache_misses")
+                if all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in (lookups, hits, misses)
+                ) and any((lookups, hits, misses)):
+                    details = f"cache h/m/l {hits:,}/{misses:,}/{lookups:,}"
+            label = f"{prefix}{connector} {name}" if connector else name
+            table.add_row(
+                label,
+                call_text,
+                f"{seconds:.3f}",
+                f"{seconds / max(parent_seconds, 1e-9) * 100:.1f}%",
+                f"{seconds / max(operator_seconds, 1e-9) * 100:.1f}%",
+                details,
+            )
+            children = node.get("children")
+            if not isinstance(children, dict):
+                return
+            child_items = [
+                (child_name, child_node)
+                for child_name, child_node in children.items()
+                if isinstance(child_name, str) and isinstance(child_node, dict)
+            ]
+            child_prefix = prefix
+            if connector:
+                child_prefix += "   " if connector == "└─" else "│  "
+            else:
+                child_prefix += "  "
+            for index, (child_name, child_node) in enumerate(child_items):
+                add_node(
+                    child_name,
+                    child_node,
+                    parent_seconds=float(seconds),
+                    operator_seconds=operator_seconds,
+                    prefix=child_prefix,
+                    connector=(
+                        "└─" if index == len(child_items) - 1 else "├─"
+                    ),
+                )
+
+        operator_items = [
+            (operator, node)
+            for operator, node in operators.items()
+            if isinstance(operator, str) and isinstance(node, dict)
+        ]
+        for index, (operator, node) in enumerate(operator_items):
+            seconds = node.get("seconds")
+            if (
+                not isinstance(seconds, int | float)
+                or isinstance(seconds, bool)
+            ):
+                continue
+            if index:
+                table.add_section()
+            add_node(
+                operator,
+                node,
+                parent_seconds=float(seconds),
+                operator_seconds=float(seconds),
+                prefix="",
+                connector="",
+            )
         return table
 
     def close(self) -> None:

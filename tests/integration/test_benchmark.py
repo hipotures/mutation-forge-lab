@@ -15,6 +15,8 @@ def _write_config(
     run_root: Path,
     *,
     wall_seconds: float = 60,
+    profiling_enabled: bool = True,
+    deep_profiling_enabled: bool = False,
 ) -> None:
     path.write_text(
         f"""
@@ -37,6 +39,8 @@ witness_cap = 8
 controller = "fixed_ils_tabu"
 evaluations_per_episode = 3
 proposal_pool_size = 1
+profiling_enabled = {str(profiling_enabled).lower()}
+deep_profiling_enabled = {str(deep_profiling_enabled).lower()}
 [proposals]
 operator_families = ["heg_uniform_two_switch", "heg_forbidden_cycle_break"]
 k_values = [2]
@@ -137,6 +141,59 @@ def test_json_and_rich_runs_have_same_canonical_summary(
         assert isinstance(episodes, list)
         assert all(episode["evaluations"] == 3 for episode in episodes)
         assert all("timing_profile" in episode for episode in episodes)
+        assert all("deep_operator_profile" not in episode for episode in episodes)
+        assert result.summary["deep_operator_profile"] == {
+            "enabled": False,
+            "profiled_episodes": 0,
+            "operators": {},
+        }
+
+
+def test_deep_operator_profile_preserves_canonical_summary(
+    tmp_path: Path,
+    heg_repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    disabled_path = tmp_path / "disabled.toml"
+    enabled_path = tmp_path / "enabled.toml"
+    _write_config(disabled_path, heg_repo, tmp_path / "disabled-runs")
+    _write_config(
+        enabled_path,
+        heg_repo,
+        tmp_path / "enabled-runs",
+        profiling_enabled=False,
+        deep_profiling_enabled=True,
+    )
+
+    disabled = run_benchmark(load_config(disabled_path), output="json")
+    capsys.readouterr()
+    enabled = run_benchmark(load_config(enabled_path), output="json")
+    capsys.readouterr()
+
+    assert disabled.summary["summary_hash"] == enabled.summary["summary_hash"]
+    deep_profile = enabled.summary["deep_operator_profile"]
+    assert deep_profile["enabled"] is True
+    assert deep_profile["profiled_episodes"] == 2
+    assert enabled.summary["timing_profile"]["enabled"] is False
+    assert enabled.summary["timing_profile"]["profiled_episodes"] == 0
+    operators = deep_profile["operators"]
+    assert set(operators) == {
+        "heg_uniform_two_switch",
+        "heg_forbidden_cycle_break",
+    }
+    for operator in operators.values():
+        assert operator["calls"] == 3
+        children = operator["children"]
+        assert sum(child["seconds"] for child in children.values()) == pytest.approx(
+            operator["seconds"]
+        )
+    forbidden_children = operators["heg_forbidden_cycle_break"]["children"]
+    assert "witness_search" in forbidden_children
+    assert "switch_attempts" in forbidden_children
+    assert all(
+        "deep_operator_profile" in episode
+        for episode in enabled.summary["episodes"]
+    )
 
 
 def test_interrupted_run_leaves_readable_failure_artifacts(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from mutation_forge.backends.heg import HegBackend
@@ -50,6 +51,7 @@ def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
             "heg_forbidden_cycle_break",
         ):
             proposal_timings: list[tuple[str, int]] = []
+            deep_profiles: list[tuple[str, dict[str, int | float | bool]]] = []
 
             def record_timing(
                 phase: str,
@@ -58,13 +60,30 @@ def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
             ) -> None:
                 timings.append((phase, elapsed_ns))
 
+            def record_deep_profile(
+                family: str,
+                payload: Mapping[str, int | float | bool],
+                profiles: list[
+                    tuple[str, dict[str, int | float | bool]]
+                ] = deep_profiles,
+            ) -> None:
+                profiles.append((family, dict(payload)))
+
+            plain_rewrite = backend.propose_rewrite(
+                graph,
+                operator_family=operator,
+                policy_seed=1,
+                evaluation=1,
+            )
             rewrite = backend.propose_rewrite(
                 graph,
                 operator_family=operator,
                 policy_seed=1,
                 evaluation=1,
                 record_timing=record_timing,
+                record_deep_profile=record_deep_profile,
             )
+            assert rewrite == plain_rewrite
             assert [phase for phase, _ in proposal_timings] == [
                 "rng_setup",
                 "graph_materialization",
@@ -72,6 +91,17 @@ def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
                 "proposal_packaging",
             ]
             assert all(elapsed_ns > 0 for _, elapsed_ns in proposal_timings)
+            assert len(deep_profiles) == 1
+            family, payload = deep_profiles[0]
+            assert family == operator
+            if operator == "heg_uniform_two_switch":
+                assert payload["uniform_evaluations"] == 1
+                assert payload["uniform_ns"] > 0
+            else:
+                assert payload["targeted_evaluations"] == 1
+                assert payload["targeted_ns"] > 0
+                assert payload["witness_searches"] == 1
+                assert payload["witness_search_ns"] > 0
             candidate = backend.apply_rewrite(graph, rewrite)
             assert backend.validate(candidate).valid
     finally:

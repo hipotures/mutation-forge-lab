@@ -12,6 +12,32 @@ profiling_enabled = true
 Set the value to `false` for a profiling-overhead control run. Older
 configuration files without the key retain the enabled default.
 
+HEG operator internals can be measured with a separate, opt-in deep profile:
+
+```toml
+[search]
+deep_profiling_enabled = true
+```
+
+Deep profiling is disabled by default and is independent of
+`profiling_enabled`. It enables HEG's `MutationProfileAccumulator` for every
+proposal and records witness search, witness-edge materialization, switch
+attempts, partner-edge sampling, candidate construction, connectivity
+validation, and graph-family validation. It does not enable the HEG mutation
+witness cache or change the search policy.
+
+The aggregate result is stored as `deep_operator_profile` in
+`run_summary.json` and terminal events. Per-episode data is stored as
+`episodes[].deep_operator_profile`. Rich renders it in a separate
+`Deep operator profile` panel. Inclusive operator rows are broken into
+non-overlapping measured children; `other` is the untimed remainder, including
+early-rejection and operator-loop overhead that the current HEG interface does
+not expose separately.
+
+Deep profiling adds timers inside witness searches and switch attempts. Use it
+for diagnosis, not for throughput comparisons. Leave it disabled when
+measuring normal runtime performance.
+
 Each episode measures these non-overlapping phases with
 `time.perf_counter_ns()`:
 

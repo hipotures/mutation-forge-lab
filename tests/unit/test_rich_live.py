@@ -172,6 +172,80 @@ def test_rich_live_renders_full_runtime_profile_table() -> None:
         sink.close()
 
 
+def test_rich_live_renders_separate_deep_operator_profile() -> None:
+    sink = RichLiveSink(console=Console(file=io.StringIO(), force_terminal=False))
+    try:
+        sink.state["timing_profile"] = {"enabled": False}
+        sink.state["deep_operator_profile"] = {
+            "enabled": True,
+            "profiled_episodes": 1,
+            "operators": {
+                "heg_forbidden_cycle_break": {
+                    "seconds": 1.0,
+                    "calls": 10,
+                    "children": {
+                        "witness_search": {
+                            "seconds": 0.4,
+                            "calls": 10,
+                        },
+                        "witness_edge_materialization": {
+                            "seconds": 0.1,
+                            "calls": None,
+                        },
+                        "switch_attempts": {
+                            "seconds": 0.35,
+                            "calls": 40,
+                            "counters": {
+                                "timing_scope": "measured children"
+                            },
+                            "children": {
+                                "partner_edge_sampling": {
+                                    "seconds": 0.05,
+                                    "calls": None,
+                                },
+                                "candidate_construction": {
+                                    "seconds": 0.2,
+                                    "calls": None,
+                                },
+                                "connectivity_validation": {
+                                    "seconds": 0.1,
+                                    "calls": None,
+                                },
+                                "graph_family_validation": {
+                                    "seconds": 0.0,
+                                    "calls": None,
+                                },
+                            },
+                        },
+                        "other": {"seconds": 0.15, "calls": None},
+                    },
+                }
+            },
+        }
+        output = io.StringIO()
+        Console(file=output, force_terminal=False, width=180).print(sink._render())
+        rendered = output.getvalue()
+        assert "Deep operator profile · 1 episodes" in rendered
+        assert "Runtime profile" not in rendered
+        assert "heg_forbidden_cycle_break" in rendered
+        assert "├─ witness_search" in rendered
+        assert "├─ switch_attempts" in rendered
+        assert "│  ├─ partner_edge_sampling" in rendered
+        assert "│  └─ graph_family_validation" in rendered
+        assert "measured children" in rendered
+        assert "40.0%" in rendered
+        assert "Time real/user/sys" in rendered
+        table = sink._deep_profile_table()
+        assert table is not None
+        assert table.box is box.MINIMAL
+        assert table.border_style == "grey37"
+
+        sink.state["deep_operator_profile"] = {"enabled": False}
+        assert sink._deep_profile_table() is None
+    finally:
+        sink.close()
+
+
 def test_rich_live_renders_at_most_once_per_second_and_on_terminal_event() -> None:
     with patch("mutation_forge.output.rich_live.time.monotonic") as monotonic:
         monotonic.return_value = 0.0

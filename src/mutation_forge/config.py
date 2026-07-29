@@ -48,6 +48,7 @@ class SearchConfig:
     evaluations_per_episode: int
     proposal_pool_size: int
     profiling_enabled: bool
+    deep_profiling_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +134,9 @@ def load_config(path: str | Path) -> LabConfig:
     profiling_enabled = search.get("profiling_enabled", True)
     if not isinstance(profiling_enabled, bool):
         raise ValueError("search.profiling_enabled must be a boolean")
+    deep_profiling_enabled = search.get("deep_profiling_enabled", False)
+    if not isinstance(deep_profiling_enabled, bool):
+        raise ValueError("search.deep_profiling_enabled must be a boolean")
     operator_families = _str_tuple(
         proposals.get("operator_families"), "proposals.operator_families"
     )
@@ -191,6 +195,7 @@ def load_config(path: str | Path) -> LabConfig:
                 search.get("proposal_pool_size"), "search.proposal_pool_size"
             ),
             profiling_enabled=profiling_enabled,
+            deep_profiling_enabled=deep_profiling_enabled,
         ),
         proposals=ProposalConfig(
             operator_families=operator_families,

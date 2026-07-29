@@ -23,6 +23,7 @@ controller = "fixed_ils_tabu"
 evaluations_per_episode = 500
 proposal_pool_size = 1
 profiling_enabled = true
+deep_profiling_enabled = false
 
 [proposals]
 operator_families = [

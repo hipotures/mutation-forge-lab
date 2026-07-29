@@ -67,7 +67,8 @@
         "controller": {"const": "fixed_ils_tabu"},
         "evaluations_per_episode": {"type": "integer", "minimum": 1},
         "proposal_pool_size": {"type": "integer", "minimum": 1},
-        "profiling_enabled": {"type": "boolean", "default": true}
+        "profiling_enabled": {"type": "boolean", "default": true},
+        "deep_profiling_enabled": {"type": "boolean", "default": false}
       },
       "additionalProperties": false
     },

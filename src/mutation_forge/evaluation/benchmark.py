@@ -21,7 +21,10 @@ from mutation_forge.config import LabConfig
 from mutation_forge.evaluation.dataset import build_dataset
 from mutation_forge.evaluation.episode import run_episode
 from mutation_forge.evaluation.fitness import aggregate_fitness
-from mutation_forge.evaluation.profiling import aggregate_timing_profiles
+from mutation_forge.evaluation.profiling import (
+    aggregate_deep_operator_profiles,
+    aggregate_timing_profiles,
+)
 from mutation_forge.events import EventBus, EventSink, JsonlSink
 from mutation_forge.models import EpisodeResult, JsonValue
 from mutation_forge.output.rich_live import RichLiveSink
@@ -164,6 +167,9 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                         deadline=deadline,
                         progress=emit_progress,
                         profiling_enabled=config.search.profiling_enabled,
+                        deep_profiling_enabled=(
+                            config.search.deep_profiling_enabled
+                        ),
                     )
                     if episode.timed_out:
                         raise TimeoutError("episode wall-time budget exhausted")
@@ -191,6 +197,10 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                         ((item.baseline, item.timing_profile) for item in episodes),
                         enabled=config.search.profiling_enabled,
                     )
+                    cumulative_deep_profile = aggregate_deep_operator_profiles(
+                        (item.deep_operator_profile for item in episodes),
+                        enabled=config.search.deep_profiling_enabled,
+                    )
                     bus.emit(
                         "episode_completed",
                         baseline=baseline.policy_id,
@@ -209,6 +219,12 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
                             else None
                         ),
                         timing_profile=cumulative_timing_profile,
+                        episode_deep_operator_profile=(
+                            episode.deep_operator_profile.as_dict()
+                            if episode.deep_operator_profile is not None
+                            else None
+                        ),
+                        deep_operator_profile=cumulative_deep_profile,
                     )
 
         fitness = {
@@ -220,6 +236,10 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
         timing_profile = aggregate_timing_profiles(
             ((episode.baseline, episode.timing_profile) for episode in episodes),
             enabled=config.search.profiling_enabled,
+        )
+        deep_operator_profile = aggregate_deep_operator_profiles(
+            (episode.deep_operator_profile for episode in episodes),
+            enabled=config.search.deep_profiling_enabled,
         )
         canonical_payload = _canonical_summary_payload(
             dataset_hash=cast(str, dataset["manifest_hash"]),
@@ -251,6 +271,7 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             "episodes": [episode.as_dict() for episode in episodes],
             "fitness": cast(dict[str, JsonValue], fitness),
             "timing_profile": timing_profile,
+            "deep_operator_profile": deep_operator_profile,
             "run_id": run_id,
             "status": "completed",
             "summary_hash": summary_hash,
@@ -281,6 +302,7 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             user_seconds=user_seconds,
             system_seconds=system_seconds,
             timing_profile=timing_profile,
+            deep_operator_profile=deep_operator_profile,
         )
         return BenchmarkResult(artifacts.path, summary)
     except Exception as error:

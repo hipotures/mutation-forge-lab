@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import random
 
-from mutation_forge.backends.base import ProposalTimingRecorder
+from mutation_forge.backends.base import (
+    DeepProposalProfileRecorder,
+    ProposalTimingRecorder,
+)
 from mutation_forge.models import (
     ExactVerification,
     GraphScore,
@@ -156,6 +159,7 @@ class ToyBackend:
         policy_seed: int,
         evaluation: int,
         record_timing: ProposalTimingRecorder | None = None,
+        record_deep_profile: DeepProposalProfileRecorder | None = None,
     ) -> RewritePlan:
         rng = random.Random((policy_seed << 32) ^ evaluation)
         edges = list(graph.edges)

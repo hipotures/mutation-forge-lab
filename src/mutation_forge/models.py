@@ -196,6 +196,98 @@ class EpisodeTimingProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class DeepOperatorTimingProfile:
+    operator_counters: Mapping[str, Mapping[str, int]]
+
+    @staticmethod
+    def _node(
+        nanoseconds: int,
+        *,
+        calls: int | None,
+        children: dict[str, JsonValue] | None = None,
+        counters: dict[str, JsonValue] | None = None,
+    ) -> dict[str, JsonValue]:
+        node: dict[str, JsonValue] = {
+            "seconds": nanoseconds / 1_000_000_000,
+            "calls": calls,
+        }
+        if children:
+            node["children"] = children
+        if counters:
+            node["counters"] = counters
+        return node
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        operators: dict[str, JsonValue] = {}
+        for operator, counters in self.operator_counters.items():
+            operator_ns = counters.get("operator_search_ns", 0)
+            witness_search_ns = counters.get("witness_search_ns", 0)
+            materialization_ns = counters.get(
+                "witness_edge_materialization_ns", 0
+            )
+            switch_children_ns = {
+                "partner_edge_sampling": counters.get(
+                    "partner_edge_sampling_ns", 0
+                ),
+                "candidate_construction": counters.get(
+                    "candidate_construction_ns", 0
+                ),
+                "connectivity_validation": counters.get(
+                    "connectivity_validation_ns", 0
+                ),
+                "graph_family_validation": counters.get(
+                    "graph_family_validation_ns", 0
+                ),
+            }
+            switch_ns = sum(switch_children_ns.values())
+
+            switch_children: dict[str, JsonValue] = {
+                phase: self._node(nanoseconds, calls=None)
+                for phase, nanoseconds in switch_children_ns.items()
+            }
+            operator_children: dict[str, JsonValue] = {}
+            if witness_search_ns:
+                operator_children["witness_search"] = self._node(
+                    witness_search_ns,
+                    calls=counters.get("witness_searches", 0),
+                )
+            if materialization_ns:
+                operator_children["witness_edge_materialization"] = self._node(
+                    materialization_ns,
+                    calls=None,
+                )
+            if counters.get("switch_attempts", 0):
+                operator_children["switch_attempts"] = self._node(
+                    switch_ns,
+                    calls=counters.get("switch_attempts", 0),
+                    children=switch_children,
+                    counters={"timing_scope": "measured children"},
+                )
+            other_ns = max(
+                0,
+                operator_ns - witness_search_ns - materialization_ns - switch_ns,
+            )
+            if other_ns:
+                operator_children["other"] = self._node(other_ns, calls=None)
+
+            operators[operator] = self._node(
+                operator_ns,
+                calls=counters.get("operator_search_calls", 0),
+                children=operator_children,
+                counters={
+                    "witness_cache_lookups": counters.get(
+                        "witness_cache_lookups", 0
+                    ),
+                    "witness_cache_hits": counters.get("witness_cache_hits", 0),
+                    "witness_cache_misses": counters.get(
+                        "witness_cache_misses", 0
+                    ),
+                },
+            )
+        return {"operators": operators}
+
+
+@dataclass(frozen=True, slots=True)
 class EpisodeResult:
     baseline: str
     entry_id: str
@@ -222,6 +314,7 @@ class EpisodeResult:
     final_graph6: str
     final_graph_hash: str
     timing_profile: EpisodeTimingProfile | None = None
+    deep_operator_profile: DeepOperatorTimingProfile | None = None
 
     def as_dict(self, *, include_timing: bool = True) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
@@ -253,4 +346,8 @@ class EpisodeResult:
             result["elapsed_seconds"] = self.elapsed_seconds
             if self.timing_profile is not None:
                 result["timing_profile"] = self.timing_profile.as_dict()
+            if self.deep_operator_profile is not None:
+                result["deep_operator_profile"] = (
+                    self.deep_operator_profile.as_dict()
+                )
         return result

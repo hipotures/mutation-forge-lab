@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mutation_forge.backends.base import ProposalTimingRecorder
+from mutation_forge.backends.base import (
+    DeepProposalProfileRecorder,
+    ProposalTimingRecorder,
+)
 from mutation_forge.models import (
     ExactVerification,
     GraphScore,
@@ -220,6 +223,7 @@ class HegBackend:
         policy_seed: int,
         evaluation: int,
         record_timing: ProposalTimingRecorder | None = None,
+        record_deep_profile: DeepProposalProfileRecorder | None = None,
     ) -> RewritePlan:
         phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
         try:
@@ -238,17 +242,41 @@ class HegBackend:
                 time.perf_counter_ns() - phase_started_ns,
             )
 
-        phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
+        mutation_config: dict[str, Any] = {
+            "mode": "cubic_first",
+            "mutation_operator": heg_operator,
+        }
+        deep_profile = None
+        if record_deep_profile is not None:
+            profile_factory = getattr(self._plugin, "new_mutation_profile", None)
+            if profile_factory is None:
+                raise RuntimeError(
+                    "configured HEG repository does not support deep mutation profiling"
+                )
+            deep_profile = profile_factory()
+            mutation_config["mutation_profile"] = deep_profile
+
+        measure_operator = (
+            record_timing is not None or record_deep_profile is not None
+        )
+        phase_started_ns = time.perf_counter_ns() if measure_operator else 0
         result = self._plugin.mutate_with_delta(
             heg_graph,
             rng,
-            {
-                "mode": "cubic_first",
-                "mutation_operator": heg_operator,
-            },
+            mutation_config,
+        )
+        operator_elapsed_ns = (
+            time.perf_counter_ns() - phase_started_ns if measure_operator else 0
         )
         if record_timing is not None:
-            record_timing("operator_search", time.perf_counter_ns() - phase_started_ns)
+            record_timing("operator_search", operator_elapsed_ns)
+        if record_deep_profile is not None:
+            assert deep_profile is not None
+            deep_profile.record_operator(heg_operator, operator_elapsed_ns)
+            record_deep_profile(
+                operator_family,
+                deep_profile.payload(cache_enabled=False),
+            )
 
         phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
         rewrite = RewritePlan(

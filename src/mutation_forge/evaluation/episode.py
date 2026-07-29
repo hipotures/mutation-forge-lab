@@ -4,7 +4,10 @@ import time
 from collections.abc import Callable
 
 from mutation_forge.backends.base import GraphBackend
-from mutation_forge.evaluation.profiling import TimingAccumulator
+from mutation_forge.evaluation.profiling import (
+    DeepOperatorTimingAccumulator,
+    TimingAccumulator,
+)
 from mutation_forge.models import EpisodeResult, GraphState, JsonValue
 from mutation_forge.policies.baselines import BaselinePolicy
 from mutation_forge.proposals.two_switch import TwoSwitchProposalSource
@@ -33,9 +36,13 @@ def run_episode(
     deadline: float,
     progress: ProgressCallback | None = None,
     profiling_enabled: bool = True,
+    deep_profiling_enabled: bool = False,
 ) -> EpisodeResult:
     started = time.monotonic()
     timing = TimingAccumulator() if profiling_enabled else None
+    deep_timing = (
+        DeepOperatorTimingAccumulator() if deep_profiling_enabled else None
+    )
     timing_started_ns = time.perf_counter_ns() if timing is not None else 0
     phase_started_ns = time.perf_counter_ns() if timing is not None else 0
     current = initial_graph
@@ -79,6 +86,9 @@ def run_episode(
             policy_seed=effective_policy_seed,
             evaluation=evaluation,
             record_timing=record_proposal_timing,
+            record_deep_profile=(
+                deep_timing.record if deep_timing is not None else None
+            ),
         )
         policy_elapsed_ns = time.perf_counter_ns() - policy_started_ns
         policy_call_ms += policy_elapsed_ns / 1_000_000
@@ -242,4 +252,7 @@ def run_episode(
         final_graph6=final_graph6,
         final_graph_hash=final_graph_hash,
         timing_profile=timing_profile,
+        deep_operator_profile=(
+            deep_timing.finish() if deep_timing is not None else None
+        ),
     )
