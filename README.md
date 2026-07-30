@@ -122,9 +122,12 @@ interval for the absolute delta of `[0.075000, 0.125000]`, while retaining
 99.665% of the structural baseline's pooled median. The final decision is
 **`GO_TO_STAGE_4`** and the complete evidence is retained in
 `docs/reports/STAGE3_REPORT.md`.
-Stage 4, evolution, held-out evaluation, full proposer work, and HEG
-integration have not started and require separate issues and explicit user
-approval.
+Issue #10 completed the frozen Stage 4 archived search, but the terminal
+decision is **`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`** because eight accepted
+generation-0 protocol-failure turns have no exact usage. The 40-record archive
+contains 19 new unique valid offspring; no initial turn was replaced.
+Validation was not eligible, Stage 5 was not started, and HEG was not
+modified. See `docs/reports/STAGE4_REPORT.md`.
 
 ## Setup and checks
 
@@ -303,6 +306,8 @@ completed Stage 2B implementation and negative evidence are retained in
 [docs/reports/STAGE2B_REPORT.md](docs/reports/STAGE2B_REPORT.md). The Stage 2C
 diagnosis and still-blocked next step are in
 [docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md](docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md).
+The completed, infrastructure-inconclusive Stage 4 campaign is documented in
+[docs/reports/STAGE4_REPORT.md](docs/reports/STAGE4_REPORT.md).
 See
 [docs/PROFILING.md](docs/PROFILING.md) for the aggregate runtime profile and
 an on/off overhead check.

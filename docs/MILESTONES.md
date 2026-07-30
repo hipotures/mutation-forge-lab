@@ -196,8 +196,12 @@ final decision `GO_TO_STAGE_4`.
 Stage 2B remains the historical `NO_GO`; Stage 2D and Stage 3 remain
 non-held-out development evidence rather than HEG superiority.
 
-Stage 4 would add archived evolutionary search. Stage 5 would freeze and
-evaluate held-out generalization. Stage 6 would perform independent
-verification and red-team review. Stage 7 alone could recommend HEG policy
-integration after a final scientific GO. None of Stages 4–7 has started, and
-each requires a separate issue and explicit user approval.
+Issue #10 completed the frozen Stage 4 archived evolutionary search.
+`docs/reports/STAGE4_REPORT.md` records
+`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`: the terminal archive is exact, but
+whole-campaign usage is incomplete for eight terminal accepted protocol
+failures. Stage 5 would freeze and evaluate held-out generalization. Stage 6
+would perform independent verification and red-team review. Stage 7 alone
+could recommend HEG policy integration after a final scientific GO. Stages
+5–7 have not started, and each requires a separate issue and explicit user
+approval.

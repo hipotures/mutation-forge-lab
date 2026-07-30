@@ -58,5 +58,8 @@ signature without a model or network call.
 
 This is a narrow defense-in-depth contract, not a general Python sandbox and
 not proof that arbitrary Python is safe. Stage 2B reuses it only to rank
-host-validated declarative plans. Model use, a full proposer, evolution, graph
-authority, and HEG integration remain separately gated.
+host-validated declarative plans. The Stage 2A/2B contract itself grants no
+model or evolutionary authority. Issue #10 separately authorizes the isolated
+Stage 4 model and evolution path described in
+`docs/reports/STAGE4_REPORT.md`; a full proposer, graph authority, held-out
+evaluation, and HEG integration remain gated.

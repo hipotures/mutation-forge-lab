@@ -10,11 +10,13 @@ the reviewed structural baseline, replayed exactly, and completed without an
 invalid graph, worker failure, timeout, crash, protocol failure, oracle call,
 or runtime network call.
 
-This decision closes only the Stage 3 development gate. Stage 4 has not
-started and requires a separate issue and explicit user approval. The result
-is non-held-out development evidence. It is not a held-out generalization
-claim, an HEG superiority claim, or authorization to integrate a policy into
-HEG.
+This decision closed only the Stage 3 development gate. At the time of this
+decision, Stage 4 had not started and required a separate issue and explicit
+user approval. Issue #10 subsequently completed with the
+infrastructure-inconclusive result documented in `STAGE4_REPORT.md`. The
+Stage 3 result remains non-held-out development evidence. It is not a
+held-out generalization claim, an HEG superiority claim, or authorization to
+integrate a policy into HEG.
 
 ## Dependency and repository provenance
 
@@ -298,5 +300,6 @@ Before the final documentation commit:
 - `git diff --check`: passed;
 - HEG: exact pin and clean.
 
-Stage 4, evolution, archive search, held-out evaluation, full proposer work,
-and HEG policy integration were not started.
+At this Stage 3 checkpoint, Stage 4, evolution, archive search, held-out
+evaluation, full proposer work, and HEG policy integration had not started.
+The later Stage 4 outcome is recorded separately in `STAGE4_REPORT.md`.

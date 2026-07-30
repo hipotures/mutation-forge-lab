@@ -111,8 +111,16 @@ Stage 3 under a two-phase freeze. Phase 1 contains no official campaign
 generation; Phase 2 is limited to the frozen eight initial slots and at most
 one schema/AST-only repair per slot. Stage 3 is now completed and validated:
 all twelve gates passed, primary and replay matched exactly, and
-`docs/reports/STAGE3_REPORT.md` records `GO_TO_STAGE_4`. Stage 4 has not
-started and still requires a separate issue and explicit user approval.
+`docs/reports/STAGE3_REPORT.md` records `GO_TO_STAGE_4`. At that checkpoint,
+Stage 4 had not started and still required a separate issue and explicit user
+approval.
+
+Issue #10 subsequently authorized and completed the frozen Stage 4 archived
+search. `docs/reports/STAGE4_REPORT.md` records
+`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`: the archive and replay evidence are
+complete, but eight terminal accepted protocol failures lack exact usage.
+Validation was ineligible, Stage 5 was not started, and HEG remained
+read-only.
 
 The Phase 1 statement refers to the official campaign. Before the fresh v6
 freeze, three explicitly user-authorized adapter connectivity turns were

@@ -64,5 +64,7 @@ scientific ranker payloads. `stage2b` generates bounded legal `k`-switch pools,
 computes host-owned aggregate features, presents identical immutable pools to
 paired rankers, and authoritatively scores selected plans only. It is not
 connected to the Stage 1 episode controller or integrated into HEG. `llm`,
-`archive`, and `evolution` remain inactive package boundaries; no model or
-evolutionary path exists.
+`archive`, and `evolution` were inactive through Stage 3. Issue #10 activates
+the isolated Stage 4 App Server, archive, and evolutionary-search path
+described in `docs/reports/STAGE4_REPORT.md`; it still does not connect that
+path to the Stage 1 controller or integrate it into HEG.
