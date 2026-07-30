@@ -1941,6 +1941,18 @@ def _program_metrics_summary(
     return {"policies": policies, "policy_identities": identities}, identities
 
 
+def _generation_request_doctor_sha256(
+    run: Path,
+    freeze_value: Mapping[str, Any],
+) -> str:
+    """Keep resumed request identities pinned to the authenticated v3 doctor."""
+
+    amendment = run / POST_LIVE_AMENDMENT_PATH
+    if amendment.is_file():
+        return str(_read_json(amendment)["authenticated_doctor_sha256"])
+    return str(freeze_value["doctor_sha256"])
+
+
 def evolve(
     config_path: str | Path,
     *,
@@ -1981,18 +1993,12 @@ def evolve(
     freeze_value = _load_search_freeze(config)
     run = campaign_root(config)
     auth_recovery: Mapping[str, Any] | None = None
-    generation_doctor_sha256 = str(freeze_value["doctor_sha256"])
+    generation_doctor_sha256 = _generation_request_doctor_sha256(
+        run,
+        freeze_value,
+    )
     if (run / POST_LIVE_AMENDMENT_PATH).is_file():
-        technical_amendment = _read_json(run / POST_LIVE_AMENDMENT_PATH)
-        generation_doctor_sha256 = str(
-            technical_amendment["authenticated_doctor_sha256"]
-        )
         auth_recovery = _prepare_authentication_recovery(run)
-    if (run / PROTOCOL_AMENDMENT_PATH).is_file():
-        protocol_amendment = _read_json(run / PROTOCOL_AMENDMENT_PATH)
-        generation_doctor_sha256 = str(
-            protocol_amendment["authenticated_doctor_sha256"]
-        )
     archive = ProgramArchive(_archive_root(run))
     manifest = _load_manifest(config.manifest_path)
     seeds = _seed_sources(config)

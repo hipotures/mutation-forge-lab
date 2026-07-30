@@ -285,6 +285,36 @@ def test_exact_usage_rejects_partial_or_incomplete_envelopes() -> None:
     assert not commands._usage_complete({"totalTokens": 2, "final": True})
 
 
+def test_generation_request_identity_remains_pinned_after_protocol_amendment(
+    tmp_path: Path,
+) -> None:
+    freeze_doctor = "a" * 64
+    authenticated_doctor = "b" * 64
+    protocol_doctor = "c" * 64
+    assert (
+        commands._generation_request_doctor_sha256(
+            tmp_path,
+            {"doctor_sha256": freeze_doctor},
+        )
+        == freeze_doctor
+    )
+    (tmp_path / commands.POST_LIVE_AMENDMENT_PATH).write_text(
+        json.dumps({"authenticated_doctor_sha256": authenticated_doctor}),
+        encoding="utf-8",
+    )
+    (tmp_path / commands.PROTOCOL_AMENDMENT_PATH).write_text(
+        json.dumps({"authenticated_doctor_sha256": protocol_doctor}),
+        encoding="utf-8",
+    )
+    assert (
+        commands._generation_request_doctor_sha256(
+            tmp_path,
+            {"doctor_sha256": freeze_doctor},
+        )
+        == authenticated_doctor
+    )
+
+
 def test_seed_evaluation_failure_is_not_live_model_evidence(tmp_path: Path) -> None:
     failed_seed = tmp_path / "evaluations" / "search-seeds" / "failure.json"
     failed_seed.parent.mkdir(parents=True)
