@@ -21,6 +21,7 @@ from mutation_forge.stage4.app_server import (
     FROZEN_STAGE4_MODEL,
     Stage4AppServerProvider,
     Stage4ProviderError,
+    _available_artifact_prefix,
     infrastructure_retry_eligible,
 )
 
@@ -181,6 +182,46 @@ def test_repair_requests_derive_distinct_artifact_prefixes(tmp_path: Path) -> No
     assert len(tuple(tmp_path.glob("*.response.json"))) == 2
 
 
+def test_retry_artifact_prefix_never_overwrites_prior_attempt(tmp_path: Path) -> None:
+    prefix = "slot-00"
+    assert _available_artifact_prefix(tmp_path, prefix) == prefix
+    (tmp_path / f"{prefix}.request.json").write_text("retained", encoding="utf-8")
+    assert _available_artifact_prefix(tmp_path, prefix) == f"{prefix}.retry-01"
+    (tmp_path / f"{prefix}.retry-01.response.json").write_text(
+        "retained",
+        encoding="utf-8",
+    )
+    assert _available_artifact_prefix(tmp_path, prefix) == f"{prefix}.retry-02"
+
+
+def test_pre_turn_provider_failure_is_proven_uncharged(tmp_path: Path) -> None:
+    provider = Stage4AppServerProvider(
+        process_factory=lambda *args, **kwargs: FakeProcess(FakeScenario(), **kwargs),
+        auth_checker=lambda capsule: False,
+        artifact_dir=tmp_path,
+    )
+    with pytest.raises(Stage4ProviderError) as raised:
+        provider.generate(_request(artifact_prefix="pre-turn"))
+    evidence = raised.value.evidence
+    assert evidence["accepted"] is False
+    assert evidence["charged"] is False
+    assert evidence["content"] is False
+    assert evidence["uncharged"] is True
+    assert evidence["usage"] == {}
+    assert infrastructure_retry_eligible(evidence)
+
+
+def test_post_thread_provider_failure_is_not_retried(tmp_path: Path) -> None:
+    provider = _provider(tmp_path, FakeScenario(terminal_status="failed"))
+    with pytest.raises(Stage4ProviderError) as raised:
+        provider.generate(_request(artifact_prefix="post-thread"))
+    evidence = raised.value.evidence
+    assert evidence["accepted"] is True
+    assert evidence["thread_id"] == "thread-1"
+    assert evidence["uncharged"] is False
+    assert not infrastructure_retry_eligible(evidence)
+
+
 def test_logs_are_redacted_and_bounded(tmp_path: Path) -> None:
     result = _provider(tmp_path).generate(_request(artifact_prefix="slot"))
     assert len(result["diagnostics"]) <= 200
@@ -206,6 +247,16 @@ def test_unauthorized_tool_request_is_not_approved(tmp_path: Path) -> None:
         ),
         ({"accepted": False, "content": False, "usage": {}}, False),
         ({"accepted": True, "content": False, "uncharged": True, "usage": {}}, False),
+        (
+            {
+                "accepted": False,
+                "content": False,
+                "uncharged": True,
+                "usage": {},
+                "unauthorized_tool_approval": True,
+            },
+            False,
+        ),
     ],
 )
 def test_infrastructure_retry_requires_host_zero_evidence(

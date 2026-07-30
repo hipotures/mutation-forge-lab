@@ -319,9 +319,9 @@ def _stage4(args: argparse.Namespace) -> int:
     command = args.stage4_command
     observer = _stage4_observer(json_output=args.json)
     if command == "doctor":
-        result = stage4_commands.doctor(args.config)
+        result = stage4_commands.doctor(args.config, auth_json=args.auth_json)
     elif command == "freeze":
-        result = stage4_commands.freeze(args.config)
+        result = stage4_commands.freeze(args.config, auth_json=args.auth_json)
     elif command == "evolve":
         result = stage4_commands.evolve(
             args.config,
@@ -606,9 +606,11 @@ def build_parser() -> argparse.ArgumentParser:
     stage4_commands_parser = stage4.add_subparsers(dest="stage4_command", required=True)
     stage4_doctor = stage4_commands_parser.add_parser("doctor")
     stage4_doctor.add_argument("--config", type=Path, required=True)
+    stage4_doctor.add_argument("--auth-json", type=Path)
     stage4_doctor.add_argument("--json", action="store_true")
     stage4_freeze = stage4_commands_parser.add_parser("freeze")
     stage4_freeze.add_argument("--config", type=Path, required=True)
+    stage4_freeze.add_argument("--auth-json", type=Path)
     stage4_freeze.add_argument("--json", action="store_true")
     stage4_evolve = stage4_commands_parser.add_parser("evolve")
     stage4_evolve.add_argument("--config", type=Path, required=True)

@@ -17,8 +17,13 @@ from typing import Any, cast
 from mutation_forge.models import JsonValue
 from mutation_forge.sandbox.validation import validate_policy
 from mutation_forge.stage2d.manifest import read_cpu_topology
+from mutation_forge.stage3.isolation import IsolatedCapsule, secure_capsule_parent
 
-from .app_server import Stage4AppServerAdapter, Stage4AppServerProvider
+from .app_server import (
+    Stage4AppServerAdapter,
+    Stage4AppServerProvider,
+    _available_artifact_prefix,
+)
 from .archive import ProgramArchive, ProgramRecord, deterministic_program_id
 from .artifacts import (
     build_evidence_manifest,
@@ -41,6 +46,7 @@ from .generation import (
     GenerationCoordinator,
     GenerationResult,
     SlotResult,
+    cached_pre_turn_auth_retry_allowed,
 )
 from .replay import verify_replay as verify_replay_pair
 from .selection import select_parents
@@ -54,10 +60,15 @@ from .statistics import (
 SEARCH_FREEZE_SCHEMA = "stage4.search.freeze.v1"
 VALIDATION_FREEZE_SCHEMA = "stage4.validation.freeze.v1"
 RUN_SCHEMA = "stage4.campaign.v1"
-SEARCH_AMENDMENT_TAG = "stage4-search-amendment-v2"
-SEARCH_AMENDMENT_CATEGORY = "replay_metrics_timing_projection"
+AUTH_RECOVERY_SCHEMA = "stage4.auth_recovery.v1"
+AUTH_RECOVERY_ROOT = "recovery/pre-auth-v1"
+POST_LIVE_AMENDMENT_SCHEMA = "stage4.search.technical_amendment.v1"
+POST_LIVE_AMENDMENT_PATH = "search-technical-amendment-v3.json"
+SEARCH_AMENDMENT_TAG = "stage4-search-amendment-v3"
+SEARCH_AMENDMENT_CATEGORY = "authenticated_same_request_resume"
 SEARCH_AMENDMENT_CATEGORIES = {
     "stage4-search-amendment-v1": "evaluation_worker_process_isolation",
+    "stage4-search-amendment-v2": "replay_metrics_timing_projection",
     SEARCH_AMENDMENT_TAG: SEARCH_AMENDMENT_CATEGORY,
 }
 STAGE3_CANONICAL_SHA256 = PROVENANCE["stage3_canonical_sha256"]
@@ -113,6 +124,19 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 
 def _atomic_source(path: Path, source: str) -> None:
     _atomic_write(path, source.encode("utf-8"))
+
+
+def _available_evidence_path(path: Path) -> Path:
+    """Select an additive evidence path without replacing an earlier report."""
+    if not path.exists():
+        return path
+    for attempt in range(1, 65):
+        candidate = path.with_name(
+            f"{path.stem}.retry-{attempt:02d}{path.suffix}"
+        )
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"evidence retry namespace is exhausted: {path.name}")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -193,7 +217,7 @@ def _thread_environment() -> dict[str, str]:
     }
 
 
-def _auth_status() -> dict[str, Any]:
+def _auth_status(*, environment: Mapping[str, str] | None = None) -> dict[str, Any]:
     executable = shutil.which("codex")
     if executable is None:
         return {"ok": False, "authenticated": False, "executable": None}
@@ -210,6 +234,7 @@ def _auth_status() -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=15,
+            env=dict(environment) if environment is not None else None,
         )
     except (OSError, subprocess.SubprocessError) as error:
         return {
@@ -230,18 +255,39 @@ def _auth_status() -> dict[str, Any]:
         "authenticated": authenticated,
         "executable": executable,
         "version": version,
-        "source": "codex login status",
+        "source": (
+            "private capsule codex login status"
+            if environment is not None
+            else "host codex login status"
+        ),
     }
 
 
-def _appserver_profile_status(run: Path) -> dict[str, Any]:
-    """Audit the frozen model profile through App Server without starting a turn."""
+def _appserver_profile_status(
+    run: Path,
+    *,
+    auth_json: str | Path | None,
+) -> dict[str, Any]:
+    """Audit private-capsule auth and the frozen profile without starting a turn."""
 
+    capsule: IsolatedCapsule | None = None
     adapter: Stage4AppServerAdapter | None = None
     try:
+        capsule = IsolatedCapsule.create(
+            secure_capsule_parent(),
+            auth_json=auth_json,
+            sandbox_mode="danger-full-access",
+            approval_policy="never",
+        )
+        auth = _auth_status(environment=capsule.env)
         adapter = Stage4AppServerAdapter(
+            capsule=capsule,
+            auth_checker=lambda _: False,
             artifact_dir=run / "offline-appserver-doctor",
-            artifact_prefix="catalog",
+            artifact_prefix=_available_artifact_prefix(
+                run / "offline-appserver-doctor",
+                "authenticated-catalog" if auth_json is not None else "catalog",
+            ),
             artifact_root=run,
         )
         catalog = adapter.model_catalog()
@@ -264,6 +310,7 @@ def _appserver_profile_status(run: Path) -> dict[str, Any]:
         ok = selected is not None and "high" in supported
         return {
             "ok": ok,
+            "auth": auth,
             "model": "gpt-5.6-luna",
             "effort": "high",
             "supported_efforts": supported,
@@ -273,6 +320,11 @@ def _appserver_profile_status(run: Path) -> dict[str, Any]:
     except Exception as error:
         return {
             "ok": False,
+            "auth": {
+                "ok": False,
+                "authenticated": False,
+                "source": "private capsule codex login status",
+            },
             "model": "gpt-5.6-luna",
             "effort": "high",
             "error_type": type(error).__name__,
@@ -282,6 +334,8 @@ def _appserver_profile_status(run: Path) -> dict[str, Any]:
     finally:
         if adapter is not None:
             adapter.close()
+        if capsule is not None:
+            capsule.cleanup()
 
 
 def _stage3_checks(config: Stage4SearchConfig) -> dict[str, Any]:
@@ -316,6 +370,7 @@ def _stage3_checks(config: Stage4SearchConfig) -> dict[str, Any]:
 def doctor(
     config_path: str | Path,
     *,
+    auth_json: str | Path | None = None,
     check_auth: bool = True,
     write: bool = True,
 ) -> dict[str, Any]:
@@ -348,16 +403,23 @@ def doctor(
     projection = project_real_shape(run / "offline-dry-run")
     projection_result = cast(Mapping[str, Any], projection["projection"])
     stage3 = _stage3_checks(config)
-    auth = (
-        _auth_status()
-        if check_auth
-        else {"ok": True, "authenticated": None, "skipped": True}
-    )
     profile = (
-        _appserver_profile_status(run)
+        _appserver_profile_status(run, auth_json=auth_json)
         if check_auth
-        else {"ok": True, "skipped": True, "inference": False}
+        else {
+            "ok": True,
+            "auth": {"ok": True, "authenticated": None, "skipped": True},
+            "skipped": True,
+            "inference": False,
+        }
     )
+    profile_auth = profile.get("auth")
+    auth = (
+        dict(profile_auth)
+        if isinstance(profile_auth, Mapping)
+        else {"ok": False, "authenticated": False}
+    )
+    profile = {key: value for key, value in profile.items() if key != "auth"}
     checks: dict[str, Any] = {
         "config": True,
         "project_base": ancestor,
@@ -384,6 +446,18 @@ def doctor(
         "authentication": bool(auth["ok"]),
         "model_profile": bool(profile["ok"]),
     }
+    doctor_path = (
+        _available_evidence_path(
+            run
+            / (
+                "authenticated-appserver-doctor.json"
+                if auth_json is not None
+                else "offline-doctor.json"
+            )
+        )
+        if write
+        else None
+    )
     result = canonical_result(
         {
             "schema_version": "stage4.doctor.v1",
@@ -403,10 +477,15 @@ def doctor(
             "thread_environment": _thread_environment(),
             "projection": projection,
             "run": str(run),
+            "artifact_path": (
+                _relative_to_run(run, doctor_path)
+                if doctor_path is not None
+                else None
+            ),
         }
     )
-    if write:
-        _atomic_json(run / "offline-doctor.json", result)
+    if doctor_path is not None:
+        _atomic_json(doctor_path, result)
     return result
 
 
@@ -445,6 +524,18 @@ def _freeze_files(config: Stage4SearchConfig) -> dict[str, str]:
 
 def _freeze_digest(value: Mapping[str, Any]) -> str:
     return _sha_value({key: item for key, item in value.items() if key != "freeze_sha256"})
+
+
+def _recovery_digest(value: Mapping[str, Any]) -> str:
+    return _sha_value(
+        {key: item for key, item in value.items() if key != "manifest_sha256"}
+    )
+
+
+def _technical_amendment_digest(value: Mapping[str, Any]) -> str:
+    return _sha_value(
+        {key: item for key, item in value.items() if key != "amendment_sha256"}
+    )
 
 
 def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
@@ -490,6 +581,267 @@ def _live_model_result_evidence(run: Path) -> dict[str, Any]:
         "generated_program_ids": generated,
         "artifact_presence": paths,
     }
+
+
+def _authentication_recovery_evidence(run: Path) -> dict[str, Any]:
+    checkpoint_path = run / "generation-checkpoint.json"
+    summary_path = run / "search-summary.json"
+    if not checkpoint_path.is_file() or not summary_path.is_file():
+        raise RuntimeError("authentication recovery evidence is incomplete")
+    checkpoint = _read_json(checkpoint_path)
+    summary = _read_json(summary_path)
+    slots = checkpoint.get("slots")
+    if not isinstance(slots, Mapping) or len(slots) != 32:
+        raise RuntimeError("authentication recovery requires exactly 32 checkpoint slots")
+    slot_values = [
+        dict(value) for value in slots.values() if isinstance(value, Mapping)
+    ]
+    generation_slot_counts = [
+        sum(int(value.get("generation", -1)) == generation for value in slot_values)
+        for generation in range(4)
+    ]
+    if (
+        len(slot_values) != 32
+        or not all(cached_pre_turn_auth_retry_allowed(value) for value in slot_values)
+        or generation_slot_counts != [8, 8, 8, 8]
+        or any(value.get("repair") is not None for value in slot_values)
+    ):
+        raise RuntimeError("checkpoint contains non-recoverable Stage 4 turn evidence")
+    request_keys = {
+        str(cast(Mapping[str, Any], value.get("request", {})).get("idempotency_key", ""))
+        for value in slot_values
+    }
+    if "" in request_keys or request_keys != {str(key) for key in slots}:
+        raise RuntimeError("authentication recovery request identities drifted")
+    archive = ProgramArchive(_archive_root(run)).reindex()
+    generated = [record for record in archive.records if record.generation > 0]
+    if (
+        not archive.ok
+        or len(generated) != 32
+        or not all(record.tombstone for record in generated)
+        or {record.effective_request_id for record in generated} != request_keys
+        or any(record.usage for record in generated)
+        or any(record.metadata.get("accepted_turn_count") != 0 for record in generated)
+    ):
+        raise RuntimeError("canonical archive contains non-recoverable Stage 4 output")
+    if (
+        summary.get("decision") != "NO_GO"
+        or summary.get("decision_reason") != "minimum_unique_offspring_not_met"
+        or summary.get("initial_turns") != 32
+        or summary.get("repair_turns") != 0
+        or summary.get("accepted_live_turns") != 0
+        or summary.get("new_unique_valid_offspring") != 0
+        or summary.get("exact_usage") is not False
+        or summary.get("unauthorized_tool_approval") is not False
+    ):
+        raise RuntimeError("search summary is not the retained authentication failure")
+    return {
+        "schema_version": AUTH_RECOVERY_SCHEMA,
+        "verified": True,
+        "inference": False,
+        "replacement_requests_authorized": True,
+        "reason": "private_capsule_authentication_missing",
+        "slot_count": 32,
+        "generation_slot_counts": generation_slot_counts,
+        "accepted_turns": 0,
+        "repair_turns": 0,
+        "contentful_turns": 0,
+        "charged_turns": 0,
+        "usage_tokens": 0,
+        "live_stage4_model_output_observed": False,
+        "retained_summary_live_results_claim": summary.get(
+            "live_stage4_model_results_observed"
+        ),
+        "request_identities_sha256": _sha_value(sorted(request_keys)),
+        "checkpoint_sha256": _sha_file(checkpoint_path),
+        "search_summary_sha256": _sha_file(summary_path),
+        "archive_sha256": archive.archive_hash,
+    }
+
+
+def _preserve_recovery_file(
+    run: Path,
+    source: Path,
+    recovery: Path,
+) -> dict[str, Any]:
+    relative = source.resolve().relative_to(run.resolve())
+    destination = recovery / relative
+    payload = source.read_bytes()
+    if destination.is_file():
+        if destination.read_bytes() != payload:
+            raise RuntimeError(f"recovery artifact collision: {relative.as_posix()}")
+    else:
+        _atomic_write(destination, payload)
+    return {
+        "source": relative.as_posix(),
+        "retained": destination.relative_to(run).as_posix(),
+        "bytes": len(payload),
+        "sha256": _sha_bytes(payload),
+    }
+
+
+def _retained_recovery_entries_valid(
+    run: Path,
+    entries: object,
+) -> bool:
+    if not isinstance(entries, list) or not entries:
+        return False
+    for item in entries:
+        if not isinstance(item, Mapping):
+            return False
+        retained = item.get("retained")
+        sha256 = item.get("sha256")
+        if not isinstance(retained, str) or not isinstance(sha256, str):
+            return False
+        path = run / retained
+        try:
+            path.resolve().relative_to(run.resolve())
+        except ValueError:
+            return False
+        if not path.is_file() or _sha_file(path) != sha256:
+            return False
+    return True
+
+
+def _prepare_authentication_recovery(run: Path) -> dict[str, Any]:
+    recovery = run / AUTH_RECOVERY_ROOT
+    manifest_path = recovery / "RECOVERY_MANIFEST.json"
+    if manifest_path.is_file():
+        completed_manifest = _read_json(manifest_path)
+        if (
+            completed_manifest.get("schema_version") != AUTH_RECOVERY_SCHEMA
+            or completed_manifest.get("verified") is not True
+            or completed_manifest.get("phase") != "completed"
+            or completed_manifest.get("manifest_sha256")
+            != _recovery_digest(completed_manifest)
+            or not _retained_recovery_entries_valid(
+                run,
+                completed_manifest.get("retained_files"),
+            )
+            or not _retained_recovery_entries_valid(
+                run,
+                completed_manifest.get("moved_tombstones"),
+            )
+        ):
+            raise RuntimeError("retained authentication recovery manifest is invalid")
+        return completed_manifest
+
+    intent_path = recovery / "RECOVERY_INTENT.json"
+    if intent_path.is_file():
+        intent = _read_json(intent_path)
+        if (
+            intent.get("schema_version") != AUTH_RECOVERY_SCHEMA
+            or intent.get("verified") is not True
+            or intent.get("phase") != "prepared"
+            or intent.get("manifest_sha256") != _recovery_digest(intent)
+        ):
+            raise RuntimeError("authentication recovery intent is invalid")
+        evidence = {
+            key: value
+            for key, value in intent.items()
+            if key
+            not in {
+                "phase",
+                "retained_files",
+                "moved_tombstones",
+                "manifest_sha256",
+            }
+        }
+        retained = cast(list[dict[str, Any]], intent.get("retained_files", []))
+        moved = cast(list[dict[str, Any]], intent.get("moved_tombstones", []))
+    else:
+        evidence = _authentication_recovery_evidence(run)
+        retained = []
+        exact_files = (
+            run / "generation-checkpoint.json",
+            run / "search-summary.json",
+            run / "EVIDENCE_MANIFEST.json",
+        )
+        for path in exact_files:
+            if not path.is_file():
+                raise RuntimeError(
+                    f"required authentication recovery artifact is missing: {path.name}"
+                )
+            retained.append(_preserve_recovery_file(run, path, recovery))
+        for directory in ("appserver", "raw", "selection"):
+            root = run / directory
+            if root.is_dir():
+                for path in sorted(
+                    candidate for candidate in root.rglob("*") if candidate.is_file()
+                ):
+                    retained.append(_preserve_recovery_file(run, path, recovery))
+
+        archive = ProgramArchive(_archive_root(run)).reindex()
+        moved = []
+        for record in archive.records:
+            if record.generation == 0:
+                continue
+            source = _archive_root(run) / "programs" / f"{record.program_id}.json"
+            retained_tombstone = _preserve_recovery_file(run, source, recovery)
+            moved.append({"program_id": record.program_id, **retained_tombstone})
+        intent = {
+            **evidence,
+            "phase": "prepared",
+            "retained_files": retained,
+            "moved_tombstones": moved,
+        }
+        intent["manifest_sha256"] = _recovery_digest(intent)
+        _atomic_json(intent_path, intent)
+
+    if len(moved) != 32:
+        raise RuntimeError("authentication recovery intent must retain 32 tombstones")
+    if not _retained_recovery_entries_valid(run, retained):
+        raise RuntimeError("retained authentication recovery evidence is invalid")
+    if not _retained_recovery_entries_valid(run, moved):
+        raise RuntimeError("retained authentication tombstones are invalid")
+    for item in moved:
+        source = run / str(item["source"])
+        destination = run / str(item["retained"])
+        if source.is_file():
+            if source.read_bytes() != destination.read_bytes():
+                raise RuntimeError("authentication tombstone recovery collision")
+            source.unlink()
+    canonical = ProgramArchive(_archive_root(run)).reindex()
+    if (
+        not canonical.ok
+        or len(canonical.records) != 8
+        or any(record.generation != 0 for record in canonical.records)
+    ):
+        raise RuntimeError("authentication recovery did not restore the seed-only archive")
+    active_checkpoint = _read_json(run / "generation-checkpoint.json")
+    recovery_marker = active_checkpoint.get("authentication_recovery")
+    if recovery_marker is None:
+        if _sha_file(run / "generation-checkpoint.json") != evidence["checkpoint_sha256"]:
+            raise RuntimeError("active authentication checkpoint drifted before recovery")
+        active_checkpoint["slots"] = {}
+        active_checkpoint["callbacks"] = {}
+        active_checkpoint.pop("summary", None)
+        active_checkpoint["authentication_recovery"] = {
+            "schema_version": AUTH_RECOVERY_SCHEMA,
+            "retained_checkpoint_sha256": evidence["checkpoint_sha256"],
+            "replacement_requests_authorized": True,
+        }
+        _atomic_json(run / "generation-checkpoint.json", active_checkpoint)
+    elif not (
+        isinstance(recovery_marker, Mapping)
+        and recovery_marker.get("schema_version") == AUTH_RECOVERY_SCHEMA
+        and recovery_marker.get("retained_checkpoint_sha256")
+        == evidence["checkpoint_sha256"]
+        and recovery_marker.get("replacement_requests_authorized") is True
+        and active_checkpoint.get("slots") == {}
+        and active_checkpoint.get("callbacks") == {}
+    ):
+        raise RuntimeError("active authentication recovery checkpoint is invalid")
+    manifest: dict[str, Any] = {
+        **evidence,
+        "phase": "completed",
+        "canonical_seed_archive_sha256": canonical.archive_hash,
+        "retained_files": retained,
+        "moved_tombstones": moved,
+    }
+    manifest["manifest_sha256"] = _recovery_digest(manifest)
+    _atomic_json(manifest_path, manifest)
+    return manifest
 
 
 def _amendment_states(value: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -619,7 +971,180 @@ def _amendment_freeze_valid(
     )
 
 
-def freeze(config_path: str | Path) -> dict[str, Any]:
+def _record_post_live_amendment(
+    config: Stage4SearchConfig,
+    run: Path,
+    project: Mapping[str, Any],
+    search_tag: Mapping[str, Any],
+    amendment_tag: Mapping[str, Any],
+    audit: Mapping[str, Any],
+) -> dict[str, Any]:
+    freeze_value = _read_json(run / "search-freeze.json")
+    if (
+        freeze_value.get("schema_version") != SEARCH_FREEZE_SCHEMA
+        or freeze_value.get("verified") is not True
+        or freeze_value.get("freeze_sha256") != _freeze_digest(freeze_value)
+        or freeze_value.get("config_sha256") != config.stable_hash()
+        or freeze_value.get("search_tag") != search_tag
+        or not _amendment_freeze_valid(run, freeze_value)
+        or not _amendment_tag_chain_valid(
+            config.project_repo,
+            freeze_value,
+            str(project["commit"]),
+        )
+        or not _is_ancestor(
+            config.project_repo,
+            str(freeze_value.get("project_commit", "")),
+            str(project["commit"]),
+        )
+    ):
+        raise RuntimeError("pre-recovery Stage 4 search freeze is invalid")
+    recovery = _authentication_recovery_evidence(run)
+    payload: dict[str, Any] = {
+        "schema_version": POST_LIVE_AMENDMENT_SCHEMA,
+        "verified": True,
+        "inference": False,
+        "live_stage4_model_output_observed": False,
+        "project_commit": project["commit"],
+        "project_branch": project["branch"],
+        "technical_tag": amendment_tag,
+        "amendment_category": SEARCH_AMENDMENT_CATEGORY,
+        "search_freeze_sha256": freeze_value["freeze_sha256"],
+        "config_sha256": config.stable_hash(),
+        "frozen_hashes": _freeze_files(config),
+        "scientific_identity_unchanged": (
+            freeze_value.get("frozen_hashes") == _freeze_files(config)
+            and freeze_value.get("config_sha256") == config.stable_hash()
+        ),
+        "authenticated_doctor_sha256": _sha_value(audit),
+        "authenticated_doctor_artifact": audit.get("artifact_path"),
+        "recovery_evidence": recovery,
+    }
+    audit_auth = audit.get("auth")
+    if (
+        payload["scientific_identity_unchanged"] is not True
+        or audit.get("status") != "completed"
+        or audit.get("inference") is not False
+        or not isinstance(audit_auth, Mapping)
+        or audit_auth.get("authenticated") is not True
+        or not isinstance(payload["authenticated_doctor_artifact"], str)
+    ):
+        raise RuntimeError("authenticated Stage 4 amendment evidence is invalid")
+    payload["amendment_sha256"] = _technical_amendment_digest(payload)
+    _atomic_json(run / POST_LIVE_AMENDMENT_PATH, payload)
+    return canonical_result(
+        {
+            "status": "completed",
+            "run": str(run),
+            "technical_amendment": True,
+            **payload,
+        }
+    )
+
+
+def _post_live_amendment_valid(
+    config: Stage4SearchConfig,
+    run: Path,
+    freeze_value: Mapping[str, Any],
+    descendant: str,
+) -> bool:
+    path = run / POST_LIVE_AMENDMENT_PATH
+    if not path.is_file():
+        return False
+    try:
+        value = _read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    tag = value.get("technical_tag")
+    recovery = value.get("recovery_evidence")
+    if not isinstance(tag, Mapping) or not isinstance(recovery, Mapping):
+        return False
+    doctor_artifact = value.get("authenticated_doctor_artifact")
+    doctor_artifact_valid = False
+    if isinstance(doctor_artifact, str):
+        doctor_path = run / doctor_artifact
+        try:
+            doctor_path.resolve().relative_to(run.resolve())
+            doctor_value = _read_json(doctor_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        else:
+            doctor_auth = doctor_value.get("auth")
+            doctor_artifact_valid = (
+                doctor_value.get("status") == "completed"
+                and doctor_value.get("inference") is False
+                and isinstance(doctor_auth, Mapping)
+                and doctor_auth.get("authenticated") is True
+                and _sha_value(doctor_value)
+                == value.get("authenticated_doctor_sha256")
+            )
+    if (
+        value.get("schema_version") != POST_LIVE_AMENDMENT_SCHEMA
+        or value.get("verified") is not True
+        or value.get("inference") is not False
+        or value.get("live_stage4_model_output_observed") is not False
+        or value.get("amendment_sha256") != _technical_amendment_digest(value)
+        or value.get("amendment_category") != SEARCH_AMENDMENT_CATEGORY
+        or value.get("search_freeze_sha256") != freeze_value.get("freeze_sha256")
+        or value.get("config_sha256") != config.stable_hash()
+        or value.get("frozen_hashes") != _freeze_files(config)
+        or value.get("scientific_identity_unchanged") is not True
+        or not isinstance(value.get("authenticated_doctor_sha256"), str)
+        or len(str(value.get("authenticated_doctor_sha256"))) != 64
+        or not isinstance(value.get("authenticated_doctor_artifact"), str)
+        or not doctor_artifact_valid
+        or tag.get("name") != SEARCH_AMENDMENT_TAG
+        or tag.get("type") != "tag"
+        or _tag_state(config.project_repo, SEARCH_AMENDMENT_TAG) != tag
+        or not _is_ancestor(
+            config.project_repo,
+            str(tag.get("commit", "")),
+            descendant,
+        )
+        or recovery.get("schema_version") != AUTH_RECOVERY_SCHEMA
+        or recovery.get("verified") is not True
+        or recovery.get("replacement_requests_authorized") is not True
+        or recovery.get("slot_count") != 32
+        or recovery.get("accepted_turns") != 0
+        or recovery.get("contentful_turns") != 0
+        or recovery.get("charged_turns") != 0
+        or recovery.get("usage_tokens") != 0
+    ):
+        return False
+    recovery_manifest = run / AUTH_RECOVERY_ROOT / "RECOVERY_MANIFEST.json"
+    if recovery_manifest.is_file():
+        try:
+            retained = _read_json(recovery_manifest)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return (
+            retained.get("phase") == "completed"
+            and retained.get("manifest_sha256") == _recovery_digest(retained)
+            and retained.get("checkpoint_sha256") == recovery.get("checkpoint_sha256")
+            and retained.get("search_summary_sha256")
+            == recovery.get("search_summary_sha256")
+            and retained.get("archive_sha256") == recovery.get("archive_sha256")
+        )
+    try:
+        current = _authentication_recovery_evidence(run)
+    except RuntimeError:
+        return False
+    return all(
+        current.get(key) == recovery.get(key)
+        for key in (
+            "checkpoint_sha256",
+            "search_summary_sha256",
+            "archive_sha256",
+            "request_identities_sha256",
+        )
+    )
+
+
+def freeze(
+    config_path: str | Path,
+    *,
+    auth_json: str | Path | None = None,
+) -> dict[str, Any]:
     """Write the immutable search freeze after its annotated tag exists."""
 
     config = load_stage4_config(config_path)
@@ -649,9 +1174,33 @@ def freeze(config_path: str | Path) -> dict[str, Any]:
     live_evidence = _live_model_result_evidence(run)
     if amended:
         if live_evidence["observed"] is not False:
-            raise RuntimeError("technical amendment is forbidden after live model results")
+            if auth_json is None:
+                raise RuntimeError(
+                    "post-live technical amendment requires the proven --auth-json preflight"
+                )
+            live_audit = doctor(
+                config_path,
+                auth_json=auth_json,
+                check_auth=True,
+                write=True,
+            )
+            if live_audit.get("status") != "completed":
+                raise RuntimeError("private-capsule App Server doctor is not READY")
+            return _record_post_live_amendment(
+                config,
+                run,
+                project,
+                tag,
+                amendment_tag,
+                live_audit,
+            )
         previous = _previous_search_freeze(config, run, tag)
-    audit = doctor(config_path, check_auth=True, write=True)
+    audit = doctor(
+        config_path,
+        auth_json=auth_json,
+        check_auth=True,
+        write=True,
+    )
     if audit["status"] != "completed":
         raise RuntimeError("Stage 4 doctor is not READY")
     projection = cast(Mapping[str, Any], audit["projection"])
@@ -721,8 +1270,27 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
     heg = _git_state(config.heg_repo)
     tag = _tag_state(config.project_repo, config.search_tag)
     amendment_states = _amendment_states(value)
+    exact_freeze_head = (
+        project["commit"] == value.get("project_commit")
+        and (
+            (
+                bool(amendment_states)
+                and amendment_states[-1].get("commit") == project["commit"]
+            )
+            or (
+                not amendment_states
+                and tag.get("commit") == project["commit"]
+            )
+        )
+    )
+    post_live_amendment = _post_live_amendment_valid(
+        config,
+        run,
+        value,
+        project["commit"],
+    )
     if (
-        project["commit"] != value.get("project_commit")
+        not (exact_freeze_head or post_live_amendment)
         or project["dirty"]
         or heg["commit"] != config.frozen_heg_commit
         or heg["dirty"]
@@ -731,14 +1299,6 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
             config.project_repo,
             value,
             project["commit"],
-        )
-        or (
-            amendment_states
-            and amendment_states[-1].get("commit") != project["commit"]
-        )
-        or (
-            not amendment_states
-            and tag.get("commit") != project["commit"]
         )
     ):
         raise RuntimeError("repository state drifted after Stage 4 search freeze")
@@ -752,7 +1312,8 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
 def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
     """Verify the search freeze after the repository advances to validation freeze."""
 
-    value = _read_json(campaign_root(config) / "search-freeze.json")
+    run = campaign_root(config)
+    value = _read_json(run / "search-freeze.json")
     tag = _tag_state(config.project_repo, config.search_tag)
     project = _git_state(config.project_repo)
     ancestor = _is_ancestor(
@@ -760,13 +1321,23 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
         str(value.get("project_commit", "")),
         project["commit"],
     )
+    technical_path = run / POST_LIVE_AMENDMENT_PATH
+    technical_ok = (
+        not technical_path.is_file()
+        or _post_live_amendment_valid(
+            config,
+            run,
+            value,
+            project["commit"],
+        )
+    )
     if (
         value.get("schema_version") != SEARCH_FREEZE_SCHEMA
         or value.get("verified") is not True
         or value.get("freeze_sha256") != _freeze_digest(value)
         or value.get("config_sha256") != config.stable_hash()
         or value.get("live_stage4_model_results_observed") is not False
-        or not _amendment_freeze_valid(campaign_root(config), value)
+        or not _amendment_freeze_valid(run, value)
         or tag != value.get("search_tag")
         or not _amendment_tag_chain_valid(
             config.project_repo,
@@ -774,6 +1345,7 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
             project["commit"],
         )
         or not ancestor
+        or not technical_ok
         or _freeze_files(config) != value.get("frozen_hashes")
         or not _stage3_checks(config)["ok"]
     ):
@@ -1023,8 +1595,39 @@ def evolve(
     if concurrency != 8:
         raise ValueError("Stage 4 generation concurrency is frozen at 8")
     config = load_stage4_config(config_path)
+    authenticated_preflight_sha256: str | None = None
+    if provider is None:
+        if auth_json is None:
+            raise RuntimeError(
+                "Stage 4 live generation requires the proven Stage 3 --auth-json flow"
+            )
+        live_doctor = doctor(
+            config_path,
+            auth_json=auth_json,
+            check_auth=True,
+            write=True,
+        )
+        if (
+            live_doctor.get("status") != "completed"
+            or cast(Mapping[str, Any], live_doctor.get("auth", {})).get(
+                "authenticated"
+            )
+            is not True
+        ):
+            raise RuntimeError(
+                "Stage 4 private-capsule App Server doctor is not READY"
+            )
+        authenticated_preflight_sha256 = _sha_value(live_doctor)
     freeze_value = _load_search_freeze(config)
     run = campaign_root(config)
+    auth_recovery: Mapping[str, Any] | None = None
+    generation_doctor_sha256 = str(freeze_value["doctor_sha256"])
+    if (run / POST_LIVE_AMENDMENT_PATH).is_file():
+        technical_amendment = _read_json(run / POST_LIVE_AMENDMENT_PATH)
+        generation_doctor_sha256 = str(
+            technical_amendment["authenticated_doctor_sha256"]
+        )
+        auth_recovery = _prepare_authentication_recovery(run)
     archive = ProgramArchive(_archive_root(run))
     manifest = _load_manifest(config.manifest_path)
     seeds = _seed_sources(config)
@@ -1243,6 +1846,11 @@ def evolve(
         for slot in slots:
             if (generation + 1, slot.slot) in known_slots:
                 continue
+            if (
+                slot.candidate is None
+                and cached_pre_turn_auth_retry_allowed(slot.as_dict())
+            ):
+                continue
             usage = _slot_usage(slot)
             request_id = None
             thread_id = None
@@ -1415,7 +2023,7 @@ def evolve(
             checkpoint_path=run / "generation-checkpoint.json",
             model=config.model.name,
             effort=config.model.effort,
-            appserver_doctor_sha256=str(freeze_value["doctor_sha256"]),
+            appserver_doctor_sha256=generation_doctor_sha256,
         ),
         briefs=briefs,
         parent_selector=parent_selector,
@@ -1454,7 +2062,7 @@ def evolve(
     )
     archive_report = archive.reindex()
     generated_records = [record for record in records if record.generation > 0]
-    initial_turns = len(generated_records)
+    initial_turns = len(generation_result.slots)
     repair_turns = sum(
         value
         for record in generated_records
@@ -1476,11 +2084,30 @@ def evolve(
         bool(record.metadata.get("unauthorized_tool_approval", False))
         for record in generated_records
     )
+    infrastructure_failures = [
+        slot
+        for slot in generation_result.slots
+        if slot.candidate is None
+        and cached_pre_turn_auth_retry_allowed(slot.as_dict())
+    ]
     result: dict[str, Any] = {
         "schema_version": RUN_SCHEMA,
         "status": generation_result.status,
         "run": str(run),
         "search_freeze_sha256": freeze_value["freeze_sha256"],
+        "authentication_recovery": (
+            {
+                "manifest_sha256": auth_recovery.get("manifest_sha256"),
+                "replacement_requests_authorized": auth_recovery.get(
+                    "replacement_requests_authorized"
+                ),
+                "slot_count": auth_recovery.get("slot_count"),
+            }
+            if auth_recovery is not None
+            else None
+        ),
+        "authenticated_preflight_sha256": authenticated_preflight_sha256,
+        "generation_doctor_sha256": generation_doctor_sha256,
         "generation": generation_result.summary,
         "archive": archive.inspect(),
         "archive_reindex": archive_report.as_dict(),
@@ -1491,9 +2118,18 @@ def evolve(
         "new_unique_valid_offspring": new_unique_valid,
         "exact_usage": exact_usage,
         "unauthorized_tool_approval": unauthorized,
-        "live_stage4_model_results_observed": True,
+        "live_stage4_model_results_observed": accepted_live_turns > 0,
     }
-    if champion is None:
+    if infrastructure_failures or initial_turns != 32 or not exact_usage:
+        result["champion"] = None
+        result["decision"] = "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"
+        result["decision_reason"] = (
+            "pre_turn_infrastructure_failures"
+            if infrastructure_failures
+            else "incomplete_turn_or_usage_accounting"
+        )
+        result["infrastructure_failure_count"] = len(infrastructure_failures)
+    elif champion is None:
         result["champion"] = None
         result["decision"] = "NO_GO"
         result["decision_reason"] = (

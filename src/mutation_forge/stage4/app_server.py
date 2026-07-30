@@ -131,6 +131,8 @@ def infrastructure_retry_eligible(evidence: Mapping[str, Any] | None) -> bool:
         return False
     if evidence.get("charged") is True or evidence.get("accepted_turn") is True:
         return False
+    if evidence.get("unauthorized_tool_approval") is True:
+        return False
     if evidence.get("uncharged") is not True and evidence.get("app_server_uncharged") is not True:
         return False
     usage = evidence.get("usage")
@@ -180,6 +182,28 @@ def _artifact_refs(
         names.append("rollout.jsonl")
     clean = prefix.rstrip(".")
     return tuple(f"{clean}.{name}" if clean else name for name in names)
+
+
+def _available_artifact_prefix(
+    directory: str | Path | None,
+    prefix: str,
+) -> str:
+    """Choose an additive retry prefix without overwriting retained evidence."""
+    if directory is None:
+        return prefix
+    root = Path(directory)
+    names = ("request.json", "response.json", "wire.jsonl", "transcript.sha256")
+
+    def occupied(candidate: str) -> bool:
+        return any((root / f"{candidate}.{name}").exists() for name in names)
+
+    if not occupied(prefix):
+        return prefix
+    for attempt in range(1, 65):
+        candidate = f"{prefix}.retry-{attempt:02d}"
+        if not occupied(candidate):
+            return candidate
+    raise Stage4ProviderError("App Server artifact retry namespace is exhausted")
 
 
 class Stage4CodexAppServerAdapter(CodexAppServerAdapter):
@@ -305,6 +329,10 @@ class Stage4AppServerProvider:
             else _derived_artifact_prefix(request)
         )
         directory = request.get("artifact_dir", self.artifact_dir)
+        prefix = _available_artifact_prefix(
+            directory if isinstance(directory, (str, Path)) else None,
+            prefix,
+        )
         root = request.get("artifact_root", self.artifact_root)
         doctor = request.get("appserver_doctor_sha256")
         adapter = Stage4CodexAppServerAdapter(
@@ -432,7 +460,16 @@ class Stage4AppServerProvider:
             diagnostics = _bounded_diagnostics(adapter.diagnostics)
             denied = any(d.get("event") == "denied_server_request" for d in diagnostics)
             partial = adapter.partial_result
-            partial_usage = self._usage(partial.usage.raw) if partial is not None else {}
+            metadata = adapter.inspect_metadata()
+            usage_state = adapter.inspect_usage()
+            observed_usage = usage_state.get("raw")
+            partial_usage = (
+                self._usage(partial.usage.raw)
+                if partial is not None
+                else self._usage(cast(Mapping[str, Any], observed_usage))
+                if isinstance(observed_usage, Mapping)
+                else {}
+            )
             if partial is not None:
                 partial_usage.setdefault("inputTokens", partial.usage.input_tokens)
                 partial_usage.setdefault(
@@ -448,14 +485,26 @@ class Stage4AppServerProvider:
                 partial_usage.update(
                     {"final": partial.usage.final, "partial": partial.usage.partial}
                 )
+            thread_id = (
+                partial.thread_id
+                if partial is not None
+                else metadata.get("threadId")
+            )
+            turn_evidence_observed = (
+                partial is not None
+                or isinstance(thread_id, str)
+                or isinstance(observed_usage, Mapping)
+            )
             error_evidence = {
-                "accepted": partial is not None,
+                # Once a private thread or usage event exists, replacement is
+                # fail-closed even if no final turn envelope was assembled.
+                "accepted": turn_evidence_observed,
                 "charged": bool(partial is not None and partial.usage.total_tokens > 0),
                 "content": bool(partial is not None and partial.text),
-                "uncharged": False,
+                "uncharged": not turn_evidence_observed,
                 "usage": partial_usage,
                 "request_id": partial.request_id if partial is not None else None,
-                "thread_id": partial.thread_id if partial is not None else None,
+                "thread_id": thread_id,
                 "turn_id": partial.turn_id if partial is not None else None,
                 "unauthorized_tool_approval": denied,
             }
@@ -463,8 +512,7 @@ class Stage4AppServerProvider:
                 adapter.logger.document(
                     "response.json",
                     {
-                        "accepted": False,
-                        "content": False,
+                        **error_evidence,
                         "status": "error",
                         "error_type": type(error).__name__,
                         "error": str(error)[:512],

@@ -11,6 +11,7 @@ import mutation_forge.stage4.generation as generation
 from mutation_forge.stage4.generation import (
     GenerationCoordinator,
     ProviderResult,
+    cached_pre_turn_auth_retry_allowed,
     infrastructure_retry_allowed,
 )
 
@@ -169,6 +170,118 @@ def test_infrastructure_retry_predicate_is_fail_closed() -> None:
     )
     assert not infrastructure_retry_allowed(
         ProviderResult(status="infrastructure", accepted=True, charged=True, content=True)
+    )
+    assert not infrastructure_retry_allowed(
+        ProviderResult(
+            status="infrastructure",
+            accepted=False,
+            charged=False,
+            content=False,
+            uncharged=True,
+            unauthorized_tool_approval=True,
+            usage={},
+        )
+    )
+
+
+def test_retained_auth_failure_retries_same_requests_only(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    class LegacyAuthFailureProvider:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def generate(self, request: dict[str, Any]) -> ProviderResult:
+            self.calls.append(dict(request))
+            return ProviderResult(
+                status="infrastructure",
+                accepted=False,
+                charged=False,
+                content=False,
+                uncharged=False,
+                usage={},
+                error="IsolationError: isolated Codex home is not authenticated",
+            )
+
+    monkeypatch.setattr(
+        generation,
+        "_behavior",
+        lambda source, limits, smoke_calls: (
+            {"signature_sha256": "3" * 64},
+            {"smoke_calls": smoke_calls},
+        ),
+    )
+    path = tmp_path / "checkpoint.json"
+    failed = LegacyAuthFailureProvider()
+    first = GenerationCoordinator(failed, checkpoint_path=path).run()
+    assert len(failed.calls) == 32
+    assert all(cached_pre_turn_auth_retry_allowed(slot.as_dict()) for slot in first.slots)
+
+    replacement = FakeProvider()
+    resumed = GenerationCoordinator(
+        replacement,
+        checkpoint_path=path,
+        retry_infrastructure=True,
+    ).run()
+    assert len(replacement.calls) == 32
+    assert {
+        request["idempotency_key"] for request in replacement.calls
+    } == {
+        request["idempotency_key"] for request in failed.calls
+    }
+    assert resumed.summary["initial_turn_count"] == 32
+
+
+def test_retained_auth_failure_classifier_is_exact() -> None:
+    value = {
+        "status": "failed",
+        "repairs": 0,
+        "repair": None,
+        "initial": {
+            "status": "infrastructure",
+            "accepted": False,
+            "charged": False,
+            "content": False,
+            "uncharged": False,
+            "usage": {},
+            "response": None,
+            "request_id": None,
+            "thread_id": None,
+            "turn_id": None,
+            "session_id": None,
+            "provider_request_id": None,
+            "provider_thread_id": None,
+            "provider_turn_id": None,
+            "error": "IsolationError: isolated Codex home is not authenticated",
+        },
+    }
+    assert cached_pre_turn_auth_retry_allowed(value)
+    assert not cached_pre_turn_auth_retry_allowed(
+        {
+            **value,
+            "initial": {
+                **value["initial"],
+                "usage": {"totalTokens": 1},
+            },
+        }
+    )
+    assert not cached_pre_turn_auth_retry_allowed(
+        {
+            **value,
+            "initial": {
+                **value["initial"],
+                "turn_id": "turn-1",
+            },
+        }
+    )
+    assert not cached_pre_turn_auth_retry_allowed(
+        {
+            **value,
+            "initial": {
+                **value["initial"],
+                "error": "different infrastructure failure",
+            },
+        }
     )
 
 

@@ -379,9 +379,45 @@ def infrastructure_retry_allowed(
         and not value.accepted
         and not value.charged
         and not value.content
+        and not value.unauthorized_tool_approval
         and value.uncharged
         and total == 0
         and value.response in (None, "", {}, [])
+    )
+
+
+def cached_pre_turn_auth_retry_allowed(value: Mapping[str, Any]) -> bool:
+    """Recognize the retained v2 auth failure without broadening live retries."""
+    if value.get("status") != "failed" or value.get("repair") is not None:
+        return False
+    repairs = value.get("repairs", 0)
+    if isinstance(repairs, bool) or not isinstance(repairs, int) or repairs != 0:
+        return False
+    envelope = value.get("initial", value.get("raw_result", {}))
+    if not isinstance(envelope, Mapping):
+        return False
+    if infrastructure_retry_allowed(envelope):
+        return True
+    result = ProviderResult.from_value(envelope)
+    identifiers = (
+        result.request_id,
+        result.thread_id,
+        result.turn_id,
+        result.session_id,
+        result.provider_request_id,
+        result.provider_thread_id,
+        result.provider_turn_id,
+    )
+    return (
+        result.status.lower() == "infrastructure"
+        and result.error == "IsolationError: isolated Codex home is not authenticated"
+        and not result.accepted
+        and not result.charged
+        and not result.content
+        and not result.unauthorized_tool_approval
+        and result.response in (None, "", {}, [])
+        and not result.usage
+        and all(identifier is None for identifier in identifiers)
     )
 
 
@@ -885,7 +921,14 @@ class GenerationCoordinator:
                     req = self._request(generation, slot, parent, "initial")
                     key = req.idempotency_key
                     cached = slots_state.get(key)
-                    if isinstance(cached, Mapping) and cached.get("status") != "pending":
+                    if (
+                        isinstance(cached, Mapping)
+                        and cached.get("status") != "pending"
+                        and not (
+                            self.retry_infrastructure
+                            and cached_pre_turn_auth_retry_allowed(cached)
+                        )
+                    ):
                         results[slot] = self._slot_from_checkpoint(cached)
                         continue
                     futures[pool.submit(self._invoke, req)] = (slot, req)
@@ -1133,6 +1176,7 @@ __all__ = [
     "GENERATIONS",
     "SMOKE_CALLS",
     "can_retry_infrastructure",
+    "cached_pre_turn_auth_retry_allowed",
     "generate",
     "generate_wave",
     "infrastructure_retry_allowed",
