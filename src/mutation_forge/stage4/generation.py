@@ -816,6 +816,147 @@ class GenerationCoordinator:
             value = self.provider.generate(payload)
         return ProviderResult.from_value(value)
 
+    def build_request(
+        self,
+        generation: int,
+        slot: str,
+        parent: str,
+        *,
+        phase: str = "initial",
+        diagnostics: Sequence[Mapping[str, Any]] = (),
+        repair_source: str = "",
+    ) -> GenerationRequest:
+        """Build one request through the frozen Stage 4 prompt path."""
+
+        return self._request(
+            generation,
+            slot,
+            parent,
+            phase,
+            diagnostics,
+            repair_source,
+        )
+
+    def _invoke_safely(self, request: GenerationRequest) -> ProviderResult:
+        try:
+            return self._invoke(request)
+        except BaseException as exc:
+            evidence = getattr(exc, "evidence", {})
+            return ProviderResult.from_value(
+                {
+                    "accepted": False,
+                    "charged": False,
+                    "content": False,
+                    "uncharged": False,
+                    **(dict(evidence) if isinstance(evidence, Mapping) else {}),
+                    "status": "infrastructure",
+                    "error": str(exc),
+                }
+            )
+
+    def run_request(
+        self,
+        request: GenerationRequest,
+        *,
+        allow_repair: bool,
+        allow_infrastructure_retry: bool,
+        retained_result: Any = None,
+    ) -> SlotResult:
+        """Run one frozen request without entering the four-generation coordinator."""
+
+        raw = (
+            ProviderResult.from_value(retained_result)
+            if retained_result is not None
+            else self._invoke_safely(request)
+        )
+        if retained_result is None and allow_infrastructure_retry and infrastructure_retry_allowed(
+            raw
+        ):
+            retried = self._invoke_safely(request)
+            raw = replace(
+                retried,
+                error=(
+                    f"infrastructure_retry:{raw.error}"
+                    if raw.error
+                    else "infrastructure_retry"
+                ),
+            )
+        candidate, diagnostics = self._assess(request, raw)
+        result = SlotResult(
+            request.generation,
+            request.slot,
+            request.parent_id,
+            "accepted" if candidate else "failed",
+            candidate,
+            tuple(diagnostics if not candidate else ()),
+            0,
+            initial=raw.as_dict(),
+            raw_result=raw.as_dict(),
+            request=request.as_dict(),
+        )
+        repairable = (
+            allow_repair
+            and candidate is None
+            and bool(diagnostics)
+            and raw.status == "completed"
+            and raw.accepted
+            and raw.content
+            and _usage_complete(raw.usage)
+        )
+        if not repairable:
+            return result
+        repair_request = self._request(
+            request.generation,
+            request.slot,
+            request.parent_id,
+            "repair",
+            diagnostics,
+            self._invalid_source(raw.as_dict()),
+        )
+        repair_request = replace(
+            repair_request,
+            parent_source=request.parent_source,
+            parent_metadata=dict(request.parent_metadata),
+            search_feedback=request.search_feedback,
+            archive_context=request.archive_context,
+        )
+        repair_raw = self._invoke_safely(repair_request)
+        repaired, repair_diagnostics = self._assess(
+            repair_request,
+            repair_raw,
+            repair=True,
+        )
+        return SlotResult(
+            request.generation,
+            request.slot,
+            request.parent_id,
+            "accepted" if repaired else "failed",
+            repaired,
+            tuple(repair_diagnostics if not repaired else ()),
+            1,
+            initial=raw.as_dict(),
+            repair=repair_raw.as_dict(),
+            request=repair_request.as_dict(),
+            raw_result=repair_raw.as_dict(),
+        )
+
+    def run_slot(
+        self,
+        generation: int,
+        slot: str,
+        parent: str,
+        *,
+        allow_repair: bool,
+        allow_infrastructure_retry: bool,
+    ) -> SlotResult:
+        """Build and execute one request through the same path used by Stage 4R."""
+
+        return self.run_request(
+            self.build_request(generation, slot, parent),
+            allow_repair=allow_repair,
+            allow_infrastructure_retry=allow_infrastructure_retry,
+        )
+
     def _assess(
         self, req: GenerationRequest, raw: ProviderResult, *, repair: bool = False
     ) -> tuple[Candidate | None, tuple[Mapping[str, Any], ...]]:
@@ -986,6 +1127,11 @@ class GenerationCoordinator:
             cast(Mapping[str, Any], value.get("raw_result", {})),
             value.get("duplicate_of"),
         )
+
+    def load_slot_result(self, value: Mapping[str, Any]) -> SlotResult:
+        """Read a retained slot result without submitting another provider turn."""
+
+        return self._slot_from_checkpoint(value)
 
     def run(self, *, resume: bool = True) -> GenerationResult:
         state = (

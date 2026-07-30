@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from mutation_forge import __version__
+from mutation_forge import stage4r as stage4r_commands
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
 from mutation_forge.evaluation.benchmark import load_summary, run_benchmark
@@ -368,6 +369,51 @@ def _stage4(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in {"completed", "ok"} else 1
 
 
+def _stage4r(args: argparse.Namespace) -> int:
+    command = args.stage4r_command
+    if command == "canary":
+        result = stage4r_commands.canary(
+            config_path=args.config,
+            retained_run=args.retained_run,
+            run=args.run,
+            auth_json=args.auth_json,
+            attempt=args.attempt,
+        )
+    elif command == "freeze-search":
+        result = stage4r_commands.freeze_search(
+            config_path=args.config,
+            retained_run=args.retained_run,
+            run=args.run,
+            tracked_freeze=args.tracked_freeze,
+        )
+    elif command == "recover":
+        result = stage4r_commands.recover(
+            config_path=args.config,
+            retained_run=args.retained_run,
+            run=args.run,
+            tracked_freeze=args.tracked_freeze,
+            auth_json=args.auth_json,
+        )
+    elif command == "freeze-validation":
+        result = stage4r_commands.freeze_validation(
+            config_path=args.config,
+            run=args.run,
+            tracked_search_freeze=args.tracked_search_freeze,
+            tracked_validation_freeze=args.tracked_validation_freeze,
+        )
+    elif command == "validate":
+        result = stage4r_commands.validate(
+            config_path=args.config,
+            retained_run=args.retained_run,
+            run=args.run,
+            tracked_validation_freeze=args.tracked_validation_freeze,
+        )
+    else:
+        raise ValueError(f"unknown Stage 4R command {command!r}")
+    _emit_stage3(result, json_output=args.json)
+    return 0 if result.get("status") in {"completed", "ok"} else 1
+
+
 def _policy_validate(path: Path, *, json_output: bool) -> int:
     result = validate_policy(path.read_text()).as_dict()
     _emit_policy_result(result, json_output=json_output)
@@ -667,6 +713,95 @@ def build_parser() -> argparse.ArgumentParser:
     stage4_replay = stage4_commands_parser.add_parser("verify-replay")
     stage4_replay.add_argument("run", type=Path)
     stage4_replay.add_argument("--json", action="store_true")
+
+    stage4r = commands.add_parser("stage4r")
+    stage4r_commands_parser = stage4r.add_subparsers(
+        dest="stage4r_command",
+        required=True,
+    )
+    stage4r_defaults = {
+        "config": Path("configs/stage4-search.toml"),
+        "retained_run": Path("runs/stage4-search/campaign-63eea8c2ddb9"),
+        "run": Path("runs/stage4r-search/issue-11"),
+        "tracked_search": Path("configs/stage4r-search-frozen-v1.json"),
+        "tracked_validation": Path("configs/stage4r-validation-frozen-v1.json"),
+    }
+    stage4r_canary = stage4r_commands_parser.add_parser("canary")
+    stage4r_canary.add_argument("--config", type=Path, default=stage4r_defaults["config"])
+    stage4r_canary.add_argument(
+        "--retained-run",
+        type=Path,
+        default=stage4r_defaults["retained_run"],
+    )
+    stage4r_canary.add_argument("--run", type=Path, default=stage4r_defaults["run"])
+    stage4r_canary.add_argument("--auth-json", type=Path, required=True)
+    stage4r_canary.add_argument("--attempt", type=int, required=True)
+    stage4r_canary.add_argument("--json", action="store_true")
+    stage4r_freeze = stage4r_commands_parser.add_parser("freeze-search")
+    stage4r_freeze.add_argument("--config", type=Path, default=stage4r_defaults["config"])
+    stage4r_freeze.add_argument(
+        "--retained-run",
+        type=Path,
+        default=stage4r_defaults["retained_run"],
+    )
+    stage4r_freeze.add_argument("--run", type=Path, default=stage4r_defaults["run"])
+    stage4r_freeze.add_argument(
+        "--tracked-freeze",
+        type=Path,
+        default=stage4r_defaults["tracked_search"],
+    )
+    stage4r_freeze.add_argument("--json", action="store_true")
+    stage4r_recover = stage4r_commands_parser.add_parser("recover")
+    stage4r_recover.add_argument("--config", type=Path, default=stage4r_defaults["config"])
+    stage4r_recover.add_argument(
+        "--retained-run",
+        type=Path,
+        default=stage4r_defaults["retained_run"],
+    )
+    stage4r_recover.add_argument("--run", type=Path, default=stage4r_defaults["run"])
+    stage4r_recover.add_argument(
+        "--tracked-freeze",
+        type=Path,
+        default=stage4r_defaults["tracked_search"],
+    )
+    stage4r_recover.add_argument("--auth-json", type=Path, required=True)
+    stage4r_recover.add_argument("--json", action="store_true")
+    stage4r_validation_freeze = stage4r_commands_parser.add_parser("freeze-validation")
+    stage4r_validation_freeze.add_argument(
+        "--config",
+        type=Path,
+        default=stage4r_defaults["config"],
+    )
+    stage4r_validation_freeze.add_argument(
+        "--run",
+        type=Path,
+        default=stage4r_defaults["run"],
+    )
+    stage4r_validation_freeze.add_argument(
+        "--tracked-search-freeze",
+        type=Path,
+        default=stage4r_defaults["tracked_search"],
+    )
+    stage4r_validation_freeze.add_argument(
+        "--tracked-validation-freeze",
+        type=Path,
+        default=stage4r_defaults["tracked_validation"],
+    )
+    stage4r_validation_freeze.add_argument("--json", action="store_true")
+    stage4r_validate = stage4r_commands_parser.add_parser("validate")
+    stage4r_validate.add_argument("--config", type=Path, default=stage4r_defaults["config"])
+    stage4r_validate.add_argument(
+        "--retained-run",
+        type=Path,
+        default=stage4r_defaults["retained_run"],
+    )
+    stage4r_validate.add_argument("--run", type=Path, default=stage4r_defaults["run"])
+    stage4r_validate.add_argument(
+        "--tracked-validation-freeze",
+        type=Path,
+        default=stage4r_defaults["tracked_validation"],
+    )
+    stage4r_validate.add_argument("--json", action="store_true")
     return parser
 
 
@@ -719,6 +854,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stage3(args)
         if args.command == "stage4":
             return _stage4(args)
+        if args.command == "stage4r":
+            return _stage4r(args)
     except Exception as error:
         if getattr(args, "json", False):
             print(
