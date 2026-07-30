@@ -45,7 +45,7 @@ generation, program search, generalization, and production consideration.
    provenance, Stage 2A validation, immutable development trajectories,
    deterministic replay, and a twelve-part gate. Live generation is blocked
    for the official campaign until the Phase 1 commit and annotated
-   `stage3-generation-frozen-v9` tag are pushed and recorded. Three
+   `stage3-generation-frozen-v10` tag are pushed and recorded. Three
    user-authorized connectivity turns used while debugging the adapter are
    retained as excluded diagnostic evidence and did not change the scientific
    contract. The retained v8 official run passed schema validation and emitted
@@ -55,7 +55,11 @@ generation, program search, generalization, and production consideration.
    the 64 KiB frame bound, adds a separate 2 MiB aggregate stdout cap, raises
    that bounded limit 100-fold to 102400, and fixes Tokio, Rayon, and numerical
    libraries to one worker per capsule. It does not alter prompts or
-   scientific inputs.
+   scientific inputs. The retained v9 run started eight turns, completed four,
+   and accepted one candidate before further bounded timeout/transport limits.
+   The user-authorized v10 correction raises the turn wall limit to 600
+   seconds, the final response bound 100-fold, and the event, transcript,
+   stdout, and queue bounds tenfold.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,

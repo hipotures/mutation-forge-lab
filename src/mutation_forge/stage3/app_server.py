@@ -245,7 +245,7 @@ class CodexAppServerAdapter:
         self._stderr_lines: list[bytes] = []
         self._stderr_exceeded = False
         self._stdout_overflow = False
-        self._queue: queue.Queue[Any] = queue.Queue(maxsize=512)
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=5_120)
         self._queued_bytes = 0
         self._queue_lock = threading.Lock()
         self._stop = threading.Event()
