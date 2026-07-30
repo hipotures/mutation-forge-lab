@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-05: Test whether selector provenance can serve as a small bounded modifier of a ranker whose main evidence remains structural and proposal-specific. Do not treat selector_tags as ground truth, depend on tag ordering, or use proposal_id as a quality signal.
+Preregistered focus: selector-aware
 
 SCIENTIFIC DECISION PROBLEM
 

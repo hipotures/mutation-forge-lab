@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-05",
-  "brief": "Use selector tags as categorical evidence while remaining robust to ordering and avoiding absolute identifiers.",
+  "brief": "Test whether selector provenance can serve as a small bounded modifier of a ranker whose main evidence remains structural and proposal-specific. Do not treat selector_tags as ground truth, depend on tag ordering, or use proposal_id as a quality signal.",
   "generation_mode": "new_strategy",
   "focus": "selector-aware"
 }

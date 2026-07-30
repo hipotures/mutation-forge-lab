@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-01",
-  "brief": "Lexicographic risk-first finite-number ranking: penalize local triangle and C4 risk, then reward broken witness load.",
+  "brief": "Construct a risk-first finite-number ranking: penalize local triangle and C4 risk, then use at most two independent sampled-witness signals. Express lexicographic emphasis with bounded arithmetic and do not treat proxy risk as a guarantee.",
   "generation_mode": "new_strategy",
   "focus": "lexicographic-risk-first"
 }

@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-07: Construct a conservative ranker using at most three independent proposal-derived signals, finite low-magnitude arithmetic, and explicit assumptions about every heuristic direction. Avoid context-only ranking, aliases, provenance-only identifiers, and unavailable scores.
+Preregistered focus: conservative-safe
 
 SCIENTIFIC DECISION PROBLEM
 

@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-06",
-  "brief": "Prefer diversity and deterministic tie behavior using distance and span features with finite stable scores.",
+  "brief": "Construct a diversity-oriented ranker using at most four independent distance, risk, or witness signals. Distances are source-graph proxies; do not count reconnection_span separately from its exact alias mean_preexisting_distance_for_new_edges.",
   "generation_mode": "new_strategy",
   "focus": "diversity-tie"
 }

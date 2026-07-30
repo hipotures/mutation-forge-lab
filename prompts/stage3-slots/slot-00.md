@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-00: Construct a sparse, interpretable linear ranker using at most four independent proposal-derived numeric signals. Context may only normalize or modulate those signals. Avoid aliases, proposal_id, unavailable scores, and arbitrary very large coefficients.
+Preregistered focus: sparse-linear
 
 SCIENTIFIC DECISION PROBLEM
 

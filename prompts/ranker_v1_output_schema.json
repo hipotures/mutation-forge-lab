@@ -8,9 +8,9 @@
   "required": ["schema_version", "source", "design_summary", "used_fields", "assumptions"],
   "properties": {
     "schema_version": {"type": "string", "const": "stage3.generated_policy.v1"},
-    "source": {"type": "string", "minLength": 1, "maxLength": 12288},
-    "design_summary": {"type": "string", "minLength": 1, "maxLength": 2048},
-    "used_fields": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
-    "assumptions": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 512}}
+    "source": {"type": "string"},
+    "design_summary": {"type": "string"},
+    "used_fields": {"type": "array", "items": {"type": "string"}},
+    "assumptions": {"type": "array", "items": {"type": "string"}}
   }
 }

@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-02",
-  "brief": "Piecewise arithmetic strategy with bounded conditionals that changes emphasis when stagnation or remaining steps changes.",
+  "brief": "Construct a piecewise arithmetic ranker whose principal signals are proposal-specific. Use bounded conditionals to modulate their weights from stagnation or remaining_steps, acknowledging that retained Stage 2B trajectories currently leave recent-history fields at defaults.",
   "generation_mode": "new_strategy",
   "focus": "piecewise"
 }

@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-04",
-  "brief": "Use proposal k and operator family consistently; test whether larger switches deserve a measured bonus when risk is controlled.",
+  "brief": "Test a k-aware hypothesis with at most four independent proposal signals: give larger switches a measured bounded bonus only when local risk is controlled. Treat operator_family as an exact alias of k and do not count it independently.",
   "generation_mode": "new_strategy",
   "focus": "k-aware"
 }

@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-07",
-  "brief": "A conservative safe strategy using only documented fields, finite arithmetic, and explicitly stated assumptions.",
+  "brief": "Construct a conservative ranker using at most three independent proposal-derived signals, finite low-magnitude arithmetic, and explicit assumptions about every heuristic direction. Avoid context-only ranking, aliases, provenance-only identifiers, and unavailable scores.",
   "generation_mode": "new_strategy",
   "focus": "conservative-safe"
 }

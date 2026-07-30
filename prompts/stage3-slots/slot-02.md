@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-02: Construct a piecewise arithmetic ranker whose principal signals are proposal-specific. Use bounded conditionals to modulate their weights from stagnation or remaining_steps, acknowledging that retained Stage 2B trajectories currently leave recent-history fields at defaults.
+Preregistered focus: piecewise
 
 SCIENTIFIC DECISION PROBLEM
 

@@ -45,7 +45,7 @@ generation, program search, generalization, and production consideration.
    provenance, Stage 2A validation, immutable development trajectories,
    deterministic replay, and a twelve-part gate. Live generation is blocked
    for the official campaign until the Phase 1 commit and annotated
-   `stage3-generation-frozen-v7` tag are pushed and recorded. Three
+   `stage3-generation-frozen-v8` tag are pushed and recorded. Three
    user-authorized connectivity turns used while debugging the adapter are
    retained as excluded diagnostic evidence and did not change the scientific
    contract.
@@ -92,6 +92,17 @@ turn boundaries because `outputSchema.properties.schema_version` lacked an
 explicit string type. After explicit user authorization, v7 adds only that
 server-required type and a matching offline preflight regression. The v6 tag
 and failed run remain unchanged.
+
+The retained v7 attempt exposed another pre-inference App Server restriction:
+`uniqueItems` is not accepted in the structured-output schema subset. v8
+allows only the verified transport keywords and leaves all response
+size/cardinality validation in the existing application parser. v8 also fixes
+the schema-derived renderer's nullable/reference descriptions and snapshots
+all eight rendered slot prompts. A versioned glossary bound to the scientific
+schema hashes supplies the decision objective, every field's semantics,
+pool-constant versus candidate-specific scope, vector alignment, aliases, and
+bounded-feature caveats without empirical Stage 2C/2D leakage. The v6/v7 tags
+and failed runs remain unchanged.
 
 ## Scientific controls
 

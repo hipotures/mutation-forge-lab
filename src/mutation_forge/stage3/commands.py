@@ -87,6 +87,7 @@ def _prompt_bundle(config: Stage3GenerationConfig) -> PromptBundle:
     return load_prompt_bundle(
         context_schema=config.context_schema_path,
         proposal_schema=config.proposal_schema_path,
+        semantics_glossary=config.semantic_glossary_path,
         output_schema=config.output_schema_path,
     )
 
@@ -128,9 +129,20 @@ def _validate_output_schema(config: Stage3GenerationConfig) -> dict[str, Any]:
         raise RuntimeError("generated-policy output schema size is invalid")
     value = json.loads(raw)
     required = {"schema_version", "source", "design_summary", "used_fields", "assumptions"}
+    root_keys = {
+        "$schema",
+        "$id",
+        "title",
+        "description",
+        "type",
+        "additionalProperties",
+        "required",
+        "properties",
+    }
     properties = value.get("properties") if isinstance(value, dict) else None
     if (
         not isinstance(value, dict)
+        or set(value) != root_keys
         or value.get("type") != "object"
         or value.get("additionalProperties") is not False
         or set(value.get("required", [])) != required
@@ -147,9 +159,22 @@ def _validate_output_schema(config: Stage3GenerationConfig) -> dict[str, Any]:
             or property_schema.get("type") not in {"string", "array"}
         ):
             raise RuntimeError(f"generated-policy property {name} requires an explicit type")
+        allowed_keys = (
+            {"type", "const"} if name == "schema_version" else {"type", "items"}
+            if property_schema["type"] == "array"
+            else {"type"}
+        )
+        if set(property_schema) != allowed_keys:
+            raise RuntimeError(
+                f"generated-policy property {name} uses unsupported schema keywords"
+            )
         if property_schema["type"] == "array":
             items = property_schema.get("items")
-            if not isinstance(items, dict) or items.get("type") != "string":
+            if (
+                not isinstance(items, dict)
+                or items.get("type") != "string"
+                or set(items) != {"type"}
+            ):
                 raise RuntimeError(
                     f"generated-policy array property {name} requires typed string items"
                 )
@@ -502,6 +527,7 @@ def _verify_freeze_inputs(config: Stage3GenerationConfig) -> dict[str, Any]:
     files = {
         "context_schema": config.context_schema_path,
         "proposal_schema": config.proposal_schema_path,
+        "semantic_glossary": config.semantic_glossary_path,
         "system_prompt": config.system_prompt_path,
         "request_prompt": config.request_prompt_path,
         "output_schema": config.output_schema_path,
@@ -512,6 +538,7 @@ def _verify_freeze_inputs(config: Stage3GenerationConfig) -> dict[str, Any]:
     for identity_name, file_name in (
         ("context_schema_sha256", "context_schema"),
         ("proposal_schema_sha256", "proposal_schema"),
+        ("semantic_glossary_sha256", "semantic_glossary"),
         ("system_prompt_sha256", "system_prompt"),
         ("request_prompt_sha256", "request_prompt"),
         ("output_schema_sha256", "output_schema"),
@@ -574,11 +601,14 @@ def freeze(config_path: str | Path) -> dict[str, Any]:
         "diagnostic_live_turns_completed": 2,
         "diagnostic_evidence_excluded": True,
         "user_reviewed_diagnostic_restart": True,
-        "prior_official_infrastructure_attempts": 1,
-        "prior_official_turn_start_attempts": 8,
+        "prior_official_infrastructure_attempts": 2,
+        "prior_official_turn_start_attempts": 16,
         "prior_official_model_content_observed": False,
         "prior_official_usage_observed": False,
-        "prior_official_failure_code": "invalid_json_schema",
+        "prior_official_failure_codes": [
+            "invalid_json_schema:missing_type",
+            "invalid_json_schema:uniqueItems_not_permitted",
+        ],
         "user_authorized_schema_repair_restart": True,
         "inference": False,
         "auth_ready": False,
@@ -680,6 +710,7 @@ def generate(
             "output_schema_sha256": config.identity.output_schema_sha256,
             "context_schema_sha256": config.identity.context_schema_sha256,
             "proposal_schema_sha256": config.identity.proposal_schema_sha256,
+            "semantic_glossary_sha256": config.identity.semantic_glossary_sha256,
         },
     )
     artifacts.write("development_manifest.json", manifest)

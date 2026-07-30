@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-04: Test a k-aware hypothesis with at most four independent proposal signals: give larger switches a measured bounded bonus only when local risk is controlled. Treat operator_family as an exact alias of k and do not count it independently.
+Preregistered focus: k-aware
 
 SCIENTIFIC DECISION PROBLEM
 

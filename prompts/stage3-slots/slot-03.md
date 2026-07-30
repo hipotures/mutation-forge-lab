@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-03: Construct a normalized ranker using at most four independent proposal-derived signals. Use safe denominators and aligned forbidden-length vectors so magnitudes remain comparable across graph orders and cycle lengths without reconstructing unavailable scores.
+Preregistered focus: normalization
 
 SCIENTIFIC DECISION PROBLEM
 

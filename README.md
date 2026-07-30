@@ -53,7 +53,7 @@ offline implementation fixes eight ordered one-shot Codex App Server slots at
 no-tool capsules, Stage 2A validation and 10,000-call smoke checks, immutable
 development trajectories, deterministic replay, and a twelve-part gate. No
 official campaign generation may occur until the implementation commit and
-the new immutable annotated tag `stage3-generation-frozen-v7` are pushed and
+the new immutable annotated tag `stage3-generation-frozen-v8` are pushed and
 recorded on issue #9. Adapter troubleshooting used three explicitly
 user-authorized connectivity turns: two completed and one ended with partial
 usage. Their fixed connectivity payloads and outputs are retained as
@@ -62,8 +62,16 @@ were not used to change prompts, schemas, rankers, manifests, metrics, or
 gates. The user reviewed that diagnostic boundary and authorized this fresh
 freeze. The retained v6 official attempt was rejected before inference because
 its structured-output `schema_version` property omitted the explicit JSON
-Schema string type. v7 adds only that server-required type and an offline
-regression preflight; the v6 tag and failure artifacts remain unchanged.
+Schema string type. v7 added that type but exposed a second pre-inference
+transport rejection because `uniqueItems` is not supported by the App Server
+structured-output subset. v8 restricts the transport schema to a tested
+keyword allowlist while retaining all size/cardinality enforcement in the
+application parser. It also fixes the schema-derived prompt renderer so
+nullable and referenced fields are explicit and snapshots all eight rendered
+slot prompts. A versioned glossary tied to the context/proposal schema hashes
+defines the decision problem, every field, pool-constant versus
+candidate-specific scope, vector alignment, aliases, and budget caveats. The
+v6/v7 tags and failure artifacts remain unchanged.
 Stage 4, evolution, held-out evaluation, full proposer work, and HEG
 integration remain blocked.
 
@@ -227,6 +235,14 @@ uses TheML-compatible names for request, response, provider raw data, profile,
 RPC, events, stdout, stderr, and the bounded rollout copy. The temporary
 capsule is deleted only after those logs are flushed. Repair is limited to one
 schema/AST-only turn per slot and receives no benchmark result.
+
+The complete reviewed prompt artifacts are checked in under
+`prompts/stage3-slots/`. Regenerate or verify them with:
+
+```console
+uv run python scripts/render_stage3_prompts.py
+uv run python scripts/render_stage3_prompts.py --check
+```
 
 See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass

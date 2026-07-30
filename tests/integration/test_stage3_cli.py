@@ -252,6 +252,10 @@ def test_output_schema_preflight_requires_explicit_schema_version_type(
     tmp_path: Path,
 ) -> None:
     schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://mutation-forge.invalid/test.json",
+        "title": "test",
+        "description": "test",
         "type": "object",
         "additionalProperties": False,
         "required": [
@@ -279,6 +283,11 @@ def test_output_schema_preflight_requires_explicit_schema_version_type(
     schema["properties"]["schema_version"]["type"] = "string"
     path.write_text(json.dumps(schema), encoding="utf-8")
     assert stage3_commands._validate_output_schema(config) == schema
+
+    schema["properties"]["used_fields"]["uniqueItems"] = True
+    path.write_text(json.dumps(schema), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unsupported schema keywords"):
+        stage3_commands._validate_output_schema(config)
 
 
 def _evaluation_config(tmp_path: Path) -> SimpleNamespace:

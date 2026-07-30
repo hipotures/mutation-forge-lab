@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-06: Construct a diversity-oriented ranker using at most four independent distance, risk, or witness signals. Distances are source-graph proxies; do not count reconnection_span separately from its exact alias mean_preexisting_distance_for_new_edges.
+Preregistered focus: diversity-tie
 
 SCIENTIFIC DECISION PROBLEM
 

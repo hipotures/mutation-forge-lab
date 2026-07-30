@@ -20,7 +20,7 @@ STAGE3_CONFIG_VERSION = "stage3.1"
 EXPECTED_MODEL, EXPECTED_EFFORT, EXPECTED_SLOTS, EXPECTED_REPAIRS = "gpt-5.6-luna", "high", 8, 1
 EXPECTED_PROJECT_COMMIT = "1670f7b023dcf110259ea39b63ba1a55cb011521"
 EXPECTED_HEG_COMMIT = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
-EXPECTED_TAG = "stage3-generation-frozen-v7"
+EXPECTED_TAG = "stage3-generation-frozen-v8"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +90,7 @@ class Stage3ExperimentConfig:
 class Stage3Identity:
     context_schema_sha256: str
     proposal_schema_sha256: str
+    semantic_glossary_sha256: str
     freeze_payload_sha256: str
     manifest_sha256: str
     system_prompt_sha256: str
@@ -113,6 +114,7 @@ class Stage3GenerationConfig:
     manifest_path: Path
     context_schema_path: Path
     proposal_schema_path: Path
+    semantic_glossary_path: Path
     stage2b_config_path: Path
     random_policy_path: Path
     structural_policy_path: Path
@@ -313,6 +315,7 @@ def load_stage3_config(path: str | Path) -> Stage3GenerationConfig:
             "manifest",
             "context_schema",
             "proposal_schema",
+            "semantic_glossary",
             "slot_briefs_dir",
             "system_prompt",
             "request_prompt",
@@ -336,6 +339,7 @@ def load_stage3_config(path: str | Path) -> Stage3GenerationConfig:
         {
             "context_schema_sha256",
             "proposal_schema_sha256",
+            "semantic_glossary_sha256",
             "freeze_payload_sha256",
             "manifest_sha256",
             "system_prompt_sha256",
@@ -462,6 +466,7 @@ def load_stage3_config(path: str | Path) -> Stage3GenerationConfig:
             "manifest",
             "context_schema",
             "proposal_schema",
+            "semantic_glossary",
             "random_policy",
             "structural_policy",
             "slot_briefs_dir",
@@ -487,6 +492,7 @@ def load_stage3_config(path: str | Path) -> Stage3GenerationConfig:
         paths["manifest"],
         paths["context_schema"],
         paths["proposal_schema"],
+        paths["semantic_glossary"],
         stage2b_path,
         paths["random_policy"],
         paths["structural_policy"],
@@ -510,6 +516,7 @@ def load_stage3_config(path: str | Path) -> Stage3GenerationConfig:
     for name, file_path in (
         ("context_schema_sha256", result.context_schema_path),
         ("proposal_schema_sha256", result.proposal_schema_path),
+        ("semantic_glossary_sha256", result.semantic_glossary_path),
         ("system_prompt_sha256", result.system_prompt_path),
         ("request_prompt_sha256", result.request_prompt_path),
         ("output_schema_sha256", result.output_schema_path),

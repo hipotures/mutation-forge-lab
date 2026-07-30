@@ -1,7 +1,8 @@
 Generate one new deterministic ranker for this frozen slot.
-Generation mode: {generation_mode}
+Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: {task_instruction}
+Task brief: slot-01: Construct a risk-first finite-number ranking: penalize local triangle and C4 risk, then use at most two independent sampled-witness signals. Express lexicographic emphasis with bounded arithmetic and do not treat proxy risk as a guarantee.
+Preregistered focus: lexicographic-risk-first
 
 SCIENTIFIC DECISION PROBLEM
 

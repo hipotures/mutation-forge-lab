@@ -109,7 +109,7 @@ capsules, strict output and exact usage accounting, Stage 2A validation and
 10,000-call smoke, the fixed non-held-out development manifest, independent
 trajectories, deterministic replay, and twelve named gates. No live generation
 for the official campaign is permitted before the Phase 1 commit and annotated
-`stage3-generation-frozen-v7` tag are pushed and recorded on issue #9. Three
+`stage3-generation-frozen-v8` tag are pushed and recorded on issue #9. Three
 explicitly user-authorized adapter connectivity turns preceded this freeze;
 two completed and one ended with partial usage. They are retained and excluded
 as diagnostic evidence, did not generate candidates, and did not change the
@@ -121,6 +121,17 @@ but was rejected before inference because the structured-output
 `schema_version` property omitted an explicit JSON Schema string type. The
 user authorized a repair. v7 adds only that required type and an offline
 preflight regression; v6 and its failure artifacts remain immutable.
+
+The retained v7 attempt then exposed a second pre-inference transport
+rejection: App Server does not permit `uniqueItems` in its structured-output
+schema subset. v8 removes unsupported transport-only length/cardinality
+keywords, enforces a strict supported-keyword allowlist before freeze, and
+retains the same limits in the application parser. It also expands nullable
+and referenced scientific fields into readable prompt text and snapshots all
+eight slot prompts. A versioned, schema-hash-bound semantic glossary covers
+all context/proposal fields, pool scope, vector alignment, aliases,
+directionality, and budget caveats without importing Stage 2C/2D empirical
+findings. v6/v7 remain immutable.
 
 The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
 `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical

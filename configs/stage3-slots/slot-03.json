@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-03",
-  "brief": "Normalize bounded feature magnitudes using safe denominators and compare proposals fairly across orders and cycle lengths.",
+  "brief": "Construct a normalized ranker using at most four independent proposal-derived signals. Use safe denominators and aligned forbidden-length vectors so magnitudes remain comparable across graph orders and cycle lengths without reconstructing unavailable scores.",
   "generation_mode": "new_strategy",
   "focus": "normalization"
 }
