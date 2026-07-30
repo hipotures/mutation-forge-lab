@@ -13,7 +13,7 @@ import json
 import os
 import time
 from collections.abc import Iterable, Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, cast
 
@@ -217,6 +217,10 @@ def _set_threads(cpu_id: int | None = None) -> list[int]:
     return observed
 
 
+def _uses_process_workers(config: object) -> bool:
+    return int(_get(_get(config, "limits", {}), "reserved_physical_cores", 0)) > 0
+
+
 def _shard(rows: list[dict[str, Any]], count: int) -> list[list[dict[str, Any]]]:
     result: list[list[dict[str, Any]]] = [[] for _ in range(count)]
     for index, row in enumerate(rows):
@@ -296,6 +300,7 @@ def _evaluate_shard(
             )
         result.append(_compact_record(raw, candidate_id))
     return result, {
+        "process_id": os.getpid(),
         "cpu_id": cpu_id,
         "observed_affinity": observed,
         "reserved_cpu_ids": reserved_cpu_ids,
@@ -367,7 +372,8 @@ def evaluate_program_manifest(
     missing = [index for index, records in enumerate(records_by_shard) if records is None]
     health: list[dict[str, Any]] = []
     if missing:
-        with ThreadPoolExecutor(max_workers=requested, thread_name_prefix="stage4-eval") as pool:
+        executor = ProcessPoolExecutor if _uses_process_workers(config) else ThreadPoolExecutor
+        with executor(max_workers=requested) as pool:
             futures = {
                 pool.submit(
                     _evaluate_shard,
@@ -462,6 +468,65 @@ def evaluate_program_manifest(
     return {**summary, "records": ordered, "shard_manifest": shard_manifest}
 
 
+def _evaluate_roster_shard(
+    config: object,
+    index: int,
+    shard_rows: list[dict[str, Any]],
+    policies: Mapping[str, Any],
+    cpu_id: int | None,
+    reserved_cpu_ids: list[int],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    observed = _set_threads(cpu_id)
+    compact: list[dict[str, Any]] = []
+    for episode in shard_rows:
+        raw = run_development_episode(
+            config,
+            episode,
+            {name: _source(value) for name, value in policies.items()},
+        )
+        if any(
+            raw.get(key, 0)
+            for key in (
+                "model_calls",
+                "app_server_calls",
+                "oracle_score_calls",
+                "runtime_network_calls",
+            )
+        ):
+            raise ValueError(
+                "Stage 4 evaluation crossed a forbidden provider/oracle/network boundary"
+            )
+        shared = {
+            key: _strip(value)
+            for key, value in raw.items()
+            if key not in {"policies", "policy_identities", "steps", "canonical_episode_sha256"}
+        }
+        summaries = raw.get("policies", {})
+        summaries_map = summaries if isinstance(summaries, Mapping) else {}
+        shared["policies"] = {
+            str(name): {
+                key: _strip(value) for key, value in summary.items() if key != "final_score"
+            }
+            for name, summary in summaries_map.items()
+            if isinstance(summary, Mapping)
+        }
+        shared["candidate_id"] = "roster"
+        shared["metrics_input"] = {
+            "episode_id": episode["episode_id"],
+            "policies": shared["policies"],
+        }
+        shared["canonical_episode_sha256"] = sha256(canonical_projection(raw))
+        compact.append(shared)
+    return compact, {
+        "shard": index,
+        "process_id": os.getpid(),
+        "cpu_id": cpu_id,
+        "observed_affinity": observed,
+        "reserved_cpu_ids": reserved_cpu_ids,
+        "thread_environment": dict(THREAD_ENVIRONMENT),
+    }
+
+
 def evaluate_policy_roster_manifest(
     config: object,
     manifest: object,
@@ -531,62 +596,21 @@ def evaluate_policy_roster_manifest(
         except Exception:
             pass
 
-    def run_shard(
-        index: int,
-        shard_rows: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        observed = _set_threads(worker_cpu_ids[index % workers])
-        compact: list[dict[str, Any]] = []
-        for episode in shard_rows:
-            raw = run_development_episode(
-                config, episode, {name: _source(value) for name, value in policies.items()}
-            )
-            if any(
-                raw.get(key, 0)
-                for key in (
-                    "model_calls",
-                    "app_server_calls",
-                    "oracle_score_calls",
-                    "runtime_network_calls",
-                )
-            ):
-                raise ValueError(
-                    "Stage 4 evaluation crossed a forbidden provider/oracle/network boundary"
-                )
-            shared = {
-                key: _strip(value)
-                for key, value in raw.items()
-                if key not in {"policies", "policy_identities", "steps", "canonical_episode_sha256"}
-            }
-            summaries = raw.get("policies", {})
-            summaries_map = summaries if isinstance(summaries, Mapping) else {}
-            shared["policies"] = {
-                str(name): {
-                    key: _strip(value) for key, value in summary.items() if key != "final_score"
-                }
-                for name, summary in summaries_map.items()
-                if isinstance(summary, Mapping)
-            }
-            shared["candidate_id"] = "roster"
-            shared["metrics_input"] = {
-                "episode_id": episode["episode_id"],
-                "policies": shared["policies"],
-            }
-            shared["canonical_episode_sha256"] = sha256(canonical_projection(raw))
-            compact.append(shared)
-        return compact, {
-            "shard": index,
-            "cpu_id": worker_cpu_ids[index % workers],
-            "observed_affinity": observed,
-            "reserved_cpu_ids": reserved_cpu_ids,
-            "thread_environment": dict(THREAD_ENVIRONMENT),
-        }
-
     missing = [index for index, value in enumerate(records_by_shard) if value is None]
     if missing:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="stage4-roster") as pool:
+        executor = ProcessPoolExecutor if _uses_process_workers(config) else ThreadPoolExecutor
+        with executor(max_workers=workers) as pool:
             futures = {
-                pool.submit(run_shard, index, shards[index]): index for index in missing
+                pool.submit(
+                    _evaluate_roster_shard,
+                    config,
+                    index,
+                    shards[index],
+                    policies,
+                    worker_cpu_ids[index % workers],
+                    reserved_cpu_ids,
+                ): index
+                for index in missing
             }
             for future in as_completed(futures):
                 index = futures[future]

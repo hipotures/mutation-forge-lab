@@ -180,3 +180,38 @@ def test_exact_usage_rejects_partial_or_incomplete_envelopes() -> None:
     assert commands._usage_complete(complete)
     assert not commands._usage_complete({**complete, "partial": True})
     assert not commands._usage_complete({"totalTokens": 2, "final": True})
+
+
+def test_seed_evaluation_failure_is_not_live_model_evidence(tmp_path: Path) -> None:
+    failed_seed = tmp_path / "evaluations" / "search-seeds" / "failure.json"
+    failed_seed.parent.mkdir(parents=True)
+    failed_seed.write_text('{"error":"worker_timeout"}', encoding="utf-8")
+    evidence = commands._live_model_result_evidence(tmp_path)
+    assert evidence["observed"] is False
+    (tmp_path / "generation-checkpoint.json").write_text("{}", encoding="utf-8")
+    assert commands._live_model_result_evidence(tmp_path)["observed"] is True
+
+
+def test_amendment_freeze_requires_retained_scientific_identity(tmp_path: Path) -> None:
+    retained = {
+        "config_sha256": "a" * 64,
+        "frozen_hashes": {"manifest": "b" * 64},
+    }
+    retained["freeze_sha256"] = commands._freeze_digest(retained)
+    active = {
+        **retained,
+        "freeze_sha256": "c" * 64,
+        "amendment_tag": {"name": commands.SEARCH_AMENDMENT_TAG},
+        "amendment_category": commands.SEARCH_AMENDMENT_CATEGORY,
+        "previous_freeze_sha256": retained["freeze_sha256"],
+        "scientific_identity_unchanged": True,
+        "pre_amendment_live_model_evidence": {"observed": False},
+    }
+    assert not commands._amendment_freeze_valid(tmp_path, active)
+    (tmp_path / "search-freeze-pre-amendment.json").write_text(
+        json.dumps(retained),
+        encoding="utf-8",
+    )
+    assert commands._amendment_freeze_valid(tmp_path, active)
+    active["frozen_hashes"] = {"manifest": "d" * 64}
+    assert not commands._amendment_freeze_valid(tmp_path, active)

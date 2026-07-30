@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from mutation_forge.stage4 import evaluation
 from mutation_forge.stage4.replay import verify_replay
+
+
+class _ProcessConfig:
+    limits = SimpleNamespace(reserved_physical_cores=1)
+
+    @staticmethod
+    def stable_hash() -> str:
+        return "frozen-config"
 
 
 def _manifest(count: int = 8) -> dict[str, Any]:
@@ -90,6 +100,27 @@ def test_one_vs_eight_parity_and_replay(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert evaluation.verify_candidate_pass(summary, manifest)["exact"]
     assert set(primary["records"][0]["policies"]) == {"candidate", "random", "structural"}
     assert all(names == ("candidate", "random", "structural") for names in calls)
+
+
+def test_official_evaluation_uses_an_isolated_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(evaluation, "run_development_episode", _fake_episode([]))
+    config = _ProcessConfig()
+    result = evaluation.evaluate_policy_roster_manifest(
+        config,
+        _manifest(1),
+        {"random": "r", "structural": "s", "candidate": "c"},
+        output_dir=tmp_path,
+        workers=1,
+        shard_count=1,
+    )
+    assignment = result["worker_health"]["assignments"][0]
+    assert evaluation._uses_process_workers(config)
+    assert not evaluation._uses_process_workers({})
+    assert assignment["process_id"] != os.getpid()
+    assert assignment["observed_affinity"] == [assignment["cpu_id"]]
 
 
 def test_corrupt_shard_is_recovered_without_rewriting_valid_shards(

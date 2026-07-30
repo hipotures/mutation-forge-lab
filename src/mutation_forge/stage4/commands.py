@@ -54,6 +54,8 @@ from .statistics import (
 SEARCH_FREEZE_SCHEMA = "stage4.search.freeze.v1"
 VALIDATION_FREEZE_SCHEMA = "stage4.validation.freeze.v1"
 RUN_SCHEMA = "stage4.campaign.v1"
+SEARCH_AMENDMENT_TAG = "stage4-search-amendment-v1"
+SEARCH_AMENDMENT_CATEGORY = "evaluation_worker_process_isolation"
 STAGE3_CANONICAL_SHA256 = PROVENANCE["stage3_canonical_sha256"]
 STAGE3_EVIDENCE_MANIFEST_SHA256 = PROVENANCE["evidence_manifest_sha256"]
 STAGE3_ARCHIVE_SHA256 = PROVENANCE["archive_sha256"]
@@ -441,6 +443,110 @@ def _freeze_digest(value: Mapping[str, Any]) -> str:
     return _sha_value({key: item for key, item in value.items() if key != "freeze_sha256"})
 
 
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    return (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).returncode
+        == 0
+    )
+
+
+def _live_model_result_evidence(run: Path) -> dict[str, Any]:
+    archive = ProgramArchive(_archive_root(run))
+    generated = [
+        record.program_id
+        for record in archive.records()
+        if record.generation > 0
+        or record.effective_request_id is not None
+        or record.turn_id is not None
+        or record.app_server_turn_id is not None
+    ]
+    paths = {
+        "search_summary": (run / "search-summary.json").is_file(),
+        "generation_checkpoint": (run / "generation-checkpoint.json").is_file(),
+        "checkpoint_records": any((run / "checkpoints").glob("checkpoint-*.json")),
+        "app_server_records": any(path.is_file() for path in (run / "appserver").glob("**/*")),
+        "raw_generation_records": any(path.is_file() for path in (run / "raw").glob("**/*")),
+    }
+    observed = bool(generated) or any(paths.values())
+    return {
+        "observed": observed,
+        "generated_program_ids": generated,
+        "artifact_presence": paths,
+    }
+
+
+def _pre_amendment_freeze(
+    config: Stage4SearchConfig,
+    run: Path,
+    search_tag: Mapping[str, Any],
+) -> dict[str, Any]:
+    source = run / "search-freeze.json"
+    if not source.is_file():
+        raise RuntimeError("technical amendment requires the retained original search freeze")
+    value = _read_json(source)
+    if (
+        value.get("schema_version") != SEARCH_FREEZE_SCHEMA
+        or value.get("verified") is not True
+        or value.get("freeze_sha256") != _freeze_digest(value)
+        or value.get("config_sha256") != config.stable_hash()
+        or value.get("live_stage4_model_results_observed") is not False
+        or value.get("project_commit") != search_tag.get("commit")
+        or value.get("search_tag") != search_tag
+        or value.get("frozen_hashes") != _freeze_files(config)
+        or value.get("amendment_tag") is not None
+    ):
+        raise RuntimeError("retained original Stage 4 search freeze is invalid")
+    retained = run / "search-freeze-pre-amendment.json"
+    if retained.is_file() and _read_json(retained) != value:
+        raise RuntimeError("retained pre-amendment freeze conflicts with the original")
+    if not retained.is_file():
+        _atomic_json(retained, value)
+    return value
+
+
+def _amendment_freeze_valid(run: Path, value: Mapping[str, Any]) -> bool:
+    amendment = value.get("amendment_tag")
+    if not isinstance(amendment, Mapping):
+        return all(
+            value.get(key) is None
+            for key in (
+                "amendment_category",
+                "previous_freeze_sha256",
+                "scientific_identity_unchanged",
+                "pre_amendment_live_model_evidence",
+            )
+        )
+    evidence = value.get("pre_amendment_live_model_evidence")
+    retained_path = run / "search-freeze-pre-amendment.json"
+    try:
+        retained = _read_json(retained_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        value.get("amendment_category") == SEARCH_AMENDMENT_CATEGORY
+        and value.get("scientific_identity_unchanged") is True
+        and isinstance(evidence, Mapping)
+        and evidence.get("observed") is False
+        and retained.get("freeze_sha256") == value.get("previous_freeze_sha256")
+        and retained.get("freeze_sha256") == _freeze_digest(retained)
+        and retained.get("frozen_hashes") == value.get("frozen_hashes")
+        and retained.get("config_sha256") == value.get("config_sha256")
+    )
+
+
 def freeze(config_path: str | Path) -> dict[str, Any]:
     """Write the immutable search freeze after its annotated tag exists."""
 
@@ -448,16 +554,34 @@ def freeze(config_path: str | Path) -> dict[str, Any]:
     project = _git_state(config.project_repo)
     heg = _git_state(config.heg_repo)
     tag = _tag_state(config.project_repo, config.search_tag)
+    amendment_tag = _tag_state(config.project_repo, SEARCH_AMENDMENT_TAG)
     if project["dirty"]:
         raise RuntimeError("project worktree must be clean before Stage 4 search freeze")
     if heg["dirty"] or heg["commit"] != config.frozen_heg_commit:
         raise RuntimeError("HEG must remain clean at the frozen commit")
-    if tag["type"] != "tag" or tag["commit"] != project["commit"]:
-        raise RuntimeError("Stage 4 search tag must be annotated at current HEAD")
+    if tag["type"] != "tag":
+        raise RuntimeError("Stage 4 search tag must remain annotated")
+    amended = tag["commit"] != project["commit"]
+    if amended and (
+        amendment_tag["type"] != "tag"
+        or amendment_tag["commit"] != project["commit"]
+        or not _is_ancestor(
+            config.project_repo,
+            str(tag["commit"]),
+            str(project["commit"]),
+        )
+    ):
+        raise RuntimeError("Stage 4 technical amendment tag must be annotated at current HEAD")
+    run = campaign_root(config)
+    previous: dict[str, Any] | None = None
+    live_evidence = _live_model_result_evidence(run)
+    if amended:
+        if live_evidence["observed"] is not False:
+            raise RuntimeError("technical amendment is forbidden after live model results")
+        previous = _pre_amendment_freeze(config, run, tag)
     audit = doctor(config_path, check_auth=True, write=True)
     if audit["status"] != "completed":
         raise RuntimeError("Stage 4 doctor is not READY")
-    run = campaign_root(config)
     projection = cast(Mapping[str, Any], audit["projection"])
     archive_projection = cast(Mapping[str, Any], projection["manifest"])
     payload: dict[str, Any] = {
@@ -487,6 +611,20 @@ def freeze(config_path: str | Path) -> dict[str, Any]:
         "offline_evidence_manifest_sha256": archive_projection["manifest_sha256"],
         "doctor_sha256": _sha_value(audit),
     }
+    if amended:
+        assert previous is not None
+        payload.update(
+            {
+                "amendment_tag": amendment_tag,
+                "amendment_category": SEARCH_AMENDMENT_CATEGORY,
+                "previous_freeze_sha256": previous["freeze_sha256"],
+                "scientific_identity_unchanged": (
+                    previous.get("frozen_hashes") == payload["frozen_hashes"]
+                    and previous.get("config_sha256") == payload["config_sha256"]
+                ),
+                "pre_amendment_live_model_evidence": live_evidence,
+            }
+        )
     payload["freeze_sha256"] = _freeze_digest(payload)
     _atomic_json(run / "search-freeze.json", payload)
     return canonical_result({"status": "completed", "run": str(run), **payload})
@@ -501,17 +639,33 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
         or value.get("freeze_sha256") != _freeze_digest(value)
         or value.get("config_sha256") != config.stable_hash()
         or value.get("live_stage4_model_results_observed") is not False
+        or not _amendment_freeze_valid(run, value)
     ):
         raise RuntimeError("Stage 4 search freeze is invalid")
     project = _git_state(config.project_repo)
     heg = _git_state(config.heg_repo)
     tag = _tag_state(config.project_repo, config.search_tag)
+    amendment = value.get("amendment_tag")
+    amendment_tag = (
+        _tag_state(config.project_repo, SEARCH_AMENDMENT_TAG)
+        if isinstance(amendment, Mapping)
+        else None
+    )
     if (
         project["commit"] != value.get("project_commit")
         or project["dirty"]
         or heg["commit"] != config.frozen_heg_commit
         or heg["dirty"]
         or tag != value.get("search_tag")
+        or amendment_tag != amendment
+        or (
+            amendment_tag is not None
+            and amendment_tag.get("commit") != project["commit"]
+        )
+        or (
+            amendment_tag is None
+            and tag.get("commit") != project["commit"]
+        )
     ):
         raise RuntimeError("repository state drifted after Stage 4 search freeze")
     if _freeze_files(config) != value.get("frozen_hashes"):
@@ -527,27 +681,26 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
     value = _read_json(campaign_root(config) / "search-freeze.json")
     tag = _tag_state(config.project_repo, config.search_tag)
     project = _git_state(config.project_repo)
-    ancestor = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(config.project_repo),
-            "merge-base",
-            "--is-ancestor",
-            str(value.get("project_commit", "")),
-            project["commit"],
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    ).returncode == 0
+    amendment = value.get("amendment_tag")
+    amendment_tag = (
+        _tag_state(config.project_repo, SEARCH_AMENDMENT_TAG)
+        if isinstance(amendment, Mapping)
+        else None
+    )
+    ancestor = _is_ancestor(
+        config.project_repo,
+        str(value.get("project_commit", "")),
+        project["commit"],
+    )
     if (
         value.get("schema_version") != SEARCH_FREEZE_SCHEMA
         or value.get("verified") is not True
         or value.get("freeze_sha256") != _freeze_digest(value)
         or value.get("config_sha256") != config.stable_hash()
         or value.get("live_stage4_model_results_observed") is not False
+        or not _amendment_freeze_valid(campaign_root(config), value)
         or tag != value.get("search_tag")
+        or amendment_tag != amendment
         or not ancestor
         or _freeze_files(config) != value.get("frozen_hashes")
         or not _stage3_checks(config)["ok"]
@@ -841,7 +994,12 @@ def evolve(
     if not seed_ids.issubset(existing_by_id) or not seed_summary_path.is_file():
         seed_policies = {seed.candidate_id: seed.source for seed in seeds}
         roster = {**baselines, **seed_policies}
-        seed_root = run / "evaluations" / "search-seeds"
+        seed_attempt = (
+            "search-seeds-amendment-v1"
+            if isinstance(freeze_value.get("amendment_tag"), Mapping)
+            else "search-seeds"
+        )
+        seed_root = run / "evaluations" / seed_attempt
         primary = evaluate_policy_roster_manifest(
             config,
             manifest,
