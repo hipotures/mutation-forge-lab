@@ -109,7 +109,7 @@ capsules, strict output and exact usage accounting, Stage 2A validation and
 10,000-call smoke, the fixed non-held-out development manifest, independent
 trajectories, deterministic replay, and twelve named gates. No live generation
 for the official campaign is permitted before the Phase 1 commit and annotated
-`stage3-generation-frozen-v8` tag are pushed and recorded on issue #9. Three
+`stage3-generation-frozen-v9` tag are pushed and recorded on issue #9. Three
 explicitly user-authorized adapter connectivity turns preceded this freeze;
 two completed and one ended with partial usage. They are retained and excluded
 as diagnostic evidence, did not generate candidates, and did not change the
@@ -132,6 +132,19 @@ eight slot prompts. A versioned, schema-hash-bound semantic glossary covers
 all context/proposal fields, pool scope, vector alignment, aliases,
 directionality, and budget caveats without importing Stage 2C/2D empirical
 findings. v6/v7 remain immutable.
+
+The retained v8 official run passed the structured-output boundary and four
+slots emitted partial model text, but it ended without final responses or
+final usage. The adapter had incorrectly reused the 64 KiB single-frame bound
+as an aggregate stdout bound, while eight Codex processes could exhaust native
+worker creation because `RLIMIT_NPROC=1024` applied across all tasks owned by
+the shared user, not one capsule. The user authorized a v9
+infrastructure-only freeze: frames remain capped at 64 KiB, aggregate stdout
+is separately capped at 2 MiB, the bounded user-wide process limit rises
+100-fold to 102400, and each capsule fixes Tokio, Rayon, and
+numerical-library workers to one. No prompt, schema, ranker, manifest, metric,
+gate, or evaluation behavior changes.
+All earlier tags and failure artifacts remain immutable.
 
 The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
 `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical

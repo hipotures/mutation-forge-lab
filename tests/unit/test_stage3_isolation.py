@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from mutation_forge.stage3.isolation import (
+    APP_SERVER_THREAD_LIMITS,
     THIN_APP_SERVER_ARGS,
     IsolatedCapsule,
     IsolationError,
@@ -46,6 +47,7 @@ def test_capsule_copies_only_secure_explicit_auth_and_sanitizes_environment(
     auth.chmod(0o600)
     monkeypatch.setenv("HOME", "/private/home")
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-leak")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "99")
     capsule = IsolatedCapsule.create(tmp_path, auth_json=auth)
     try:
         copied = capsule.codex_home / "auth.json"
@@ -53,7 +55,10 @@ def test_capsule_copies_only_secure_explicit_auth_and_sanitizes_environment(
         assert stat.S_IMODE(copied.stat().st_mode) == 0o600
         assert stat.S_IMODE(capsule.root.stat().st_mode) == 0o700
         assert set(sanitized_environment(capsule)).issuperset(
-            {"PATH", "CODEX_HOME", "CODEX_SQLITE_HOME"}
+            {"PATH", "CODEX_HOME", "CODEX_SQLITE_HOME", *APP_SERVER_THREAD_LIMITS}
+        )
+        assert {key: capsule.env[key] for key in APP_SERVER_THREAD_LIMITS} == dict(
+            APP_SERVER_THREAD_LIMITS
         )
         assert capsule.env["HOME"] == str(capsule.root)
         assert "UNRELATED_SECRET" not in capsule.env

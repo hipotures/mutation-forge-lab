@@ -8,7 +8,7 @@ def test_frozen_stage3_config() -> None:
     assert config.model.slots == tuple(f"slot-{i:02d}" for i in range(8))
     assert config.model.max_repairs == 1
     assert config.experiment.episode_count == 128
-    assert config.preregistration_tag == "stage3-generation-frozen-v8"
+    assert config.preregistration_tag == "stage3-generation-frozen-v9"
     assert config.semantic_glossary_path.name == "stage3-field-semantics.v1.json"
     assert (
         config.identity.semantic_glossary_sha256
@@ -17,7 +17,11 @@ def test_frozen_stage3_config() -> None:
     assert config.app_server.sandbox_mode == "danger-full-access"
     assert config.app_server.approval_policy == "never"
     assert config.limits.resource_address_space_bytes == 2 * 1024 * 1024 * 1024
-    assert config.limits.resource_processes == 1024
+    assert config.limits.resource_processes == 102_400
     assert config.limits.request_bytes == 65_536
     assert config.limits.response_bytes == 16_384
+    assert config.limits.event_bytes == 65_536
+    assert config.limits.transcript_bytes == 262_144
+    assert config.limits.stdout_bytes == 2 * 1024 * 1024
+    assert config.limits.stderr_bytes == 65_536
     assert config.limits.artifact_bytes == 32 * 1024 * 1024

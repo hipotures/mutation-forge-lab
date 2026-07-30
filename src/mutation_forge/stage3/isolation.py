@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 THIN_APP_SERVER_ARGS: tuple[str, ...] = (
     "codex",
@@ -78,6 +79,18 @@ THIN_APP_SERVER_ARGS: tuple[str, ...] = (
 MAX_AUTH_JSON_BYTES = 65_536
 APP_SERVER_SANDBOX_MODES = frozenset({"read-only", "danger-full-access"})
 APP_SERVER_APPROVAL_POLICIES = frozenset({"never"})
+APP_SERVER_THREAD_LIMITS: Mapping[str, str] = MappingProxyType(
+    {
+        "TOKIO_WORKER_THREADS": "1",
+        "RAYON_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "VECLIB_MAXIMUM_THREADS": "1",
+        "BLIS_NUM_THREADS": "1",
+    }
+)
 
 
 def secure_capsule_parent() -> Path:
@@ -242,6 +255,7 @@ class IsolatedCapsule:
                 "HOME": str(base),
                 "CODEX_HOME": str(homes[0]),
                 "CODEX_SQLITE_HOME": str(homes[1]),
+                **APP_SERVER_THREAD_LIMITS,
             }
             managed_root = os.environ.get("CODEX_MANAGED_PACKAGE_ROOT")
             if managed_root:
@@ -285,7 +299,7 @@ def linux_resource_preexec(
     address_space_bytes: int = 2 * 1024 * 1024 * 1024,
     file_bytes: int = 8 * 1024 * 1024,
     open_files: int = 256,
-    processes: int = 1024,
+    processes: int = 102_400,
 ) -> None:
     if not sys.platform.startswith("linux"):
         raise IsolationError("resource limits require Linux")

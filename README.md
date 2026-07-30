@@ -53,7 +53,7 @@ offline implementation fixes eight ordered one-shot Codex App Server slots at
 no-tool capsules, Stage 2A validation and 10,000-call smoke checks, immutable
 development trajectories, deterministic replay, and a twelve-part gate. No
 official campaign generation may occur until the implementation commit and
-the new immutable annotated tag `stage3-generation-frozen-v8` are pushed and
+the new immutable annotated tag `stage3-generation-frozen-v9` are pushed and
 recorded on issue #9. Adapter troubleshooting used three explicitly
 user-authorized connectivity turns: two completed and one ended with partial
 usage. Their fixed connectivity payloads and outputs are retained as
@@ -71,7 +71,18 @@ nullable and referenced fields are explicit and snapshots all eight rendered
 slot prompts. A versioned glossary tied to the context/proposal schema hashes
 defines the decision problem, every field, pool-constant versus
 candidate-specific scope, vector alignment, aliases, and budget caveats. The
-v6/v7 tags and failure artifacts remain unchanged.
+retained v8 official run passed structured-output validation and four slots
+emitted partial model text, but no slot produced a final response or final
+usage. The adapter had incorrectly reused the 64 KiB frame bound as an
+aggregate stdout bound, while eight Codex processes could exhaust native
+worker creation because the child `RLIMIT_NPROC=1024` was charged against all
+tasks owned by the shared user rather than one capsule. The user authorized a
+v9 infrastructure-only freeze that keeps the 64 KiB per-frame bound,
+separately caps aggregate stdout at 2 MiB, raises that bounded user-wide limit
+100-fold to 102400, and fixes Tokio, Rayon, and numerical-library workers to
+one per capsule.
+Prompts, schemas, rankers, manifests, metrics, gates, and evaluation behavior
+are unchanged. The v6/v7/v8 tags and failure artifacts remain unchanged.
 Stage 4, evolution, held-out evaluation, full proposer work, and HEG
 integration remain blocked.
 

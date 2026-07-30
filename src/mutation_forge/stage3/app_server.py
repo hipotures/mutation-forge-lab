@@ -63,7 +63,7 @@ class AppServerLimits:
     resource_address_space_bytes: int = 2 * 1024 * 1024 * 1024
     resource_file_bytes: int = 8 * 1024 * 1024
     resource_open_files: int = 256
-    resource_processes: int = 1024
+    resource_processes: int = 102_400
     max_message_bytes: int | None = None
     max_request_bytes: int | None = None
     max_response_bytes: int | None = None

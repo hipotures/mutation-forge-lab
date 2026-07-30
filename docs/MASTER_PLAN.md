@@ -45,10 +45,17 @@ generation, program search, generalization, and production consideration.
    provenance, Stage 2A validation, immutable development trajectories,
    deterministic replay, and a twelve-part gate. Live generation is blocked
    for the official campaign until the Phase 1 commit and annotated
-   `stage3-generation-frozen-v8` tag are pushed and recorded. Three
+   `stage3-generation-frozen-v9` tag are pushed and recorded. Three
    user-authorized connectivity turns used while debugging the adapter are
    retained as excluded diagnostic evidence and did not change the scientific
-   contract.
+   contract. The retained v8 official run passed schema validation and emitted
+   partial model text in four slots before aggregate stdout and native worker
+   creation ended the run. The child `RLIMIT_NPROC=1024` was user-wide, not
+   capsule-local. The user-authorized v9 infrastructure correction preserves
+   the 64 KiB frame bound, adds a separate 2 MiB aggregate stdout cap, raises
+   that bounded limit 100-fold to 102400, and fixes Tokio, Rayon, and numerical
+   libraries to one worker per capsule. It does not alter prompts or
+   scientific inputs.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,

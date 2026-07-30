@@ -118,6 +118,7 @@ def test_strict_argv_private_cwd_and_lifecycle_ids(tmp_path: Path) -> None:
     assert calls[0][1]["cwd"] == str(adapter.capsule.workdir)
     assert calls[0][1]["env"] == dict(adapter.capsule.env)
     assert calls[0][1]["start_new_session"] is True
+    assert calls[0][1]["preexec_fn"].keywords["processes"] == 102_400
     assert result.text == "fixture answer"
     assert (result.thread_id, result.session_id, result.turn_id) == (
         "thread-1",
@@ -342,6 +343,41 @@ def test_system_error_and_oversized_message_are_rejected(tmp_path: Path) -> None
     adapter, _ = _adapter(tmp_path / "oversized", FakeScenario(oversized=True), limits=limits)
     with adapter, pytest.raises(ProtocolError, match="incoming message exceeds limit"):
         adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+
+def test_many_small_frames_may_exceed_single_frame_limit_in_aggregate(tmp_path: Path) -> None:
+    process = FakeProcess()
+    original_receive = process.receive
+
+    def receive(line: bytes) -> None:
+        payload = json.loads(line)
+        if payload.get("method") == "initialize":
+            for _ in range(20):
+                process.stdout.put(
+                    {
+                        "method": "account/rateLimits/updated",
+                        "params": {"rateLimits": {}},
+                    }
+                )
+        original_receive(line)
+
+    process.receive = receive  # type: ignore[method-assign]
+    limits = AppServerLimits(
+        message_bytes=1024,
+        stdout_bytes=32_768,
+        transcript_bytes=65_536,
+    )
+    adapter = CodexAppServerAdapter(
+        capsule=_capsule(tmp_path),
+        process_factory=_fixed_process_factory(process),
+        auth_checker=lambda _: True,
+        limits=limits,
+    )
+    with adapter:
+        result = adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+        assert result.text == "fixture answer"
+        assert adapter._stdout_size > limits.message_limit
+        assert adapter._stdout_size < limits.stdout_limit
 
 
 def test_timeout_interrupts_and_failed_adapter_is_not_reused(tmp_path: Path) -> None:

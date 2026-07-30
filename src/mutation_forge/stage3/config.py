@@ -20,7 +20,7 @@ STAGE3_CONFIG_VERSION = "stage3.1"
 EXPECTED_MODEL, EXPECTED_EFFORT, EXPECTED_SLOTS, EXPECTED_REPAIRS = "gpt-5.6-luna", "high", 8, 1
 EXPECTED_PROJECT_COMMIT = "1670f7b023dcf110259ea39b63ba1a55cb011521"
 EXPECTED_HEG_COMMIT = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
-EXPECTED_TAG = "stage3-generation-frozen-v8"
+EXPECTED_TAG = "stage3-generation-frozen-v9"
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +398,18 @@ def load_stage3_config(path: str | Path) -> Stage3GenerationConfig:
         ),
         artifact_bytes=int(_positive(limits["artifact_bytes"], "limits.artifact_bytes")),
     )
+    if (
+        parsed_limits.request_bytes,
+        parsed_limits.response_bytes,
+        parsed_limits.event_bytes,
+        parsed_limits.transcript_bytes,
+        parsed_limits.stdout_bytes,
+        parsed_limits.stderr_bytes,
+    ) != (65_536, 16_384, 65_536, 262_144, 2_097_152, 65_536):
+        raise ValueError(
+            "transport limits are frozen to 64 KiB requests/events, 16 KiB responses, "
+            "256 KiB transcripts, 2 MiB aggregate stdout, and 64 KiB stderr"
+        )
     parsed_resources = Stage3Resources(
         *(
             int(_positive(resources[k], f"resources.{k}"))
@@ -429,7 +441,7 @@ def load_stage3_config(path: str | Path) -> Stage3GenerationConfig:
         or parsed_limits.resource_cpu_seconds != 120.0
         or parsed_limits.resource_file_bytes != 8 * 1024 * 1024
         or parsed_limits.resource_open_files != 256
-        or parsed_limits.resource_processes != 1024
+        or parsed_limits.resource_processes != 102_400
         or parsed_limits.turn_seconds != 120.0
         or parsed_limits.campaign_seconds != 1800.0
         or parsed_limits.artifact_bytes != 32 * 1024 * 1024
