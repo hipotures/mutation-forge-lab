@@ -20,7 +20,7 @@ STAGE3_CONFIG_VERSION = "stage3.1"
 EXPECTED_MODEL, EXPECTED_EFFORT, EXPECTED_SLOTS, EXPECTED_REPAIRS = "gpt-5.6-luna", "high", 8, 1
 EXPECTED_PROJECT_COMMIT = "1670f7b023dcf110259ea39b63ba1a55cb011521"
 EXPECTED_HEG_COMMIT = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
-EXPECTED_TAG = "stage3-generation-frozen-v10"
+EXPECTED_TAG = "stage3-generation-frozen-v11"
 
 
 @dataclass(frozen=True, slots=True)

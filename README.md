@@ -53,7 +53,7 @@ offline implementation fixes eight ordered one-shot Codex App Server slots at
 no-tool capsules, Stage 2A validation and 10,000-call smoke checks, immutable
 development trajectories, deterministic replay, and a twelve-part gate. No
 official campaign generation may occur until the implementation commit and
-the new immutable annotated tag `stage3-generation-frozen-v10` are pushed and
+the new immutable annotated tag `stage3-generation-frozen-v11` are pushed and
 recorded on issue #9. Adapter troubleshooting used three explicitly
 user-authorized connectivity turns: two completed and one ended with partial
 usage. Their fixed connectivity payloads and outputs are retained as
@@ -88,6 +88,12 @@ log, and 64 KiB incoming-frame/512-event queue limits. The user authorized v10
 with a 600-second turn limit, 100-fold final-response limit, and tenfold event,
 transcript, stdout, and queue bounds. The v6–v9 tags and failure artifacts
 remain unchanged.
+The retained v10 run completed all eight model turns without an infrastructure
+failure and produced four valid unique candidates. Four AST-invalid candidates
+did not receive their permitted repair because the orchestrator recognized
+only an incomplete hard-coded subset of validator error codes. v11 classifies
+all errors originating from static AST validation as repairable while keeping
+transport, usage, and runtime failures terminal.
 Stage 4, evolution, held-out evaluation, full proposer work, and HEG
 integration remain blocked.
 

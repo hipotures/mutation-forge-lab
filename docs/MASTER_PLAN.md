@@ -45,7 +45,7 @@ generation, program search, generalization, and production consideration.
    provenance, Stage 2A validation, immutable development trajectories,
    deterministic replay, and a twelve-part gate. Live generation is blocked
    for the official campaign until the Phase 1 commit and annotated
-   `stage3-generation-frozen-v10` tag are pushed and recorded. Three
+   `stage3-generation-frozen-v11` tag are pushed and recorded. Three
    user-authorized connectivity turns used while debugging the adapter are
    retained as excluded diagnostic evidence and did not change the scientific
    contract. The retained v8 official run passed schema validation and emitted
@@ -60,6 +60,11 @@ generation, program search, generalization, and production consideration.
    The user-authorized v10 correction raises the turn wall limit to 600
    seconds, the final response bound 100-fold, and the event, transcript,
    stdout, and queue bounds tenfold.
+   The retained v10 run completed all eight model turns and produced four
+   valid unique candidates, but an incomplete hard-coded repair-code list
+   suppressed the one permitted repair for four AST-invalid candidates. v11
+   treats every error emitted by static AST validation as repairable while
+   leaving infrastructure/runtime errors terminal.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,

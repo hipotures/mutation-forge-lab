@@ -424,7 +424,7 @@ def _diagnostics(errors: Sequence[Mapping[str, Any]], limit: int) -> tuple[Mappi
     result = []
     for error in errors:
         code = str(error.get("code", ""))
-        if code in _REPAIRABLE:
+        if code in _REPAIRABLE or error.get("repair_class") == "ast":
             result.append({"code": code, "message": str(error.get("message", ""))[:256]})
     return tuple(result[: max(0, limit)])
 
@@ -436,8 +436,10 @@ def _repairable_errors(errors: Sequence[Mapping[str, Any]]) -> bool:
     failure) is infrastructure-tainted and must remain terminal rather than
     consuming a repair turn.
     """
-    codes = {str(error.get("code", "")) for error in errors}
-    return bool(codes) and codes.issubset(_REPAIRABLE)
+    return bool(errors) and all(
+        str(error.get("code", "")) in _REPAIRABLE or error.get("repair_class") == "ast"
+        for error in errors
+    )
 
 
 class OneShotGenerator:
@@ -638,7 +640,7 @@ class OneShotGenerator:
         if source is not None:
             validation = validate_policy(source, self.limits)
             if not validation.valid:
-                errors.extend(e.as_dict() for e in validation.errors)
+                errors.extend({**e.as_dict(), "repair_class": "ast"} for e in validation.errors)
             else:
                 try:
                     behavior, telemetry = _behavior(source, self.limits, self.config.smoke_calls)

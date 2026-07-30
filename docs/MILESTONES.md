@@ -109,7 +109,7 @@ capsules, strict output and exact usage accounting, Stage 2A validation and
 10,000-call smoke, the fixed non-held-out development manifest, independent
 trajectories, deterministic replay, and twelve named gates. No live generation
 for the official campaign is permitted before the Phase 1 commit and annotated
-`stage3-generation-frozen-v10` tag are pushed and recorded on issue #9. Three
+`stage3-generation-frozen-v11` tag are pushed and recorded on issue #9. Three
 explicitly user-authorized adapter connectivity turns preceded this freeze;
 two completed and one ended with partial usage. They are retained and excluded
 as diagnostic evidence, did not generate candidates, and did not change the
@@ -151,6 +151,13 @@ candidate. Two turns reached the 120-second wall limit, one reached the 256
 KiB transport-log limit, and one reached an incoming-message/queue bound. The
 user authorized v10 with a 600-second turn limit, a 100-fold final-response
 limit, and tenfold event, transcript, aggregate-stdout, and queue bounds.
+
+The retained v10 run completed all eight model turns without timeout or
+transport failure and produced four valid unique candidates. Four candidates
+failed static AST validation, but the permitted repair turn was suppressed by
+an incomplete hard-coded repair-code list. v11 tags every static-validator
+error as AST-repairable while transport, usage, and runtime failures remain
+terminal.
 
 The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
 `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical

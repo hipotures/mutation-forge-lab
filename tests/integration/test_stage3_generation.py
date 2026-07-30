@@ -215,6 +215,34 @@ def test_one_schema_repair_only_and_no_infrastructure_retry() -> None:
     assert result.slots[1].repairs == 0
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "def priority(ctx, proposal):\n"
+            "    total = 0\n"
+            "    for value in range(len(proposal[\"selector_tags\"])):\n"
+            "        total += value\n"
+            "    return total\n"
+        ),
+        "def priority(ctx, proposal):\n    return proposal[\"k\"] * 1000\n",
+    ],
+)
+def test_static_ast_validation_failure_receives_one_repair(source: str) -> None:
+    provider = RecordingProvider({"slot-00": _envelope(source)})
+    result = OneShotGenerator(provider).run(run_id="offline-ast-repair")
+
+    assert len(provider.repairs) == 1
+    assert provider.repairs[0][0]["slot"] == "slot-00"
+    assert provider.repairs[0][1][0]["code"] in {
+        "unbounded_loop",
+        "multiplication_bound",
+    }
+    assert result.slots[0].status == "accepted"
+    assert result.slots[0].repairs == 1
+    assert result.summary["repair_turn_count"] == 1
+
+
 def test_runtime_failures_and_nonfinal_usage_never_trigger_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
