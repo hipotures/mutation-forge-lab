@@ -282,6 +282,8 @@ def _stage3(args: argparse.Namespace) -> int:
         )
     elif command == "validate":
         result = stage3_commands.validate(args.run)
+    elif command == "revalidate":
+        result = stage3_commands.revalidate(args.config, args.run)
     elif command == "evaluate":
         result = stage3_commands.evaluate(args.config, args.run, workers=args.workers)
     elif command == "verify-replay":
@@ -514,6 +516,10 @@ def build_parser() -> argparse.ArgumentParser:
     stage3_validate = stage3_commands_parser.add_parser("validate")
     stage3_validate.add_argument("run", type=Path)
     stage3_validate.add_argument("--json", action="store_true")
+    stage3_revalidate = stage3_commands_parser.add_parser("revalidate")
+    stage3_revalidate.add_argument("--config", type=Path, required=True)
+    stage3_revalidate.add_argument("--run", type=Path, required=True)
+    stage3_revalidate.add_argument("--json", action="store_true")
     stage3_evaluate = stage3_commands_parser.add_parser("evaluate")
     stage3_evaluate.add_argument("--config", type=Path, required=True)
     stage3_evaluate.add_argument("--run", type=Path, required=True)

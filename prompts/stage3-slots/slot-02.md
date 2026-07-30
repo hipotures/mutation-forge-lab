@@ -132,10 +132,10 @@ def priority(ctx, proposal):
 - The source must contain exactly one return statement, and it must be the final top-level statement in priority.
 - Return a finite int or float; bool, NaN, infinity, complex values, and containers are rejected.
 - Read ctx and proposal only by indexing or slicing. Do not mutate either input.
-- Allowed local control flow: assignments, arithmetic, comparisons, Boolean logic, conditionals, and statically bounded for loops.
+- Allowed local control flow: assignments, arithmetic, comparisons, Boolean logic, conditionals, for loops, and while loops.
 - Allowed built-ins only: abs, all, any, len, max, min, range, round, sum.
-- No imports, attributes or method calls, comprehensions, lambda, recursion, while, try, with, yield, async, decorators, annotations, classes, nested functions, reflection, dynamic execution, I/O, environment, process, network, database, RNG, or hidden state.
-- Source <= 12288 bytes; AST <= 500 nodes; every loop bound <= 256; per-call wall <= 0.025 seconds; total smoke wall <= 60.0 seconds.
+- No imports, attributes or method calls, comprehensions, lambda, recursion, try, with, yield, async, decorators, annotations, classes, nested functions, reflection, dynamic execution, I/O, environment, process, network, database, RNG, or hidden state.
+- Source <= 12288 bytes; AST <= 500 nodes; per-call wall <= 0.025 seconds; total smoke wall <= 60.0 seconds.
 
 OUTPUT FIELD REQUIREMENTS
 

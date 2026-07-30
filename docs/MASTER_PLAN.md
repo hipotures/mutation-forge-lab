@@ -45,7 +45,7 @@ generation, program search, generalization, and production consideration.
    provenance, Stage 2A validation, immutable development trajectories,
    deterministic replay, and a twelve-part gate. Live generation is blocked
    for the official campaign until the Phase 1 commit and annotated
-   `stage3-generation-frozen-v11` tag are pushed and recorded. Three
+   `stage3-generation-frozen-v12` tag are pushed and recorded. Three
    user-authorized connectivity turns used while debugging the adapter are
    retained as excluded diagnostic evidence and did not change the scientific
    contract. The retained v8 official run passed schema validation and emitted
@@ -64,7 +64,15 @@ generation, program search, generalization, and production consideration.
    valid unique candidates, but an incomplete hard-coded repair-code list
    suppressed the one permitted repair for four AST-invalid candidates. v11
    treats every error emitted by static AST validation as repairable while
-   leaving infrastructure/runtime errors terminal.
+   leaving infrastructure/runtime errors terminal. The retained v11 campaign
+   completed eight initial and five repair turns; seven candidates passed the
+   former validator and one finite dynamic `range(min(...))` loop was rejected
+   by an unsound static-bound heuristic. The user-authorized v12 amendment
+   removes loop-bound/termination inference while retaining the AST capability
+   boundary and resource-bounded worker. It performs no generation call.
+   Offline revalidation of the eight retained final responses yields eight
+   unique valid candidates and 80,000 successful persistent-worker calls,
+   with new derived artifacts separated from immutable generation logs.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,

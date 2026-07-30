@@ -21,14 +21,16 @@ the graph, rewrite, validation, scoring, cache, controller, and experiment
 state.
 
 Validation accepts exactly one undecorated top-level function with parameters
-`ctx, proposal`, local-name assignments, conditionals, bounded `for` loops,
+`ctx, proposal`, local-name assignments, conditionals, `for`/`while` loops,
 arithmetic, comparisons, Boolean logic, indexing/slicing, bounded literals,
 and selected deterministic built-ins. It rejects every AST node not explicitly
 allowed, all attribute access, private names, mutation targets other than local
-names, unknown names, non-static loop sources, dynamic execution, imports, and
-the other adversarial classes listed in `MILESTONES.md`. Defaults are 12 KiB
-source, 500 AST nodes, and a 256-item static loop bound. Validation errors are
-machine-readable and retain source locations.
+names, unknown names, dynamic execution, imports, and the other adversarial
+classes listed in `MILESTONES.md`. The validator does not attempt to prove a
+loop bound or termination. Loop runtime is governed by the worker's CPU and
+wall limits, so a slow or infinite loop fails only its candidate. Defaults are
+12 KiB source and 500 AST nodes. Validation errors are machine-readable and
+retain source locations.
 
 The coordinator never executes policy code. A dedicated persistent subprocess
 starts in a new process group, sanitized environment, isolated temporary

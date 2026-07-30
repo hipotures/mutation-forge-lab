@@ -159,6 +159,18 @@ an incomplete hard-coded repair-code list. v11 tags every static-validator
 error as AST-repairable while transport, usage, and runtime failures remain
 terminal.
 
+The retained v11 campaign completed all eight initial turns and five repair
+turns. Seven candidates passed the former validator. The eighth final response
+used a finite dynamic `range(min(...))` loop that the static-bound heuristic
+could not prove. The user-authorized v12 validation amendment removes all
+static loop-bound and termination inference, permits `for` and `while`, and
+relies on the existing per-candidate CPU/wall limits for slow or infinite
+programs. No additional model call is made. Provider-free revalidation of the
+eight retained final responses produced eight unique valid candidates and
+80,000 successful persistent-worker smoke calls. Raw generation prompts,
+responses, usage, JSON-RPC, event, stderr, and transport logs remain unchanged;
+the derived revalidation evidence is stored separately.
+
 The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
 `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical
 `NO_GO`; Stage 2D remains non-held-out toy evidence rather than HEG

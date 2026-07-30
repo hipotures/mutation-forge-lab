@@ -12,13 +12,14 @@ from mutation_forge.stage3 import commands as stage3_commands
 from mutation_forge.stage3.commands import verify_replay
 
 
-def test_stage3_parser_surfaces_the_six_frozen_commands() -> None:
+def test_stage3_parser_surfaces_the_offline_revalidation_command() -> None:
     parser = build_parser()
     commands = (
         ["appserver-doctor", "--config", "config.toml", "--json"],
         ["freeze", "--config", "config.toml", "--json"],
         ["generate", "--config", "config.toml", "--concurrency", "8", "--json"],
         ["validate", "RUN", "--json"],
+        ["revalidate", "--config", "config.toml", "--run", "RUN", "--json"],
         ["evaluate", "--config", "config.toml", "--run", "RUN", "--workers", "8", "--json"],
         ["verify-replay", "PRIMARY", "REPLAY", "--json"],
     )

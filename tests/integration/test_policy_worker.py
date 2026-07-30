@@ -178,3 +178,23 @@ def test_total_wall_limit_is_parent_controlled(project_root: Path) -> None:
     with pytest.raises(WorkerTimeoutError, match="total wall"):
         worker.call(_ctx(), _proposal())
     worker.close()
+
+
+def test_infinite_loop_is_accepted_statically_and_stopped_by_worker_timeout() -> None:
+    source = (
+        "def priority(ctx, proposal):\n"
+        "    total = 0\n"
+        "    while True:\n"
+        "        total += 1\n"
+        "    return total\n"
+    )
+    limits = SandboxLimits(per_call_wall_seconds=0.05)
+    worker = PolicyWorker(source, limits)
+    started = time.monotonic()
+    try:
+        with pytest.raises(WorkerTimeoutError):
+            worker.call(_ctx(), _proposal())
+        assert not worker.usable
+    finally:
+        worker.close()
+    assert time.monotonic() - started < 3.0

@@ -37,6 +37,7 @@ from .isolation import IsolatedCapsule, secure_capsule_parent
 from .manifest import load_manifest, sha256
 from .prompts import PromptBundle, load_prompt_bundle
 from .replay import verify_replay as verify_replay_artifacts
+from .revalidation import replay_saved_revalidation, revalidate_saved_generation
 from .statistics import evaluate_gate, gate_report, summarize_development
 
 SLOTS = tuple(f"slot-{index:02d}" for index in range(8))
@@ -906,19 +907,34 @@ def validate(run: str | Path) -> dict[str, Any]:
     )
 
 
+def revalidate(config_path: str | Path, run: str | Path) -> dict[str, Any]:
+    """Persist a provider-free revalidation of retained final responses."""
+    config = load_stage3_config(config_path)
+    summary = revalidate_saved_generation(config, run, persist=True)
+    return canonical_result(summary)
+
+
 def _sources_for_run(root: Path, config: Stage3GenerationConfig) -> dict[str, str]:
     policies = {
         "random": config.random_policy_path.read_text(encoding="utf-8"),
         "structural": config.structural_policy_path.read_text(encoding="utf-8"),
     }
-    summary = GenerationArtifacts.read_summary(root)
+    revalidation_path = root / "revalidation_summary.json"
+    if revalidation_path.is_file():
+        summary = cast(
+            dict[str, Any], json.loads(revalidation_path.read_text(encoding="utf-8"))
+        )
+        source_prefix = root / "revalidation" / "slots"
+    else:
+        summary = GenerationArtifacts.read_summary(root)
+        source_prefix = root / "slots"
     for slot in cast(list[Mapping[str, Any]], summary.get("slots", [])):
         if slot.get("status") != "accepted":
             continue
         name = str(slot.get("slot"))
         if name not in SLOTS:
             raise RuntimeError("generation summary contains an invalid slot identifier")
-        path = root / "slots" / name / "source.py"
+        path = source_prefix / name / "source.py"
         if path.is_file():
             policies[f"candidate-{name}"] = path.read_text(encoding="utf-8")
     return policies
@@ -1010,7 +1026,11 @@ def _evaluate(
         raise RuntimeError("evaluation requires clean frozen project and HEG repositories")
     if heg_state["commit"] != config.frozen_heg_commit:
         raise RuntimeError("HEG commit drifted after the generation freeze")
-    generation_summary = replay_generation(root)
+    generation_summary = (
+        replay_saved_revalidation(config, root)
+        if (root / "revalidation_summary.json").is_file()
+        else replay_generation(root)
+    )
     if (
         generation_summary.get("status") != "completed"
         or generation_summary.get("replay_validated") is not True
@@ -1135,8 +1155,15 @@ def _evaluate(
         and generation_summary.get("status") == "completed"
     )
     tag_commit = _git(config.project_repo, "rev-list", "-n", "1", config.preregistration_tag)
+    source_generation_tag = str(
+        generation_summary.get("source_generation_tag", config.preregistration_tag)
+    )
+    source_generation_tag_commit = _git(
+        config.project_repo, "rev-list", "-n", "1", source_generation_tag
+    )
     repository_and_heg = (
-        tag_commit == frozen.get("project_commit")
+        source_generation_tag_commit == frozen.get("project_commit")
+        and tag_commit == _git(config.project_repo, "rev-parse", "HEAD")
         and _git(config.heg_repo, "rev-parse", "HEAD") == config.frozen_heg_commit
         and not _git(config.heg_repo, "status", "--short")
     )
@@ -1145,7 +1172,8 @@ def _evaluate(
             "scientific_valid": len(reduced) == len(selected),
             "dependency_provenance": (
                 frozen.get("heg_commit") == config.frozen_heg_commit
-                and frozen.get("project_commit") == tag_commit
+                and frozen.get("project_commit") == source_generation_tag_commit
+                and generation_summary.get("replay_validated") is True
             ),
             "protocol_safety": protocol_safety,
             "campaign_authority": campaign_authority,
@@ -1255,6 +1283,7 @@ run_appserver_doctor = appserver_doctor
 freeze_stage3 = freeze
 generate_stage3 = generate
 validate_stage3 = validate
+revalidate_stage3 = revalidate
 evaluate_stage3 = evaluate
 verify_stage3_replay = verify_replay
 
@@ -1263,6 +1292,7 @@ __all__ = [
     "freeze",
     "generate",
     "validate",
+    "revalidate",
     "evaluate",
     "verify_replay",
     "canonical_result",
@@ -1270,6 +1300,7 @@ __all__ = [
     "freeze_stage3",
     "generate_stage3",
     "validate_stage3",
+    "revalidate_stage3",
     "evaluate_stage3",
     "verify_stage3_replay",
 ]

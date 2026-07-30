@@ -73,7 +73,7 @@ def test_versioned_probe_json_schema_is_well_formed(project_root: Path) -> None:
     assert schema["x-runtime-bounds"]["max_request_bytes"] == 65536
 
 
-def test_static_loop_bound_is_enforced() -> None:
+def test_for_loop_bounds_are_left_to_the_resource_bounded_worker() -> None:
     source = (
         "def priority(ctx, proposal):\n"
         "    total = 0\n"
@@ -82,8 +82,19 @@ def test_static_loop_bound_is_enforced() -> None:
         "    return total\n"
     )
     result = validate_policy(source)
-    assert not result.valid
-    assert any(error.code == "loop_bound" for error in result.errors)
+    assert result.valid, result.as_dict()
+
+
+def test_while_loop_termination_is_left_to_the_resource_bounded_worker() -> None:
+    source = (
+        "def priority(ctx, proposal):\n"
+        "    total = 0\n"
+        "    while total < proposal['features']['weight']:\n"
+        "        total += 1\n"
+        "    return total\n"
+    )
+    result = validate_policy(source)
+    assert result.valid, result.as_dict()
 
 
 @pytest.mark.parametrize(

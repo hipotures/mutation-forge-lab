@@ -5,7 +5,6 @@ import copy
 import hashlib
 import math
 from dataclasses import dataclass
-from typing import cast
 
 from mutation_forge.models import JsonValue
 from mutation_forge.sandbox.contracts import (
@@ -42,6 +41,9 @@ _ALLOWED_NODE_TYPES = (
     ast.AugAssign,
     ast.If,
     ast.For,
+    ast.While,
+    ast.Break,
+    ast.Continue,
     ast.Expr,
     ast.Name,
     ast.Load,
@@ -268,48 +270,6 @@ class _PolicyValidator(ast.NodeVisitor):
                 "augmented assignments may target a local name only",
             )
         self.generic_visit(node)
-
-    def visit_For(self, node: ast.For) -> None:
-        if not isinstance(node.target, ast.Name):
-            self.error(node, "loop_target", "for loop target must be a local name")
-        if node.orelse:
-            self.error(node, "loop_else", "for-else is not allowed")
-        bound = self._loop_bound(node.iter)
-        if bound is None:
-            self.error(
-                node.iter,
-                "unbounded_loop",
-                "for iterable must be range(constants), a bounded literal, "
-                "or direct input indexing",
-            )
-        elif bound > self.limits.max_static_loop_bound:
-            self.error(
-                node.iter,
-                "loop_bound",
-                f"static loop bound {bound} exceeds {self.limits.max_static_loop_bound}",
-            )
-        self.generic_visit(node)
-
-    def _loop_bound(self, node: ast.AST) -> int | None:
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id != "range" or node.keywords:
-                return None
-            values = [self._literal_int(argument) for argument in node.args]
-            if not 1 <= len(values) <= 3 or any(value is None for value in values):
-                return None
-            try:
-                return len(range(*cast(list[int], values)))
-            except (ValueError, OverflowError):
-                return None
-        if isinstance(node, ast.List | ast.Tuple):
-            return len(node.elts)
-        if isinstance(node, ast.Subscript):
-            root = node.value
-            while isinstance(root, ast.Subscript):
-                root = root.value
-            if isinstance(root, ast.Name) and root.id in PARAMETERS:
-                return MAX_SEQUENCE_ITEMS
-        return None
 
     @staticmethod
     def _literal_int(node: ast.AST) -> int | None:

@@ -94,6 +94,17 @@ did not receive their permitted repair because the orchestrator recognized
 only an incomplete hard-coded subset of validator error codes. v11 classifies
 all errors originating from static AST validation as repairable while keeping
 transport, usage, and runtime failures terminal.
+The retained v11 campaign completed all eight initial turns and five permitted
+repair turns. Seven candidates passed the old validator; one final response was
+incorrectly rejected because its finite `range(min(...))` expression could not
+be proven by the static loop-bound heuristic. The user-authorized v12
+validation amendment removes all static loop-bound and termination inference,
+permits `for` and `while`, and leaves slow or infinite programs to the existing
+per-candidate worker CPU/wall limits. It does not make another model call.
+Provider-free revalidation of the eight retained final responses produced eight
+unique valid candidates and completed 80,000 persistent-worker smoke calls.
+Raw prompts, responses, JSON-RPC transcripts, usage, and transport logs remain
+unchanged; derived revalidation artifacts are stored separately.
 Stage 4, evolution, held-out evaluation, full proposer work, and HEG
 integration remain blocked.
 

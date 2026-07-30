@@ -21,7 +21,7 @@ SCIENTIFIC_SELECTOR_TAGS = frozenset(
         "mixed_exploit_explore",
     }
 )
-VALIDATOR_VERSION = "stage2a.validator.v1"
+VALIDATOR_VERSION = "stage2a.validator.v2"
 BEHAVIOR_SCHEMA_VERSION = "stage2a.behavior.v1"
 ARTIFACT_SCHEMA_VERSION = "stage2a.artifact.v1"
 

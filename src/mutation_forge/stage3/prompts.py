@@ -288,7 +288,7 @@ def validator_limits() -> str:
     builtins = ", ".join(sorted(SAFE_BUILTINS))
     return (
         f"safe builtins: {builtins}; max source bytes={limits.max_source_bytes}; max AST nodes={limits.max_ast_nodes}; "
-        f"max static loop bound={limits.max_static_loop_bound}; per-call wall seconds={limits.per_call_wall_seconds}; "
+        f"per-call wall seconds={limits.per_call_wall_seconds}; "
         f"total wall seconds={limits.total_wall_seconds}; allowed AST nodes: {nodes}"
     )
 
@@ -305,12 +305,11 @@ def program_contract() -> str:
         "- The source must contain exactly one return statement, and it must be the final top-level statement in priority.\n"
         "- Return a finite int or float; bool, NaN, infinity, complex values, and containers are rejected.\n"
         "- Read ctx and proposal only by indexing or slicing. Do not mutate either input.\n"
-        "- Allowed local control flow: assignments, arithmetic, comparisons, Boolean logic, conditionals, and statically bounded for loops.\n"
+        "- Allowed local control flow: assignments, arithmetic, comparisons, Boolean logic, conditionals, for loops, and while loops.\n"
         f"- Allowed built-ins only: {builtins}.\n"
-        "- No imports, attributes or method calls, comprehensions, lambda, recursion, while, try, with, yield, async, decorators, annotations, classes, nested functions, reflection, dynamic execution, I/O, environment, process, network, database, RNG, or hidden state.\n"
+        "- No imports, attributes or method calls, comprehensions, lambda, recursion, try, with, yield, async, decorators, annotations, classes, nested functions, reflection, dynamic execution, I/O, environment, process, network, database, RNG, or hidden state.\n"
         f"- Source <= {limits.max_source_bytes} bytes; AST <= {limits.max_ast_nodes} nodes; "
-        f"every loop bound <= {limits.max_static_loop_bound}; per-call wall <= "
-        f"{limits.per_call_wall_seconds} seconds; total smoke wall <= "
+        f"per-call wall <= {limits.per_call_wall_seconds} seconds; total smoke wall <= "
         f"{limits.total_wall_seconds} seconds."
     )
 
