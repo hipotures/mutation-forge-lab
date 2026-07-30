@@ -33,7 +33,13 @@ def _project(value: Any, *, top_level: bool = False) -> Any:
 
 def canonical_hash(value: Mapping[str, Any] | list[Any]) -> str:
     """Hash an ordered record projection with timing/path fields removed recursively."""
-    projected: Any = _project(value, top_level=isinstance(value, Mapping))
+    if isinstance(value, list):
+        projected: Any = [
+            canonical_projection(item) if isinstance(item, Mapping) else _project(item)
+            for item in value
+        ]
+    else:
+        projected = _project(value, top_level=True)
     return hashlib.sha256(canonical_bytes(projected)).hexdigest()
 
 

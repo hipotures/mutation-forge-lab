@@ -32,8 +32,10 @@ HEG.
 - Final evaluation-only freeze commit:
   `b28b5be350232b94961a21248d9da77814f8da74`.
 - Final annotated tag: `stage3-generation-frozen-v13`.
-- Stage 3 development manifest SHA-256:
+- Stage 3 development-manifest input SHA-256 recorded by the frozen config:
   `7d7cf3cb1cccaea57bbc5ef168845c82ac7be59da7ad8a9613c77bffaa9573f1`.
+- Stage 3 canonical development-manifest SHA-256:
+  `f94757d7b21b28a16fb1d3d3b4e54385785f07270da8f89496c1cb24e76c96d1`.
 
 Every freeze was committed, pushed, tagged, and recorded on issue #9 before
 the corresponding provider or evaluation boundary was crossed. Earlier tags
@@ -113,7 +115,7 @@ Provider-free revalidation then produced:
 - eight unique source and normalized-AST identities;
 - 10,000 persistent-worker calls per candidate;
 - 80,000 successful bounded calls in total;
-- zero model, App Server, or runtime-network calls.
+- zero model or App Server calls.
 
 The frozen generated policies and both reviewed baselines all execute through
 the Stage 2A worker. The champion identity is:
@@ -176,9 +178,6 @@ Observed final artifact sizes:
 |---|---:|---:|---:|---:|
 | Primary | 128 | 45,841,430 B | 5,733,843 B | 33,554,432 B |
 | Replay | 128 | 45,841,396 B | 5,733,839 B | 33,554,432 B |
-
-A pre-freeze real-data size smoke also projected at most 5,749,344 bytes for
-16 records, leaving 27,805,088 bytes of headroom under the per-shard bound.
 
 ## Primary development result
 
@@ -276,8 +275,8 @@ runs/stage3-development/stage3-generation-1f7f0784e37c-attempt-01/
 
 Key artifacts:
 
-- `campaign.json`, per-slot prompts, responses, usage, events, wire logs, and
-  transport logs;
+- `generation_summary.json`, per-slot prompts, responses, usage, events, wire
+  logs, and transport logs;
 - `revalidation_summary.json`;
 - `evaluation-primary-shards.json`;
 - `evaluation-primary-shard-00.jsonl.gz` through

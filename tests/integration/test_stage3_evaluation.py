@@ -233,3 +233,5 @@ def test_evaluation_records_are_written_once_in_eight_bounded_shards(
         tmp_path / "evaluation-replay-shards.json",
     )
     assert verified["exact"] is True
+    assert verified["primary_sha256"] == primary["canonical_records_sha256"]
+    assert verified["replay_sha256"] == replay["canonical_records_sha256"]

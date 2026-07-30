@@ -79,3 +79,23 @@ def test_canonical_hash_strips_timing_from_nested_records_but_keeps_hashes() -> 
     assert verify_replay(primary, replay)["exact"] is True
     replay["records"][0]["digest"] = "b"
     assert verify_replay(primary, replay)["exact"] is False
+
+
+def test_canonical_hash_projects_each_record_in_a_record_list() -> None:
+    primary = [
+        {
+            "episode_id": "episode-1",
+            "canonical_episode_sha256": "a" * 64,
+            "elapsed_seconds": 1.0,
+            "value": 3,
+        }
+    ]
+    replay = [
+        {
+            "episode_id": "episode-1",
+            "canonical_episode_sha256": "b" * 64,
+            "elapsed_seconds": 99.0,
+            "value": 3,
+        }
+    ]
+    assert canonical_hash(primary) == canonical_hash(replay)
