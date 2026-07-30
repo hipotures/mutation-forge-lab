@@ -25,7 +25,10 @@ from mutation_forge.stage3.app_server import (
     ProtocolError,
     TurnError,
 )
+from mutation_forge.stage3.config import load_stage3_config
+from mutation_forge.stage3.contracts import parse_generated_policy
 from mutation_forge.stage3.isolation import THIN_APP_SERVER_ARGS, IsolatedCapsule
+from mutation_forge.stage3.prompts import load_prompt_bundle
 
 _FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "fake_stage3_app_server.py"
 _SPEC = importlib.util.spec_from_file_location("stage3_fake_app_server", _FIXTURE_PATH)
@@ -511,6 +514,83 @@ def test_provider_persists_theml_style_initial_and_repair_artifacts(tmp_path: Pa
     assert initial["usage"]["final"] is True
     assert initial["usage"]["partial"] is False
     assert len((logs / "slot-00.transcript.sha256").read_text().strip()) == 64
+
+
+def test_exact_v8_bundle_completes_nested_thread_started_structured_path(
+    tmp_path: Path,
+) -> None:
+    config = load_stage3_config("configs/stage3-generation.toml")
+    bundle = load_prompt_bundle(
+        context_schema=config.context_schema_path,
+        proposal_schema=config.proposal_schema_path,
+        semantics_glossary=config.semantic_glossary_path,
+        output_schema=config.output_schema_path,
+    )
+    brief = json.loads(
+        (config.slot_briefs_dir / "slot-00.json").read_text(encoding="utf-8")
+    )
+    prompt = bundle.render_slot_request(
+        brief["slot_id"],
+        brief["brief"],
+        generation_mode=brief["generation_mode"],
+        focus=brief["focus"],
+    )
+    output_schema = json.loads(bundle.output_schema)
+    envelope = {
+        "schema_version": "stage3.generated_policy.v1",
+        "source": "def priority(ctx, proposal):\n    return 0.0\n",
+        "design_summary": (
+            "Hypothesis: a constant ranker matches an unstructured selection rule."
+        ),
+        "used_fields": [],
+        "assumptions": [],
+    }
+    process = FakeProcess(
+        FakeScenario(
+            final_text=json.dumps(envelope, sort_keys=True),
+            thread_started_notification="nested",
+        )
+    )
+    seen: list[dict[str, Any]] = []
+    original_receive = process.receive
+
+    def receive(line: bytes) -> None:
+        seen.append(json.loads(line))
+        original_receive(line)
+
+    process.receive = receive
+    provider = AppServerGenerationProvider(
+        process_factory=_fixed_process_factory(process),
+        auth_checker=lambda _: True,
+        sandbox_mode=config.app_server.sandbox_mode,
+        approval_policy=config.app_server.approval_policy,
+    )
+    result = provider.generate(
+        {
+            "prompt": prompt,
+            "system_prompt": bundle.system,
+            "output_schema": output_schema,
+            "model": config.model.name,
+            "effort": config.model.effort,
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert parse_generated_policy(json.loads(result["response"])).as_dict() == envelope
+    thread_start = next(item for item in seen if item.get("method") == "thread/start")
+    turn_start = next(item for item in seen if item.get("method") == "turn/start")
+    assert thread_start["params"]["baseInstructions"] == bundle.system
+    assert thread_start["params"]["dynamicTools"] == []
+    assert thread_start["params"]["selectedCapabilityRoots"] == []
+    assert turn_start["params"]["input"] == [{"type": "text", "text": prompt}]
+    assert turn_start["params"]["outputSchema"] == output_schema
+    assert turn_start["params"]["model"] == "gpt-5.6-luna"
+    assert turn_start["params"]["effort"] == "high"
+    assert (
+        len(json.dumps(turn_start, separators=(",", ":")).encode("utf-8"))
+        < config.limits.request_bytes
+    )
 
 
 def test_provider_request_and_response_bounds_fail_closed(tmp_path: Path) -> None:
