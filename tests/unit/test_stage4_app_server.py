@@ -19,6 +19,7 @@ from mutation_forge.stage3.app_server import IsolationError
 from mutation_forge.stage4.app_server import (
     FROZEN_STAGE4_EFFORT,
     FROZEN_STAGE4_MODEL,
+    STAGE4_TURN_TIMEOUT_SECONDS,
     Stage4AppServerProvider,
     Stage4ProviderError,
     _available_artifact_prefix,
@@ -71,6 +72,13 @@ def test_frozen_model_and_effort_are_enforced(tmp_path: Path) -> None:
         provider.generate(_request(model="other"))
     with pytest.raises(Exception, match="requires gpt-5.6-luna:high"):
         provider.generate(_request(effort="low"))
+
+
+def test_stage4_uses_the_proven_six_hundred_second_turn_timeout(
+    tmp_path: Path,
+) -> None:
+    provider = _provider(tmp_path)
+    assert provider.limits.turn_timeout == STAGE4_TURN_TIMEOUT_SECONDS == 600.0
 
 
 def test_schema_prompt_ids_usage_and_artifact_refs_are_preserved(tmp_path: Path) -> None:
@@ -317,6 +325,48 @@ def test_legacy_rejected_schema_artifact_is_recovered_without_resubmission(
     assert recovered is not None
     assert recovered["status"] == "infrastructure"
     assert recovered["accepted"] is True
+
+
+def test_completed_remote_turn_is_recovered_after_host_logging_timeout(
+    tmp_path: Path,
+) -> None:
+    request = _request(artifact_prefix="completed-timeout")
+    (tmp_path / "completed-timeout.response.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    provider = _provider(tmp_path)
+    generated = provider.generate(request)
+    prefix = "completed-timeout.retry-01"
+    response_path = tmp_path / f"{prefix}.response.json"
+    response = json.loads(response_path.read_text(encoding="utf-8"))
+    response.update(
+        {
+            "status": "error",
+            "error_type": "TurnError",
+            "error": "turn timed out",
+            "accepted": True,
+            "charged": False,
+            "content": False,
+            "usage": {},
+            "request_id": None,
+            "turn_id": None,
+            "provider_request_id": None,
+            "provider_turn_id": None,
+        }
+    )
+    response_path.write_text(json.dumps(response), encoding="utf-8")
+
+    recovered = provider.load_retained_result(request)
+    assert recovered is not None
+    assert recovered["status"] == "completed"
+    assert recovered["accepted"] is True
+    assert recovered["content"] is True
+    assert recovered["response"] == generated["response"]
+    assert recovered["turn_id"] == generated["turn_id"]
+    assert recovered["usage"] == generated["usage"]
+    assert recovered["retained_completed_turn_recovery"] == prefix
+    assert recovered["host_timeout_after_remote_completion"] is True
 
 
 def test_logs_are_redacted_and_bounded(tmp_path: Path) -> None:

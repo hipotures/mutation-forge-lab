@@ -33,10 +33,24 @@ from mutation_forge.stage3.isolation import (
 
 FROZEN_STAGE4_MODEL: Final = "gpt-5.6-luna"
 FROZEN_STAGE4_EFFORT: Final = "high"
+STAGE4_TURN_TIMEOUT_SECONDS: Final = 600.0
 INITIAL_TURN_BUDGET: Final = 32
 REPAIR_TURN_BUDGET: Final = 32
 TOTAL_TURN_BUDGET: Final = INITIAL_TURN_BUDGET + REPAIR_TURN_BUDGET
 MAX_DIAGNOSTIC_BYTES: Final = 16 * 1024
+_RECOVERY_PASSIVE_ITEMS: Final = {"userMessage", "agentMessage", "reasoning"}
+_RECOVERY_GLOBAL_EVENTS: Final = {
+    "account/updated",
+    "account/rateLimits/updated",
+    "configWarning",
+    "remoteControl/status/changed",
+}
+_RECOVERY_DELTAS: Final = {
+    "item/agentMessage/delta",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/summaryPartAdded",
+    "item/reasoning/textDelta",
+}
 
 
 class Stage4ProviderError(RuntimeError):
@@ -82,6 +96,28 @@ def _codex_transport_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("Stage 4 schema_version type is incompatible")
     schema_version["type"] = "string"
     return value
+
+
+def _read_jsonl_mappings(
+    path: Path,
+    *,
+    max_bytes: int,
+    max_lines: int = 10_000,
+) -> tuple[Mapping[str, Any], ...] | None:
+    """Read one bounded retained JSONL stream without accepting partial lines."""
+
+    try:
+        if not path.is_file() or path.stat().st_size > max_bytes:
+            return None
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if not lines or len(lines) > max_lines:
+            return None
+        values = tuple(json.loads(line) for line in lines)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+    if not all(isinstance(value, Mapping) for value in values):
+        return None
+    return cast(tuple[Mapping[str, Any], ...], values)
 
 
 def _derived_artifact_prefix(request: Mapping[str, Any]) -> str:
@@ -289,7 +325,9 @@ class Stage4AppServerProvider:
         self.process_factory = process_factory
         self.auth_checker = auth_checker
         self.auth_json = auth_json
-        self.limits = limits or AppServerLimits()
+        self.limits = limits or AppServerLimits(
+            turn_timeout=STAGE4_TURN_TIMEOUT_SECONDS,
+        )
         self.artifact_dir = artifact_dir
         self.artifact_prefix = artifact_prefix
         self.artifact_root = artifact_root
@@ -338,6 +376,321 @@ class Stage4AppServerProvider:
                 f"Stage 4 generation requires {FROZEN_STAGE4_MODEL}:{FROZEN_STAGE4_EFFORT}"
             )
         return prompt, system, schema, model, effort
+
+    def _load_completed_timeout_result(
+        self,
+        *,
+        root: Path,
+        retained_prefix: str,
+        response_value: Mapping[str, Any],
+        request: Mapping[str, Any],
+        model: str,
+        effort: str,
+    ) -> Mapping[str, Any] | None:
+        """Recover a remotely completed turn that the host timed out while logging."""
+
+        if (
+            response_value.get("status") != "error"
+            or response_value.get("error_type") != "TurnError"
+            or response_value.get("error") != "turn timed out"
+            or response_value.get("accepted") is not True
+            or response_value.get("content") is not False
+            or response_value.get("usage") != {}
+        ):
+            return None
+        events = _read_jsonl_mappings(
+            root / f"{retained_prefix}.events.jsonl",
+            max_bytes=self.limits.transcript_limit,
+        )
+        rpc = _read_jsonl_mappings(
+            root / f"{retained_prefix}.codex-rpc.jsonl",
+            max_bytes=self.limits.transcript_limit,
+        )
+        profile_path = root / f"{retained_prefix}.codex-profile.json"
+        transcript_path = root / f"{retained_prefix}.transcript.sha256"
+        if events is None or rpc is None:
+            return None
+        try:
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            transcript_sha256 = transcript_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return None
+        doctor = request.get("appserver_doctor_sha256")
+        if (
+            not isinstance(profile, Mapping)
+            or profile.get("model") != model
+            or profile.get("effort") != effort
+            or profile.get("protocolAuditSha256") != doctor
+            or profile.get("artifactPrefix") != retained_prefix
+            or re.fullmatch(r"[0-9a-f]{64}", transcript_sha256) is None
+        ):
+            return None
+
+        thread_responses: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+        turn_responses: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+        for message in rpc:
+            result = message.get("result")
+            if not isinstance(result, Mapping):
+                continue
+            thread = result.get("thread")
+            turn = result.get("turn")
+            if isinstance(thread, Mapping):
+                thread_responses.append((message, thread))
+            if isinstance(turn, Mapping):
+                turn_responses.append((message, turn))
+        if len(thread_responses) != 1 or len(turn_responses) != 1:
+            return None
+        thread_message, thread = thread_responses[0]
+        turn_message, started_turn = turn_responses[0]
+        thread_id = thread.get("id")
+        turn_id = started_turn.get("id")
+        request_id = turn_message.get("id")
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id
+            or response_value.get("thread_id") != thread_id
+            or thread.get("ephemeral") is not True
+            or not isinstance(turn_id, str)
+            or not turn_id
+            or started_turn.get("status") != "inProgress"
+            or not isinstance(started_turn.get("items"), list)
+            or not isinstance(request_id, (int, str))
+            or isinstance(request_id, bool)
+        ):
+            return None
+
+        active: dict[str, str] = {}
+        completed: set[str] = set()
+        final_items: list[tuple[str, str]] = []
+        usage_values: list[Mapping[str, Any]] = []
+        completed_turns: list[Mapping[str, Any]] = []
+        turn_started = 0
+        for message in events:
+            method = message.get("method")
+            params = message.get("params")
+            if not isinstance(method, str) or not isinstance(params, Mapping):
+                return None
+            event_thread = params.get("threadId", params.get("thread_id"))
+            nested_turn = params.get("turn")
+            event_turn = params.get("turnId", params.get("turn_id"))
+            if event_turn is None and isinstance(nested_turn, Mapping):
+                event_turn = nested_turn.get("id")
+            if event_thread is not None and event_thread != thread_id:
+                return None
+            if event_turn is not None and event_turn != turn_id:
+                return None
+            if method in _RECOVERY_GLOBAL_EVENTS:
+                continue
+            if method in {"error", "model/rerouted"}:
+                return None
+            if method == "thread/started":
+                nested_thread = params.get("thread")
+                observed_thread = (
+                    nested_thread.get("id")
+                    if isinstance(nested_thread, Mapping)
+                    else event_thread
+                )
+                if observed_thread != thread_id:
+                    return None
+                continue
+            if method == "turn/started":
+                if (
+                    not isinstance(nested_turn, Mapping)
+                    or nested_turn.get("id") != turn_id
+                    or nested_turn.get("status") != "inProgress"
+                    or not isinstance(nested_turn.get("items"), list)
+                ):
+                    return None
+                turn_started += 1
+                continue
+            if method in {"item/started", "item/completed"}:
+                item = params.get("item")
+                if (
+                    not isinstance(item, Mapping)
+                    or not isinstance(item.get("id"), str)
+                    or not isinstance(item.get("type"), str)
+                    or item.get("type") not in _RECOVERY_PASSIVE_ITEMS
+                ):
+                    return None
+                item_id = cast(str, item["id"])
+                item_type = cast(str, item["type"])
+                if method == "item/started":
+                    if item_id in active or item_id in completed:
+                        return None
+                    active[item_id] = item_type
+                    continue
+                if active.pop(item_id, None) != item_type or item_id in completed:
+                    return None
+                completed.add(item_id)
+                if item_type == "agentMessage" and item.get("phase") == "final_answer":
+                    text = item.get("text")
+                    if not isinstance(text, str) or not text:
+                        return None
+                    final_items.append((item_id, text))
+                continue
+            if method in _RECOVERY_DELTAS:
+                item_id = params.get("itemId", params.get("item_id"))
+                expected_type = (
+                    "agentMessage"
+                    if method == "item/agentMessage/delta"
+                    else "reasoning"
+                )
+                if not isinstance(item_id, str) or active.get(item_id) != expected_type:
+                    return None
+                continue
+            if method == "thread/tokenUsage/updated":
+                token_usage = params.get("tokenUsage")
+                last = (
+                    token_usage.get("last")
+                    if isinstance(token_usage, Mapping)
+                    else None
+                )
+                if not isinstance(last, Mapping):
+                    return None
+                usage_values.append(last)
+                continue
+            if method == "thread/status/changed":
+                status = params.get("status")
+                status_type = (
+                    status.get("type") if isinstance(status, Mapping) else None
+                )
+                if not isinstance(status_type, str) or status_type in {
+                    "systemError",
+                    "failed",
+                    "interrupted",
+                    "cancelled",
+                }:
+                    return None
+                continue
+            if method == "turn/completed":
+                if not isinstance(nested_turn, Mapping):
+                    return None
+                completed_turns.append(nested_turn)
+                continue
+            return None
+
+        if (
+            turn_started != 1
+            or active
+            or len(final_items) != 1
+            or len(completed_turns) != 1
+            or not usage_values
+        ):
+            return None
+        final_item_id, response_text = final_items[0]
+        completed_turn = completed_turns[0]
+        completed_items = completed_turn.get("items")
+        if (
+            completed_turn.get("id") != turn_id
+            or completed_turn.get("status") != "completed"
+            or not isinstance(completed_items, list)
+        ):
+            return None
+        completed_ids = {
+            item.get("id")
+            for item in completed_items
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        }
+        if (
+            completed_turn.get("itemsView") != "notLoaded"
+            and final_item_id not in completed_ids
+        ):
+            return None
+
+        usage_raw = usage_values[-1]
+        required_usage = (
+            "inputTokens",
+            "cachedInputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens",
+        )
+        if any(
+            not isinstance(usage_raw.get(key), int)
+            or isinstance(usage_raw.get(key), bool)
+            or cast(int, usage_raw[key]) < 0
+            for key in required_usage
+        ):
+            return None
+        cache_write = usage_raw.get("cacheWriteInputTokens", 0)
+        if (
+            not isinstance(cache_write, int)
+            or isinstance(cache_write, bool)
+            or cache_write < 0
+        ):
+            return None
+        usage = {
+            **dict(usage_raw),
+            "cacheWriteInputTokens": cache_write,
+            "final": True,
+            "partial": False,
+        }
+        response: Any = response_text
+        try:
+            decoded = json.loads(response_text)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if isinstance(decoded, Mapping):
+                response = dict(decoded)
+        denied = response_value.get("unauthorized_tool_approval")
+        if denied is not False:
+            return None
+        prompt_hashes = response_value.get("prompt_hashes")
+        if not isinstance(prompt_hashes, Mapping):
+            prompt_hashes = {
+                key: response_value.get(key)
+                for key in (
+                    "prompt_sha256",
+                    "system_prompt_sha256",
+                    "output_schema_sha256",
+                    "schema_sha256",
+                    "transport_output_schema_sha256",
+                    "request_sha256",
+                )
+            }
+        total_tokens = cast(int, usage["totalTokens"])
+        return {
+            **dict(response_value),
+            "response": response,
+            "response_text": response_text,
+            "raw_response": response_text,
+            "status": "completed",
+            "accepted": True,
+            "accepted_turn": True,
+            "charged": total_tokens > 0,
+            "content": True,
+            "content_proof": {
+                "present": True,
+                "bytes": len(response_text.encode()),
+                "sha256": _hash(response_text),
+            },
+            "usage": usage,
+            "usage_proof": {
+                "complete": True,
+                "charged": total_tokens > 0,
+                "totalTokens": total_tokens,
+            },
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "session_id": thread.get("sessionId"),
+            "turn_id": turn_id,
+            "provider_request_id": str(request_id),
+            "provider_thread_id": thread_id,
+            "provider_turn_id": turn_id,
+            "model": model,
+            "effort": effort,
+            "prompt_hashes": dict(prompt_hashes),
+            "transcript_sha256": transcript_sha256,
+            "transport_sha256": transcript_sha256,
+            "appserver_doctor_sha256": doctor,
+            "retained_completed_turn_recovery": retained_prefix,
+            "host_timeout_after_remote_completion": True,
+            "original_error": {
+                "error_type": response_value.get("error_type"),
+                "error": response_value.get("error"),
+            },
+        }
 
     def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         prompt, system, schema, model, effort = self._request_values(request)
@@ -660,6 +1013,16 @@ class Stage4AppServerProvider:
                 and isinstance(response_value.get("error_type"), str)
                 and isinstance(response_value.get("error"), str)
             ):
+                recovered = self._load_completed_timeout_result(
+                    root=root,
+                    retained_prefix=retained_prefix,
+                    response_value=response_value,
+                    request=request,
+                    model=model,
+                    effort=effort,
+                )
+                if recovered is not None:
+                    return recovered
                 return {
                     **dict(response_value),
                     "status": "infrastructure",
@@ -715,6 +1078,7 @@ __all__ = [
     "CodexAppServerProvider",
     "FROZEN_STAGE4_MODEL",
     "FROZEN_STAGE4_EFFORT",
+    "STAGE4_TURN_TIMEOUT_SECONDS",
     "INITIAL_TURN_BUDGET",
     "REPAIR_TURN_BUDGET",
     "TOTAL_TURN_BUDGET",

@@ -30,6 +30,7 @@ from .prompts import render_repair_prompt, render_request_prompt
 SLOTS: tuple[str, ...] = tuple(f"slot-{i:02d}" for i in range(8))
 GENERATIONS = 4
 SMOKE_CALLS = 10_000
+COMPLETED_TURN_RECOVERY_SCHEMA = "stage4.completed_turn_recovery.v1"
 
 
 class GenerationProvider(Protocol):
@@ -165,6 +166,76 @@ class GenerationRequest:
     @property
     def request_idempotency_key(self) -> str:
         return self.idempotency_key
+
+    @classmethod
+    def from_value(cls, value: Mapping[str, Any]) -> GenerationRequest:
+        """Reconstruct and verify an immutable request retained in a checkpoint."""
+
+        string_fields = (
+            "campaign_id",
+            "slot",
+            "parent_id",
+            "brief_id",
+            "prompt",
+            "prompt_hash",
+            "idempotency_key",
+            "phase",
+            "parent_source",
+            "search_feedback",
+            "archive_context",
+            "model",
+            "effort",
+        )
+        if any(not isinstance(value.get(name), str) for name in string_fields):
+            raise ValueError("retained generation request has invalid string fields")
+        generation = value.get("generation")
+        metadata = value.get("parent_metadata")
+        diagnostics = value.get("diagnostics", [])
+        doctor = value.get("appserver_doctor_sha256")
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation not in range(GENERATIONS)
+            or value["slot"] not in SLOTS
+            or value["phase"] not in {"initial", "repair"}
+            or not isinstance(metadata, Mapping)
+            or not isinstance(diagnostics, list)
+            or not all(isinstance(item, Mapping) for item in diagnostics)
+            or (doctor is not None and not isinstance(doctor, str))
+            or value.get("request_idempotency_key", value["idempotency_key"])
+            != value["idempotency_key"]
+            or value["prompt_hash"] != _hash(value["prompt"])
+            or value["idempotency_key"]
+            != request_idempotency_key(
+                cast(str, value["campaign_id"]),
+                generation,
+                cast(str, value["slot"]),
+                cast(str, value["parent_id"]),
+                cast(str, value["brief_id"]),
+                cast(str, value["prompt_hash"]),
+                cast(str, value["phase"]),
+            )
+        ):
+            raise ValueError("retained generation request identity is invalid")
+        return cls(
+            campaign_id=cast(str, value["campaign_id"]),
+            generation=generation,
+            slot=cast(str, value["slot"]),
+            parent_id=cast(str, value["parent_id"]),
+            brief_id=cast(str, value["brief_id"]),
+            prompt=cast(str, value["prompt"]),
+            prompt_hash=cast(str, value["prompt_hash"]),
+            idempotency_key=cast(str, value["idempotency_key"]),
+            phase=cast(str, value["phase"]),
+            diagnostics=tuple(cast(Mapping[str, Any], item) for item in diagnostics),
+            parent_source=cast(str, value["parent_source"]),
+            parent_metadata=dict(metadata),
+            search_feedback=cast(str, value["search_feedback"]),
+            archive_context=cast(str, value["archive_context"]),
+            model=cast(str, value["model"]),
+            effort=cast(str, value["effort"]),
+            appserver_doctor_sha256=doctor,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -359,6 +430,39 @@ def _usage_complete(usage: Mapping[str, Any]) -> bool:
             for name in required
         )
     )
+
+
+def _completed_turn_recovery_positions(
+    state: Mapping[str, Any],
+    slots_state: Mapping[str, Any],
+) -> dict[str, str]:
+    marker = state.get("completed_turn_recovery")
+    if marker is None:
+        return {}
+    if not isinstance(marker, Mapping):
+        raise RuntimeError("completed-turn recovery marker is malformed")
+    positions = marker.get("positions")
+    request_keys = marker.get("request_keys")
+    expected_positions = {
+        f"{generation}:{slot}"
+        for generation in range(1, GENERATIONS)
+        for slot in SLOTS
+    }
+    if (
+        marker.get("schema_version") != COMPLETED_TURN_RECOVERY_SCHEMA
+        or marker.get("replacement_requests_authorized") is not False
+        or marker.get("provider_process_calls_authorized") is not False
+        or not isinstance(positions, Mapping)
+        or set(positions) != expected_positions
+        or not all(isinstance(key, str) for key in positions.values())
+        or not isinstance(request_keys, list)
+        or not all(isinstance(key, str) for key in request_keys)
+        or set(request_keys) != set(positions.values())
+        or len(set(request_keys)) != 24
+        or not set(request_keys).issubset(slots_state)
+    ):
+        raise RuntimeError("completed-turn recovery marker is invalid")
+    return {str(position): str(key) for position, key in positions.items()}
 
 
 def infrastructure_retry_allowed(
@@ -896,6 +1000,7 @@ class GenerationCoordinator:
         state.setdefault("slots", {})
         callbacks = cast(dict[str, Any], state.setdefault("callbacks", {}))
         slots_state = cast(dict[str, Any], state["slots"])
+        recovery_positions = _completed_turn_recovery_positions(state, slots_state)
         all_generations: list[tuple[SlotResult, ...]] = []
         seen: dict[str, str] = {}
         # Existing archive/seed sources participate in duplicate detection but
@@ -917,6 +1022,100 @@ class GenerationCoordinator:
                 max_workers=8, thread_name_prefix=f"stage4-g{generation}"
             ) as pool:
                 for slot in SLOTS:
+                    recovery_key = recovery_positions.get(f"{generation}:{slot}")
+                    if recovery_key is not None:
+                        cached_recovery = slots_state.get(recovery_key)
+                        if not isinstance(cached_recovery, Mapping):
+                            raise RuntimeError(
+                                "completed-turn recovery slot is missing"
+                            )
+                        retained_initial = cached_recovery.get("initial")
+                        if (
+                            isinstance(retained_initial, Mapping)
+                            and retained_initial.get("status") == "completed"
+                            and retained_initial.get("accepted") is True
+                            and retained_initial.get("content") is True
+                            and isinstance(retained_initial.get("usage"), Mapping)
+                            and _usage_complete(
+                                cast(Mapping[str, Any], retained_initial["usage"])
+                            )
+                        ):
+                            results[slot] = self._slot_from_checkpoint(
+                                cached_recovery
+                            )
+                            continue
+                        retained_request = GenerationRequest.from_value(
+                            cast(
+                                Mapping[str, Any],
+                                cached_recovery.get("request", {}),
+                            )
+                        )
+                        if (
+                            retained_request.generation != generation
+                            or retained_request.slot != slot
+                            or retained_request.phase != "initial"
+                            or retained_request.idempotency_key != recovery_key
+                        ):
+                            raise RuntimeError(
+                                "completed-turn recovery request position drifted"
+                            )
+                        loader = getattr(
+                            self.provider,
+                            "load_retained_result",
+                            None,
+                        )
+                        retained_value = (
+                            loader(retained_request.as_dict())
+                            if callable(loader)
+                            else None
+                        )
+                        if retained_value is None:
+                            raise RuntimeError(
+                                "completed accepted turn could not be recovered"
+                            )
+                        raw = ProviderResult.from_value(retained_value)
+                        if (
+                            raw.status != "completed"
+                            or not raw.accepted
+                            or not raw.content
+                            or not _usage_complete(raw.usage)
+                        ):
+                            raise RuntimeError(
+                                "retained completed turn evidence is incomplete"
+                            )
+                        candidate, diagnostics = self._assess(
+                            retained_request,
+                            raw,
+                        )
+                        slot_result = SlotResult(
+                            generation,
+                            slot,
+                            retained_request.parent_id,
+                            "accepted" if candidate else "failed",
+                            candidate,
+                            tuple(diagnostics if not candidate else ()),
+                            0,
+                            initial=raw.as_dict(),
+                            raw_result=raw.as_dict(),
+                            request=retained_request.as_dict(),
+                        )
+                        if candidate is None and diagnostics:
+                            slot_result = replace(
+                                slot_result,
+                                status="repair_pending",
+                            )
+                        results[slot] = slot_result
+                        slots_state[recovery_key] = slot_result.as_dict()
+                        initial_calls += 1
+                        recovered_initial_calls += 1
+                        self._save(state)
+                        self._emit_checkpoint(
+                            generation,
+                            parents,
+                            state,
+                            results,
+                        )
+                        continue
                     parent = parents[slot]
                     req = self._request(generation, slot, parent, "initial")
                     key = req.idempotency_key
@@ -1059,6 +1258,22 @@ class GenerationCoordinator:
                         result.errors,
                         self._invalid_source(result.raw_result),
                     )
+                    original_request = result.request
+                    original_metadata = original_request.get("parent_metadata")
+                    if isinstance(original_metadata, Mapping):
+                        req = replace(
+                            req,
+                            parent_source=str(
+                                original_request.get("parent_source", "")
+                            ),
+                            parent_metadata=dict(original_metadata),
+                            search_feedback=str(
+                                original_request.get("search_feedback", "")
+                            ),
+                            archive_context=str(
+                                original_request.get("archive_context", "")
+                            ),
+                        )
                     cached = slots_state.get(req.idempotency_key)
                     if isinstance(cached, Mapping) and cached.get("status") not in {
                         "pending",

@@ -292,6 +292,7 @@ def test_accepted_artifact_recovery_never_submits_a_replacement(
         def __init__(self) -> None:
             self.loaded: list[dict[str, Any]] = []
             self.generated = 0
+            self.repairs = 0
 
         def load_retained_result(
             self,
@@ -333,6 +334,132 @@ def test_accepted_artifact_recovery_never_submits_a_replacement(
     assert result.summary["initial_turn_count"] == 32
     assert result.summary["recovered_initial_turn_count"] == 32
     assert result.summary["accepted_live_turns"] == 32
+
+
+def test_cached_timeouts_upgrade_from_completed_artifacts_without_replacement(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    class TimeoutProvider:
+        def generate(self, request: dict[str, Any]) -> ProviderResult:
+            return ProviderResult(
+                status="infrastructure",
+                accepted=True,
+                charged=False,
+                content=False,
+                usage={},
+                thread_id=f"thread-{request['generation']}-{request['slot']}",
+                error="TurnError: turn timed out",
+            )
+
+    class CompletedArtifactProvider:
+        def __init__(self) -> None:
+            self.loaded: list[dict[str, Any]] = []
+            self.generated = 0
+            self.repairs = 0
+
+        def load_retained_result(
+            self,
+            request: dict[str, Any],
+        ) -> ProviderResult:
+            self.loaded.append(dict(request))
+            invalid = request["generation"] == 1 and request["slot"] == "slot-00"
+            return ProviderResult(
+                response={"not": "a policy"} if invalid else envelope(),
+                status="completed",
+                accepted=True,
+                charged=True,
+                content=True,
+                usage={
+                    "inputTokens": 1,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 1,
+                    "reasoningOutputTokens": 0,
+                    "totalTokens": 2,
+                    "final": True,
+                    "partial": False,
+                },
+                request_id=f"retained-{request['generation']}-{request['slot']}",
+                thread_id=f"thread-{request['generation']}-{request['slot']}",
+                turn_id=f"turn-{request['generation']}-{request['slot']}",
+            )
+
+        def generate(self, request: dict[str, Any]) -> ProviderResult:
+            self.generated += 1
+            raise AssertionError("completed accepted turn must not be submitted again")
+
+        def repair(
+            self,
+            request: dict[str, Any],
+            diagnostics: tuple[dict[str, Any], ...],
+        ) -> ProviderResult:
+            self.repairs += 1
+            return ProviderResult(
+                response=envelope(),
+                usage={
+                    "inputTokens": 1,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 1,
+                    "reasoningOutputTokens": 0,
+                    "totalTokens": 2,
+                    "final": True,
+                    "partial": False,
+                },
+            )
+
+    monkeypatch.setattr(
+        generation,
+        "_behavior",
+        lambda source, limits, smoke_calls: (
+            {"signature_sha256": "5" * 64},
+            {"smoke_calls": smoke_calls},
+        ),
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    GenerationCoordinator(
+        TimeoutProvider(),
+        checkpoint_path=checkpoint_path,
+    ).run()
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    positions = {
+        f"{value['generation']}:{value['slot']}": key
+        for key, value in checkpoint["slots"].items()
+        if value["generation"] in {1, 2, 3}
+    }
+    checkpoint["completed_turn_recovery"] = {
+        "schema_version": generation.COMPLETED_TURN_RECOVERY_SCHEMA,
+        "replacement_requests_authorized": False,
+        "provider_process_calls_authorized": False,
+        "positions": positions,
+        "request_keys": sorted(positions.values()),
+    }
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    recovered_provider = CompletedArtifactProvider()
+    recovered = GenerationCoordinator(
+        recovered_provider,
+        checkpoint_path=checkpoint_path,
+    ).run()
+    assert recovered_provider.generated == 0
+    assert len(recovered_provider.loaded) == 24
+    assert recovered_provider.repairs == 1
+    assert recovered.summary["initial_turn_count"] == 24
+    assert recovered.summary["recovered_initial_turn_count"] == 24
+    assert recovered.summary["accepted_live_turns"] == 33
+    assert all(
+        slot.initial["status"] == "completed"
+        for slot in recovered.slots
+        if slot.generation in {1, 2, 3}
+    )
+    no_replay_provider = CompletedArtifactProvider()
+    resumed = GenerationCoordinator(
+        no_replay_provider,
+        checkpoint_path=checkpoint_path,
+    ).run()
+    assert no_replay_provider.loaded == []
+    assert no_replay_provider.generated == 0
+    assert no_replay_provider.repairs == 0
+    assert resumed.summary["accepted_live_turns"] == 33
 
 
 def test_json_text_response_and_real_parent_prompt_inputs(monkeypatch: Any) -> None:

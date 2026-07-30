@@ -42,9 +42,12 @@ from .evaluation import (
     verify_candidate_pass,
 )
 from .generation import (
+    COMPLETED_TURN_RECOVERY_SCHEMA,
+    SLOTS,
     Candidate,
     GenerationConfig,
     GenerationCoordinator,
+    GenerationRequest,
     GenerationResult,
     SlotResult,
     cached_pre_turn_auth_retry_allowed,
@@ -71,6 +74,7 @@ PROTOCOL_AMENDMENT_PATH = "search-technical-amendment-v4.json"
 PROTOCOL_AMENDMENT_TAG = "stage4-search-amendment-v4"
 PROTOCOL_AMENDMENT_CATEGORY = "codex_schema_projection_checkpoint_recovery"
 PROTOCOL_RECOVERY_ROOT = "recovery/protocol-v1"
+COMPLETED_TURN_RECOVERY_ROOT = "recovery/completed-turn-v1"
 SEARCH_AMENDMENT_CATEGORIES = {
     "stage4-search-amendment-v1": "evaluation_worker_process_isolation",
     "stage4-search-amendment-v2": "replay_metrics_timing_projection",
@@ -853,6 +857,514 @@ def _prepare_authentication_recovery(run: Path) -> dict[str, Any]:
     manifest["manifest_sha256"] = _recovery_digest(manifest)
     _atomic_json(manifest_path, manifest)
     return manifest
+
+
+def _source_recovery_entries_valid(run: Path, entries: object) -> bool:
+    if not isinstance(entries, list) or not entries:
+        return False
+    for item in entries:
+        if not isinstance(item, Mapping):
+            return False
+        relative = item.get("path")
+        sha256 = item.get("sha256")
+        size = item.get("bytes")
+        if (
+            not isinstance(relative, str)
+            or not isinstance(sha256, str)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            return False
+        path = run / relative
+        try:
+            path.resolve().relative_to(run.resolve())
+        except ValueError:
+            return False
+        if (
+            not path.is_file()
+            or path.stat().st_size != size
+            or _sha_file(path) != sha256
+        ):
+            return False
+    return True
+
+
+def _completed_turn_recovery_required(run: Path) -> bool:
+    recovery = run / COMPLETED_TURN_RECOVERY_ROOT
+    if (recovery / "RECOVERY_INTENT.json").is_file() or (
+        recovery / "RECOVERY_MANIFEST.json"
+    ).is_file():
+        return True
+    checkpoint_path = run / "generation-checkpoint.json"
+    summary_path = run / "search-summary.json"
+    if not checkpoint_path.is_file() or not summary_path.is_file():
+        return False
+    try:
+        checkpoint = _read_json(checkpoint_path)
+        summary = _read_json(summary_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    slots = checkpoint.get("slots")
+    if not isinstance(slots, Mapping):
+        return False
+    timeout_slots = 0
+    for value in slots.values():
+        if not isinstance(value, Mapping):
+            continue
+        initial = value.get("initial")
+        if (
+            isinstance(initial, Mapping)
+            and value.get("generation") in {1, 2, 3}
+            and initial.get("accepted") is True
+            and initial.get("content") is False
+            and initial.get("usage") == {}
+            and "turn timed out" in str(initial.get("error", ""))
+        ):
+            timeout_slots += 1
+    return (
+        timeout_slots == 24
+        and summary.get("status") == "completed"
+        and summary.get("decision") == "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"
+        and summary.get("initial_turns") == 32
+        and summary.get("accepted_live_turns") == 32
+        and summary.get("repair_turns") == 0
+        and summary.get("exact_usage") is False
+    )
+
+
+def _completed_turn_recovery_evidence(
+    run: Path,
+    provider: Stage4AppServerProvider,
+) -> dict[str, Any]:
+    checkpoint_path = run / "generation-checkpoint.json"
+    summary_path = run / "search-summary.json"
+    checkpoint = _read_json(checkpoint_path)
+    summary = _read_json(summary_path)
+    slots = checkpoint.get("slots")
+    callbacks = checkpoint.get("callbacks")
+    if (
+        not isinstance(slots, Mapping)
+        or len(slots) != 32
+        or not isinstance(callbacks, Mapping)
+        or set(callbacks) != {"0", "1", "2", "3"}
+        or any(
+            not isinstance(value, Mapping)
+            or value.get("status") != "completed"
+            for value in callbacks.values()
+        )
+        or summary.get("decision") != "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"
+        or summary.get("decision_reason") != "incomplete_turn_or_usage_accounting"
+        or summary.get("initial_turns") != 32
+        or summary.get("accepted_live_turns") != 32
+        or summary.get("repair_turns") != 0
+        or summary.get("exact_usage") is not False
+    ):
+        raise RuntimeError("completed-turn recovery source checkpoint is invalid")
+
+    positions: dict[str, str] = {}
+    recovered: list[dict[str, Any]] = []
+    source_paths: set[Path] = set()
+    usage_totals: dict[str, int] = {}
+    for key, value in slots.items():
+        if not isinstance(key, str) or not isinstance(value, Mapping):
+            raise RuntimeError("completed-turn recovery slot is malformed")
+        generation = value.get("generation")
+        slot = value.get("slot")
+        if generation not in {1, 2, 3}:
+            continue
+        initial = value.get("initial")
+        if (
+            not isinstance(slot, str)
+            or slot not in SLOTS
+            or not isinstance(initial, Mapping)
+            or value.get("status") != "failed"
+            or value.get("candidate") is not None
+            or value.get("repairs") != 0
+            or initial.get("accepted") is not True
+            or initial.get("content") is not False
+            or initial.get("charged") is not False
+            or initial.get("usage") != {}
+            or "turn timed out" not in str(initial.get("error", ""))
+        ):
+            raise RuntimeError("completed-turn recovery slot is not the retained timeout")
+        request_value = value.get("request")
+        if not isinstance(request_value, Mapping):
+            raise RuntimeError("completed-turn recovery request is missing")
+        request = GenerationRequest.from_value(request_value)
+        if (
+            request.generation != generation
+            or request.slot != slot
+            or request.phase != "initial"
+            or request.idempotency_key != key
+        ):
+            raise RuntimeError("completed-turn recovery request identity drifted")
+        result = provider.load_retained_result(request.as_dict())
+        if (
+            not isinstance(result, Mapping)
+            or result.get("status") != "completed"
+            or result.get("accepted") is not True
+            or result.get("content") is not True
+            or not isinstance(result.get("usage"), Mapping)
+            or not _usage_complete(cast(Mapping[str, Any], result["usage"]))
+            or result.get("unauthorized_tool_approval") is not False
+        ):
+            raise RuntimeError("completed remote turn could not be recovered offline")
+        retained_prefix = result.get("retained_completed_turn_recovery")
+        content_proof = result.get("content_proof")
+        if not isinstance(retained_prefix, str) or not isinstance(
+            content_proof,
+            Mapping,
+        ):
+            raise RuntimeError("completed-turn recovery provenance is incomplete")
+        position = f"{generation}:{slot}"
+        if position in positions:
+            raise RuntimeError("completed-turn recovery position is duplicated")
+        positions[position] = key
+        usage = cast(Mapping[str, Any], result["usage"])
+        for name, amount in usage.items():
+            if isinstance(amount, int) and not isinstance(amount, bool):
+                usage_totals[name] = usage_totals.get(name, 0) + amount
+        recovered.append(
+            {
+                "generation": generation,
+                "slot": slot,
+                "request_key": key,
+                "request_sha256": result.get("request_sha256"),
+                "content_sha256": content_proof.get("sha256"),
+                "usage_sha256": _sha_value(usage),
+                "artifact_prefix": retained_prefix,
+            }
+        )
+        for suffix in (
+            "request.json",
+            "response.json",
+            "events.jsonl",
+            "codex-rpc.jsonl",
+            "codex-profile.json",
+            "wire.jsonl",
+            "transcript.sha256",
+        ):
+            path = run / "appserver" / f"{retained_prefix}.{suffix}"
+            if not path.is_file():
+                raise RuntimeError("completed-turn recovery artifact set is incomplete")
+            source_paths.add(path)
+    expected_positions = {
+        f"{generation}:{slot}"
+        for generation in range(1, 4)
+        for slot in SLOTS
+    }
+    if set(positions) != expected_positions or len(recovered) != 24:
+        raise RuntimeError("completed-turn recovery must contain exactly 24 turns")
+
+    archive = ProgramArchive(_archive_root(run)).reindex()
+    timeout_records = [
+        record
+        for record in archive.records
+        if record.generation in {2, 3, 4}
+    ]
+    if (
+        not archive.ok
+        or len(archive.records) != 40
+        or len(timeout_records) != 24
+        or not all(
+            record.tombstone
+            and record.effective_request_id in set(positions.values())
+            and record.metadata.get("accepted_turn_count") == 1
+            and record.metadata.get("usage_complete") is False
+            for record in timeout_records
+        )
+    ):
+        raise RuntimeError("completed-turn recovery archive is invalid")
+    seed_ids = {
+        record.program_id for record in archive.records if record.generation == 0
+    }
+    if any(record.effective_parent_id not in seed_ids for record in timeout_records):
+        raise RuntimeError("completed-turn recovery parent identity drifted")
+
+    source_artifacts = [
+        {
+            "path": path.resolve().relative_to(run.resolve()).as_posix(),
+            "bytes": path.stat().st_size,
+            "sha256": _sha_file(path),
+        }
+        for path in sorted(source_paths)
+    ]
+    return {
+        "schema_version": COMPLETED_TURN_RECOVERY_SCHEMA,
+        "verified": True,
+        "inference": False,
+        "reason": "host_timeout_after_remote_turn_completion",
+        "replacement_requests_authorized": False,
+        "provider_process_calls_authorized": False,
+        "terminal_protocol_failures_retained": 8,
+        "completed_timeout_turns": 24,
+        "generation_slot_counts": {"1": 8, "2": 8, "3": 8},
+        "positions": positions,
+        "request_keys": sorted(positions.values()),
+        "request_identities_sha256": _sha_value(sorted(positions.values())),
+        "recovered_results_sha256": _sha_value(
+            sorted(
+                recovered,
+                key=lambda item: (item["generation"], item["slot"]),
+            )
+        ),
+        "usage_totals": usage_totals,
+        "source_checkpoint_sha256": _sha_file(checkpoint_path),
+        "source_summary_sha256": _sha_file(summary_path),
+        "source_archive_sha256": archive.archive_hash,
+        "timeout_program_ids": sorted(
+            record.program_id for record in timeout_records
+        ),
+        "source_artifacts": source_artifacts,
+    }
+
+
+def _prepare_completed_turn_recovery(
+    run: Path,
+    provider: Stage4AppServerProvider,
+) -> dict[str, Any]:
+    recovery = run / COMPLETED_TURN_RECOVERY_ROOT
+    manifest_path = recovery / "RECOVERY_MANIFEST.json"
+    if manifest_path.is_file():
+        manifest = _read_json(manifest_path)
+        if (
+            manifest.get("schema_version") != COMPLETED_TURN_RECOVERY_SCHEMA
+            or manifest.get("verified") is not True
+            or manifest.get("phase") not in {"activated", "completed"}
+            or manifest.get("manifest_sha256") != _recovery_digest(manifest)
+            or not _retained_recovery_entries_valid(
+                run,
+                manifest.get("retained_files"),
+            )
+            or not _retained_recovery_entries_valid(
+                run,
+                manifest.get("moved_tombstones"),
+            )
+            or not _source_recovery_entries_valid(
+                run,
+                manifest.get("source_artifacts"),
+            )
+        ):
+            raise RuntimeError("completed-turn recovery manifest is invalid")
+        return manifest
+
+    intent_path = recovery / "RECOVERY_INTENT.json"
+    if intent_path.is_file():
+        intent = _read_json(intent_path)
+        if (
+            intent.get("schema_version") != COMPLETED_TURN_RECOVERY_SCHEMA
+            or intent.get("verified") is not True
+            or intent.get("phase") != "prepared"
+            or intent.get("manifest_sha256") != _recovery_digest(intent)
+            or not _retained_recovery_entries_valid(
+                run,
+                intent.get("retained_files"),
+            )
+            or not _retained_recovery_entries_valid(
+                run,
+                intent.get("moved_tombstones"),
+            )
+            or not _source_recovery_entries_valid(
+                run,
+                intent.get("source_artifacts"),
+            )
+        ):
+            raise RuntimeError("completed-turn recovery intent is invalid")
+    else:
+        evidence = _completed_turn_recovery_evidence(run, provider)
+        retained: list[dict[str, Any]] = []
+        for path in (
+            run / "generation-checkpoint.json",
+            run / "search-summary.json",
+            run / "EVIDENCE_MANIFEST.json",
+        ):
+            if path.is_file():
+                retained.append(_preserve_recovery_file(run, path, recovery))
+        for generation in range(2, 5):
+            raw_root = run / "raw" / f"generation-{generation:04d}"
+            if raw_root.is_dir():
+                for path in sorted(
+                    candidate for candidate in raw_root.rglob("*") if candidate.is_file()
+                ):
+                    retained.append(_preserve_recovery_file(run, path, recovery))
+            selection_path = run / "selection" / f"generation-{generation:02d}.json"
+            if selection_path.is_file():
+                retained.append(
+                    _preserve_recovery_file(run, selection_path, recovery)
+                )
+
+        timeout_ids = set(cast(list[str], evidence["timeout_program_ids"]))
+        archive = ProgramArchive(_archive_root(run)).reindex()
+        moved: list[dict[str, Any]] = []
+        for record in archive.records:
+            if record.program_id not in timeout_ids:
+                continue
+            source = _archive_root(run) / "programs" / f"{record.program_id}.json"
+            retained_record = _preserve_recovery_file(run, source, recovery)
+            moved.append({"program_id": record.program_id, **retained_record})
+        if len(moved) != 24:
+            raise RuntimeError("completed-turn recovery must retain 24 tombstones")
+        marker = {
+            "schema_version": COMPLETED_TURN_RECOVERY_SCHEMA,
+            "retained_checkpoint_sha256": evidence["source_checkpoint_sha256"],
+            "replacement_requests_authorized": False,
+            "provider_process_calls_authorized": False,
+            "positions": evidence["positions"],
+            "request_keys": evidence["request_keys"],
+        }
+        intent = {
+            **evidence,
+            "phase": "prepared",
+            "retained_files": retained,
+            "moved_tombstones": moved,
+            "checkpoint_marker": marker,
+        }
+        intent["manifest_sha256"] = _recovery_digest(intent)
+        _atomic_json(intent_path, intent)
+
+    moved_entries = cast(list[Mapping[str, Any]], intent["moved_tombstones"])
+    for item in moved_entries:
+        source = run / str(item["source"])
+        destination = run / str(item["retained"])
+        if source.is_file():
+            if source.read_bytes() != destination.read_bytes():
+                raise RuntimeError("completed-turn tombstone recovery collision")
+            source.unlink()
+    canonical = ProgramArchive(_archive_root(run)).reindex()
+    if (
+        not canonical.ok
+        or len(canonical.records) != 16
+        or sum(record.generation == 0 for record in canonical.records) != 8
+        or sum(record.generation == 1 for record in canonical.records) != 8
+    ):
+        raise RuntimeError("completed-turn recovery archive activation failed")
+
+    checkpoint_path = run / "generation-checkpoint.json"
+    checkpoint = _read_json(checkpoint_path)
+    checkpoint_marker = cast(Mapping[str, Any], intent["checkpoint_marker"])
+    current_marker = checkpoint.get("completed_turn_recovery")
+    if current_marker is None:
+        if _sha_file(checkpoint_path) != intent["source_checkpoint_sha256"]:
+            raise RuntimeError("completed-turn recovery checkpoint drifted")
+        callbacks = checkpoint.get("callbacks")
+        if not isinstance(callbacks, Mapping) or set(callbacks) != {
+            "0",
+            "1",
+            "2",
+            "3",
+        }:
+            raise RuntimeError("completed-turn recovery callbacks are invalid")
+        checkpoint["callbacks"] = {"0": callbacks["0"]}
+        checkpoint.pop("summary", None)
+        checkpoint["completed_turn_recovery"] = dict(checkpoint_marker)
+        _atomic_json(checkpoint_path, checkpoint)
+    elif current_marker != checkpoint_marker:
+        raise RuntimeError("completed-turn recovery checkpoint marker drifted")
+
+    manifest = {
+        **{
+            key: value
+            for key, value in intent.items()
+            if key not in {"phase", "manifest_sha256"}
+        },
+        "phase": "activated",
+        "activated_checkpoint_sha256": _sha_file(checkpoint_path),
+        "activated_archive_sha256": canonical.archive_hash,
+    }
+    manifest["manifest_sha256"] = _recovery_digest(manifest)
+    _atomic_json(manifest_path, manifest)
+    return manifest
+
+
+def _complete_completed_turn_recovery(
+    run: Path,
+    search_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    manifest_path = run / COMPLETED_TURN_RECOVERY_ROOT / "RECOVERY_MANIFEST.json"
+    manifest = _read_json(manifest_path)
+    if manifest.get("phase") == "completed":
+        return manifest
+    if (
+        manifest.get("phase") != "activated"
+        or manifest.get("manifest_sha256") != _recovery_digest(manifest)
+    ):
+        raise RuntimeError("completed-turn recovery is not activated")
+    checkpoint = _read_json(run / "generation-checkpoint.json")
+    marker = checkpoint.get("completed_turn_recovery")
+    callbacks = checkpoint.get("callbacks")
+    slots = checkpoint.get("slots")
+    positions = manifest.get("positions")
+    if (
+        marker != manifest.get("checkpoint_marker")
+        or not isinstance(callbacks, Mapping)
+        or set(callbacks) != {"0", "1", "2", "3"}
+        or any(
+            not isinstance(value, Mapping)
+            or value.get("status") != "completed"
+            for value in callbacks.values()
+        )
+        or not isinstance(slots, Mapping)
+        or not isinstance(positions, Mapping)
+    ):
+        raise RuntimeError("completed-turn recovery checkpoint did not finish")
+    repair_turns = 0
+    for key in positions.values():
+        value = slots.get(key)
+        if not isinstance(value, Mapping):
+            raise RuntimeError("recovered completed-turn slot is missing")
+        initial = value.get("initial")
+        if (
+            not isinstance(initial, Mapping)
+            or initial.get("status") != "completed"
+            or initial.get("accepted") is not True
+            or initial.get("content") is not True
+            or not isinstance(initial.get("usage"), Mapping)
+            or not _usage_complete(cast(Mapping[str, Any], initial["usage"]))
+        ):
+            raise RuntimeError("recovered completed-turn slot is incomplete")
+        repairs = value.get("repairs")
+        if not isinstance(repairs, int) or isinstance(repairs, bool) or repairs not in {
+            0,
+            1,
+        }:
+            raise RuntimeError("recovered completed-turn repair count is invalid")
+        repair_turns += repairs
+
+    archive = ProgramArchive(_archive_root(run)).reindex()
+    if (
+        not archive.ok
+        or len(archive.records) != 40
+        or any(
+            record.program_id in set(manifest["timeout_program_ids"])
+            for record in archive.records
+        )
+    ):
+        raise RuntimeError("completed-turn recovery final archive is invalid")
+    if search_result.get("initial_turns") != 32:
+        raise RuntimeError("completed-turn recovery changed the initial-turn budget")
+    completed = {
+        **{
+            key: value
+            for key, value in manifest.items()
+            if key not in {"phase", "manifest_sha256"}
+        },
+        "phase": "completed",
+        "recovered_initial_turns": 24,
+        "replacement_initial_turns": 0,
+        "model_turns_replayed": 0,
+        "repair_turns": repair_turns,
+        "final_checkpoint_sha256": _sha_file(
+            run / "generation-checkpoint.json"
+        ),
+        "final_archive_sha256": archive.archive_hash,
+        "pre_completion_search_summary_sha256": _sha_file(
+            run / "search-summary.json"
+        ),
+    }
+    completed["manifest_sha256"] = _recovery_digest(completed)
+    _atomic_json(manifest_path, completed)
+    return completed
 
 
 def _amendment_states(value: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -2100,10 +2612,68 @@ def evolve(
         artifact_root=run,
         artifact_max_bytes=config.limits.artifact_compressed_campaign_bytes,
     )
+    completed_turn_recovery = (
+        _prepare_completed_turn_recovery(run, app_provider)
+        if _completed_turn_recovery_required(run)
+        else None
+    )
     coordinator: GenerationCoordinator
 
     def parent_selector(generation: int) -> Mapping[str, str]:
         records = archive.records()
+        if completed_turn_recovery is not None and generation in {1, 2, 3}:
+            checkpoint = _read_json(run / "generation-checkpoint.json")
+            marker = checkpoint.get("completed_turn_recovery")
+            slots_state = checkpoint.get("slots")
+            if not isinstance(marker, Mapping) or not isinstance(
+                slots_state,
+                Mapping,
+            ):
+                raise RuntimeError("completed-turn recovery selection is invalid")
+            positions = marker.get("positions")
+            if not isinstance(positions, Mapping):
+                raise RuntimeError("completed-turn recovery positions are missing")
+            retained_requests: dict[str, GenerationRequest] = {}
+            for slot in SLOTS:
+                key = positions.get(f"{generation}:{slot}")
+                value = slots_state.get(key) if isinstance(key, str) else None
+                if not isinstance(value, Mapping) or not isinstance(
+                    value.get("request"),
+                    Mapping,
+                ):
+                    raise RuntimeError(
+                        "completed-turn recovery request selection is missing"
+                    )
+                retained_requests[slot] = GenerationRequest.from_value(
+                    cast(Mapping[str, Any], value["request"])
+                )
+            assignments = {
+                slot: request.parent_id
+                for slot, request in retained_requests.items()
+            }
+            by_id = {record.program_id: record for record in records}
+            for program_id in assignments.values():
+                if program_id not in by_id:
+                    raise RuntimeError(
+                        "completed-turn recovery parent is absent from the archive"
+                    )
+                record = by_id[program_id]
+                coordinator.parent_sources[program_id] = _program_source(run, record)
+                coordinator.parent_records[program_id] = record
+            coordinator.search_feedback = {
+                generation: {
+                    slot: request.search_feedback
+                    for slot, request in retained_requests.items()
+                }
+            }
+            coordinator.archive_context = {
+                generation: {
+                    slot: request.archive_context
+                    for slot, request in retained_requests.items()
+                }
+            }
+            return assignments
+
         selection = select_parents(records)
         assignments = dict(selection.slots)
         by_id = {record.program_id: record for record in records}
@@ -2477,6 +3047,16 @@ def evolve(
             if auth_recovery is not None
             else None
         ),
+        "completed_turn_recovery": (
+            {
+                "phase": completed_turn_recovery.get("phase"),
+                "manifest_sha256": completed_turn_recovery.get("manifest_sha256"),
+                "recovered_initial_turns": 24,
+                "replacement_initial_turns": 0,
+            }
+            if completed_turn_recovery is not None
+            else None
+        ),
         "authenticated_preflight_sha256": authenticated_preflight_sha256,
         "generation_doctor_sha256": generation_doctor_sha256,
         "generation": generation_result.summary,
@@ -2519,6 +3099,25 @@ def evolve(
         }
         result["decision"] = "PENDING_VALIDATION"
     _atomic_json(run / "search-summary.json", result)
+    if completed_turn_recovery is not None:
+        completed_turn_recovery = _complete_completed_turn_recovery(
+            run,
+            result,
+        )
+        result["completed_turn_recovery"] = {
+            "phase": completed_turn_recovery["phase"],
+            "manifest_sha256": completed_turn_recovery["manifest_sha256"],
+            "recovered_initial_turns": completed_turn_recovery[
+                "recovered_initial_turns"
+            ],
+            "replacement_initial_turns": completed_turn_recovery[
+                "replacement_initial_turns"
+            ],
+            "model_turns_replayed": completed_turn_recovery[
+                "model_turns_replayed"
+            ],
+        }
+        _atomic_json(run / "search-summary.json", result)
     build_evidence_manifest(run)
     emit({"event": "search_completed", "champion": champion, "run": str(run)})
     return canonical_result(result)
