@@ -1,0 +1,247 @@
+{
+  "schema_version": "stage4.seed_capsule.v1",
+  "source_run": "runs/stage3-development/stage3-generation-1f7f0784e37c-attempt-01/revalidation",
+  "provenance": {
+    "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+    "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+    "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+  },
+  "seeds": [
+    {
+      "candidate_id": "stage3-slot-00",
+      "slot_id": "slot-00",
+      "source_path": "fixtures/stage4-seeds/slot-00.py",
+      "source_sha256": "a7b07edee18d02ef6070b37b65acb6a8898eed02bf0b454dd8eb31c04400c784",
+      "ast_sha256": "b34907386237f451b00a4bbf7da3af90bb476e3bc3c462815cbed8b3a3655d05",
+      "behavior_signature": "bac25561040a2a9df85229f362ceae6164f7ae6c1d14c1fce4725c8e507a735f",
+      "design_summary": "Hypothesis: compared with unstructured selection, proposals touching more sampled witnesses and witness-load mass, reconnecting more remotely, and creating fewer local risks will more often reduce the next authoritative forbidden-cycle penalty; this can be falsified by matched-pool follow-up reductions.",
+      "used_fields": [
+        "ctx.order",
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.removed_edge_load_sum_by_length",
+        "proposal.mean_preexisting_distance_for_new_edges",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk"
+      ],
+      "assumptions": [
+        "More sampled witnesses touched predicts greater true forbidden-cycle reduction.",
+        "Greater removed-edge witness-load mass predicts a more useful rewrite.",
+        "Greater reconnection distance predicts lower newly created forbidden-cycle risk.",
+        "Greater combined local triangle and 4-cycle risk predicts a worse rewrite."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    },
+    {
+      "candidate_id": "stage3-slot-01",
+      "slot_id": "slot-01",
+      "source_path": "fixtures/stage4-seeds/slot-01.py",
+      "source_sha256": "89b2dbe157edb1ceaf6c8f74c9285d154651c595bc87fe3f0d3164d04600d827",
+      "ast_sha256": "cee37da69b4dbdea9ca06acb1dbe4a5e4698bda63877c9b51098063b92316a9d",
+      "behavior_signature": "c34393046bd9de535305492cf9d7ebf387616d6a771795c5f79922275a10ce16",
+      "design_summary": "Hypothesis: compared with unstructured selection, this lexicographically prioritizes lower bounded local triangle/C4 risk, then favors larger bounded sampled-witness coverage and edge-load proxies, which should more often select early moves associated with fewer later forbidden-cycle witnesses; this is falsifiable by comparing subsequent authoritative scores across selected moves.",
+      "used_fields": [
+        "ctx.forbidden_lengths",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk",
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.removed_edge_load_sum_by_length"
+      ],
+      "assumptions": [
+        "Lower combined local triangle and C4 risk is associated with lower downstream forbidden-cycle risk, but local counts may be partial and provide no guarantee.",
+        "More sampled witnesses broken is associated with greater forbidden-cycle reduction.",
+        "Higher removed-edge sampled witness load is associated with greater forbidden-cycle reduction; this proxy may be redundant or misleading."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    },
+    {
+      "candidate_id": "stage3-slot-02",
+      "slot_id": "slot-02",
+      "source_path": "fixtures/stage4-seeds/slot-02.py",
+      "source_sha256": "9dc0f1f03474295205cc2dbe5d0f21db054bf36764364c4f5bf0693371d896eb",
+      "ast_sha256": "949bbef05017eecc314c4952342c766bf9ca6721434a9cf2dd2491f0b8dead7c",
+      "behavior_signature": "3525163c36a199f2a650f1c3a41780dde4845a0ce65ae8b106bd39440509a969",
+      "design_summary": "Hypothesis: weighting proposal-specific sampled witness hits and edge loads by current forbidden-cycle counts, while penalizing local risks and piecewise-adjusting exploration from stagnation or remaining_steps, will select mutations that reduce forbidden-cycle witnesses earlier than an unstructured rule; this is falsified if it does not improve early accepted reductions under identical proposal pools.",
+      "used_fields": [
+        "ctx.forbidden_lengths",
+        "ctx.capped_cycle_counts",
+        "ctx.stagnation",
+        "ctx.remaining_steps",
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.removed_edge_load_sum_by_length",
+        "proposal.mean_distance_between_removed_edges",
+        "proposal.minimum_distance_between_removed_edges",
+        "proposal.mean_preexisting_distance_for_new_edges",
+        "proposal.minimum_preexisting_distance_for_new_edges",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk"
+      ],
+      "assumptions": [
+        "Larger current capped cycle counts identify more valuable forbidden lengths, despite being capped and not guaranteed to predict improvement.",
+        "Larger broken sampled witness counts and removed-edge witness loads predict greater reduction of forbidden-cycle witnesses.",
+        "Greater separation among removed edges and greater remoteness of newly connected endpoints are beneficial heuristics.",
+        "Larger local triangle and C4 risk predicts a worse rewrite.",
+        "Stagnation or a short remaining horizon warrants more exploitation of witness-breaking and risk-avoiding signals than broad structural exploration.",
+        "Bounded sampled witnesses and local-risk counts are sufficiently informative proxies for the authoritative post-rewrite score."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    },
+    {
+      "candidate_id": "stage3-slot-03",
+      "slot_id": "slot-03",
+      "source_path": "fixtures/stage4-seeds/slot-03.py",
+      "source_sha256": "0249c4b54e14a339461383d303f54dcae2bf1257e40c3a3fe95ddfdf1a2c5628",
+      "ast_sha256": "a8a1cc8261347991774a0ac7ba4787a43418eda5e4640add15af4a634d3aa690",
+      "behavior_signature": "c9a017b1423acf0cd705b20570b34ee8c916bda1f5a29792dcf4636c135091cc",
+      "design_summary": "Hypothesis: equal-weight averages of aligned per-length witness-hit and witness-load fractions, combined with graph-order-normalized removed-edge separation, will select mutations that reduce forbidden-cycle witnesses earlier than unstructured selection; this is falsified if these priorities do not yield lower authoritative forbidden-cycle penalties along otherwise comparable search trajectories.",
+      "used_fields": [
+        "ctx.forbidden_lengths",
+        "ctx.capped_cycle_counts",
+        "ctx.order",
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.removed_edge_load_sum_by_length",
+        "proposal.mean_distance_between_removed_edges"
+      ],
+      "assumptions": [
+        "A larger per-length sampled-witness hit fraction tends to indicate a better rewrite.",
+        "A larger per-length sampled witness-load fraction tends to indicate a better rewrite.",
+        "Greater normalized separation between removed edges tends to indicate a better rewrite."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    },
+    {
+      "candidate_id": "stage3-slot-04",
+      "slot_id": "slot-04",
+      "source_path": "fixtures/stage4-seeds/slot-04.py",
+      "source_sha256": "a5f540459695bbf7d454eeccbb8e48158d6130df6a769b67d1447de18276dc01",
+      "ast_sha256": "cef05bb644e2e0a9acbc4972fbaa6d4ba3e033ee8a73ecd756da44100c767f5c",
+      "behavior_signature": "3694bd0b8813621c2abe98186dbbe933f3f7758b7b660d4c9229616e77d76c3c",
+      "design_summary": "Hypothesis: prioritizing proposals that touch more sampled forbidden witnesses and higher-load witness edges should beat unstructured selection, while a small k bonus should help larger switches only when their bounded local triangle/C4 risk is controlled.",
+      "used_fields": [
+        "ctx.capped_cycle_counts",
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.removed_edge_load_sum_by_length",
+        "proposal.k",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk"
+      ],
+      "assumptions": [
+        "More broken sampled witnesses indicate greater expected reduction of forbidden-cycle witnesses.",
+        "Higher removed-edge sampled witness load indicates greater expected usefulness.",
+        "Higher current capped witness counts identify cycle lengths where candidate witness signals deserve more weight.",
+        "Higher combined local triangle/C4 risk predicts a less desirable rewrite.",
+        "Larger k can be beneficial when local risk is below the fixed control threshold."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    },
+    {
+      "candidate_id": "stage3-slot-05",
+      "slot_id": "slot-05",
+      "source_path": "fixtures/stage4-seeds/slot-05.py",
+      "source_sha256": "66438215dee22fe5671c61853bdcccb432fcbbb8d0ad8187739983034e806dc6",
+      "ast_sha256": "2467b1cd0136feb8d43bc489738fafd79a43528ce528d1237f4507a8a3eed8b7",
+      "behavior_signature": "016b30ae0e2316b3209bf6aab25bd98b3ecd620a1512a03d4ba88d3112f19a7a",
+      "design_summary": "Hypothesis: proposals touching more sampled forbidden witnesses and higher-load removed edges, while creating fewer local short cycles and using more separated or remote reconnections, will reduce forbidden-cycle witnesses earlier than unstructured selection; the bounded selector-provenance bonus should provide only a small additional preference. This is falsifiable by comparing early accepted improvement against an unstructured baseline.",
+      "used_fields": [
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.removed_edge_load_sum_by_length",
+        "proposal.removed_edge_load_max_by_length",
+        "proposal.minimum_distance_between_removed_edges",
+        "proposal.mean_distance_between_removed_edges",
+        "proposal.minimum_preexisting_distance_for_new_edges",
+        "proposal.mean_preexisting_distance_for_new_edges",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk",
+        "proposal.selector_tags"
+      ],
+      "assumptions": [
+        "Larger sampled witness-touch counts predict greater forbidden-cycle reduction.",
+        "Larger removed-edge witness loads and concentration predict greater reduction.",
+        "Greater separation among removed edges is beneficial.",
+        "More remote newly connected endpoints are beneficial.",
+        "Higher local triangle and C4 risk predicts worse rewrites.",
+        "Selector provenance tags have a weak directional association with proposal quality, but are not ground truth."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    },
+    {
+      "candidate_id": "stage3-slot-06",
+      "slot_id": "slot-06",
+      "source_path": "fixtures/stage4-seeds/slot-06.py",
+      "source_sha256": "7d0313b339cd0498644ce759b3a6c11aa76935fd96894257800551c973b78823",
+      "ast_sha256": "898b22a1c8a3c02fe8badad138fdfc333736e978f5e3a5f2b74acea6acff12d6",
+      "behavior_signature": "e29d65163423e707f2e5b9227b00b4d381ba1cc68608ef9db35e4165d31d9116",
+      "design_summary": "Hypothesis: weighting sampled witness coverage by current capped load, then favoring separated removals and remote reconnections while penalizing local cycle risk, will select mutations that reduce forbidden-cycle witnesses more reliably than unstructured selection, especially when witness evidence is tied.",
+      "used_fields": [
+        "ctx.capped_cycle_counts",
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.mean_distance_between_removed_edges",
+        "proposal.minimum_preexisting_distance_for_new_edges",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk"
+      ],
+      "assumptions": [
+        "Breaking more sampled witnesses predicts greater forbidden-cycle reduction.",
+        "Higher current capped witness counts identify more valuable lengths to target.",
+        "Greater mean distance between removed edges improves diversity of the rewrite.",
+        "Greater minimum preexisting distance for new edges makes reconnection more beneficial.",
+        "Higher combined local triangle and C4 risk predicts a less favorable rewrite."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    },
+    {
+      "candidate_id": "stage3-slot-07",
+      "slot_id": "slot-07",
+      "source_path": "fixtures/stage4-seeds/slot-07.py",
+      "source_sha256": "dd9ab3c9667dfa17d0201705091874d7e85cbbef3420bd9a7a7f994da18603b4",
+      "ast_sha256": "4e41bafd5e5cabe051c3dd2132c62c29737384cd4fd984daba394679203418d4",
+      "behavior_signature": "bdd28c2620dddf30ba719b8434a87dfb82755faa8a5efc41598683dfb760baf7",
+      "design_summary": "Hypothesis: Compared with unstructured selection, favoring proposals that touch more sampled forbidden-cycle witnesses while penalizing local triangle and 4-cycle creation will reduce authoritative forbidden-witness penalty earlier in bounded trajectories; this is falsified if these rankings systematically perform no better or worse than unstructured selection.",
+      "used_fields": [
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk"
+      ],
+      "assumptions": [
+        "A larger aggregate count of broken sampled witnesses predicts greater reduction of forbidden-cycle witnesses after rewriting.",
+        "The sum across configured lengths is a useful aggregate despite differing cycle lengths and sampling budgets.",
+        "A larger local triangle risk predicts more harmful newly created structure and should reduce priority.",
+        "A larger local 4-cycle risk predicts more harmful newly created structure and should reduce priority.",
+        "Capping each signal at 16 preserves useful ordering while limiting outlier influence, and the 8:1:1 weighting makes sampled witness breakage the principal signal."
+      ],
+      "provenance": {
+        "stage3_canonical_sha256": "43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73",
+        "evidence_manifest_sha256": "b1cacc1340bddd548d9b4b3ed2b358c1a99e7d2b24bfe0c589ddc040c84359dc",
+        "archive_sha256": "4acdc374914005681a0792abc84f4efd424e9a59292869278c144f7bf4bd4b4e"
+      }
+    }
+  ],
+  "manifest_sha256": "953e177f3e23bd68dce9a90979f829ac68eff792a3f0a7cc590fc518b3005812"
+}

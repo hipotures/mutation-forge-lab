@@ -1,0 +1,16 @@
+{
+  "$id": "stage4.generated-policy.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "design_summary", "change_summary", "hypothesis", "used_fields", "assumptions", "expected_failure_modes"],
+  "properties": {
+    "schema_version": {"const": "stage4.generated_policy.v1"},
+    "source": {"type": "string", "minLength": 1, "maxLength": 12288},
+    "design_summary": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "change_summary": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "hypothesis": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "used_fields": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+    "assumptions": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
+    "expected_failure_modes": {"type": "array", "items": {"type": "string"}, "maxItems": 16}
+  }
+}

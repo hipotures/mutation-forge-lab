@@ -1,0 +1,1074 @@
+{
+  "schema_version": "stage4.manifest.v1",
+  "split": "search",
+  "dataset": "retained-stage2d-toy-trajectories",
+  "held_out": false,
+  "orders": [
+    10,
+    12
+  ],
+  "graph_seeds": [
+    401,
+    402,
+    403,
+    404
+  ],
+  "policy_seeds": [
+    4001,
+    4002,
+    4003,
+    4004,
+    4005,
+    4006,
+    4007,
+    4008,
+    4009,
+    4010,
+    4011,
+    4012,
+    4013,
+    4014,
+    4015,
+    4016
+  ],
+  "horizon": 32,
+  "episode_count": 128,
+  "shard_count": 8,
+  "episodes_per_shard": 16,
+  "episodes": [
+    {
+      "episode_id": "o10-g0401-p4001",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0401-p4002",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0401-p4003",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0401-p4004",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0401-p4005",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0401-p4006",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0401-p4007",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0401-p4008",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o10-g0401-p4009",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0401-p4010",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0401-p4011",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0401-p4012",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0401-p4013",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0401-p4014",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0401-p4015",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0401-p4016",
+      "order": 10,
+      "graph_seed": 401,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o10-g0402-p4001",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0402-p4002",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0402-p4003",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0402-p4004",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0402-p4005",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0402-p4006",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0402-p4007",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0402-p4008",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o10-g0402-p4009",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0402-p4010",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0402-p4011",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0402-p4012",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0402-p4013",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0402-p4014",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0402-p4015",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0402-p4016",
+      "order": 10,
+      "graph_seed": 402,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o10-g0403-p4001",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0403-p4002",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0403-p4003",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0403-p4004",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0403-p4005",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0403-p4006",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0403-p4007",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0403-p4008",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o10-g0403-p4009",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0403-p4010",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0403-p4011",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0403-p4012",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0403-p4013",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0403-p4014",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0403-p4015",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0403-p4016",
+      "order": 10,
+      "graph_seed": 403,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o10-g0404-p4001",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0404-p4002",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0404-p4003",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0404-p4004",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0404-p4005",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0404-p4006",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0404-p4007",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0404-p4008",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o10-g0404-p4009",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o10-g0404-p4010",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o10-g0404-p4011",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o10-g0404-p4012",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o10-g0404-p4013",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o10-g0404-p4014",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o10-g0404-p4015",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o10-g0404-p4016",
+      "order": 10,
+      "graph_seed": 404,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0401-p4001",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0401-p4002",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0401-p4003",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0401-p4004",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0401-p4005",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0401-p4006",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0401-p4007",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0401-p4008",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0401-p4009",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0401-p4010",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0401-p4011",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0401-p4012",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0401-p4013",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0401-p4014",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0401-p4015",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0401-p4016",
+      "order": 12,
+      "graph_seed": 401,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0402-p4001",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0402-p4002",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0402-p4003",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0402-p4004",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0402-p4005",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0402-p4006",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0402-p4007",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0402-p4008",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0402-p4009",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0402-p4010",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0402-p4011",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0402-p4012",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0402-p4013",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0402-p4014",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0402-p4015",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0402-p4016",
+      "order": 12,
+      "graph_seed": 402,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0403-p4001",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0403-p4002",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0403-p4003",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0403-p4004",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0403-p4005",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0403-p4006",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0403-p4007",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0403-p4008",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0403-p4009",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0403-p4010",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0403-p4011",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0403-p4012",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0403-p4013",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0403-p4014",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0403-p4015",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0403-p4016",
+      "order": 12,
+      "graph_seed": 403,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0404-p4001",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4001,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0404-p4002",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4002,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0404-p4003",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4003,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0404-p4004",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4004,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0404-p4005",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4005,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0404-p4006",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4006,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0404-p4007",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4007,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0404-p4008",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4008,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    },
+    {
+      "episode_id": "o12-g0404-p4009",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4009,
+      "horizon": 32,
+      "shard_id": "shard-00"
+    },
+    {
+      "episode_id": "o12-g0404-p4010",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4010,
+      "horizon": 32,
+      "shard_id": "shard-01"
+    },
+    {
+      "episode_id": "o12-g0404-p4011",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4011,
+      "horizon": 32,
+      "shard_id": "shard-02"
+    },
+    {
+      "episode_id": "o12-g0404-p4012",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4012,
+      "horizon": 32,
+      "shard_id": "shard-03"
+    },
+    {
+      "episode_id": "o12-g0404-p4013",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4013,
+      "horizon": 32,
+      "shard_id": "shard-04"
+    },
+    {
+      "episode_id": "o12-g0404-p4014",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4014,
+      "horizon": 32,
+      "shard_id": "shard-05"
+    },
+    {
+      "episode_id": "o12-g0404-p4015",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4015,
+      "horizon": 32,
+      "shard_id": "shard-06"
+    },
+    {
+      "episode_id": "o12-g0404-p4016",
+      "order": 12,
+      "graph_seed": 404,
+      "policy_seed": 4016,
+      "horizon": 32,
+      "shard_id": "shard-07"
+    }
+  ],
+  "gate_spec": {
+    "selection": "selected-plan-only",
+    "equal_budgets": true,
+    "strict_improvement": true,
+    "oracle_access": false,
+    "stage5_leakage": false,
+    "stage2b_config": "configs/stage2b-preregistered.toml",
+    "validation_disjoint": true
+  },
+  "manifest_sha256": "0b933c14d11081129175869ae434a766c60f3afbb844d587526bfa80ab81c7e7"
+}

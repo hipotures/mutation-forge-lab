@@ -43,6 +43,7 @@ from mutation_forge.stage2d.evaluation import (
     verify_stage2d_replay,
 )
 from mutation_forge.stage3 import commands as stage3_commands
+from mutation_forge.stage4 import commands as stage4_commands
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -299,6 +300,74 @@ def _stage3(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in {"completed", "ok"} else 1
 
 
+def _stage4_observer(*, json_output: bool) -> Any:
+    def emit(event: Mapping[str, Any]) -> None:
+        payload = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if json_output:
+            print(payload)
+        else:
+            label = event.get("event", "stage4")
+            detail = ", ".join(
+                f"{key}={value}" for key, value in event.items() if key != "event"
+            )
+            Console().print(f"[cyan]{label}[/cyan] {detail}")
+
+    return emit
+
+
+def _stage4(args: argparse.Namespace) -> int:
+    command = args.stage4_command
+    observer = _stage4_observer(json_output=args.json)
+    if command == "doctor":
+        result = stage4_commands.doctor(args.config)
+    elif command == "freeze":
+        result = stage4_commands.freeze(args.config)
+    elif command == "evolve":
+        result = stage4_commands.evolve(
+            args.config,
+            concurrency=args.concurrency,
+            auth_json=args.auth_json,
+            observer=observer,
+        )
+    elif command == "resume":
+        result = stage4_commands.resume(
+            args.run,
+            config_path=args.config,
+            auth_json=args.auth_json,
+            observer=observer,
+        )
+    elif command == "archive":
+        if args.stage4_archive_command == "inspect":
+            result = stage4_commands.archive_inspect(args.run)
+        elif args.stage4_archive_command == "reindex":
+            result = stage4_commands.archive_reindex(args.run)
+        else:
+            raise ValueError(f"unknown Stage 4 archive command {args.stage4_archive_command!r}")
+    elif command == "evaluate-candidate":
+        result = stage4_commands.evaluate_candidate(
+            args.run,
+            args.program_id,
+            pass_name=args.pass_name,
+            workers=args.workers,
+            config_path=args.config,
+        )
+    elif command == "freeze-validation":
+        result = stage4_commands.freeze_validation(args.run, config_path=args.config)
+    elif command == "validate":
+        result = stage4_commands.validate(
+            args.run,
+            workers=args.workers,
+            config_path=args.config,
+            observer=observer,
+        )
+    elif command == "verify-replay":
+        result = stage4_commands.verify_replay(args.run)
+    else:
+        raise ValueError(f"unknown Stage 4 command {command!r}")
+    _emit_stage3(result, json_output=args.json)
+    return 0 if result.get("status") in {"completed", "ok"} else 1
+
+
 def _policy_validate(path: Path, *, json_output: bool) -> int:
     result = validate_policy(path.read_text()).as_dict()
     _emit_policy_result(result, json_output=json_output)
@@ -532,6 +601,70 @@ def build_parser() -> argparse.ArgumentParser:
     stage3_replay_generation = stage3_commands_parser.add_parser("replay-generation")
     stage3_replay_generation.add_argument("run", type=Path)
     stage3_replay_generation.add_argument("--json", action="store_true")
+
+    stage4 = commands.add_parser("stage4")
+    stage4_commands_parser = stage4.add_subparsers(dest="stage4_command", required=True)
+    stage4_doctor = stage4_commands_parser.add_parser("doctor")
+    stage4_doctor.add_argument("--config", type=Path, required=True)
+    stage4_doctor.add_argument("--json", action="store_true")
+    stage4_freeze = stage4_commands_parser.add_parser("freeze")
+    stage4_freeze.add_argument("--config", type=Path, required=True)
+    stage4_freeze.add_argument("--json", action="store_true")
+    stage4_evolve = stage4_commands_parser.add_parser("evolve")
+    stage4_evolve.add_argument("--config", type=Path, required=True)
+    stage4_evolve.add_argument("--auth-json", type=Path)
+    stage4_evolve.add_argument("--concurrency", type=int, default=8)
+    stage4_evolve.add_argument("--json", action="store_true")
+    stage4_resume = stage4_commands_parser.add_parser("resume")
+    stage4_resume.add_argument("run", type=Path)
+    stage4_resume.add_argument("--config", type=Path, default=Path("configs/stage4-search.toml"))
+    stage4_resume.add_argument("--auth-json", type=Path)
+    stage4_resume.add_argument("--json", action="store_true")
+    stage4_archive = stage4_commands_parser.add_parser("archive")
+    stage4_archive_commands = stage4_archive.add_subparsers(
+        dest="stage4_archive_command",
+        required=True,
+    )
+    for name in ("inspect", "reindex"):
+        stage4_archive_command = stage4_archive_commands.add_parser(name)
+        stage4_archive_command.add_argument("run", type=Path)
+        stage4_archive_command.add_argument("--json", action="store_true")
+    stage4_evaluate = stage4_commands_parser.add_parser("evaluate-candidate")
+    stage4_evaluate.add_argument("run", type=Path)
+    stage4_evaluate.add_argument("program_id")
+    stage4_evaluate.add_argument(
+        "--pass",
+        dest="pass_name",
+        choices=("primary", "replay"),
+        required=True,
+    )
+    stage4_evaluate.add_argument("--workers", type=int, default=8)
+    stage4_evaluate.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/stage4-search.toml"),
+    )
+    stage4_evaluate.add_argument("--json", action="store_true")
+    stage4_validation_freeze = stage4_commands_parser.add_parser("freeze-validation")
+    stage4_validation_freeze.add_argument("run", type=Path)
+    stage4_validation_freeze.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/stage4-search.toml"),
+    )
+    stage4_validation_freeze.add_argument("--json", action="store_true")
+    stage4_validate = stage4_commands_parser.add_parser("validate")
+    stage4_validate.add_argument("run", type=Path)
+    stage4_validate.add_argument("--workers", type=int, default=8)
+    stage4_validate.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/stage4-search.toml"),
+    )
+    stage4_validate.add_argument("--json", action="store_true")
+    stage4_replay = stage4_commands_parser.add_parser("verify-replay")
+    stage4_replay.add_argument("run", type=Path)
+    stage4_replay.add_argument("--json", action="store_true")
     return parser
 
 
@@ -582,6 +715,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stage2d(args)
         if args.command == "stage3":
             return _stage3(args)
+        if args.command == "stage4":
+            return _stage4(args)
     except Exception as error:
         if getattr(args, "json", False):
             print(

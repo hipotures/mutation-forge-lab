@@ -1,0 +1,48 @@
+{
+  "$id": "stage4.manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "split", "dataset", "held_out", "orders", "graph_seeds", "policy_seeds", "horizon", "episode_count", "shard_count", "episodes_per_shard", "episodes", "gate_spec", "manifest_sha256"],
+  "properties": {
+    "schema_version": {"const": "stage4.manifest.v1"},
+    "split": {"enum": ["search", "validation"]},
+    "dataset": {"const": "retained-stage2d-toy-trajectories"},
+    "held_out": {"type": "boolean"},
+    "orders": {"type": "array", "const": [10, 12]},
+    "graph_seeds": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer"}},
+    "policy_seeds": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer"}},
+    "horizon": {"const": 32},
+    "episode_count": {"const": 128},
+    "shard_count": {"const": 8},
+    "episodes_per_shard": {"const": 16},
+    "episodes": {
+      "type": "array", "minItems": 128, "maxItems": 128,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["episode_id", "order", "graph_seed", "policy_seed", "horizon", "shard_id"],
+        "properties": {
+          "episode_id": {"type": "string", "pattern": "^o[0-9]{2}-g[0-9]{4}-p[0-9]{4}$"},
+          "order": {"type": "integer", "enum": [10, 12]},
+          "graph_seed": {"type": "integer"},
+          "policy_seed": {"type": "integer"},
+          "horizon": {"const": 32},
+          "shard_id": {"type": "string", "pattern": "^shard-[0-7]{2}$"}
+        }
+      }
+    },
+    "gate_spec": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selection", "equal_budgets", "strict_improvement", "oracle_access", "stage5_leakage", "stage2b_config", "validation_disjoint"],
+      "properties": {
+        "selection": {"const": "selected-plan-only"},
+        "equal_budgets": {"const": true},
+        "strict_improvement": {"const": true},
+        "oracle_access": {"const": false},
+        "stage5_leakage": {"const": false},
+        "stage2b_config": {"const": "configs/stage2b-preregistered.toml"},
+        "validation_disjoint": {"const": true}
+      }
+    },
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -1,0 +1,74 @@
+schema_version = "stage4.search.v1"
+
+[run]
+run_root = "../runs/stage4-search"
+
+[model]
+name = "gpt-5.6-luna"
+effort = "high"
+generations = 4
+slots = 8
+concurrency = 8
+max_repairs = 1
+max_initial_turns = 32
+max_accepted_turns = 64
+
+[limits]
+artifact_uncompressed_shard_bytes = 33554432
+artifact_uncompressed_campaign_bytes = 536870912
+artifact_compressed_campaign_bytes = 134217728
+dry_run_max_fraction = 0.5
+
+[resources]
+max_generation_workers = 8
+max_evaluation_workers = 8
+reserved_physical_cores = 8
+thread_count = 1
+
+[evaluation]
+bootstrap_samples = 10000
+bootstrap_seed = 2026073004
+confidence_level = 0.95
+
+[experiment]
+orders = [10, 12]
+graph_seeds = [401, 402, 403, 404]
+policy_seeds = [4001, 4002, 4003, 4004, 4005, 4006, 4007, 4008, 4009, 4010, 4011, 4012, 4013, 4014, 4015, 4016]
+horizon = 32
+shard_count = 8
+episodes_per_shard = 16
+
+[inputs]
+stage2b_config = "stage2b-preregistered.toml"
+random_policy = "../fixtures/rankers/stage2b_random.py"
+structural_policy = "../fixtures/rankers/stage2b_structural.py"
+context_schema = "schemas/stage2b-context.schema.json"
+proposal_schema = "schemas/stage2b-proposal.schema.json"
+semantic_glossary = "stage3-field-semantics.v1.json"
+stage3_source_run = "../runs/stage3-development/stage3-generation-1f7f0784e37c-attempt-01/revalidation"
+seed_manifest = "manifests/stage4-seeds-v1.json"
+manifest = "manifests/stage4-search-v1.json"
+validation_manifest = "manifests/stage4-validation-v1.json"
+briefs_dir = "stage4-briefs"
+system_prompt = "../prompts/stage4-system.md"
+request_prompt = "../prompts/stage4-request.md"
+repair_prompt = "../prompts/stage4-repair.md"
+output_schema = "schemas/stage4-generated-policy.schema.json"
+
+[repositories]
+project_repo = ".."
+heg_repo = "../../heg"
+frozen_project_commit = "49b4a611a91f87bde0b7b7be2f97c5deec8f1e89"
+frozen_heg_commit = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
+search_tag = "stage4-search-frozen-v1"
+validation_tag = "stage4-validation-frozen-v1"
+
+[identity]
+manifest_sha256 = "4c18525516bcbeed3c80596f6accbbd6e4bd52463486be0a3497bc817efafa10"
+validation_manifest_sha256 = "87f5b6298e4c312feac2d9c4f6bafea63b70a3b29c0104a0aef33d4b91dcc91e"
+seed_manifest_sha256 = "d7f9866305b587b0d259d72942b3eb54e2fdd3bbcc046ce441b7efb29fa5a36f"
+system_prompt_sha256 = "f3355c7fa0c7842d12d245ae06c9d23e28072a2d133fd5a8ae63d80aa6c7dc51"
+request_prompt_sha256 = "cc974b93604cd702d7a5a21b51c41ff659e2cc25110b6cc7e3be4bdd5565b7c5"
+repair_prompt_sha256 = "026ed13d2c26204dbbb837591be3e227362acf21532df79ac8561a151a5cb51f"
+output_schema_sha256 = "64fd40f187c1a3a937285f28ea919f693094b9e83286400a6e615a991751acb7"
+freeze_payload_sha256 = "bf34289941d58580b2e9b2388a339d8dc171d96d150f27caa8fc43e5a8184ace"
