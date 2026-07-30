@@ -102,9 +102,26 @@ started and requires a separate issue and explicit user approval.
 
 ## Stages 3–7
 
-Stage 3 has not started despite the Stage 2D `GO_TO_STAGE_3`; it requires a
-separate issue and explicit user approval before any model or App Server work.
+**Stage 3 status: issue #9 Phase 1 preregistration in progress.** The offline
+implementation freezes the exact `gpt-5.6-luna`/`high` profile, eight ordered
+one-shot slots, one schema/AST-only repair maximum, private no-tool App Server
+capsules, strict output and exact usage accounting, Stage 2A validation and
+10,000-call smoke, the fixed non-held-out development manifest, independent
+trajectories, deterministic replay, and twelve named gates. No live generation
+for the official campaign is permitted before the Phase 1 commit and annotated
+`stage3-generation-frozen-v6` tag are pushed and recorded on issue #9. Three
+explicitly user-authorized adapter connectivity turns preceded this freeze;
+two completed and one ended with partial usage. They are retained and excluded
+as diagnostic evidence, did not generate candidates, and did not change the
+scientific contract. The user reviewed that boundary and authorized the fresh
+freeze.
+
+The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
+`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical
+`NO_GO`; Stage 2D remains non-held-out toy evidence rather than HEG
+superiority.
+
 Stage 4 would add archived evolutionary search. Stage 5 would freeze and
 evaluate held-out generalization. Stage 6 would perform independent
 verification and red-team review. Stage 7 alone could recommend HEG policy
-integration after a final scientific GO.
+integration after a final scientific GO. None of Stages 4–7 has started.

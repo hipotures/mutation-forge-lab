@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/stage3-manifest.v1.json",
+  "title": "Stage 3 fixed development manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "dataset", "held_out", "source_stage2d_manifest", "source_stage2d_evidence", "episode_count", "shard_count", "episodes_per_shard", "episodes", "shards", "gate_spec", "manifest_sha256"],
+  "properties": {
+    "schema_version": {"const": "stage3.manifest.v1"},
+    "dataset": {"const": "retained-stage2d-toy-trajectories"},
+    "held_out": {"const": false},
+    "source_stage2d_manifest": {"type": "string", "minLength": 1},
+    "source_stage2d_evidence": {"type": "string", "minLength": 1},
+    "episode_count": {"const": 128}, "shard_count": {"const": 8}, "episodes_per_shard": {"const": 16},
+    "episodes": {"type": "array", "minItems": 128, "maxItems": 128, "items": {"$ref": "#/$defs/episode"}},
+    "shards": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"$ref": "#/$defs/shard"}},
+    "gate_spec": {"$ref": "#/$defs/gates"},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "episode": {"type": "object", "additionalProperties": false, "required": ["episode_id", "order", "graph_seed", "policy_seed", "horizon", "shard_id"], "properties": {"episode_id": {"type": "string"}, "order": {"enum": [10,12]}, "graph_seed": {"enum": [301,302,303,304]}, "policy_seed": {"type": "integer", "minimum": 3001, "maximum": 3016}, "horizon": {"const": 32}, "shard_id": {"pattern": "^shard-0[0-7]$"}}},
+    "shard": {"type": "object", "additionalProperties": false, "required": ["shard_id", "episode_ids", "episode_count"], "properties": {"shard_id": {"pattern": "^shard-0[0-7]$"}, "episode_ids": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "string"}}, "episode_count": {"const": 16}}},
+    "gates": {"type": "object", "additionalProperties": false, "required": ["min_unique_valid_candidates", "require_no_baseline_ast_duplicate", "champion_pooled_median_auc_relative_improvement", "champion_structural_fraction", "require_exact_replay", "max_invalid_candidates", "max_generation_failures", "selection", "oracle_access", "equal_budgets"], "properties": {"min_unique_valid_candidates": {"const": 4}, "require_no_baseline_ast_duplicate": {"const": true}, "champion_pooled_median_auc_relative_improvement": {"const": 0.05}, "champion_structural_fraction": {"const": 0.9}, "require_exact_replay": {"const": true}, "max_invalid_candidates": {"const": 0}, "max_generation_failures": {"const": 0}, "selection": {"const": "selected-only"}, "oracle_access": {"const": false}, "equal_budgets": {"const": true}}}
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": "stage3.slot.v1",
+  "slot_id": "slot-00",
+  "brief": "Sparse linear ranking over a small predeclared subset of context and proposal numeric fields; prefer interpretable low-variance weights.",
+  "generation_mode": "new_strategy",
+  "focus": "sparse-linear"
+}

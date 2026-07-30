@@ -39,10 +39,16 @@ generation, program search, generalization, and production consideration.
    strict-improvement graph states, unchanged Stage 2B rankers, hierarchical
    paired bootstrap gates, and one complete deterministic replay. All eleven
    preregistered gates passed.
-6. **Stage 3 — Codex App Server generation (not started; separate approval
-   required).** A schema-derived thin inference adapter, isolated
-   authentication/configuration, structured output, saved evidence, and
-   exact token usage.
+6. **Stage 3 — Codex App Server generation (issue #9 preregistration in
+   progress).** A schema-derived thin inference adapter, eight isolated
+   one-turn no-tool capsules, strict structured output, exact usage and
+   provenance, Stage 2A validation, immutable development trajectories,
+   deterministic replay, and a twelve-part gate. Live generation is blocked
+   for the official campaign until the Phase 1 commit and annotated
+   `stage3-generation-frozen-v6` tag are pushed and recorded. Three
+   user-authorized connectivity turns used while debugging the adapter are
+   retained as excluded diagnostic evidence and did not change the scientific
+   contract.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
@@ -67,8 +73,19 @@ controls, and replay requirements before any confirmatory result. The
 confirmatory phase did not modify those inputs or analyses. All eleven gates
 passed and `docs/reports/STAGE2D_CONFIRMATORY_REPORT.md` records
 `GO_TO_STAGE_3`. Stage 2D is non-held-out toy evidence, not a held-out
-generalization claim or HEG superiority claim. Stage 3 has not started and
-requires a separate issue and explicit user approval.
+generalization claim or HEG superiority claim. Issue #9 separately authorizes
+Stage 3 under a two-phase freeze. Phase 1 contains no official campaign
+generation; Phase 2 is limited to the frozen eight initial slots and at most
+one schema/AST-only repair per slot. Stage 4 remains blocked pending the
+terminal Stage 3 decision and separate approval.
+
+The Phase 1 statement refers to the official campaign. Before the fresh v6
+freeze, three explicitly user-authorized adapter connectivity turns were
+attempted, two completed and one ended with partial usage. Their fixed
+connectivity outputs are retained, excluded from candidate generation and
+evaluation, and were not used to change prompts, schemas, rankers, manifests,
+metrics, thresholds, or gates. The user reviewed that diagnostic boundary and
+authorized the new immutable freeze.
 
 ## Scientific controls
 

@@ -1,0 +1,7 @@
+{
+  "schema_version": "stage3.slot.v1",
+  "slot_id": "slot-04",
+  "brief": "Use proposal k and operator family consistently; test whether larger switches deserve a measured bonus when risk is controlled.",
+  "generation_mode": "new_strategy",
+  "focus": "k-aware"
+}

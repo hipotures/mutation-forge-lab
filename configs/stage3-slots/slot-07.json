@@ -1,0 +1,7 @@
+{
+  "schema_version": "stage3.slot.v1",
+  "slot_id": "slot-07",
+  "brief": "A conservative safe strategy using only documented fields, finite arithmetic, and explicitly stated assumptions.",
+  "generation_mode": "new_strategy",
+  "focus": "conservative-safe"
+}

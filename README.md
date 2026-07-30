@@ -45,8 +45,23 @@ immutable shards before any confirmatory result was observed. All eleven
 preregistered gates passed, including exact primary/replay identity, and the
 decision is **`GO_TO_STAGE_3`**. Stage 2B remains the historical `NO_GO`; the
 Stage 2D result neither rewrites that evidence nor constitutes held-out
-generalization or HEG superiority. Stage 3 has not started and requires a
-separate issue and explicit user approval.
+generalization or HEG superiority.
+
+Stage 3 issue #9 is in its preregistration phase on a dedicated branch. Its
+offline implementation fixes eight ordered one-shot Codex App Server slots at
+`gpt-5.6-luna` with `high` reasoning, strict structured output, private
+no-tool capsules, Stage 2A validation and 10,000-call smoke checks, immutable
+development trajectories, deterministic replay, and a twelve-part gate. No
+official campaign generation may occur until the implementation commit and
+the new immutable annotated tag `stage3-generation-frozen-v6` are pushed and
+recorded on issue #9. Adapter troubleshooting used three explicitly
+user-authorized connectivity turns: two completed and one ended with partial
+usage. Their fixed connectivity payloads and outputs are retained as
+diagnostic evidence, excluded from candidate generation and evaluation, and
+were not used to change prompts, schemas, rankers, manifests, metrics, or
+gates. The user reviewed that diagnostic boundary and authorized this fresh
+freeze. Stage 4, evolution, held-out evaluation, full proposer work, and HEG
+integration remain blocked.
 
 ## Setup and checks
 
@@ -178,6 +193,36 @@ timing-stripped canonical hashes, CPU affinity and single-thread environment
 evidence, and terminal status. The second complete run is replay evidence,
 never an additional statistical sample. No Stage 2D command has a model,
 network, App Server, oracle, evolution, or HEG-write path.
+
+## Stage 3 preregistration and one-shot generation
+
+The offline protocol audit and immutable freeze are separate from live
+generation:
+
+```console
+uv run mforge stage3 appserver-doctor \
+  --config configs/stage3-generation.toml \
+  --auth-json ~/.codex/auth.json --json
+uv run mforge stage3 freeze \
+  --config configs/stage3-generation.toml --json
+uv run mforge stage3 generate \
+  --config configs/stage3-generation.toml \
+  --auth-json ~/.codex/auth.json --concurrency 8 --json
+uv run mforge stage3 validate RUN --json
+uv run mforge stage3 evaluate \
+  --config configs/stage3-generation.toml \
+  --run RUN --workers 8 --json
+```
+
+`appserver-doctor` starts no inference turn. Production generation requires
+the exact catalogued model/effort and creates exactly eight concurrent initial
+one-turn capsules. Each private capsule has separate Codex and SQLite homes,
+an empty work directory, disabled tools/skills/apps/plugins/web search, and a
+secure copied credential that is never persisted. Durable per-slot evidence
+uses TheML-compatible names for request, response, provider raw data, profile,
+RPC, events, stdout, stderr, and the bounded rollout copy. The temporary
+capsule is deleted only after those logs are flushed. Repair is limited to one
+schema/AST-only turn per slot and receives no benchmark result.
 
 See [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md) for milestones and
 [docs/STAGE1_REPORT.md](docs/STAGE1_REPORT.md) for the validated first-pass

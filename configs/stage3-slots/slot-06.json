@@ -1,0 +1,7 @@
+{
+  "schema_version": "stage3.slot.v1",
+  "slot_id": "slot-06",
+  "brief": "Prefer diversity and deterministic tie behavior using distance and span features with finite stable scores.",
+  "generation_mode": "new_strategy",
+  "focus": "diversity-tie"
+}
