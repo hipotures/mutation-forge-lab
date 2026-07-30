@@ -248,6 +248,39 @@ def test_appserver_doctor_artifact_equals_returned_canonical_result(
     assert result["inference"] is False
 
 
+def test_output_schema_preflight_requires_explicit_schema_version_type(
+    tmp_path: Path,
+) -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version",
+            "source",
+            "design_summary",
+            "used_fields",
+            "assumptions",
+        ],
+        "properties": {
+            "schema_version": {"const": "stage3.generated_policy.v1"},
+            "source": {"type": "string"},
+            "design_summary": {"type": "string"},
+            "used_fields": {"type": "array", "items": {"type": "string"}},
+            "assumptions": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    path = tmp_path / "output-schema.json"
+    path.write_text(json.dumps(schema), encoding="utf-8")
+    config = SimpleNamespace(output_schema_path=path)
+
+    with pytest.raises(RuntimeError, match="frozen strict schema"):
+        stage3_commands._validate_output_schema(config)
+
+    schema["properties"]["schema_version"]["type"] = "string"
+    path.write_text(json.dumps(schema), encoding="utf-8")
+    assert stage3_commands._validate_output_schema(config) == schema
+
+
 def _evaluation_config(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         project_repo=tmp_path / "project",

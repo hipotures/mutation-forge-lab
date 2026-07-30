@@ -53,14 +53,18 @@ offline implementation fixes eight ordered one-shot Codex App Server slots at
 no-tool capsules, Stage 2A validation and 10,000-call smoke checks, immutable
 development trajectories, deterministic replay, and a twelve-part gate. No
 official campaign generation may occur until the implementation commit and
-the new immutable annotated tag `stage3-generation-frozen-v6` are pushed and
+the new immutable annotated tag `stage3-generation-frozen-v7` are pushed and
 recorded on issue #9. Adapter troubleshooting used three explicitly
 user-authorized connectivity turns: two completed and one ended with partial
 usage. Their fixed connectivity payloads and outputs are retained as
 diagnostic evidence, excluded from candidate generation and evaluation, and
 were not used to change prompts, schemas, rankers, manifests, metrics, or
 gates. The user reviewed that diagnostic boundary and authorized this fresh
-freeze. Stage 4, evolution, held-out evaluation, full proposer work, and HEG
+freeze. The retained v6 official attempt was rejected before inference because
+its structured-output `schema_version` property omitted the explicit JSON
+Schema string type. v7 adds only that server-required type and an offline
+regression preflight; the v6 tag and failure artifacts remain unchanged.
+Stage 4, evolution, held-out evaluation, full proposer work, and HEG
 integration remain blocked.
 
 ## Setup and checks

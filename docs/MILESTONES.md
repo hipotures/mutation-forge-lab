@@ -109,12 +109,18 @@ capsules, strict output and exact usage accounting, Stage 2A validation and
 10,000-call smoke, the fixed non-held-out development manifest, independent
 trajectories, deterministic replay, and twelve named gates. No live generation
 for the official campaign is permitted before the Phase 1 commit and annotated
-`stage3-generation-frozen-v6` tag are pushed and recorded on issue #9. Three
+`stage3-generation-frozen-v7` tag are pushed and recorded on issue #9. Three
 explicitly user-authorized adapter connectivity turns preceded this freeze;
 two completed and one ended with partial usage. They are retained and excluded
 as diagnostic evidence, did not generate candidates, and did not change the
 scientific contract. The user reviewed that boundary and authorized the fresh
 freeze.
+
+The retained v6 official attempt reached all eight App Server turn boundaries
+but was rejected before inference because the structured-output
+`schema_version` property omitted an explicit JSON Schema string type. The
+user authorized a repair. v7 adds only that required type and an offline
+preflight regression; v6 and its failure artifacts remain immutable.
 
 The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
 `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical

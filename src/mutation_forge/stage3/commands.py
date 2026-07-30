@@ -128,17 +128,31 @@ def _validate_output_schema(config: Stage3GenerationConfig) -> dict[str, Any]:
         raise RuntimeError("generated-policy output schema size is invalid")
     value = json.loads(raw)
     required = {"schema_version", "source", "design_summary", "used_fields", "assumptions"}
+    properties = value.get("properties") if isinstance(value, dict) else None
     if (
         not isinstance(value, dict)
         or value.get("type") != "object"
         or value.get("additionalProperties") is not False
         or set(value.get("required", [])) != required
-        or not isinstance(value.get("properties"), dict)
-        or set(value["properties"]) != required
-        or value["properties"]["schema_version"].get("const")
+        or not isinstance(properties, dict)
+        or set(properties) != required
+        or properties["schema_version"].get("type") != "string"
+        or properties["schema_version"].get("const")
         != "stage3.generated_policy.v1"
     ):
         raise RuntimeError("generated-policy output schema is not the frozen strict schema")
+    for name, property_schema in properties.items():
+        if (
+            not isinstance(property_schema, dict)
+            or property_schema.get("type") not in {"string", "array"}
+        ):
+            raise RuntimeError(f"generated-policy property {name} requires an explicit type")
+        if property_schema["type"] == "array":
+            items = property_schema.get("items")
+            if not isinstance(items, dict) or items.get("type") != "string":
+                raise RuntimeError(
+                    f"generated-policy array property {name} requires typed string items"
+                )
     return cast(dict[str, Any], value)
 
 
@@ -560,6 +574,12 @@ def freeze(config_path: str | Path) -> dict[str, Any]:
         "diagnostic_live_turns_completed": 2,
         "diagnostic_evidence_excluded": True,
         "user_reviewed_diagnostic_restart": True,
+        "prior_official_infrastructure_attempts": 1,
+        "prior_official_turn_start_attempts": 8,
+        "prior_official_model_content_observed": False,
+        "prior_official_usage_observed": False,
+        "prior_official_failure_code": "invalid_json_schema",
+        "user_authorized_schema_repair_restart": True,
         "inference": False,
         "auth_ready": False,
         "doctor": audit,

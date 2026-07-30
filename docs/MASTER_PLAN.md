@@ -45,7 +45,7 @@ generation, program search, generalization, and production consideration.
    provenance, Stage 2A validation, immutable development trajectories,
    deterministic replay, and a twelve-part gate. Live generation is blocked
    for the official campaign until the Phase 1 commit and annotated
-   `stage3-generation-frozen-v6` tag are pushed and recorded. Three
+   `stage3-generation-frozen-v7` tag are pushed and recorded. Three
    user-authorized connectivity turns used while debugging the adapter are
    retained as excluded diagnostic evidence and did not change the scientific
    contract.
@@ -86,6 +86,12 @@ connectivity outputs are retained, excluded from candidate generation and
 evaluation, and were not used to change prompts, schemas, rankers, manifests,
 metrics, thresholds, or gates. The user reviewed that diagnostic boundary and
 authorized the new immutable freeze.
+
+The retained v6 official attempt was rejected before inference at all eight
+turn boundaries because `outputSchema.properties.schema_version` lacked an
+explicit string type. After explicit user authorization, v7 adds only that
+server-required type and a matching offline preflight regression. The v6 tag
+and failed run remain unchanged.
 
 ## Scientific controls
 

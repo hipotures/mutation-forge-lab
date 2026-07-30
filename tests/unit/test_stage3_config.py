@@ -8,7 +8,7 @@ def test_frozen_stage3_config() -> None:
     assert config.model.slots == tuple(f"slot-{i:02d}" for i in range(8))
     assert config.model.max_repairs == 1
     assert config.experiment.episode_count == 128
-    assert config.preregistration_tag == "stage3-generation-frozen-v6"
+    assert config.preregistration_tag == "stage3-generation-frozen-v7"
     assert config.app_server.sandbox_mode == "danger-full-access"
     assert config.app_server.approval_policy == "never"
     assert config.limits.resource_address_space_bytes == 2 * 1024 * 1024 * 1024
