@@ -75,6 +75,8 @@ PROTOCOL_AMENDMENT_TAG = "stage4-search-amendment-v4"
 PROTOCOL_AMENDMENT_CATEGORY = "codex_schema_projection_checkpoint_recovery"
 PROTOCOL_RECOVERY_ROOT = "recovery/protocol-v1"
 COMPLETED_TURN_RECOVERY_ROOT = "recovery/completed-turn-v1"
+COMPLETED_TURN_CALLBACK_RECOVERY_SCHEMA = "stage4.completed_turn_partial_callback_recovery.v1"
+COMPLETED_TURN_CALLBACK_RECOVERY_ROOT = f"{COMPLETED_TURN_RECOVERY_ROOT}/partial-callback-v1"
 SEARCH_AMENDMENT_CATEGORIES = {
     "stage4-search-amendment-v1": "evaluation_worker_process_isolation",
     "stage4-search-amendment-v2": "replay_metrics_timing_projection",
@@ -140,9 +142,7 @@ def _available_evidence_path(path: Path) -> Path:
     if not path.exists():
         return path
     for attempt in range(1, 65):
-        candidate = path.with_name(
-            f"{path.stem}.retry-{attempt:02d}{path.suffix}"
-        )
+        candidate = path.with_name(f"{path.stem}.retry-{attempt:02d}{path.suffix}")
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"evidence retry namespace is exhausted: {path.name}")
@@ -369,9 +369,7 @@ def _stage3_checks(config: Stage4SearchConfig) -> dict[str, Any]:
             primary == STAGE3_CANONICAL_SHA256 and replay == STAGE3_CANONICAL_SHA256
         ),
         "decision": summary.get("decision") == "GO_TO_STAGE_4",
-        "verified_archive": (
-            archive.is_file() and _sha_file(archive) == STAGE3_ARCHIVE_SHA256
-        ),
+        "verified_archive": (archive.is_file() and _sha_file(archive) == STAGE3_ARCHIVE_SHA256),
     }
     return {"ok": all(checks.values()), "checks": checks, "archive": str(archive)}
 
@@ -388,20 +386,23 @@ def doctor(
     config = load_stage4_config(config_path)
     project = _git_state(config.project_repo)
     heg = _git_state(config.heg_repo)
-    ancestor = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(config.project_repo),
-            "merge-base",
-            "--is-ancestor",
-            config.frozen_project_commit,
-            project["commit"],
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    ).returncode == 0
+    ancestor = (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(config.project_repo),
+                "merge-base",
+                "--is-ancestor",
+                config.frozen_project_commit,
+                project["commit"],
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).returncode
+        == 0
+    )
     topology = read_cpu_topology()
     search_manifest = _load_manifest(config.manifest_path)
     validation_manifest = _load_manifest(config.validation_manifest_path)
@@ -443,8 +444,7 @@ def doctor(
         ),
         "physical_cores": len(topology) >= 16,
         "worker_budget": (
-            config.limits.max_evaluation_workers <= 8
-            and config.limits.reserved_physical_cores >= 8
+            config.limits.max_evaluation_workers <= 8 and config.limits.reserved_physical_cores >= 8
         ),
         "artifact_headroom": min(
             float(projection_result["shard_headroom"]),
@@ -487,9 +487,7 @@ def doctor(
             "projection": projection,
             "run": str(run),
             "artifact_path": (
-                _relative_to_run(run, doctor_path)
-                if doctor_path is not None
-                else None
+                _relative_to_run(run, doctor_path) if doctor_path is not None else None
             ),
         }
     )
@@ -536,21 +534,15 @@ def _freeze_digest(value: Mapping[str, Any]) -> str:
 
 
 def _recovery_digest(value: Mapping[str, Any]) -> str:
-    return _sha_value(
-        {key: item for key, item in value.items() if key != "manifest_sha256"}
-    )
+    return _sha_value({key: item for key, item in value.items() if key != "manifest_sha256"})
 
 
 def _technical_amendment_digest(value: Mapping[str, Any]) -> str:
-    return _sha_value(
-        {key: item for key, item in value.items() if key != "amendment_sha256"}
-    )
+    return _sha_value({key: item for key, item in value.items() if key != "amendment_sha256"})
 
 
 def _protocol_evidence_digest(value: Mapping[str, Any]) -> str:
-    return _sha_value(
-        {key: item for key, item in value.items() if key != "evidence_sha256"}
-    )
+    return _sha_value({key: item for key, item in value.items() if key != "evidence_sha256"})
 
 
 def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
@@ -608,9 +600,7 @@ def _authentication_recovery_evidence(run: Path) -> dict[str, Any]:
     slots = checkpoint.get("slots")
     if not isinstance(slots, Mapping) or len(slots) != 32:
         raise RuntimeError("authentication recovery requires exactly 32 checkpoint slots")
-    slot_values = [
-        dict(value) for value in slots.values() if isinstance(value, Mapping)
-    ]
+    slot_values = [dict(value) for value in slots.values() if isinstance(value, Mapping)]
     generation_slot_counts = [
         sum(int(value.get("generation", -1)) == generation for value in slot_values)
         for generation in range(4)
@@ -664,9 +654,7 @@ def _authentication_recovery_evidence(run: Path) -> dict[str, Any]:
         "charged_turns": 0,
         "usage_tokens": 0,
         "live_stage4_model_output_observed": False,
-        "retained_summary_live_results_claim": summary.get(
-            "live_stage4_model_results_observed"
-        ),
+        "retained_summary_live_results_claim": summary.get("live_stage4_model_results_observed"),
         "request_identities_sha256": _sha_value(sorted(request_keys)),
         "checkpoint_sha256": _sha_file(checkpoint_path),
         "search_summary_sha256": _sha_file(summary_path),
@@ -727,8 +715,7 @@ def _prepare_authentication_recovery(run: Path) -> dict[str, Any]:
             completed_manifest.get("schema_version") != AUTH_RECOVERY_SCHEMA
             or completed_manifest.get("verified") is not True
             or completed_manifest.get("phase") != "completed"
-            or completed_manifest.get("manifest_sha256")
-            != _recovery_digest(completed_manifest)
+            or completed_manifest.get("manifest_sha256") != _recovery_digest(completed_manifest)
             or not _retained_recovery_entries_valid(
                 run,
                 completed_manifest.get("retained_files"),
@@ -840,8 +827,7 @@ def _prepare_authentication_recovery(run: Path) -> dict[str, Any]:
     elif not (
         isinstance(recovery_marker, Mapping)
         and recovery_marker.get("schema_version") == AUTH_RECOVERY_SCHEMA
-        and recovery_marker.get("retained_checkpoint_sha256")
-        == evidence["checkpoint_sha256"]
+        and recovery_marker.get("retained_checkpoint_sha256") == evidence["checkpoint_sha256"]
         and recovery_marker.get("replacement_requests_authorized") is True
         and active_checkpoint.get("slots") == {}
         and active_checkpoint.get("callbacks") == {}
@@ -881,11 +867,7 @@ def _source_recovery_entries_valid(run: Path, entries: object) -> bool:
             path.resolve().relative_to(run.resolve())
         except ValueError:
             return False
-        if (
-            not path.is_file()
-            or path.stat().st_size != size
-            or _sha_file(path) != sha256
-        ):
+        if not path.is_file() or path.stat().st_size != size or _sha_file(path) != sha256:
             return False
     return True
 
@@ -949,8 +931,7 @@ def _completed_turn_recovery_evidence(
         or not isinstance(callbacks, Mapping)
         or set(callbacks) != {"0", "1", "2", "3"}
         or any(
-            not isinstance(value, Mapping)
-            or value.get("status") != "completed"
+            not isinstance(value, Mapping) or value.get("status") != "completed"
             for value in callbacks.values()
         )
         or summary.get("decision") != "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"
@@ -1049,20 +1030,12 @@ def _completed_turn_recovery_evidence(
             if not path.is_file():
                 raise RuntimeError("completed-turn recovery artifact set is incomplete")
             source_paths.add(path)
-    expected_positions = {
-        f"{generation}:{slot}"
-        for generation in range(1, 4)
-        for slot in SLOTS
-    }
+    expected_positions = {f"{generation}:{slot}" for generation in range(1, 4) for slot in SLOTS}
     if set(positions) != expected_positions or len(recovered) != 24:
         raise RuntimeError("completed-turn recovery must contain exactly 24 turns")
 
     archive = ProgramArchive(_archive_root(run)).reindex()
-    timeout_records = [
-        record
-        for record in archive.records
-        if record.generation in {2, 3, 4}
-    ]
+    timeout_records = [record for record in archive.records if record.generation in {2, 3, 4}]
     if (
         not archive.ok
         or len(archive.records) != 40
@@ -1076,9 +1049,7 @@ def _completed_turn_recovery_evidence(
         )
     ):
         raise RuntimeError("completed-turn recovery archive is invalid")
-    seed_ids = {
-        record.program_id for record in archive.records if record.generation == 0
-    }
+    seed_ids = {record.program_id for record in archive.records if record.generation == 0}
     if any(record.effective_parent_id not in seed_ids for record in timeout_records):
         raise RuntimeError("completed-turn recovery parent identity drifted")
 
@@ -1113,9 +1084,7 @@ def _completed_turn_recovery_evidence(
         "source_checkpoint_sha256": _sha_file(checkpoint_path),
         "source_summary_sha256": _sha_file(summary_path),
         "source_archive_sha256": archive.archive_hash,
-        "timeout_program_ids": sorted(
-            record.program_id for record in timeout_records
-        ),
+        "timeout_program_ids": sorted(record.program_id for record in timeout_records),
         "source_artifacts": source_artifacts,
     }
 
@@ -1190,9 +1159,7 @@ def _prepare_completed_turn_recovery(
                     retained.append(_preserve_recovery_file(run, path, recovery))
             selection_path = run / "selection" / f"generation-{generation:02d}.json"
             if selection_path.is_file():
-                retained.append(
-                    _preserve_recovery_file(run, selection_path, recovery)
-                )
+                retained.append(_preserve_recovery_file(run, selection_path, recovery))
 
         timeout_ids = set(cast(list[str], evidence["timeout_program_ids"]))
         archive = ProgramArchive(_archive_root(run)).reindex()
@@ -1263,14 +1230,185 @@ def _prepare_completed_turn_recovery(
         raise RuntimeError("completed-turn recovery checkpoint marker drifted")
 
     manifest = {
-        **{
-            key: value
-            for key, value in intent.items()
-            if key not in {"phase", "manifest_sha256"}
-        },
+        **{key: value for key, value in intent.items() if key not in {"phase", "manifest_sha256"}},
         "phase": "activated",
         "activated_checkpoint_sha256": _sha_file(checkpoint_path),
         "activated_archive_sha256": canonical.archive_hash,
+    }
+    manifest["manifest_sha256"] = _recovery_digest(manifest)
+    _atomic_json(manifest_path, manifest)
+    return manifest
+
+
+def _prepare_completed_turn_callback_recovery(
+    run: Path,
+    completed_turn_recovery: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Remove only an uncommitted callback projection after retaining its bytes."""
+
+    recovery = run / COMPLETED_TURN_CALLBACK_RECOVERY_ROOT
+    manifest_path = recovery / "RECOVERY_MANIFEST.json"
+    parent_checkpoint_sha256 = completed_turn_recovery.get("source_checkpoint_sha256")
+    if not isinstance(parent_checkpoint_sha256, str):
+        raise RuntimeError("completed-turn recovery parent identity is missing")
+    if manifest_path.is_file():
+        manifest = _read_json(manifest_path)
+        if (
+            manifest.get("schema_version") != COMPLETED_TURN_CALLBACK_RECOVERY_SCHEMA
+            or manifest.get("verified") is not True
+            or manifest.get("phase") != "completed"
+            or manifest.get("parent_source_checkpoint_sha256") != parent_checkpoint_sha256
+            or manifest.get("manifest_sha256") != _recovery_digest(manifest)
+            or not _retained_recovery_entries_valid(
+                run,
+                manifest.get("retained_files"),
+            )
+        ):
+            raise RuntimeError("completed-turn partial callback recovery manifest is invalid")
+        return manifest
+
+    checkpoint_path = run / "generation-checkpoint.json"
+    checkpoint = _read_json(checkpoint_path)
+    callbacks = checkpoint.get("callbacks")
+    if not isinstance(callbacks, Mapping):
+        raise RuntimeError("completed-turn recovery callbacks are malformed")
+    callback_indices: list[int] = []
+    for key, value in callbacks.items():
+        if (
+            not isinstance(key, str)
+            or not key.isdigit()
+            or not isinstance(value, Mapping)
+            or value.get("status") != "completed"
+        ):
+            raise RuntimeError("completed-turn recovery callback state is invalid")
+        callback_indices.append(int(key))
+    callback_indices.sort()
+    if not callback_indices or callback_indices != list(range(len(callback_indices))):
+        raise RuntimeError("completed-turn recovery callbacks are not contiguous")
+
+    intent_path = recovery / "RECOVERY_INTENT.json"
+    if intent_path.is_file():
+        intent = _read_json(intent_path)
+        if (
+            intent.get("schema_version") != COMPLETED_TURN_CALLBACK_RECOVERY_SCHEMA
+            or intent.get("verified") is not True
+            or intent.get("phase") != "prepared"
+            or intent.get("parent_source_checkpoint_sha256") != parent_checkpoint_sha256
+            or intent.get("manifest_sha256") != _recovery_digest(intent)
+            or not _retained_recovery_entries_valid(
+                run,
+                intent.get("retained_files"),
+            )
+        ):
+            raise RuntimeError("completed-turn partial callback recovery intent is invalid")
+    else:
+        archive = ProgramArchive(_archive_root(run)).reindex()
+        if archive.ok:
+            return None
+        if (
+            archive.duplicate_program_ids
+            or archive.duplicate_slots
+            or not archive.duplicate_requests
+            or archive.missing_requests
+            or archive.missing_parents
+            or archive.missing_sources
+            or archive.source_hash_mismatches
+            or archive.corrupt_files
+        ):
+            raise RuntimeError(
+                "completed-turn archive failure is not a partial callback projection"
+            )
+        incomplete = [
+            record
+            for record in archive.records
+            if record.generation > 0 and str(record.generation - 1) not in callbacks
+        ]
+        expected_generation = len(callback_indices) + 1
+        if (
+            not incomplete
+            or len(incomplete) > len(SLOTS)
+            or {record.generation for record in incomplete} != {expected_generation}
+            or len({record.slot for record in incomplete}) != len(incomplete)
+            or not set(archive.duplicate_requests).issubset(
+                {
+                    record.effective_request_id
+                    for record in incomplete
+                    if record.effective_request_id is not None
+                }
+            )
+        ):
+            raise RuntimeError("completed-turn partial callback archive projection is invalid")
+        retained: list[dict[str, Any]] = []
+        partial_records: list[dict[str, Any]] = []
+        for record in incomplete:
+            record_path = _archive_root(run) / "programs" / f"{record.program_id}.json"
+            retained_record = _preserve_recovery_file(run, record_path, recovery)
+            retained.append(retained_record)
+            partial_records.append(
+                {
+                    "program_id": record.program_id,
+                    "generation": record.generation,
+                    "slot": record.slot,
+                    "request_id": record.effective_request_id,
+                    "record": retained_record,
+                }
+            )
+            if record.tombstone:
+                continue
+            source_path = Path(record.source_path)
+            source = source_path if source_path.is_absolute() else run / source_path
+            try:
+                source.resolve().relative_to(run.resolve())
+            except ValueError as error:
+                raise RuntimeError(
+                    "completed-turn partial callback source escapes the run"
+                ) from error
+            retained_source = _preserve_recovery_file(run, source, recovery)
+            retained.append(retained_source)
+            partial_records[-1]["source"] = retained_source
+        intent = {
+            "schema_version": COMPLETED_TURN_CALLBACK_RECOVERY_SCHEMA,
+            "verified": True,
+            "inference": False,
+            "phase": "prepared",
+            "parent_source_checkpoint_sha256": parent_checkpoint_sha256,
+            "source_checkpoint_sha256": _sha_file(checkpoint_path),
+            "source_archive_sha256": archive.archive_hash,
+            "source_archive_errors": list(archive.errors),
+            "completed_callbacks": [str(index) for index in callback_indices],
+            "partial_generation": expected_generation,
+            "partial_record_count": len(partial_records),
+            "partial_records": partial_records,
+            "retained_files": retained,
+            "model_turns_replayed": 0,
+            "replacement_initial_turns": 0,
+        }
+        intent["manifest_sha256"] = _recovery_digest(intent)
+        _atomic_json(intent_path, intent)
+
+    for item in cast(list[Mapping[str, Any]], intent["retained_files"]):
+        source = run / str(item["source"])
+        retained_path = run / str(item["retained"])
+        if source.is_file():
+            if source.read_bytes() != retained_path.read_bytes():
+                raise RuntimeError("completed-turn partial callback recovery collision")
+            source.unlink()
+    canonical = ProgramArchive(_archive_root(run)).reindex()
+    expected_records = 8 + (8 * len(callback_indices))
+    if (
+        not canonical.ok
+        or len(canonical.records) != expected_records
+        or any(
+            record.generation > 0 and str(record.generation - 1) not in callbacks
+            for record in canonical.records
+        )
+    ):
+        raise RuntimeError("completed-turn partial callback archive reconciliation failed")
+    manifest = {
+        **{key: value for key, value in intent.items() if key not in {"phase", "manifest_sha256"}},
+        "phase": "completed",
+        "reconciled_archive_sha256": canonical.archive_hash,
+        "reconciled_record_count": len(canonical.records),
     }
     manifest["manifest_sha256"] = _recovery_digest(manifest)
     _atomic_json(manifest_path, manifest)
@@ -1285,9 +1423,8 @@ def _complete_completed_turn_recovery(
     manifest = _read_json(manifest_path)
     if manifest.get("phase") == "completed":
         return manifest
-    if (
-        manifest.get("phase") != "activated"
-        or manifest.get("manifest_sha256") != _recovery_digest(manifest)
+    if manifest.get("phase") != "activated" or manifest.get("manifest_sha256") != _recovery_digest(
+        manifest
     ):
         raise RuntimeError("completed-turn recovery is not activated")
     checkpoint = _read_json(run / "generation-checkpoint.json")
@@ -1300,8 +1437,7 @@ def _complete_completed_turn_recovery(
         or not isinstance(callbacks, Mapping)
         or set(callbacks) != {"0", "1", "2", "3"}
         or any(
-            not isinstance(value, Mapping)
-            or value.get("status") != "completed"
+            not isinstance(value, Mapping) or value.get("status") != "completed"
             for value in callbacks.values()
         )
         or not isinstance(slots, Mapping)
@@ -1324,10 +1460,15 @@ def _complete_completed_turn_recovery(
         ):
             raise RuntimeError("recovered completed-turn slot is incomplete")
         repairs = value.get("repairs")
-        if not isinstance(repairs, int) or isinstance(repairs, bool) or repairs not in {
-            0,
-            1,
-        }:
+        if (
+            not isinstance(repairs, int)
+            or isinstance(repairs, bool)
+            or repairs
+            not in {
+                0,
+                1,
+            }
+        ):
             raise RuntimeError("recovered completed-turn repair count is invalid")
         repair_turns += repairs
 
@@ -1336,8 +1477,7 @@ def _complete_completed_turn_recovery(
         not archive.ok
         or len(archive.records) != 40
         or any(
-            record.program_id in set(manifest["timeout_program_ids"])
-            for record in archive.records
+            record.program_id in set(manifest["timeout_program_ids"]) for record in archive.records
         )
     ):
         raise RuntimeError("completed-turn recovery final archive is invalid")
@@ -1345,22 +1485,16 @@ def _complete_completed_turn_recovery(
         raise RuntimeError("completed-turn recovery changed the initial-turn budget")
     completed = {
         **{
-            key: value
-            for key, value in manifest.items()
-            if key not in {"phase", "manifest_sha256"}
+            key: value for key, value in manifest.items() if key not in {"phase", "manifest_sha256"}
         },
         "phase": "completed",
         "recovered_initial_turns": 24,
         "replacement_initial_turns": 0,
         "model_turns_replayed": 0,
         "repair_turns": repair_turns,
-        "final_checkpoint_sha256": _sha_file(
-            run / "generation-checkpoint.json"
-        ),
+        "final_checkpoint_sha256": _sha_file(run / "generation-checkpoint.json"),
         "final_archive_sha256": archive.archive_hash,
-        "pre_completion_search_summary_sha256": _sha_file(
-            run / "search-summary.json"
-        ),
+        "pre_completion_search_summary_sha256": _sha_file(run / "search-summary.json"),
     }
     completed["manifest_sha256"] = _recovery_digest(completed)
     _atomic_json(manifest_path, completed)
@@ -1463,12 +1597,8 @@ def _amendment_freeze_valid(
     if category is None:
         return False
     evidence = value.get("pre_amendment_live_model_evidence")
-    retained_name = str(
-        value.get("previous_freeze_path", _amendment_backup_name(tag_name))
-    )
-    allowed_names = {
-        _amendment_backup_name(name) for name in SEARCH_AMENDMENT_CATEGORIES
-    }
+    retained_name = str(value.get("previous_freeze_path", _amendment_backup_name(tag_name)))
+    allowed_names = {_amendment_backup_name(name) for name in SEARCH_AMENDMENT_CATEGORIES}
     if retained_name not in allowed_names or retained_name in visited:
         return False
     retained_path = run / retained_name
@@ -1598,8 +1728,7 @@ def _post_live_amendment_valid(
                 and doctor_value.get("inference") is False
                 and isinstance(doctor_auth, Mapping)
                 and doctor_auth.get("authenticated") is True
-                and _sha_value(doctor_value)
-                == value.get("authenticated_doctor_sha256")
+                and _sha_value(doctor_value) == value.get("authenticated_doctor_sha256")
             )
     if (
         value.get("schema_version") != POST_LIVE_AMENDMENT_SCHEMA
@@ -1644,8 +1773,7 @@ def _post_live_amendment_valid(
             retained.get("phase") == "completed"
             and retained.get("manifest_sha256") == _recovery_digest(retained)
             and retained.get("checkpoint_sha256") == recovery.get("checkpoint_sha256")
-            and retained.get("search_summary_sha256")
-            == recovery.get("search_summary_sha256")
+            and retained.get("search_summary_sha256") == recovery.get("search_summary_sha256")
             and retained.get("archive_sha256") == recovery.get("archive_sha256")
         )
     try:
@@ -1684,9 +1812,7 @@ def _prepare_protocol_failure_evidence(
             raise RuntimeError("retained Stage 4 protocol failure evidence is invalid")
         return retained_evidence
 
-    retained_checkpoint = _read_json(
-        run / AUTH_RECOVERY_ROOT / "generation-checkpoint.json"
-    )
+    retained_checkpoint = _read_json(run / AUTH_RECOVERY_ROOT / "generation-checkpoint.json")
     retained_slots = retained_checkpoint.get("slots")
     if not isinstance(retained_slots, Mapping):
         raise RuntimeError("retained authentication checkpoint slots are invalid")
@@ -1720,9 +1846,7 @@ def _prepare_protocol_failure_evidence(
             raise RuntimeError("active protocol-failure slot is not fail-closed")
 
     response_paths = sorted(
-        (run / "appserver").glob(
-            "s4-*-0-slot-*-initial-*.retry-01.response.json"
-        )
+        (run / "appserver").glob("s4-*-0-slot-*-initial-*.retry-01.response.json")
     )
     if len(response_paths) != 8:
         raise RuntimeError("protocol recovery requires eight retry response artifacts")
@@ -1736,9 +1860,7 @@ def _prepare_protocol_failure_evidence(
     sequence_checkpoint = run / "checkpoints" / "checkpoint-000000000037.json"
     if not sequence_checkpoint.is_file():
         raise RuntimeError("protocol recovery sequence checkpoint is missing")
-    retained.append(
-        _preserve_recovery_file(run, sequence_checkpoint, recovery)
-    )
+    retained.append(_preserve_recovery_file(run, sequence_checkpoint, recovery))
     request_sha256: set[str] = set()
     thread_ids: set[str] = set()
     for response_path in response_paths:
@@ -1781,9 +1903,7 @@ def _prepare_protocol_failure_evidence(
     if len(request_sha256) != 8 or len(thread_ids) != 8:
         raise RuntimeError("protocol failure request/thread identities are not unique")
 
-    frozen_schema = json.loads(
-        config.output_schema_path.read_text(encoding="utf-8")
-    )
+    frozen_schema = json.loads(config.output_schema_path.read_text(encoding="utf-8"))
     if not isinstance(frozen_schema, Mapping):
         raise RuntimeError("frozen Stage 4 output schema is invalid")
     projected_schema = _codex_transport_schema(frozen_schema)
@@ -1964,13 +2084,11 @@ def _protocol_amendment_valid(
         and _sha_value(doctor) == value.get("authenticated_doctor_sha256")
         and evidence.get("schema_version") == "stage4.protocol_failure.v1"
         and evidence.get("verified") is True
-        and evidence.get("evidence_sha256")
-        == _protocol_evidence_digest(evidence)
+        and evidence.get("evidence_sha256") == _protocol_evidence_digest(evidence)
         and evidence.get("accepted_protocol_turns") == 8
         and evidence.get("replacement_requests_authorized") is False
         and evidence.get("live_model_output_observed") is False
-        and evidence.get("frozen_output_schema_sha256")
-        == _sha_file(config.output_schema_path)
+        and evidence.get("frozen_output_schema_sha256") == _sha_file(config.output_schema_path)
         and _retained_recovery_entries_valid(
             run,
             evidence.get("retained_files"),
@@ -2112,18 +2230,9 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
     heg = _git_state(config.heg_repo)
     tag = _tag_state(config.project_repo, config.search_tag)
     amendment_states = _amendment_states(value)
-    exact_freeze_head = (
-        project["commit"] == value.get("project_commit")
-        and (
-            (
-                bool(amendment_states)
-                and amendment_states[-1].get("commit") == project["commit"]
-            )
-            or (
-                not amendment_states
-                and tag.get("commit") == project["commit"]
-            )
-        )
+    exact_freeze_head = project["commit"] == value.get("project_commit") and (
+        (bool(amendment_states) and amendment_states[-1].get("commit") == project["commit"])
+        or (not amendment_states and tag.get("commit") == project["commit"])
     )
     post_live_amendment = _post_live_amendment_valid(
         config,
@@ -2132,22 +2241,16 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
         project["commit"],
     )
     protocol_tag = _tag_state(config.project_repo, PROTOCOL_AMENDMENT_TAG)
-    protocol_required = (
-        protocol_tag.get("type") == "tag"
-        and _is_ancestor(
-            config.project_repo,
-            str(protocol_tag.get("commit", "")),
-            str(project["commit"]),
-        )
+    protocol_required = protocol_tag.get("type") == "tag" and _is_ancestor(
+        config.project_repo,
+        str(protocol_tag.get("commit", "")),
+        str(project["commit"]),
     )
-    protocol_ok = (
-        not protocol_required
-        or _protocol_amendment_valid(
-            config,
-            run,
-            value,
-            project["commit"],
-        )
+    protocol_ok = not protocol_required or _protocol_amendment_valid(
+        config,
+        run,
+        value,
+        project["commit"],
     )
     if (
         not (exact_freeze_head or post_live_amendment)
@@ -2183,24 +2286,18 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
         project["commit"],
     )
     technical_path = run / POST_LIVE_AMENDMENT_PATH
-    technical_ok = (
-        not technical_path.is_file()
-        or _post_live_amendment_valid(
-            config,
-            run,
-            value,
-            project["commit"],
-        )
+    technical_ok = not technical_path.is_file() or _post_live_amendment_valid(
+        config,
+        run,
+        value,
+        project["commit"],
     )
     protocol_path = run / PROTOCOL_AMENDMENT_PATH
-    protocol_ok = (
-        not protocol_path.is_file()
-        or _protocol_amendment_valid(
-            config,
-            run,
-            value,
-            project["commit"],
-        )
+    protocol_ok = not protocol_path.is_file() or _protocol_amendment_valid(
+        config,
+        run,
+        value,
+        project["commit"],
     )
     if (
         value.get("schema_version") != SEARCH_FREEZE_SCHEMA
@@ -2402,6 +2499,28 @@ def _slot_usage(slot: SlotResult) -> Mapping[str, JsonValue]:
     return cast(Mapping[str, JsonValue], values)
 
 
+def _slot_archive_transport_identity(
+    slot: SlotResult,
+) -> tuple[object, object, object, object]:
+    provider_request_id = None
+    thread_id = None
+    turn_id = None
+    for envelope in (slot.repair or {}, slot.initial):
+        if not isinstance(envelope, Mapping):
+            continue
+        provider_request_id = (
+            provider_request_id or envelope.get("provider_request_id") or envelope.get("request_id")
+        )
+        thread_id = thread_id or envelope.get("thread_id")
+        turn_id = turn_id or envelope.get("turn_id")
+    request_id = (
+        slot.request.get("idempotency_key")
+        or slot.request.get("request_idempotency_key")
+        or provider_request_id
+    )
+    return request_id, provider_request_id, thread_id, turn_id
+
+
 def _write_generation_raw(run: Path, generation: int, slot: SlotResult) -> Path:
     return write_raw_slot_record(
         run,
@@ -2493,14 +2612,9 @@ def evolve(
         )
         if (
             live_doctor.get("status") != "completed"
-            or cast(Mapping[str, Any], live_doctor.get("auth", {})).get(
-                "authenticated"
-            )
-            is not True
+            or cast(Mapping[str, Any], live_doctor.get("auth", {})).get("authenticated") is not True
         ):
-            raise RuntimeError(
-                "Stage 4 private-capsule App Server doctor is not READY"
-            )
+            raise RuntimeError("Stage 4 private-capsule App Server doctor is not READY")
         authenticated_preflight_sha256 = _sha_value(live_doctor)
     freeze_value = _load_search_freeze(config)
     run = campaign_root(config)
@@ -2559,9 +2673,7 @@ def evolve(
             else ""
         )
         seed_attempt = (
-            f"search-seeds-amendment-{amendment_version}"
-            if amendment_version
-            else "search-seeds"
+            f"search-seeds-amendment-{amendment_version}" if amendment_version else "search-seeds"
         )
         seed_root = run / "evaluations" / seed_attempt
         primary = evaluate_policy_roster_manifest(
@@ -2617,6 +2729,14 @@ def evolve(
         if _completed_turn_recovery_required(run)
         else None
     )
+    completed_turn_callback_recovery = (
+        _prepare_completed_turn_callback_recovery(
+            run,
+            completed_turn_recovery,
+        )
+        if completed_turn_recovery is not None
+        else None
+    )
     coordinator: GenerationCoordinator
 
     def parent_selector(generation: int) -> Mapping[str, str]:
@@ -2641,35 +2761,26 @@ def evolve(
                     value.get("request"),
                     Mapping,
                 ):
-                    raise RuntimeError(
-                        "completed-turn recovery request selection is missing"
-                    )
+                    raise RuntimeError("completed-turn recovery request selection is missing")
                 retained_requests[slot] = GenerationRequest.from_value(
                     cast(Mapping[str, Any], value["request"])
                 )
-            assignments = {
-                slot: request.parent_id
-                for slot, request in retained_requests.items()
-            }
+            assignments = {slot: request.parent_id for slot, request in retained_requests.items()}
             by_id = {record.program_id: record for record in records}
             for program_id in assignments.values():
                 if program_id not in by_id:
-                    raise RuntimeError(
-                        "completed-turn recovery parent is absent from the archive"
-                    )
+                    raise RuntimeError("completed-turn recovery parent is absent from the archive")
                 record = by_id[program_id]
                 coordinator.parent_sources[program_id] = _program_source(run, record)
                 coordinator.parent_records[program_id] = record
             coordinator.search_feedback = {
                 generation: {
-                    slot: request.search_feedback
-                    for slot, request in retained_requests.items()
+                    slot: request.search_feedback for slot, request in retained_requests.items()
                 }
             }
             coordinator.archive_context = {
                 generation: {
-                    slot: request.archive_context
-                    for slot, request in retained_requests.items()
+                    slot: request.archive_context for slot, request in retained_requests.items()
                 }
             }
             return assignments
@@ -2710,9 +2821,9 @@ def evolve(
         by_ast = dict(baseline_ast_representatives)
         by_ast.update(
             {
-            record.normalized_ast_sha256: record.program_id
-            for record in existing_records
-            if record.unique
+                record.normalized_ast_sha256: record.program_id
+                for record in existing_records
+                if record.unique
             }
         )
         representative_by_ast = dict(by_ast)
@@ -2787,22 +2898,15 @@ def evolve(
         for slot in slots:
             if (generation + 1, slot.slot) in known_slots:
                 continue
-            if (
-                slot.candidate is None
-                and cached_pre_turn_auth_retry_allowed(slot.as_dict())
-            ):
+            if slot.candidate is None and cached_pre_turn_auth_retry_allowed(slot.as_dict()):
                 continue
             usage = _slot_usage(slot)
-            request_id = None
-            thread_id = None
-            turn_id = None
-            for envelope in (slot.repair or {}, slot.initial):
-                if not isinstance(envelope, Mapping):
-                    continue
-                request_id = request_id or envelope.get("request_id")
-                thread_id = thread_id or envelope.get("thread_id")
-                turn_id = turn_id or envelope.get("turn_id")
-            request_id = request_id or slot.request.get("idempotency_key")
+            (
+                request_id,
+                provider_request_id,
+                thread_id,
+                turn_id,
+            ) = _slot_archive_transport_identity(slot)
             unauthorized = any(
                 bool(envelope.get("unauthorized_tool_approval", False))
                 for envelope in (slot.initial, slot.repair or {})
@@ -2851,6 +2955,9 @@ def evolve(
                         "usage_complete": _usage_complete(usage),
                         "unauthorized_tool_approval": unauthorized,
                         "accepted_turn_count": accepted_turn_count,
+                        "provider_request_id": (
+                            str(provider_request_id) if provider_request_id is not None else None
+                        ),
                     },
                 )
             else:
@@ -2865,10 +2972,10 @@ def evolve(
                     source_path=_relative_to_run(run, source_path),
                     source_sha256=candidate.source_sha256,
                     normalized_ast_sha256=candidate.normalized_ast_sha256,
-                behavior_signature=cast(
-                    Mapping[str, JsonValue],
-                    candidate.behavior_signature,
-                ),
+                    behavior_signature=cast(
+                        Mapping[str, JsonValue],
+                        candidate.behavior_signature,
+                    ),
                     generation=generation + 1,
                     slot=slot.slot,
                     parent_id=slot.parent_id,
@@ -2903,6 +3010,9 @@ def evolve(
                         "usage_complete": _usage_complete(usage),
                         "unauthorized_tool_approval": unauthorized,
                         "accepted_turn_count": accepted_turn_count,
+                        "provider_request_id": (
+                            str(provider_request_id) if provider_request_id is not None else None
+                        ),
                     },
                 )
             if record.program_id not in current:
@@ -3028,8 +3138,7 @@ def evolve(
     infrastructure_failures = [
         slot
         for slot in generation_result.slots
-        if slot.candidate is None
-        and cached_pre_turn_auth_retry_allowed(slot.as_dict())
+        if slot.candidate is None and cached_pre_turn_auth_retry_allowed(slot.as_dict())
     ]
     result: dict[str, Any] = {
         "schema_version": RUN_SCHEMA,
@@ -3053,6 +3162,17 @@ def evolve(
                 "manifest_sha256": completed_turn_recovery.get("manifest_sha256"),
                 "recovered_initial_turns": 24,
                 "replacement_initial_turns": 0,
+                "partial_callback_recovery": (
+                    {
+                        "phase": completed_turn_callback_recovery.get("phase"),
+                        "manifest_sha256": completed_turn_callback_recovery.get("manifest_sha256"),
+                        "partial_record_count": completed_turn_callback_recovery.get(
+                            "partial_record_count"
+                        ),
+                    }
+                    if completed_turn_callback_recovery is not None
+                    else None
+                ),
             }
             if completed_turn_recovery is not None
             else None
@@ -3107,15 +3227,20 @@ def evolve(
         result["completed_turn_recovery"] = {
             "phase": completed_turn_recovery["phase"],
             "manifest_sha256": completed_turn_recovery["manifest_sha256"],
-            "recovered_initial_turns": completed_turn_recovery[
-                "recovered_initial_turns"
-            ],
-            "replacement_initial_turns": completed_turn_recovery[
-                "replacement_initial_turns"
-            ],
-            "model_turns_replayed": completed_turn_recovery[
-                "model_turns_replayed"
-            ],
+            "recovered_initial_turns": completed_turn_recovery["recovered_initial_turns"],
+            "replacement_initial_turns": completed_turn_recovery["replacement_initial_turns"],
+            "model_turns_replayed": completed_turn_recovery["model_turns_replayed"],
+            "partial_callback_recovery": (
+                {
+                    "phase": completed_turn_callback_recovery["phase"],
+                    "manifest_sha256": completed_turn_callback_recovery["manifest_sha256"],
+                    "partial_record_count": completed_turn_callback_recovery[
+                        "partial_record_count"
+                    ],
+                }
+                if completed_turn_callback_recovery is not None
+                else None
+            ),
         }
         _atomic_json(run / "search-summary.json", result)
     build_evidence_manifest(run)
@@ -3281,24 +3406,19 @@ def _load_validation_freeze(
         or tag != value.get("validation_tag")
         or _git_state(config.heg_repo)["commit"] != config.frozen_heg_commit
         or _git_state(config.heg_repo)["dirty"]
-        or _sha_file(config.validation_manifest_path)
-        != value.get("validation_manifest_sha256")
-        or _sha_file(
-            config.project_repo / "src" / "mutation_forge" / "stage4" / "statistics.py"
-        )
+        or _sha_file(config.validation_manifest_path) != value.get("validation_manifest_sha256")
+        or _sha_file(config.project_repo / "src" / "mutation_forge" / "stage4" / "statistics.py")
         != value.get("statistics_sha256")
         or value.get("config_sha256") != config.stable_hash()
         or value.get("search_freeze_sha256") != search_freeze.get("freeze_sha256")
-        or value.get("search_summary_sha256")
-        != _sha_file(run / "search-summary.json")
+        or value.get("search_summary_sha256") != _sha_file(run / "search-summary.json")
         or not archive.ok
         or value.get("archive_sha256") != archive.archive_hash
         or not isinstance(champion, Mapping)
         or value.get("champion") != dict(champion)
         or champion_record is None
         or champion_record.source_sha256 != champion.get("source_sha256")
-        or champion_record.normalized_ast_sha256
-        != champion.get("normalized_ast_sha256")
+        or champion_record.normalized_ast_sha256 != champion.get("normalized_ast_sha256")
     ):
         raise RuntimeError("repository drift after validation freeze")
     return value
@@ -3530,12 +3650,8 @@ def validate(
     replay_check = verify_replay_pair(primary, replay)
     if replay_check.get("exact") is not True:
         raise RuntimeError("final validation primary/replay mismatch")
-    records = _rename_stage3_policy(
-        cast(Sequence[Mapping[str, Any]], primary["records"])
-    )
-    replay_records = _rename_stage3_policy(
-        cast(Sequence[Mapping[str, Any]], replay["records"])
-    )
+    records = _rename_stage3_policy(cast(Sequence[Mapping[str, Any]], primary["records"]))
+    replay_records = _rename_stage3_policy(cast(Sequence[Mapping[str, Any]], replay["records"]))
     health = _validation_health(records, primary, replay)
     replay_health = _validation_health(replay_records, replay, primary)
     summary, gate_evidence = _reduce_validation_records(records, health, config)
@@ -3576,18 +3692,14 @@ def validate(
         ),
         "champion_distinct": (
             champion_record.normalized_ast_sha256
-            not in {
-                seed.ast_sha256 for seed in seeds.values()
-            }
+            not in {seed.ast_sha256 for seed in seeds.values()}
             | {
                 validate_policy(source, config.sandbox).identity.normalized_ast_sha256
                 for source in _baseline_sources(config).values()
             }
         ),
         "primary_replay_exact": replay_check.get("exact") is True,
-        "primary_replay_records_exact": (
-            replay_check.get("canonical_reduction_match") is True
-        ),
+        "primary_replay_records_exact": (replay_check.get("canonical_reduction_match") is True),
         "primary_replay_hashes_exact": (
             replay_check.get("primary_sha256") == replay_check.get("replay_sha256")
         ),
@@ -3652,9 +3764,7 @@ def verify_replay(
         if replay is None and isinstance(value.get("replay"), Mapping):
             candidate = value["replay"]
             replay = (
-                candidate
-                if candidate.get("schema_version") == "stage4.evaluation.v1"
-                else None
+                candidate if candidate.get("schema_version") == "stage4.evaluation.v1" else None
             )
         if not isinstance(primary, Mapping) or not isinstance(replay, Mapping):
             continue

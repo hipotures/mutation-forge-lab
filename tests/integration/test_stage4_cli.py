@@ -9,6 +9,7 @@ import pytest
 from mutation_forge import cli
 from mutation_forge.stage4 import commands
 from mutation_forge.stage4.archive import ProgramArchive, ProgramRecord
+from mutation_forge.stage4.generation import SlotResult
 
 
 def test_stage4_parser_exposes_every_frozen_command(tmp_path: Path) -> None:
@@ -507,20 +508,185 @@ def test_authentication_recovery_is_additive_and_idempotent(tmp_path: Path) -> N
     assert recovery["replacement_requests_authorized"] is True
     assert len(recovery["moved_tombstones"]) == 32
     assert len(ProgramArchive(run / "archive").records()) == 8
-    active_checkpoint = json.loads(
-        (run / "generation-checkpoint.json").read_text(encoding="utf-8")
-    )
+    active_checkpoint = json.loads((run / "generation-checkpoint.json").read_text(encoding="utf-8"))
     assert active_checkpoint["slots"] == {}
     assert active_checkpoint["callbacks"] == {}
-    assert active_checkpoint["authentication_recovery"][
-        "replacement_requests_authorized"
-    ] is True
+    assert active_checkpoint["authentication_recovery"]["replacement_requests_authorized"] is True
     retained_root = run / commands.AUTH_RECOVERY_ROOT
-    assert (retained_root / "generation-checkpoint.json").read_text(
-        encoding="utf-8"
-    ) == json.dumps(checkpoint)
-    assert (retained_root / "search-summary.json").read_text(
-        encoding="utf-8"
-    ) == json.dumps(summary)
+    assert (retained_root / "generation-checkpoint.json").read_text(encoding="utf-8") == json.dumps(
+        checkpoint
+    )
+    assert (retained_root / "search-summary.json").read_text(encoding="utf-8") == json.dumps(
+        summary
+    )
     assert len(tuple((retained_root / "archive" / "programs").glob("*.json"))) == 32
     assert commands._prepare_authentication_recovery(run) == recovery
+
+
+def test_archive_uses_global_idempotency_key_not_process_local_rpc_id() -> None:
+    slot = SlotResult(
+        generation=1,
+        slot="slot-01",
+        parent_id="parent",
+        status="failed",
+        repairs=1,
+        initial={
+            "request_id": 10,
+            "thread_id": "initial-thread",
+            "turn_id": "initial-turn",
+        },
+        repair={
+            "request_id": 10,
+            "provider_request_id": "10",
+            "thread_id": "repair-thread",
+            "turn_id": "repair-turn",
+        },
+        request={
+            "idempotency_key": "globally-unique-repair-key",
+            "request_idempotency_key": "globally-unique-repair-key",
+        },
+    )
+
+    assert commands._slot_archive_transport_identity(slot) == (
+        "globally-unique-repair-key",
+        "10",
+        "repair-thread",
+        "repair-turn",
+    )
+
+
+def test_completed_turn_partial_callback_recovery_is_additive_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "campaign"
+    archive = ProgramArchive(run / "archive")
+    seed_ids: list[str] = []
+    for index in range(8):
+        seed_id = f"seed-{index:02d}"
+        seed_ids.append(seed_id)
+        source = f"def priority(ctx, proposal):\n    return {index}.0\n"
+        source_path = run / "archive" / "sources" / f"{seed_id}.py"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(source, encoding="utf-8")
+        archive.append(
+            ProgramRecord(
+                program_id=seed_id,
+                source_path=f"archive/sources/{seed_id}.py",
+                source_sha256=hashlib.sha256(source.encode()).hexdigest(),
+                normalized_ast_sha256=hashlib.sha256(f"seed-ast-{index}".encode()).hexdigest(),
+                behavior_signature=hashlib.sha256(f"seed-behavior-{index}".encode()).hexdigest(),
+                generation=0,
+                slot=f"slot-{index:02d}",
+                validation_status="valid",
+                probe_status="passed",
+                smoke_10k_status="passed",
+                replay_status="verified",
+                fitness_status="verified",
+                seed_id=seed_id,
+            )
+        )
+        digest = hashlib.sha256(f"protocol-{index}".encode()).hexdigest()
+        archive.append(
+            ProgramRecord(
+                program_id=f"protocol-{index:02d}",
+                source_path="",
+                source_sha256=digest,
+                normalized_ast_sha256=digest,
+                behavior_signature=digest,
+                generation=1,
+                slot=f"slot-{index:02d}",
+                parent_id=seed_id,
+                request_id=f"initial-{index:02d}",
+                validation_status="failed",
+                probe_status="failed",
+                smoke_10k_status="failed",
+                replay_status="not_evaluated",
+                fitness_status="failed",
+                tombstone=True,
+            )
+        )
+        partial_source = f"def priority(ctx, proposal):\n    return {index + 8}.0\n"
+        partial_source_path = run / "archive" / "sources" / f"partial-{index:02d}.py"
+        partial_source_path.write_text(partial_source, encoding="utf-8")
+        archive.append(
+            ProgramRecord(
+                program_id=f"partial-{index:02d}",
+                source_path=f"archive/sources/partial-{index:02d}.py",
+                source_sha256=hashlib.sha256(partial_source.encode()).hexdigest(),
+                normalized_ast_sha256=hashlib.sha256(f"partial-ast-{index}".encode()).hexdigest(),
+                behavior_signature=hashlib.sha256(f"partial-behavior-{index}".encode()).hexdigest(),
+                generation=2,
+                slot=f"slot-{index:02d}",
+                parent_id=seed_id,
+                request_id="10",
+                validation_status="valid",
+                probe_status="passed",
+                smoke_10k_status="passed",
+                replay_status="verified",
+                fitness_status="verified",
+                seed_id=seed_id,
+            )
+        )
+
+    source_report = archive.reindex()
+    assert source_report.duplicate_requests == ("10",)
+    checkpoint = {
+        "schema_version": "stage4.checkpoint.v1",
+        "campaign_id": "stage4-test",
+        "slots": {},
+        "callbacks": {"0": {"status": "completed"}},
+    }
+    (run / "generation-checkpoint.json").write_text(
+        json.dumps(checkpoint),
+        encoding="utf-8",
+    )
+    parent_recovery = {"source_checkpoint_sha256": "a" * 64}
+
+    recovery = commands._prepare_completed_turn_callback_recovery(
+        run,
+        parent_recovery,
+    )
+    assert recovery is not None
+    assert recovery["phase"] == "completed"
+    assert recovery["partial_generation"] == 2
+    assert recovery["partial_record_count"] == 8
+    assert len(recovery["retained_files"]) == 16
+    reconciled = archive.reindex()
+    assert reconciled.ok
+    assert len(reconciled.records) == 16
+    assert not tuple((run / "archive" / "programs").glob("partial-*.json"))
+
+    for index in range(8):
+        partial_source = f"def priority(ctx, proposal):\n    return {index + 8}.0\n"
+        partial_source_path = run / "archive" / "sources" / f"partial-{index:02d}.py"
+        partial_source_path.write_text(partial_source, encoding="utf-8")
+        archive.append(
+            ProgramRecord(
+                program_id=f"partial-{index:02d}",
+                source_path=f"archive/sources/partial-{index:02d}.py",
+                source_sha256=hashlib.sha256(partial_source.encode()).hexdigest(),
+                normalized_ast_sha256=hashlib.sha256(f"partial-ast-{index}".encode()).hexdigest(),
+                behavior_signature=hashlib.sha256(f"partial-behavior-{index}".encode()).hexdigest(),
+                generation=2,
+                slot=f"slot-{index:02d}",
+                parent_id=seed_ids[index],
+                request_id=f"globally-unique-{index:02d}",
+                validation_status="valid",
+                probe_status="passed",
+                smoke_10k_status="passed",
+                replay_status="verified",
+                fitness_status="verified",
+                seed_id=seed_ids[index],
+            )
+        )
+
+    assert (
+        commands._prepare_completed_turn_callback_recovery(
+            run,
+            parent_recovery,
+        )
+        == recovery
+    )
+    rebuilt = archive.reindex()
+    assert rebuilt.ok
+    assert len(rebuilt.records) == 24
