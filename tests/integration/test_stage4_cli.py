@@ -193,23 +193,48 @@ def test_seed_evaluation_failure_is_not_live_model_evidence(tmp_path: Path) -> N
 
 
 def test_amendment_freeze_requires_retained_scientific_identity(tmp_path: Path) -> None:
-    retained = {
+    original = {
         "config_sha256": "a" * 64,
         "frozen_hashes": {"manifest": "b" * 64},
     }
-    retained["freeze_sha256"] = commands._freeze_digest(retained)
-    active = {
-        **retained,
-        "freeze_sha256": "c" * 64,
-        "amendment_tag": {"name": commands.SEARCH_AMENDMENT_TAG},
-        "amendment_category": commands.SEARCH_AMENDMENT_CATEGORY,
-        "previous_freeze_sha256": retained["freeze_sha256"],
+    original["freeze_sha256"] = commands._freeze_digest(original)
+    amendment_v1 = {
+        "name": "stage4-search-amendment-v1",
+        "type": "tag",
+        "commit": "1" * 40,
+    }
+    previous = {
+        **original,
+        "amendment_tag": amendment_v1,
+        "amendment_category": "evaluation_worker_process_isolation",
+        "previous_freeze_sha256": original["freeze_sha256"],
         "scientific_identity_unchanged": True,
         "pre_amendment_live_model_evidence": {"observed": False},
     }
+    previous["freeze_sha256"] = commands._freeze_digest(previous)
+    amendment_v2 = {
+        "name": commands.SEARCH_AMENDMENT_TAG,
+        "type": "tag",
+        "commit": "2" * 40,
+    }
+    active = {
+        **original,
+        "amendment_tag": amendment_v2,
+        "amendment_tags": [amendment_v1, amendment_v2],
+        "amendment_category": commands.SEARCH_AMENDMENT_CATEGORY,
+        "previous_freeze_sha256": previous["freeze_sha256"],
+        "previous_freeze_path": "search-freeze-pre-amendment-v2.json",
+        "scientific_identity_unchanged": True,
+        "pre_amendment_live_model_evidence": {"observed": False},
+    }
+    active["freeze_sha256"] = commands._freeze_digest(active)
     assert not commands._amendment_freeze_valid(tmp_path, active)
     (tmp_path / "search-freeze-pre-amendment.json").write_text(
-        json.dumps(retained),
+        json.dumps(original),
+        encoding="utf-8",
+    )
+    (tmp_path / "search-freeze-pre-amendment-v2.json").write_text(
+        json.dumps(previous),
         encoding="utf-8",
     )
     assert commands._amendment_freeze_valid(tmp_path, active)

@@ -126,6 +126,17 @@ def _strip(value: Any) -> Any:
     return value
 
 
+def _compact_policy_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    stripped = _strip(summary)
+    if not isinstance(stripped, Mapping):
+        raise TypeError("policy summary projection must remain a mapping")
+    return {
+        str(key): value
+        for key, value in stripped.items()
+        if str(key) != "final_score"
+    }
+
+
 def metrics_input_projection(record: Mapping[str, Any]) -> dict[str, Any]:
     """Projection consumed by fitness; excludes full shared score/trace objects."""
     policies = record.get("policies", {})
@@ -165,9 +176,7 @@ def _compact_record(record: Mapping[str, Any], candidate_id: str) -> dict[str, A
     # traces and score objects remain shared Stage 3 evidence and are omitted.
     if isinstance(policies, Mapping):
         compact["policies"] = {
-            str(name): {
-                key: _strip(value) for key, value in summary.items() if key != "final_score"
-            }
+            str(name): _compact_policy_summary(summary)
             for name, summary in policies.items()
             if isinstance(summary, Mapping)
         }
@@ -504,9 +513,7 @@ def _evaluate_roster_shard(
         summaries = raw.get("policies", {})
         summaries_map = summaries if isinstance(summaries, Mapping) else {}
         shared["policies"] = {
-            str(name): {
-                key: _strip(value) for key, value in summary.items() if key != "final_score"
-            }
+            str(name): _compact_policy_summary(summary)
             for name, summary in summaries_map.items()
             if isinstance(summary, Mapping)
         }

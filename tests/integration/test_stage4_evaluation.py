@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -49,6 +50,7 @@ def _fake_episode(calls: list[tuple[str, ...]]) -> Any:
                     "best_total_witnesses": 2,
                     "accepted_count": index,
                     "failure_count": 0,
+                    "first_improvement_ns": time.perf_counter_ns(),
                 }
                 for index, name in enumerate(policies)
             },
@@ -99,6 +101,7 @@ def test_one_vs_eight_parity_and_replay(monkeypatch: pytest.MonkeyPatch, tmp_pat
     summary = next((tmp_path / "one").glob("*summary.json"))
     assert evaluation.verify_candidate_pass(summary, manifest)["exact"]
     assert set(primary["records"][0]["policies"]) == {"candidate", "random", "structural"}
+    assert "first_improvement_ns" not in primary["records"][0]["policies"]["candidate"]
     assert all(names == ("candidate", "random", "structural") for names in calls)
 
 

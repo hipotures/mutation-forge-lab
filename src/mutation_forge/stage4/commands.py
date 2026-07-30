@@ -54,8 +54,12 @@ from .statistics import (
 SEARCH_FREEZE_SCHEMA = "stage4.search.freeze.v1"
 VALIDATION_FREEZE_SCHEMA = "stage4.validation.freeze.v1"
 RUN_SCHEMA = "stage4.campaign.v1"
-SEARCH_AMENDMENT_TAG = "stage4-search-amendment-v1"
-SEARCH_AMENDMENT_CATEGORY = "evaluation_worker_process_isolation"
+SEARCH_AMENDMENT_TAG = "stage4-search-amendment-v2"
+SEARCH_AMENDMENT_CATEGORY = "replay_metrics_timing_projection"
+SEARCH_AMENDMENT_CATEGORIES = {
+    "stage4-search-amendment-v1": "evaluation_worker_process_isolation",
+    SEARCH_AMENDMENT_TAG: SEARCH_AMENDMENT_CATEGORY,
+}
 STAGE3_CANONICAL_SHA256 = PROVENANCE["stage3_canonical_sha256"]
 STAGE3_EVIDENCE_MANIFEST_SHA256 = PROVENANCE["evidence_manifest_sha256"]
 STAGE3_ARCHIVE_SHA256 = PROVENANCE["archive_sha256"]
@@ -488,7 +492,44 @@ def _live_model_result_evidence(run: Path) -> dict[str, Any]:
     }
 
 
-def _pre_amendment_freeze(
+def _amendment_states(value: Mapping[str, Any]) -> list[dict[str, Any]]:
+    history = value.get("amendment_tags")
+    if isinstance(history, list) and all(isinstance(item, Mapping) for item in history):
+        return [dict(item) for item in history]
+    amendment = value.get("amendment_tag")
+    return [dict(amendment)] if isinstance(amendment, Mapping) else []
+
+
+def _amendment_backup_name(tag_name: str) -> str:
+    if tag_name == "stage4-search-amendment-v1":
+        return "search-freeze-pre-amendment.json"
+    version = tag_name.rsplit("-", 1)[-1]
+    return f"search-freeze-pre-amendment-{version}.json"
+
+
+def _amendment_tag_chain_valid(
+    repo: Path,
+    value: Mapping[str, Any],
+    descendant: str,
+) -> bool:
+    states = _amendment_states(value)
+    amendment = value.get("amendment_tag")
+    if not states:
+        return amendment is None
+    if not isinstance(amendment, Mapping) or states[-1] != amendment:
+        return False
+    names = [str(state.get("name", "")) for state in states]
+    if names != list(SEARCH_AMENDMENT_CATEGORIES)[: len(names)]:
+        return False
+    return all(
+        state.get("type") == "tag"
+        and _tag_state(repo, str(state.get("name", ""))) == state
+        and _is_ancestor(repo, str(state.get("commit", "")), descendant)
+        for state in states
+    )
+
+
+def _previous_search_freeze(
     config: Stage4SearchConfig,
     run: Path,
     search_tag: Mapping[str, Any],
@@ -503,21 +544,32 @@ def _pre_amendment_freeze(
         or value.get("freeze_sha256") != _freeze_digest(value)
         or value.get("config_sha256") != config.stable_hash()
         or value.get("live_stage4_model_results_observed") is not False
-        or value.get("project_commit") != search_tag.get("commit")
         or value.get("search_tag") != search_tag
         or value.get("frozen_hashes") != _freeze_files(config)
-        or value.get("amendment_tag") is not None
+        or not _amendment_freeze_valid(run, value)
+        or not _amendment_tag_chain_valid(
+            config.project_repo,
+            value,
+            _git_state(config.project_repo)["commit"],
+        )
     ):
-        raise RuntimeError("retained original Stage 4 search freeze is invalid")
-    retained = run / "search-freeze-pre-amendment.json"
+        raise RuntimeError("retained prior Stage 4 search freeze is invalid")
+    states = _amendment_states(value)
+    if not states and value.get("project_commit") != search_tag.get("commit"):
+        raise RuntimeError("original Stage 4 search freeze commit is invalid")
+    retained = run / _amendment_backup_name(SEARCH_AMENDMENT_TAG)
     if retained.is_file() and _read_json(retained) != value:
-        raise RuntimeError("retained pre-amendment freeze conflicts with the original")
+        raise RuntimeError("retained pre-amendment freeze conflicts with the prior freeze")
     if not retained.is_file():
         _atomic_json(retained, value)
     return value
 
 
-def _amendment_freeze_valid(run: Path, value: Mapping[str, Any]) -> bool:
+def _amendment_freeze_valid(
+    run: Path,
+    value: Mapping[str, Any],
+    visited: tuple[str, ...] = (),
+) -> bool:
     amendment = value.get("amendment_tag")
     if not isinstance(amendment, Mapping):
         return all(
@@ -527,23 +579,43 @@ def _amendment_freeze_valid(run: Path, value: Mapping[str, Any]) -> bool:
                 "previous_freeze_sha256",
                 "scientific_identity_unchanged",
                 "pre_amendment_live_model_evidence",
+                "previous_freeze_path",
+                "amendment_tags",
             )
         )
+    tag_name = str(amendment.get("name", ""))
+    category = SEARCH_AMENDMENT_CATEGORIES.get(tag_name)
+    if category is None:
+        return False
     evidence = value.get("pre_amendment_live_model_evidence")
-    retained_path = run / "search-freeze-pre-amendment.json"
+    retained_name = str(
+        value.get("previous_freeze_path", _amendment_backup_name(tag_name))
+    )
+    allowed_names = {
+        _amendment_backup_name(name) for name in SEARCH_AMENDMENT_CATEGORIES
+    }
+    if retained_name not in allowed_names or retained_name in visited:
+        return False
+    retained_path = run / retained_name
     try:
         retained = _read_json(retained_path)
     except (OSError, ValueError, json.JSONDecodeError):
         return False
+    states = _amendment_states(value)
+    retained_states = _amendment_states(retained)
     return (
-        value.get("amendment_category") == SEARCH_AMENDMENT_CATEGORY
+        value.get("amendment_category") == category
         and value.get("scientific_identity_unchanged") is True
         and isinstance(evidence, Mapping)
         and evidence.get("observed") is False
+        and bool(states)
+        and states[-1] == amendment
+        and states[:-1] == retained_states
         and retained.get("freeze_sha256") == value.get("previous_freeze_sha256")
         and retained.get("freeze_sha256") == _freeze_digest(retained)
         and retained.get("frozen_hashes") == value.get("frozen_hashes")
         and retained.get("config_sha256") == value.get("config_sha256")
+        and _amendment_freeze_valid(run, retained, (*visited, retained_name))
     )
 
 
@@ -578,7 +650,7 @@ def freeze(config_path: str | Path) -> dict[str, Any]:
     if amended:
         if live_evidence["observed"] is not False:
             raise RuntimeError("technical amendment is forbidden after live model results")
-        previous = _pre_amendment_freeze(config, run, tag)
+        previous = _previous_search_freeze(config, run, tag)
     audit = doctor(config_path, check_auth=True, write=True)
     if audit["status"] != "completed":
         raise RuntimeError("Stage 4 doctor is not READY")
@@ -613,11 +685,14 @@ def freeze(config_path: str | Path) -> dict[str, Any]:
     }
     if amended:
         assert previous is not None
+        amendment_tags = [*_amendment_states(previous), amendment_tag]
         payload.update(
             {
                 "amendment_tag": amendment_tag,
+                "amendment_tags": amendment_tags,
                 "amendment_category": SEARCH_AMENDMENT_CATEGORY,
                 "previous_freeze_sha256": previous["freeze_sha256"],
+                "previous_freeze_path": _amendment_backup_name(SEARCH_AMENDMENT_TAG),
                 "scientific_identity_unchanged": (
                     previous.get("frozen_hashes") == payload["frozen_hashes"]
                     and previous.get("config_sha256") == payload["config_sha256"]
@@ -645,25 +720,24 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
     project = _git_state(config.project_repo)
     heg = _git_state(config.heg_repo)
     tag = _tag_state(config.project_repo, config.search_tag)
-    amendment = value.get("amendment_tag")
-    amendment_tag = (
-        _tag_state(config.project_repo, SEARCH_AMENDMENT_TAG)
-        if isinstance(amendment, Mapping)
-        else None
-    )
+    amendment_states = _amendment_states(value)
     if (
         project["commit"] != value.get("project_commit")
         or project["dirty"]
         or heg["commit"] != config.frozen_heg_commit
         or heg["dirty"]
         or tag != value.get("search_tag")
-        or amendment_tag != amendment
-        or (
-            amendment_tag is not None
-            and amendment_tag.get("commit") != project["commit"]
+        or not _amendment_tag_chain_valid(
+            config.project_repo,
+            value,
+            project["commit"],
         )
         or (
-            amendment_tag is None
+            amendment_states
+            and amendment_states[-1].get("commit") != project["commit"]
+        )
+        or (
+            not amendment_states
             and tag.get("commit") != project["commit"]
         )
     ):
@@ -681,12 +755,6 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
     value = _read_json(campaign_root(config) / "search-freeze.json")
     tag = _tag_state(config.project_repo, config.search_tag)
     project = _git_state(config.project_repo)
-    amendment = value.get("amendment_tag")
-    amendment_tag = (
-        _tag_state(config.project_repo, SEARCH_AMENDMENT_TAG)
-        if isinstance(amendment, Mapping)
-        else None
-    )
     ancestor = _is_ancestor(
         config.project_repo,
         str(value.get("project_commit", "")),
@@ -700,7 +768,11 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
         or value.get("live_stage4_model_results_observed") is not False
         or not _amendment_freeze_valid(campaign_root(config), value)
         or tag != value.get("search_tag")
-        or amendment_tag != amendment
+        or not _amendment_tag_chain_valid(
+            config.project_repo,
+            value,
+            project["commit"],
+        )
         or not ancestor
         or _freeze_files(config) != value.get("frozen_hashes")
         or not _stage3_checks(config)["ok"]
@@ -994,9 +1066,15 @@ def evolve(
     if not seed_ids.issubset(existing_by_id) or not seed_summary_path.is_file():
         seed_policies = {seed.candidate_id: seed.source for seed in seeds}
         roster = {**baselines, **seed_policies}
+        amendment = freeze_value.get("amendment_tag")
+        amendment_version = (
+            str(amendment.get("name", "")).rsplit("-", 1)[-1]
+            if isinstance(amendment, Mapping)
+            else ""
+        )
         seed_attempt = (
-            "search-seeds-amendment-v1"
-            if isinstance(freeze_value.get("amendment_tag"), Mapping)
+            f"search-seeds-amendment-{amendment_version}"
+            if amendment_version
             else "search-seeds"
         )
         seed_root = run / "evaluations" / seed_attempt
