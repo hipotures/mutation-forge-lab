@@ -109,7 +109,7 @@ class CheckpointStore:
         sequence = checkpoint.sequence
         if sequence == 0:
             existing = self.list()
-            sequence = existing[-1].sequence + 1 if existing else 1
+            sequence = max((item.sequence for item in existing), default=0) + 1
             checkpoint = replace(checkpoint, sequence=sequence)
         payload = canonical_bytes(checkpoint.as_dict())
         path = self.root / f"checkpoint-{checkpoint.sequence:012d}.json"
@@ -144,7 +144,7 @@ class CheckpointStore:
                     result.append(Checkpoint.from_dict(raw))
             except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
                 continue
-        return sorted(result, key=lambda item: (item.generation, item.sequence))
+        return sorted(result, key=lambda item: item.sequence)
 
     def latest(self) -> Checkpoint | None:
         values = self.list()

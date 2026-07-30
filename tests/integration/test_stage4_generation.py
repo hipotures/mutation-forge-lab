@@ -285,6 +285,56 @@ def test_retained_auth_failure_classifier_is_exact() -> None:
     )
 
 
+def test_accepted_artifact_recovery_never_submits_a_replacement(
+    monkeypatch: Any,
+) -> None:
+    class RetainedProvider:
+        def __init__(self) -> None:
+            self.loaded: list[dict[str, Any]] = []
+            self.generated = 0
+
+        def load_retained_result(
+            self,
+            request: dict[str, Any],
+        ) -> ProviderResult:
+            self.loaded.append(dict(request))
+            return ProviderResult(
+                response=envelope(),
+                usage={
+                    "inputTokens": 1,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 1,
+                    "reasoningOutputTokens": 0,
+                    "totalTokens": 2,
+                    "final": True,
+                    "partial": False,
+                },
+                request_id=f"retained-{request['generation']}-{request['slot']}",
+                thread_id="retained-thread",
+                turn_id=f"retained-turn-{request['generation']}-{request['slot']}",
+            )
+
+        def generate(self, request: dict[str, Any]) -> ProviderResult:
+            self.generated += 1
+            raise AssertionError("retained accepted request must not be submitted again")
+
+    monkeypatch.setattr(
+        generation,
+        "_behavior",
+        lambda source, limits, smoke_calls: (
+            {"signature_sha256": "4" * 64},
+            {"smoke_calls": smoke_calls},
+        ),
+    )
+    provider = RetainedProvider()
+    result = GenerationCoordinator(provider).run()
+    assert provider.generated == 0
+    assert len(provider.loaded) == 32
+    assert result.summary["initial_turn_count"] == 32
+    assert result.summary["recovered_initial_turn_count"] == 32
+    assert result.summary["accepted_live_turns"] == 32
+
+
 def test_json_text_response_and_real_parent_prompt_inputs(monkeypatch: Any) -> None:
     class TextProvider(FakeProvider):
         def generate(self, request: dict[str, Any]) -> ProviderResult:

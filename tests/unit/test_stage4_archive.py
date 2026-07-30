@@ -101,3 +101,17 @@ def test_checkpoint_partial_resume_and_idempotency(tmp_path) -> None:
     assert not store.should_request("req-1", checkpoint)
     assert store.should_request("req-2", checkpoint)
     assert store.resume()["token_count"] == 12
+
+
+def test_checkpoint_sequence_remains_monotonic_after_generation_recovery(
+    tmp_path,
+) -> None:
+    store = CheckpointStore(tmp_path)
+    original = store.save(Checkpoint(3, completed_slots=("slot-00",)))
+    recovery = store.save(Checkpoint(0, completed_slots=("slot-00",)))
+    continued = store.save(
+        Checkpoint(0, completed_slots=("slot-00", "slot-01"))
+    )
+    assert [original.sequence, recovery.sequence, continued.sequence] == [1, 2, 3]
+    assert [checkpoint.sequence for checkpoint in store.list()] == [1, 2, 3]
+    assert store.latest() == continued

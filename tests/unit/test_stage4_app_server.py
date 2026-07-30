@@ -22,6 +22,7 @@ from mutation_forge.stage4.app_server import (
     Stage4AppServerProvider,
     Stage4ProviderError,
     _available_artifact_prefix,
+    _codex_transport_schema,
     infrastructure_retry_eligible,
 )
 
@@ -50,7 +51,14 @@ def _request(**extra: Any) -> dict[str, Any]:
     return {
         "prompt": "change the policy",
         "system_prompt": "Return one structured Stage 4 policy.",
-        "output_schema": {"type": "object", "required": ["source"]},
+        "output_schema": {
+            "type": "object",
+            "required": ["schema_version", "source"],
+            "properties": {
+                "schema_version": {"const": "stage4.generated_policy.v1"},
+                "source": {"type": "string"},
+            },
+        },
         "model": FROZEN_STAGE4_MODEL,
         "effort": FROZEN_STAGE4_EFFORT,
         **extra,
@@ -75,6 +83,16 @@ def test_schema_prompt_ids_usage_and_artifact_refs_are_preserved(tmp_path: Path)
     assert result["usage"]["reasoningOutputTokens"] == 1
     assert len(result["prompt_sha256"]) == 64
     assert len(result["schema_sha256"]) == 64
+    request_artifact = json.loads(
+        (tmp_path / "slot-00.request.json").read_text(encoding="utf-8")
+    )
+    assert request_artifact["output_schema"]["properties"]["schema_version"][
+        "type"
+    ] == "string"
+    assert "type" not in request_artifact["frozen_output_schema"]["properties"][
+        "schema_version"
+    ]
+    assert result["transport_output_schema_sha256"] != result["schema_sha256"]
     assert "slot-00.response.json" in result["artifact_refs"]
     assert not any("codex-home" in str(ref) for ref in result["artifact_refs"])
 
@@ -115,6 +133,23 @@ def test_unique_items_schema_is_rejected_before_transport(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="uniqueItems"):
         provider.generate(_request(output_schema={"type": "array", "uniqueItems": False}))
     assert calls == 0
+
+
+def test_codex_transport_schema_does_not_mutate_frozen_contract() -> None:
+    frozen = {
+        "type": "object",
+        "properties": {
+            "schema_version": {"const": "stage4.generated_policy.v1"},
+        },
+    }
+    projected = _codex_transport_schema(frozen)
+    assert projected["properties"]["schema_version"] == {
+        "const": "stage4.generated_policy.v1",
+        "type": "string",
+    }
+    assert frozen["properties"]["schema_version"] == {
+        "const": "stage4.generated_policy.v1"
+    }
 
 
 def test_eight_concurrent_calls_use_independent_process_targets(tmp_path: Path) -> None:
@@ -220,6 +255,68 @@ def test_post_thread_provider_failure_is_not_retried(tmp_path: Path) -> None:
     assert evidence["thread_id"] == "thread-1"
     assert evidence["uncharged"] is False
     assert not infrastructure_retry_eligible(evidence)
+
+
+def test_accepted_retry_artifact_can_be_recovered_without_a_new_turn(
+    tmp_path: Path,
+) -> None:
+    request = _request(artifact_prefix="retained")
+    (tmp_path / "retained.response.json").write_text("{}", encoding="utf-8")
+    provider = _provider(tmp_path)
+    generated = provider.generate(request)
+    assert "retained.retry-01.response.json" in generated["artifact_refs"]
+
+    recovered = provider.load_retained_result(request)
+    assert recovered is not None
+    assert recovered["accepted"] is True
+    assert recovered["thread_id"] == generated["thread_id"]
+    assert recovered["turn_id"] == generated["turn_id"]
+    assert recovered["request_sha256"] == generated["request_sha256"]
+
+
+def test_accepted_error_artifact_is_recovered_as_terminal_infrastructure(
+    tmp_path: Path,
+) -> None:
+    request = _request(artifact_prefix="retained-error")
+    (tmp_path / "retained-error.response.json").write_text("{}", encoding="utf-8")
+    provider = _provider(tmp_path, FakeScenario(terminal_status="failed"))
+    with pytest.raises(Stage4ProviderError):
+        provider.generate(request)
+
+    recovered = provider.load_retained_result(request)
+    assert recovered is not None
+    assert recovered["status"] == "infrastructure"
+    assert recovered["accepted"] is True
+    assert recovered["content"] is False
+    assert recovered["uncharged"] is False
+    assert recovered["retained_artifact_recovery"].endswith(
+        ".retry-01.response.json"
+    )
+
+
+def test_legacy_rejected_schema_artifact_is_recovered_without_resubmission(
+    tmp_path: Path,
+) -> None:
+    request = _request(artifact_prefix="legacy-error")
+    (tmp_path / "legacy-error.response.json").write_text("{}", encoding="utf-8")
+    provider = _provider(tmp_path, FakeScenario(terminal_status="failed"))
+    with pytest.raises(Stage4ProviderError):
+        provider.generate(request)
+    prefix = "legacy-error.retry-01"
+    request_path = tmp_path / f"{prefix}.request.json"
+    response_path = tmp_path / f"{prefix}.response.json"
+    request_value = json.loads(request_path.read_text(encoding="utf-8"))
+    response_value = json.loads(response_path.read_text(encoding="utf-8"))
+    request_value["output_schema"] = request_value.pop("frozen_output_schema")
+    request_value.pop("transport_output_schema_sha256")
+    response_value.pop("transport_output_schema_sha256")
+    request_path.write_text(json.dumps(request_value), encoding="utf-8")
+    response_path.write_text(json.dumps(response_value), encoding="utf-8")
+
+    recovered = provider.load_retained_result(request)
+    assert recovered is not None
+    assert recovered["status"] == "infrastructure"
+    assert recovered["accepted"] is True
 
 
 def test_logs_are_redacted_and_bounded(tmp_path: Path) -> None:

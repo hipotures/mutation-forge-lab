@@ -23,6 +23,7 @@ from .app_server import (
     Stage4AppServerAdapter,
     Stage4AppServerProvider,
     _available_artifact_prefix,
+    _codex_transport_schema,
 )
 from .archive import ProgramArchive, ProgramRecord, deterministic_program_id
 from .artifacts import (
@@ -66,6 +67,10 @@ POST_LIVE_AMENDMENT_SCHEMA = "stage4.search.technical_amendment.v1"
 POST_LIVE_AMENDMENT_PATH = "search-technical-amendment-v3.json"
 SEARCH_AMENDMENT_TAG = "stage4-search-amendment-v3"
 SEARCH_AMENDMENT_CATEGORY = "authenticated_same_request_resume"
+PROTOCOL_AMENDMENT_PATH = "search-technical-amendment-v4.json"
+PROTOCOL_AMENDMENT_TAG = "stage4-search-amendment-v4"
+PROTOCOL_AMENDMENT_CATEGORY = "codex_schema_projection_checkpoint_recovery"
+PROTOCOL_RECOVERY_ROOT = "recovery/protocol-v1"
 SEARCH_AMENDMENT_CATEGORIES = {
     "stage4-search-amendment-v1": "evaluation_worker_process_isolation",
     "stage4-search-amendment-v2": "replay_metrics_timing_projection",
@@ -535,6 +540,12 @@ def _recovery_digest(value: Mapping[str, Any]) -> str:
 def _technical_amendment_digest(value: Mapping[str, Any]) -> str:
     return _sha_value(
         {key: item for key, item in value.items() if key != "amendment_sha256"}
+    )
+
+
+def _protocol_evidence_digest(value: Mapping[str, Any]) -> str:
+    return _sha_value(
+        {key: item for key, item in value.items() if key != "evidence_sha256"}
     )
 
 
@@ -1140,6 +1151,325 @@ def _post_live_amendment_valid(
     )
 
 
+def _prepare_protocol_failure_evidence(
+    config: Stage4SearchConfig,
+    run: Path,
+) -> dict[str, Any]:
+    recovery = run / PROTOCOL_RECOVERY_ROOT
+    evidence_path = recovery / "PROTOCOL_FAILURE.json"
+    if evidence_path.is_file():
+        retained_evidence = _read_json(evidence_path)
+        if (
+            retained_evidence.get("schema_version") != "stage4.protocol_failure.v1"
+            or retained_evidence.get("verified") is not True
+            or retained_evidence.get("evidence_sha256")
+            != _protocol_evidence_digest(retained_evidence)
+            or not _retained_recovery_entries_valid(
+                run,
+                retained_evidence.get("retained_files"),
+            )
+        ):
+            raise RuntimeError("retained Stage 4 protocol failure evidence is invalid")
+        return retained_evidence
+
+    retained_checkpoint = _read_json(
+        run / AUTH_RECOVERY_ROOT / "generation-checkpoint.json"
+    )
+    retained_slots = retained_checkpoint.get("slots")
+    if not isinstance(retained_slots, Mapping):
+        raise RuntimeError("retained authentication checkpoint slots are invalid")
+    generation_zero_keys = sorted(
+        str(key)
+        for key, value in retained_slots.items()
+        if isinstance(value, Mapping) and value.get("generation") == 0
+    )
+    if len(generation_zero_keys) != 8:
+        raise RuntimeError("protocol recovery requires eight generation-zero requests")
+
+    active_checkpoint_path = run / "generation-checkpoint.json"
+    active_checkpoint = _read_json(active_checkpoint_path)
+    active_slots = active_checkpoint.get("slots")
+    if not isinstance(active_slots, Mapping) or len(active_slots) != 2:
+        raise RuntimeError("protocol recovery requires two durable active slots")
+    active_keys = sorted(str(key) for key in active_slots)
+    if not set(active_keys).issubset(generation_zero_keys):
+        raise RuntimeError("active protocol-failure requests drifted")
+    for value in active_slots.values():
+        if not isinstance(value, Mapping):
+            raise RuntimeError("active protocol-failure slot is invalid")
+        initial = value.get("initial")
+        if (
+            not isinstance(initial, Mapping)
+            or initial.get("accepted") is not True
+            or initial.get("content") is not False
+            or initial.get("charged") is not False
+            or initial.get("usage") != {}
+        ):
+            raise RuntimeError("active protocol-failure slot is not fail-closed")
+
+    response_paths = sorted(
+        (run / "appserver").glob(
+            "s4-*-0-slot-*-initial-*.retry-01.response.json"
+        )
+    )
+    if len(response_paths) != 8:
+        raise RuntimeError("protocol recovery requires eight retry response artifacts")
+    retained: list[dict[str, Any]] = [
+        _preserve_recovery_file(
+            run,
+            active_checkpoint_path,
+            recovery,
+        )
+    ]
+    sequence_checkpoint = run / "checkpoints" / "checkpoint-000000000037.json"
+    if not sequence_checkpoint.is_file():
+        raise RuntimeError("protocol recovery sequence checkpoint is missing")
+    retained.append(
+        _preserve_recovery_file(run, sequence_checkpoint, recovery)
+    )
+    request_sha256: set[str] = set()
+    thread_ids: set[str] = set()
+    for response_path in response_paths:
+        prefix = response_path.name.removesuffix(".response.json")
+        request_path = response_path.with_name(f"{prefix}.request.json")
+        events_path = response_path.with_name(f"{prefix}.events.jsonl")
+        if not request_path.is_file() or not events_path.is_file():
+            raise RuntimeError("protocol recovery transport evidence is incomplete")
+        response = _read_json(response_path)
+        request = _read_json(request_path)
+        thread_id = response.get("thread_id")
+        request_hash = response.get("request_sha256")
+        events_payload = events_path.read_bytes()
+        if (
+            response.get("status") != "error"
+            or response.get("accepted") is not True
+            or response.get("content") is not False
+            or response.get("charged") is not False
+            or response.get("uncharged") is not False
+            or response.get("usage") != {}
+            or response.get("unauthorized_tool_approval") is not False
+            or not isinstance(thread_id, str)
+            or not thread_id
+            or response.get("turn_id") is not None
+            or not isinstance(request_hash, str)
+            or len(request_hash) != 64
+            or request.get("request_sha256") != request_hash
+            or b"invalid_json_schema" not in events_payload
+            or b"schema_version" not in events_payload
+        ):
+            raise RuntimeError("protocol failure artifact is not the frozen schema rejection")
+        request_sha256.add(request_hash)
+        thread_ids.add(thread_id)
+        for path in sorted(
+            candidate
+            for candidate in response_path.parent.glob(f"{prefix}.*")
+            if candidate.is_file()
+        ):
+            retained.append(_preserve_recovery_file(run, path, recovery))
+    if len(request_sha256) != 8 or len(thread_ids) != 8:
+        raise RuntimeError("protocol failure request/thread identities are not unique")
+
+    frozen_schema = json.loads(
+        config.output_schema_path.read_text(encoding="utf-8")
+    )
+    if not isinstance(frozen_schema, Mapping):
+        raise RuntimeError("frozen Stage 4 output schema is invalid")
+    projected_schema = _codex_transport_schema(frozen_schema)
+    evidence: dict[str, Any] = {
+        "schema_version": "stage4.protocol_failure.v1",
+        "verified": True,
+        "inference": False,
+        "live_model_output_observed": False,
+        "failure": "invalid_json_schema",
+        "http_status": 400,
+        "generation": 0,
+        "slot_count": 8,
+        "accepted_protocol_turns": 8,
+        "contentful_turns": 0,
+        "charged_turns": 0,
+        "usage_tokens": 0,
+        "exact_usage_complete": False,
+        "unauthorized_tool_approval": False,
+        "replacement_requests_authorized": False,
+        "terminal_request_identities": generation_zero_keys,
+        "terminal_request_identities_sha256": _sha_value(generation_zero_keys),
+        "active_checkpointed_request_count": len(active_keys),
+        "active_checkpointed_request_identities_sha256": _sha_value(active_keys),
+        "recovered_artifact_request_count": 8 - len(active_keys),
+        "transport_request_sha256": sorted(request_sha256),
+        "thread_ids_sha256": _sha_value(sorted(thread_ids)),
+        "frozen_output_schema_sha256": _sha_file(config.output_schema_path),
+        "transport_output_schema_sha256": _sha_value(projected_schema),
+        "transport_projection": {
+            "path": "properties.schema_version.type",
+            "value": "string",
+            "semantic_contract_unchanged": True,
+        },
+        "checkpoint_collision": {
+            "path": sequence_checkpoint.relative_to(run).as_posix(),
+            "sha256": _sha_file(sequence_checkpoint),
+            "sequence": 37,
+        },
+        "retained_files": retained,
+    }
+    evidence["evidence_sha256"] = _protocol_evidence_digest(evidence)
+    _atomic_json(evidence_path, evidence)
+    return evidence
+
+
+def _record_protocol_amendment(
+    config: Stage4SearchConfig,
+    run: Path,
+    project: Mapping[str, Any],
+    search_tag: Mapping[str, Any],
+    amendment_tag: Mapping[str, Any],
+    audit: Mapping[str, Any],
+) -> dict[str, Any]:
+    freeze_value = _read_json(run / "search-freeze.json")
+    if (
+        freeze_value.get("freeze_sha256") != _freeze_digest(freeze_value)
+        or freeze_value.get("config_sha256") != config.stable_hash()
+        or freeze_value.get("frozen_hashes") != _freeze_files(config)
+        or freeze_value.get("search_tag") != search_tag
+        or not _post_live_amendment_valid(
+            config,
+            run,
+            freeze_value,
+            str(project["commit"]),
+        )
+    ):
+        raise RuntimeError("authenticated Stage 4 v3 amendment is invalid")
+    protocol_evidence = _prepare_protocol_failure_evidence(config, run)
+    parent = _read_json(run / POST_LIVE_AMENDMENT_PATH)
+    payload: dict[str, Any] = {
+        "schema_version": POST_LIVE_AMENDMENT_SCHEMA,
+        "verified": True,
+        "inference": False,
+        "live_stage4_model_output_observed": False,
+        "project_commit": project["commit"],
+        "project_branch": project["branch"],
+        "technical_tag": amendment_tag,
+        "amendment_category": PROTOCOL_AMENDMENT_CATEGORY,
+        "parent_amendment_path": POST_LIVE_AMENDMENT_PATH,
+        "parent_amendment_sha256": parent["amendment_sha256"],
+        "search_freeze_sha256": freeze_value["freeze_sha256"],
+        "config_sha256": config.stable_hash(),
+        "frozen_hashes": _freeze_files(config),
+        "scientific_identity_unchanged": (
+            freeze_value.get("frozen_hashes") == _freeze_files(config)
+            and freeze_value.get("config_sha256") == config.stable_hash()
+        ),
+        "authenticated_doctor_sha256": _sha_value(audit),
+        "authenticated_doctor_artifact": audit.get("artifact_path"),
+        "protocol_failure_evidence": protocol_evidence,
+        "continuation": {
+            "terminal_initial_requests": 8,
+            "replacement_requests": 0,
+            "remaining_initial_requests": 24,
+            "orphaned_accepted_results_loaded_from_artifacts": 6,
+        },
+    }
+    audit_auth = audit.get("auth")
+    if (
+        payload["scientific_identity_unchanged"] is not True
+        or audit.get("status") != "completed"
+        or audit.get("inference") is not False
+        or not isinstance(audit_auth, Mapping)
+        or audit_auth.get("authenticated") is not True
+        or amendment_tag.get("name") != PROTOCOL_AMENDMENT_TAG
+        or amendment_tag.get("type") != "tag"
+        or amendment_tag.get("commit") != project.get("commit")
+    ):
+        raise RuntimeError("Stage 4 protocol amendment evidence is invalid")
+    payload["amendment_sha256"] = _technical_amendment_digest(payload)
+    _atomic_json(run / PROTOCOL_AMENDMENT_PATH, payload)
+    return canonical_result(
+        {
+            "status": "completed",
+            "run": str(run),
+            "technical_amendment": True,
+            **payload,
+        }
+    )
+
+
+def _protocol_amendment_valid(
+    config: Stage4SearchConfig,
+    run: Path,
+    freeze_value: Mapping[str, Any],
+    descendant: str,
+) -> bool:
+    path = run / PROTOCOL_AMENDMENT_PATH
+    if not path.is_file():
+        return False
+    try:
+        value = _read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    tag = value.get("technical_tag")
+    evidence = value.get("protocol_failure_evidence")
+    doctor_artifact = value.get("authenticated_doctor_artifact")
+    if (
+        not isinstance(tag, Mapping)
+        or not isinstance(evidence, Mapping)
+        or not isinstance(doctor_artifact, str)
+    ):
+        return False
+    doctor_path = run / doctor_artifact
+    try:
+        doctor_path.resolve().relative_to(run.resolve())
+        doctor = _read_json(doctor_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    doctor_auth = doctor.get("auth")
+    parent = _read_json(run / POST_LIVE_AMENDMENT_PATH)
+    continuation = value.get("continuation")
+    return (
+        value.get("schema_version") == POST_LIVE_AMENDMENT_SCHEMA
+        and value.get("verified") is True
+        and value.get("inference") is False
+        and value.get("live_stage4_model_output_observed") is False
+        and value.get("amendment_sha256") == _technical_amendment_digest(value)
+        and value.get("amendment_category") == PROTOCOL_AMENDMENT_CATEGORY
+        and value.get("parent_amendment_path") == POST_LIVE_AMENDMENT_PATH
+        and value.get("parent_amendment_sha256") == parent.get("amendment_sha256")
+        and value.get("search_freeze_sha256") == freeze_value.get("freeze_sha256")
+        and value.get("config_sha256") == config.stable_hash()
+        and value.get("frozen_hashes") == _freeze_files(config)
+        and value.get("scientific_identity_unchanged") is True
+        and tag.get("name") == PROTOCOL_AMENDMENT_TAG
+        and tag.get("type") == "tag"
+        and _tag_state(config.project_repo, PROTOCOL_AMENDMENT_TAG) == tag
+        and _is_ancestor(
+            config.project_repo,
+            str(tag.get("commit", "")),
+            descendant,
+        )
+        and doctor.get("status") == "completed"
+        and doctor.get("inference") is False
+        and isinstance(doctor_auth, Mapping)
+        and doctor_auth.get("authenticated") is True
+        and _sha_value(doctor) == value.get("authenticated_doctor_sha256")
+        and evidence.get("schema_version") == "stage4.protocol_failure.v1"
+        and evidence.get("verified") is True
+        and evidence.get("evidence_sha256")
+        == _protocol_evidence_digest(evidence)
+        and evidence.get("accepted_protocol_turns") == 8
+        and evidence.get("replacement_requests_authorized") is False
+        and evidence.get("live_model_output_observed") is False
+        and evidence.get("frozen_output_schema_sha256")
+        == _sha_file(config.output_schema_path)
+        and _retained_recovery_entries_valid(
+            run,
+            evidence.get("retained_files"),
+        )
+        and isinstance(continuation, Mapping)
+        and continuation.get("terminal_initial_requests") == 8
+        and continuation.get("replacement_requests") == 0
+        and continuation.get("remaining_initial_requests") == 24
+    )
+
+
 def freeze(
     config_path: str | Path,
     *,
@@ -1151,7 +1481,7 @@ def freeze(
     project = _git_state(config.project_repo)
     heg = _git_state(config.heg_repo)
     tag = _tag_state(config.project_repo, config.search_tag)
-    amendment_tag = _tag_state(config.project_repo, SEARCH_AMENDMENT_TAG)
+    amendment_tag = _tag_state(config.project_repo, PROTOCOL_AMENDMENT_TAG)
     if project["dirty"]:
         raise RuntimeError("project worktree must be clean before Stage 4 search freeze")
     if heg["dirty"] or heg["commit"] != config.frozen_heg_commit:
@@ -1186,7 +1516,7 @@ def freeze(
             )
             if live_audit.get("status") != "completed":
                 raise RuntimeError("private-capsule App Server doctor is not READY")
-            return _record_post_live_amendment(
+            return _record_protocol_amendment(
                 config,
                 run,
                 project,
@@ -1289,8 +1619,27 @@ def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
         value,
         project["commit"],
     )
+    protocol_tag = _tag_state(config.project_repo, PROTOCOL_AMENDMENT_TAG)
+    protocol_required = (
+        protocol_tag.get("type") == "tag"
+        and _is_ancestor(
+            config.project_repo,
+            str(protocol_tag.get("commit", "")),
+            str(project["commit"]),
+        )
+    )
+    protocol_ok = (
+        not protocol_required
+        or _protocol_amendment_valid(
+            config,
+            run,
+            value,
+            project["commit"],
+        )
+    )
     if (
         not (exact_freeze_head or post_live_amendment)
+        or not protocol_ok
         or project["dirty"]
         or heg["commit"] != config.frozen_heg_commit
         or heg["dirty"]
@@ -1331,6 +1680,16 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
             project["commit"],
         )
     )
+    protocol_path = run / PROTOCOL_AMENDMENT_PATH
+    protocol_ok = (
+        not protocol_path.is_file()
+        or _protocol_amendment_valid(
+            config,
+            run,
+            value,
+            project["commit"],
+        )
+    )
     if (
         value.get("schema_version") != SEARCH_FREEZE_SCHEMA
         or value.get("verified") is not True
@@ -1346,6 +1705,7 @@ def _load_retained_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
         )
         or not ancestor
         or not technical_ok
+        or not protocol_ok
         or _freeze_files(config) != value.get("frozen_hashes")
         or not _stage3_checks(config)["ok"]
     ):
@@ -1628,6 +1988,11 @@ def evolve(
             technical_amendment["authenticated_doctor_sha256"]
         )
         auth_recovery = _prepare_authentication_recovery(run)
+    if (run / PROTOCOL_AMENDMENT_PATH).is_file():
+        protocol_amendment = _read_json(run / PROTOCOL_AMENDMENT_PATH)
+        generation_doctor_sha256 = str(
+            protocol_amendment["authenticated_doctor_sha256"]
+        )
     archive = ProgramArchive(_archive_root(run))
     manifest = _load_manifest(config.manifest_path)
     seeds = _seed_sources(config)

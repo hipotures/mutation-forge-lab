@@ -66,6 +66,24 @@ def _contains_unique_items(value: object) -> bool:
     return False
 
 
+def _codex_transport_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Add the redundant type required by Codex without changing the frozen schema."""
+    value = cast(dict[str, Any], json.loads(json.dumps(schema)))
+    properties = value.get("properties")
+    if not isinstance(properties, dict):
+        raise ValueError("Stage 4 output schema properties are missing")
+    schema_version = properties.get("schema_version")
+    if not isinstance(schema_version, dict):
+        raise ValueError("Stage 4 schema_version contract is missing")
+    if schema_version.get("const") != "stage4.generated_policy.v1":
+        raise ValueError("Stage 4 schema_version constant drifted")
+    declared_type = schema_version.get("type")
+    if declared_type not in (None, "string"):
+        raise ValueError("Stage 4 schema_version type is incompatible")
+    schema_version["type"] = "string"
+    return value
+
+
 def _derived_artifact_prefix(request: Mapping[str, Any]) -> str:
     """Build a deterministic, bounded filename prefix for one generation turn."""
     identity = {
@@ -323,6 +341,7 @@ class Stage4AppServerProvider:
 
     def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         prompt, system, schema, model, effort = self._request_values(request)
+        transport_schema = _codex_transport_schema(schema)
         prefix = (
             str(request["artifact_prefix"])
             if "artifact_prefix" in request
@@ -354,6 +373,7 @@ class Stage4AppServerProvider:
             "system_prompt_sha256": _hash(system),
             "output_schema_sha256": _hash(schema),
             "schema_sha256": _hash(schema),
+            "transport_output_schema_sha256": _hash(transport_schema),
             "request_sha256": _hash(
                 {
                     k: request[k]
@@ -371,13 +391,17 @@ class Stage4AppServerProvider:
                     "effort": effort,
                     "prompt": prompt,
                     "system_prompt": system,
-                    "output_schema": dict(schema),
+                    "output_schema": transport_schema,
+                    "frozen_output_schema": dict(schema),
+                    "transport_schema_projected": transport_schema != schema,
                     **prompt_hashes,
                 },
             )
         try:
             result = adapter.generate(
-                prompt, ModelProfile("codex", model, effort), output_schema=schema
+                prompt,
+                ModelProfile("codex", model, effort),
+                output_schema=transport_schema,
             )
             response_text = result.text
             response_value: Any = response_text
@@ -530,6 +554,122 @@ class Stage4AppServerProvider:
             ) from error
         finally:
             adapter.close()
+
+    def load_retained_result(
+        self,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        """Load an accepted additive retry artifact after checkpoint persistence failed."""
+        prompt, system, schema, model, effort = self._request_values(request)
+        transport_schema = _codex_transport_schema(schema)
+        directory = request.get("artifact_dir", self.artifact_dir)
+        if not isinstance(directory, (str, Path)):
+            return None
+        root = Path(directory)
+        prefix = (
+            str(request["artifact_prefix"])
+            if "artifact_prefix" in request
+            else _derived_artifact_prefix(request)
+        )
+        expected_request_sha256 = _hash(
+            {
+                key: request[key]
+                for key in sorted(request)
+                if key not in {"artifact_dir", "artifact_root", "artifact_prefix"}
+            }
+        )
+        candidates = sorted(
+            root.glob(f"{prefix}.retry-*.response.json"),
+            reverse=True,
+        )
+        for response_path in candidates:
+            try:
+                response_path.resolve().relative_to(root.resolve())
+                retained_prefix = response_path.name.removesuffix(".response.json")
+                request_path = root / f"{retained_prefix}.request.json"
+                request_path.resolve().relative_to(root.resolve())
+                response_value = json.loads(response_path.read_text(encoding="utf-8"))
+                request_value = json.loads(request_path.read_text(encoding="utf-8"))
+            except (
+                OSError,
+                UnicodeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                continue
+            if not isinstance(response_value, Mapping) or not isinstance(
+                request_value,
+                Mapping,
+            ):
+                continue
+            usage = response_value.get("usage")
+            expected_hashes = {
+                "prompt_sha256": _hash(prompt),
+                "system_prompt_sha256": _hash(system),
+                "output_schema_sha256": _hash(schema),
+                "schema_sha256": _hash(schema),
+                "request_sha256": expected_request_sha256,
+            }
+            projected_metadata = (
+                request_value.get("output_schema") == transport_schema
+                and request_value.get("frozen_output_schema") == schema
+                and request_value.get("transport_output_schema_sha256")
+                == _hash(transport_schema)
+                and response_value.get("transport_output_schema_sha256")
+                == _hash(transport_schema)
+            )
+            legacy_rejected_metadata = (
+                response_value.get("status") == "error"
+                and request_value.get("output_schema") == schema
+                and "frozen_output_schema" not in request_value
+                and "transport_output_schema_sha256" not in request_value
+                and "transport_output_schema_sha256" not in response_value
+            )
+            if (
+                response_value.get("accepted") is not True
+                or not isinstance(response_value.get("content"), bool)
+                or not isinstance(response_value.get("charged"), bool)
+                or not isinstance(usage, Mapping)
+                or response_value.get("unauthorized_tool_approval") is not False
+                or request_value.get("model") != model
+                or request_value.get("effort") != effort
+                or request_value.get("prompt") != prompt
+                or request_value.get("system_prompt") != system
+                or not (projected_metadata or legacy_rejected_metadata)
+                or any(
+                    response_value.get(key) != expected
+                    or request_value.get(key) != expected
+                    for key, expected in expected_hashes.items()
+                )
+            ):
+                continue
+            status = response_value.get("status")
+            if status == "completed":
+                response_text = response_value.get("response_text")
+                content_proof = response_value.get("content_proof")
+                if (
+                    not isinstance(response_text, str)
+                    or not isinstance(content_proof, Mapping)
+                    or content_proof.get("sha256") != _hash(response_text)
+                    or content_proof.get("bytes") != len(response_text.encode())
+                ):
+                    continue
+                return dict(response_value)
+            if (
+                status == "error"
+                and isinstance(response_value.get("error_type"), str)
+                and isinstance(response_value.get("error"), str)
+            ):
+                return {
+                    **dict(response_value),
+                    "status": "infrastructure",
+                    "error": (
+                        f"{response_value['error_type']}: "
+                        f"{response_value['error']}"
+                    ),
+                    "retained_artifact_recovery": response_path.name,
+                }
+        return None
 
     def repair(
         self, request: Mapping[str, Any], diagnostics: tuple[Mapping[str, Any], ...]

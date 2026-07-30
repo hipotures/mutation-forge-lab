@@ -908,7 +908,7 @@ class GenerationCoordinator:
             except Exception:
                 continue
         unique: list[Candidate] = []
-        initial_calls = repair_calls = 0
+        initial_calls = repair_calls = recovered_initial_calls = 0
         for generation in range(GENERATIONS):
             parents = self._parents(generation)  # fixed before worker submission
             results: dict[str, SlotResult] = {}
@@ -930,6 +930,44 @@ class GenerationCoordinator:
                         )
                     ):
                         results[slot] = self._slot_from_checkpoint(cached)
+                        continue
+                    loader = getattr(self.provider, "load_retained_result", None)
+                    retained_value = (
+                        loader(req.as_dict()) if callable(loader) else None
+                    )
+                    if retained_value is not None:
+                        raw = ProviderResult.from_value(retained_value)
+                        candidate, diagnostics = self._assess(req, raw)
+                        slot_result = SlotResult(
+                            generation,
+                            slot,
+                            req.parent_id,
+                            "accepted" if candidate else "failed",
+                            candidate,
+                            tuple(diagnostics if not candidate else ()),
+                            0,
+                            initial=raw.as_dict(),
+                            raw_result=raw.as_dict(),
+                            request=req.as_dict(),
+                        )
+                        if (
+                            candidate is None
+                            and diagnostics
+                            and raw.status == "completed"
+                            and raw.accepted
+                            and raw.content
+                            and _usage_complete(raw.usage)
+                        ):
+                            slot_result = replace(
+                                slot_result,
+                                status="repair_pending",
+                            )
+                        results[slot] = slot_result
+                        slots_state[req.idempotency_key] = slot_result.as_dict()
+                        initial_calls += 1
+                        recovered_initial_calls += 1
+                        self._save(state)
+                        self._emit_checkpoint(generation, parents, state, results)
                         continue
                     futures[pool.submit(self._invoke, req)] = (slot, req)
                     initial_calls += 1
@@ -1130,6 +1168,7 @@ class GenerationCoordinator:
             "generation_count": GENERATIONS,
             "slots_per_generation": 8,
             "initial_turn_count": initial_calls,
+            "recovered_initial_turn_count": recovered_initial_calls,
             "repair_turn_count": repair_calls,
             "total_live_turns": initial_calls + repair_calls,
             "accepted_live_turns": sum(
