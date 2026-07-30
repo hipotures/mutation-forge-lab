@@ -39,13 +39,12 @@ generation, program search, generalization, and production consideration.
    strict-improvement graph states, unchanged Stage 2B rankers, hierarchical
    paired bootstrap gates, and one complete deterministic replay. All eleven
    preregistered gates passed.
-6. **Stage 3 — Codex App Server generation (issue #9 preregistration in
-   progress).** A schema-derived thin inference adapter, eight isolated
+6. **Stage 3 — Codex App Server generation (completed and validated;
+   `GO_TO_STAGE_4`).** A schema-derived thin inference adapter, eight isolated
    one-turn no-tool capsules, strict structured output, exact usage and
    provenance, Stage 2A validation, immutable development trajectories,
-   deterministic replay, and a twelve-part gate. Live generation is blocked
-   for the official campaign until the Phase 1 commit and annotated
-   `stage3-generation-frozen-v12` tag are pushed and recorded. Three
+   deterministic replay, and a twelve-part gate. The generation source was
+   frozen, pushed, annotated, and recorded before official generation. Three
    user-authorized connectivity turns used while debugging the adapter are
    retained as excluded diagnostic evidence and did not change the scientific
    contract. The retained v8 official run passed schema validation and emitted
@@ -81,7 +80,8 @@ generation, program search, generalization, and production consideration.
    selected-plan score evidence, and writes eight deterministic bounded
    16-episode shards per pass. Candidates, baselines, manifest, seeds,
    metrics, bootstrap, thresholds, and gates remain unchanged; no new model
-   turn is made.
+   turn is made. Primary and replay then matched exactly, all twelve gates
+   passed, and `docs/reports/STAGE3_REPORT.md` records `GO_TO_STAGE_4`.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,
@@ -109,8 +109,10 @@ passed and `docs/reports/STAGE2D_CONFIRMATORY_REPORT.md` records
 generalization claim or HEG superiority claim. Issue #9 separately authorizes
 Stage 3 under a two-phase freeze. Phase 1 contains no official campaign
 generation; Phase 2 is limited to the frozen eight initial slots and at most
-one schema/AST-only repair per slot. Stage 4 remains blocked pending the
-terminal Stage 3 decision and separate approval.
+one schema/AST-only repair per slot. Stage 3 is now completed and validated:
+all twelve gates passed, primary and replay matched exactly, and
+`docs/reports/STAGE3_REPORT.md` records `GO_TO_STAGE_4`. Stage 4 has not
+started and still requires a separate issue and explicit user approval.
 
 The Phase 1 statement refers to the official campaign. Before the fresh v6
 freeze, three explicitly user-authorized adapter connectivity turns were

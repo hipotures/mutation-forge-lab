@@ -25,9 +25,9 @@ implementation adds host-generated, host-validated legal `k`-switch pools for
 compares reviewed deterministic random and structural rankers over identical
 pools. The preregistered efficacy gate failed: the structural ranker did not
 clear the required improvement over random, so the final decision is
-**`NO_GO`**. The implementation and negative evidence remain retained.
-Stage 3, model use, evolution, full proposer work, and HEG policy integration
-remain blocked.
+**`NO_GO`**. The implementation and negative evidence remain retained. At the
+close of Stage 2B, Stage 3, model use, evolution, full proposer work, and HEG
+policy integration remained blocked.
 
 Stage 2C is completed as a diagnostic follow-up to that retained `NO_GO`. It
 reproduced the immutable Stage 2B control, measured rank/tie/metric behavior,
@@ -47,14 +47,14 @@ decision is **`GO_TO_STAGE_3`**. Stage 2B remains the historical `NO_GO`; the
 Stage 2D result neither rewrites that evidence nor constitutes held-out
 generalization or HEG superiority.
 
-Stage 3 issue #9 is in its preregistration phase on a dedicated branch. Its
-offline implementation fixes eight ordered one-shot Codex App Server slots at
+Stage 3 issue #9 is completed and validated on its dedicated branch. Its
+frozen implementation used eight ordered one-shot Codex App Server slots at
 `gpt-5.6-luna` with `high` reasoning, strict structured output, private
 no-tool capsules, Stage 2A validation and 10,000-call smoke checks, immutable
-development trajectories, deterministic replay, and a twelve-part gate. No
-official campaign generation may occur until the implementation commit and
-the new immutable annotated tag `stage3-generation-frozen-v11` are pushed and
-recorded on issue #9. Adapter troubleshooting used three explicitly
+development trajectories, deterministic replay, and a twelve-part gate. The
+official campaign source was committed, pushed, annotated with
+`stage3-generation-frozen-v11`, and recorded on issue #9 before generation.
+Adapter troubleshooting used three explicitly
 user-authorized connectivity turns: two completed and one ended with partial
 usage. Their fixed connectivity payloads and outputs are retained as
 diagnostic evidence, excluded from candidate generation and evaluation, and
@@ -114,8 +114,17 @@ redundant full score objects with compact selected-plan score evidence, and
 persists primary and replay as eight deterministic bounded shards of sixteen
 episodes. It changes no candidate, baseline, episode, seed, metric, bootstrap,
 threshold, or gate and makes no model call.
+The primary and replay records have the identical timing-stripped SHA-256
+`43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73`.
+All twelve gates passed. `candidate-slot-04` improved pooled median normalized
+best-so-far AUC by 15.097% relative to random with a paired 95% bootstrap
+interval for the absolute delta of `[0.075000, 0.125000]`, while retaining
+99.665% of the structural baseline's pooled median. The final decision is
+**`GO_TO_STAGE_4`** and the complete evidence is retained in
+`docs/reports/STAGE3_REPORT.md`.
 Stage 4, evolution, held-out evaluation, full proposer work, and HEG
-integration remain blocked.
+integration have not started and require separate issues and explicit user
+approval.
 
 ## Setup and checks
 

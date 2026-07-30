@@ -55,9 +55,10 @@ pilot passed, but the preregistered efficacy gate failed: structural achieved
 10%, and the paired bootstrap interval included zero. The implementation and
 negative evidence remain retained in `docs/reports/STAGE2B_REPORT.md`.
 
-Stage 3, model use, evolution, full proposer work, and HEG policy integration
-remain blocked. The failed gate must not be reinterpreted by changing its
-threshold, dataset, benchmark result, or scientific interpretation.
+At the close of Stage 2B, Stage 3, model use, evolution, full proposer work,
+and HEG policy integration remained blocked. The failed gate must not be
+reinterpreted by changing its threshold, dataset, benchmark result, or
+scientific interpretation.
 
 ## Stage 2C: diagnostic follow-up
 
@@ -71,10 +72,10 @@ distinct policy behavior despite universal pool headroom and substantially
 better immediate structural selections. The next-step decision is
 `DESIGN_STAGE_2D_PREREGISTRATION`.
 
-That decision does not approve or execute Stage 2D. Any Stage 2D benchmark
-must be frozen and approved in a separate issue. Stage 2B remains `NO_GO`, and
-Stage 3, model use, evolution, full proposer work, and HEG policy integration
-remain blocked. Evidence is retained in
+That decision did not approve or execute Stage 2D. Any Stage 2D benchmark had
+to be frozen and approved in a separate issue. Stage 2B remains `NO_GO`; at
+the close of Stage 2C, Stage 3, model use, evolution, full proposer work, and
+HEG policy integration remained blocked. Evidence is retained in
 `docs/reports/STAGE2C_DIAGNOSTIC_REPORT.md`.
 
 ## Stage 2D: preregistered independent-trajectory confirmation
@@ -102,14 +103,14 @@ started and requires a separate issue and explicit user approval.
 
 ## Stages 3–7
 
-**Stage 3 status: issue #9 Phase 1 preregistration in progress.** The offline
-implementation freezes the exact `gpt-5.6-luna`/`high` profile, eight ordered
+**Stage 3 status: completed and validated; `GO_TO_STAGE_4`.** The frozen
+implementation uses the exact `gpt-5.6-luna`/`high` profile, eight ordered
 one-shot slots, one schema/AST-only repair maximum, private no-tool App Server
 capsules, strict output and exact usage accounting, Stage 2A validation and
 10,000-call smoke, the fixed non-held-out development manifest, independent
-trajectories, deterministic replay, and twelve named gates. No live generation
-for the official campaign is permitted before the Phase 1 commit and annotated
-`stage3-generation-frozen-v11` tag are pushed and recorded on issue #9. Three
+trajectories, deterministic replay, and twelve named gates. The Phase 1 commit
+and annotated `stage3-generation-frozen-v11` tag were pushed and recorded on
+issue #9 before official generation. Three
 explicitly user-authorized adapter connectivity turns preceded this freeze;
 two completed and one ended with partial usage. They are retained and excluded
 as diagnostic evidence, did not generate candidates, and did not change the
@@ -183,12 +184,20 @@ bounded shards of sixteen episodes. It does not change policies, prompts,
 schemas visible to generated code, manifest, seeds, metrics, bootstrap,
 thresholds, or gates and makes no model call.
 
-The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
-`INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical
-`NO_GO`; Stage 2D remains non-held-out toy evidence rather than HEG
-superiority.
+The v13 primary evaluation and deterministic replay produced the identical
+timing-stripped record hash
+`43dee7e356ccc3f11c3fff326a78d16c70b0524a5b046732f6aca289335ccd73`.
+All twelve gates passed. `candidate-slot-04` achieved 15.097% relative pooled
+median normalized best-so-far AUC improvement over random, with a paired 95%
+bootstrap interval for the absolute delta of `[0.075000, 0.125000]`, and
+retained 99.665% of structural. `docs/reports/STAGE3_REPORT.md` records the
+final decision `GO_TO_STAGE_4`.
+
+Stage 2B remains the historical `NO_GO`; Stage 2D and Stage 3 remain
+non-held-out development evidence rather than HEG superiority.
 
 Stage 4 would add archived evolutionary search. Stage 5 would freeze and
 evaluate held-out generalization. Stage 6 would perform independent
 verification and red-team review. Stage 7 alone could recommend HEG policy
-integration after a final scientific GO. None of Stages 4–7 has started.
+integration after a final scientific GO. None of Stages 4–7 has started, and
+each requires a separate issue and explicit user approval.
