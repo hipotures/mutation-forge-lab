@@ -105,6 +105,15 @@ Provider-free revalidation of the eight retained final responses produced eight
 unique valid candidates and completed 80,000 persistent-worker smoke calls.
 Raw prompts, responses, JSON-RPC transcripts, usage, and transport logs remain
 unchanged; derived revalidation artifacts are stored separately.
+The first frozen v12 evaluation completed both passes in memory but could not
+persist the monolithic 128-record primary JSONL because duplicated per-step
+traces exceeded the writer's 64 MiB pre-compression bound. No scientific
+result was retained from that failed attempt. The user-authorized v13
+evaluation-only correction stores each step trace exactly once, replaces
+redundant full score objects with compact selected-plan score evidence, and
+persists primary and replay as eight deterministic bounded shards of sixteen
+episodes. It changes no candidate, baseline, episode, seed, metric, bootstrap,
+threshold, or gate and makes no model call.
 Stage 4, evolution, held-out evaluation, full proposer work, and HEG
 integration remain blocked.
 

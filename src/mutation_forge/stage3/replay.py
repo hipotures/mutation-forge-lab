@@ -13,8 +13,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .evaluation import read_records
-from .manifest import canonical_bytes
+from .evaluation import canonical_projection, read_records
+from .manifest import canonical_bytes, sha256
 
 
 def _project(value: Any, *, top_level: bool = False) -> Any:
@@ -37,6 +37,38 @@ def canonical_hash(value: Mapping[str, Any] | list[Any]) -> str:
     return hashlib.sha256(canonical_bytes(projected)).hexdigest()
 
 
+def _load_shards(manifest_path: Path, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    shards = manifest.get("shards")
+    if (
+        manifest.get("schema_version") != "stage3.evaluation_shards.v1"
+        or not isinstance(shards, list)
+        or len(shards) != 8
+    ):
+        raise ValueError("invalid evaluation shard manifest")
+    records: list[dict[str, Any]] = []
+    for item in shards:
+        if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
+            raise ValueError("invalid evaluation shard entry")
+        relative = Path(item["path"])
+        if relative.is_absolute() or relative.name != str(relative):
+            raise ValueError("evaluation shard path escapes manifest directory")
+        path = manifest_path.parent / relative
+        if hashlib.sha256(path.read_bytes()).hexdigest() != item.get("file_sha256"):
+            raise ValueError("evaluation shard file hash mismatch")
+        shard_records = read_records(path, max_records=128)
+        if len(shard_records) != item.get("record_count"):
+            raise ValueError("evaluation shard record count mismatch")
+        records.extend(shard_records)
+    ordered = sorted(records, key=lambda record: str(record["episode_id"]))
+    if len(ordered) != manifest.get("record_count"):
+        raise ValueError("evaluation aggregate record count mismatch")
+    if sha256([canonical_projection(record) for record in ordered]) != manifest.get(
+        "canonical_records_sha256"
+    ):
+        raise ValueError("evaluation aggregate record hash mismatch")
+    return ordered
+
+
 def _load(value: str | Path | Mapping[str, Any]) -> Any:
     if isinstance(value, Mapping):
         return dict(value)
@@ -47,10 +79,18 @@ def _load(value: str | Path | Mapping[str, Any]) -> Any:
         candidate = path / "evaluation-primary.jsonl.gz"
         if candidate.is_file():
             return read_records(candidate)
+        candidate = path / "evaluation-primary-shards.json"
+        if candidate.is_file():
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+            if not isinstance(raw, Mapping):
+                raise ValueError("evaluation shard manifest must be an object")
+            return _load_shards(candidate, raw)
         candidate = path / "evaluation_summary.json"
     else:
         candidate = path
     raw = json.loads(candidate.read_text(encoding="utf-8"))
+    if isinstance(raw, Mapping) and raw.get("schema_version") == "stage3.evaluation_shards.v1":
+        return _load_shards(candidate, raw)
     if not isinstance(raw, (dict, list)):
         raise ValueError("replay artifact must contain an object or record list")
     return raw

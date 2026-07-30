@@ -8,7 +8,7 @@ def test_frozen_stage3_config() -> None:
     assert config.model.slots == tuple(f"slot-{i:02d}" for i in range(8))
     assert config.model.max_repairs == 1
     assert config.experiment.episode_count == 128
-    assert config.preregistration_tag == "stage3-generation-frozen-v12"
+    assert config.preregistration_tag == "stage3-generation-frozen-v13"
     assert config.semantic_glossary_path.name == "stage3-field-semantics.v1.json"
     assert (
         config.identity.semantic_glossary_sha256

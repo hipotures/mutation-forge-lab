@@ -25,7 +25,7 @@ from mutation_forge.sandbox.validation import validate_policy
 from mutation_forge.stage2b.rankers import SourceRanker
 from mutation_forge.stage3.manifest import canonical_bytes, sha256
 
-STAGE3_EPISODE_VERSION = "stage3.development.episode.v1"
+STAGE3_EPISODE_VERSION = "stage3.development.episode.v2"
 STAGE3_REDUCTION_VERSION = "stage3.development.reduction.v1"
 THREAD_ENVIRONMENT = {
     name: "1"
@@ -79,7 +79,6 @@ class _State:
     best_total: int
     curve: list[float] = field(default_factory=list)
     raw_curve: list[int] = field(default_factory=list)
-    trace: list[dict[str, JsonValue]] = field(default_factory=list)
     accepted: int = 0
     rejected: int = 0
     duplicates: int = 0
@@ -220,9 +219,15 @@ def _apply(
         "selected_operator_family": candidate.payload["operator_family"],
         "selected_selector_tags": cast(list[JsonValue], candidate.payload["selector_tags"]),
         "accepted": accepted,
-        "selected_score": score.as_dict(),
-        "current_score": state.score.as_dict(),
-        "previous_score": previous.as_dict(),
+        "selected_ordering_key": list(score.ordering_key),
+        "previous_ordering_key": list(previous.ordering_key),
+        "selected_total_witnesses": score.total_capped_witnesses,
+        "previous_total_witnesses": previous.total_capped_witnesses,
+        "current_total_witnesses": state.score.total_capped_witnesses,
+        "selected_witness_delta": (
+            previous.total_capped_witnesses - score.total_capped_witnesses
+        ),
+        "selected_penalty_delta": previous.weighted_penalty - score.weighted_penalty,
         "best_total_witnesses": state.best_total,
         "state_hash": backend.state_hash(state.graph),
         "ranker_elapsed_ns": getattr(rank, "elapsed_ns", 0),
@@ -236,7 +241,6 @@ def _apply(
         "pool_legality_ns": pool.legality_elapsed_ns,
         "pool_feature_ns": pool.feature_elapsed_ns,
     }
-    state.trace.append(trace)
     return trace
 
 
@@ -400,12 +404,7 @@ def run_development_episode(
                 else state.first_improvement_step + 1,
                 "first_improvement_ns": state.first_improvement_ns,
                 "failure_count": state.failures,
-                "initial_score": initial.as_dict(),
                 "final_score": state.score.as_dict(),
-                "best_score": state.score.as_dict(),
-                "trace": cast(list[JsonValue], state.trace),
-                "timings_ns": {"first_improvement": state.first_improvement_ns or 0},
-                "resources": {"network_calls": 0, "model_calls": 0, "app_server_calls": 0},
             }
         identities: dict[str, JsonValue] = {}
         for name, ranker in rankers.items():
@@ -421,6 +420,7 @@ def run_development_episode(
             "policy_seed": episode["policy_seed"],
             "horizon": horizon,
             "initial_graph_hash": be.state_hash(graph),
+            "initial_score": initial.as_dict(),
             "divergence_step": divergence_step,
             "shared_pool_steps": shared_steps,
             "independent_pool_steps": independent_steps,
@@ -515,9 +515,16 @@ def validate_record(
         raise ValueError("selected scoring budget mismatch")
     if int(record.get("invalid_graphs", -1)) != 0:
         raise ValueError("invalid graph reached an episode")
+    if not isinstance(record.get("initial_score"), Mapping):
+        raise ValueError("episode initial score is missing")
     for counter in ("model_calls", "app_server_calls", "runtime_network_calls"):
         if int(record.get(counter, -1)) != 0:
             raise ValueError(f"unexpected {counter}")
+    for policy in policies.values():
+        if not isinstance(policy, Mapping):
+            raise ValueError("policy summary must be an object")
+        if any(field in policy for field in ("trace", "initial_score", "best_score", "resources")):
+            raise ValueError("policy summary duplicates episode or step data")
     steps = record.get("steps")
     if not isinstance(steps, list) or len(steps) != horizon:
         raise ValueError("trajectory step count mismatch")
@@ -530,6 +537,23 @@ def validate_record(
                 "rank_pool_hash"
             ):
                 raise ValueError("ranker did not receive the recorded pool")
+            if any(
+                field in trace for field in ("selected_score", "current_score", "previous_score")
+            ):
+                raise ValueError("step trace contains redundant full scores")
+            if not all(
+                field in trace
+                for field in (
+                    "selected_ordering_key",
+                    "previous_ordering_key",
+                    "selected_total_witnesses",
+                    "previous_total_witnesses",
+                    "current_total_witnesses",
+                    "selected_witness_delta",
+                    "selected_penalty_delta",
+                )
+            ):
+                raise ValueError("step trace omits compact selected-score evidence")
 
 
 def reduce_records(

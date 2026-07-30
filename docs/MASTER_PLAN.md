@@ -73,6 +73,15 @@ generation, program search, generalization, and production consideration.
    Offline revalidation of the eight retained final responses yields eight
    unique valid candidates and 80,000 successful persistent-worker calls,
    with new derived artifacts separated from immutable generation logs.
+   The frozen v12 evaluation then completed primary and replay computation in
+   memory but failed before durable reduction because the monolithic
+   128-record JSONL duplicated every policy-step trace and exceeded a 64 MiB
+   pre-compression bound. No metrics or replay hashes were retained. The
+   user-authorized v13 evaluation-only freeze stores each trace once, compacts
+   selected-plan score evidence, and writes eight deterministic bounded
+   16-episode shards per pass. Candidates, baselines, manifest, seeds,
+   metrics, bootstrap, thresholds, and gates remain unchanged; no new model
+   turn is made.
 7. **Stage 4 — evolutionary program search.** Archive, lineage, deduplication,
    selection, mutation prompts, checkpoints, and fixed compute accounting.
 8. **Stage 5 — held-out generalization.** Unseen seeds, random relabelings,

@@ -171,6 +171,18 @@ eight retained final responses produced eight unique valid candidates and
 responses, usage, JSON-RPC, event, stderr, and transport logs remain unchanged;
 the derived revalidation evidence is stored separately.
 
+The first frozen v12 evaluation completed its primary and replay computations
+in memory but failed before durable reduction. The runner serialized each
+policy-step trace twice and attempted one monolithic 128-record JSONL; its
+uncompressed payload exceeded the 64 MiB writer bound before gzip or a
+temporary file was created. The failure retained no scientific metrics or
+replay hashes. The user-authorized v13 evaluation-only correction stores each
+trace exactly once, replaces redundant full score objects with compact
+selected-plan score evidence, and writes primary/replay as eight deterministic
+bounded shards of sixteen episodes. It does not change policies, prompts,
+schemas visible to generated code, manifest, seeds, metrics, bootstrap,
+thresholds, or gates and makes no model call.
+
 The Stage 3 result can only be `GO_TO_STAGE_4`, `NO_GO`, or
 `INCONCLUSIVE_INFRASTRUCTURE_FAILURE`. Stage 2B remains the historical
 `NO_GO`; Stage 2D remains non-held-out toy evidence rather than HEG

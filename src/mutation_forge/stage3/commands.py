@@ -1008,6 +1008,60 @@ def _run_evaluation_pass(
     )
 
 
+def _write_evaluation_record_shards(
+    config: Stage3GenerationConfig,
+    root: Path,
+    label: str,
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    grouped: list[list[Mapping[str, Any]]] = [
+        [] for _ in range(config.experiment.shard_count)
+    ]
+    for record in records:
+        shard_index = config.episode_shard(
+            int(record["order"]),
+            int(record["graph_seed"]),
+            int(record["policy_seed"]),
+        )
+        grouped[shard_index].append(record)
+    expected = config.experiment.episodes_per_shard
+    if any(len(shard) != expected for shard in grouped):
+        raise ValueError("evaluation record shard cardinality mismatch")
+    artifacts: list[dict[str, Any]] = []
+    for index, shard_records in enumerate(grouped):
+        ordered = sorted(shard_records, key=lambda record: str(record["episode_id"]))
+        artifacts.append(
+            cast(
+                dict[str, Any],
+                write_records(
+                    root / f"evaluation-{label}-shard-{index:02d}.jsonl.gz",
+                    ordered,
+                    maximum_bytes=config.limits.artifact_bytes,
+                ),
+            )
+        )
+    manifest: dict[str, Any] = {
+        "schema_version": "stage3.evaluation_shards.v1",
+        "label": label,
+        "shard_count": len(artifacts),
+        "episodes_per_shard": expected,
+        "record_count": sum(int(artifact["record_count"]) for artifact in artifacts),
+        "uncompressed_bytes": sum(
+            int(artifact["uncompressed_bytes"]) for artifact in artifacts
+        ),
+        "canonical_records_sha256": sha256(
+            [canonical_projection(record) for record in records]
+        ),
+        "shards": artifacts,
+    }
+    _atomic_json(
+        root / f"evaluation-{label}-shards.json",
+        manifest,
+        max_bytes=config.limits.artifact_bytes,
+    )
+    return manifest
+
+
 def _evaluate(
     config_path: str | Path,
     run: str | Path,
@@ -1212,19 +1266,25 @@ def _evaluate(
         "gate": gate,
         "decision": evaluate_gate(summary),
     }
-    write_records(
-        root / "evaluation-primary.jsonl.gz",
+    primary_shards = _write_evaluation_record_shards(
+        config,
+        root,
+        "primary",
         cast(list[Mapping[str, Any]], reduced),
     )
-    write_records(
-        root / "evaluation-replay.jsonl.gz",
+    replay_shards = _write_evaluation_record_shards(
+        config,
+        root,
+        "replay",
         cast(list[Mapping[str, Any]], replay_reduced),
     )
-    (root / "gate.json").write_text(
-        json.dumps(gate, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
-    )
-    (root / "evaluation_summary.json").write_text(
-        json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+    output["primary_shards"] = primary_shards
+    output["replay_shards"] = replay_shards
+    _atomic_json(root / "gate.json", gate, max_bytes=config.limits.artifact_bytes)
+    _atomic_json(
+        root / "evaluation_summary.json",
+        output,
+        max_bytes=config.limits.artifact_bytes,
     )
     return canonical_result(output)
 
