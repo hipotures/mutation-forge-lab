@@ -471,6 +471,16 @@ def replay_generation(root: Path) -> dict[str, Any]:
                 usage_totals[key] += usage[key]
             if bool(final_turn.get("charged")) != (usage["totalTokens"] > 0):
                 raise ValueError(f"{slot} usage provenance mismatch")
+            request_path = slot_root / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(request, dict)
+                or request.get("slot") != slot
+                or request.get("model") != generation_config.get("model")
+                or request.get("effort") != generation_config.get("effort")
+                or request.get("protocol_version") != generation_config.get("protocol_version")
+            ):
+                raise ValueError(f"{slot} request/config identity mismatch")
             source_path = run_root / "slots" / slot / "source.py"
             if not source_path.is_file():
                 raise ValueError(f"{slot} is missing persisted source")
