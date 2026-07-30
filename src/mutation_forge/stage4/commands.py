@@ -380,6 +380,7 @@ def doctor(
     auth_json: str | Path | None = None,
     check_auth: bool = True,
     write: bool = True,
+    run_override: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run all non-inference Stage 4 prerequisite and dry-run checks."""
 
@@ -409,7 +410,7 @@ def doctor(
     search_ids = {str(item["episode_id"]) for item in search_manifest["episodes"]}
     validation_ids = {str(item["episode_id"]) for item in validation_manifest["episodes"]}
     seeds = load_seed_manifest(config.seed_manifest_path)
-    run = campaign_root(config)
+    run = Path(run_override).resolve() if run_override is not None else campaign_root(config)
     projection = project_real_shape(run / "offline-dry-run")
     projection_result = cast(Mapping[str, Any], projection["projection"])
     stage3 = _stage3_checks(config)

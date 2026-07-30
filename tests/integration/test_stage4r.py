@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+import pytest
 
 from mutation_forge import cli, stage4r
+from mutation_forge.stage4 import commands as stage4_commands
 from mutation_forge.stage4.generation import GenerationCoordinator, ProviderResult
 
 SOURCE = "def priority(ctx, proposal):\n    return 1.0\n"
@@ -160,6 +163,46 @@ def test_canary_runs_one_turn_and_reindexes_diagnostic_artifact(tmp_path: Path) 
     assert len(provider.calls) == 1
     assert result["excluded_from_scientific_archive"] is True
     assert (tmp_path / "run" / "canary-success.json").is_file()
+
+
+def test_canary_scopes_doctor_artifacts_to_recovery_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_doctor(
+        config_path: str | Path,
+        *,
+        auth_json: str | Path | None,
+        check_auth: bool,
+        write: bool,
+        run_override: str | Path | None,
+    ) -> dict[str, Any]:
+        observed.update(
+            {
+                "config_path": config_path,
+                "auth_json": auth_json,
+                "check_auth": check_auth,
+                "write": write,
+                "run_override": Path(cast(str | Path, run_override)).resolve(),
+            }
+        )
+        return _doctor()
+
+    monkeypatch.setattr(stage4_commands, "doctor", fake_doctor)
+    run = tmp_path / "run"
+    result = stage4r.canary(
+        config_path=CONFIG,
+        retained_run=RETAINED,
+        run=run,
+        auth_json=tmp_path / "auth.json",
+        attempt=1,
+        provider=FakeProvider(),
+    )
+    assert result["passed"] is True
+    assert observed["run_override"] == run.resolve()
+    assert observed["write"] is False
 
 
 def test_search_freeze_follows_successful_canary_and_contains_eight_requests(

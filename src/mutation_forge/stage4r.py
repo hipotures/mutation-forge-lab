@@ -395,6 +395,7 @@ def canary(
             auth_json=auth_json,
             check_auth=True,
             write=False,
+            run_override=root,
         )
     )
     doctor_ready = (
