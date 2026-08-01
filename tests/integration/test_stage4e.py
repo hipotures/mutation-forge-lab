@@ -14,6 +14,15 @@ def test_stage4e_parser_exposes_freeze_and_confirm() -> None:
         assert parsed.stage4e_command == command
 
 
+def test_stage4e_parser_exposes_retained_recovery() -> None:
+    parser = cli.build_parser()
+    parsed = parser.parse_args(
+        ["stage4e", "recover-retained", "--run", "/tmp/preserved-stage4e", "--json"]
+    )
+    assert parsed.command == "stage4e"
+    assert parsed.stage4e_command == "recover-retained"
+
+
 def test_stage4e_manifest_is_frozen_and_disjoint() -> None:
     config = load_stage4e_config(Path("configs/stage4e-confirmation.toml"))
     manifest = load_manifest(config)

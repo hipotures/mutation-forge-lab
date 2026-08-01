@@ -16,6 +16,7 @@ from rich.table import Table
 
 from mutation_forge import __version__
 from mutation_forge import stage4e as stage4e_commands
+from mutation_forge import stage4e_retained_recovery as stage4e_recovery_commands
 from mutation_forge import stage4r as stage4r_commands
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
@@ -422,6 +423,12 @@ def _stage4e(args: argparse.Namespace) -> int:
         result = stage4e_commands.freeze_stage4e(args.config)
     elif args.stage4e_command == "confirm":
         result = stage4e_commands.confirm_stage4e(args.config)
+    elif args.stage4e_command == "recover-retained":
+        result = stage4e_recovery_commands.recover_retained(
+            args.run,
+            output_dir=args.output,
+            report_path=args.report,
+        )
     else:
         raise ValueError(f"unknown Stage 4E command {args.stage4e_command!r}")
     _emit_stage3(result, json_output=args.json)
@@ -830,6 +837,15 @@ def build_parser() -> argparse.ArgumentParser:
         stage4e_command = stage4e_commands_parser.add_parser(command_name)
         stage4e_command.add_argument("--config", type=Path, default=stage4e_defaults["config"])
         stage4e_command.add_argument("--json", action="store_true")
+    stage4e_recover = stage4e_commands_parser.add_parser("recover-retained")
+    stage4e_recover.add_argument("--run", type=Path, required=True)
+    stage4e_recover.add_argument("--output", type=Path)
+    stage4e_recover.add_argument(
+        "--report",
+        type=Path,
+        default=Path("docs/reports/STAGE4E_RETAINED_RECOVERY_REPORT.md"),
+    )
+    stage4e_recover.add_argument("--json", action="store_true")
     return parser
 
 
