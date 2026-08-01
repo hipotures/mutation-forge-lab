@@ -1,0 +1,39 @@
+{
+  "schema_version": "stage6.redteam.fixtures.v1",
+  "generator": "mutation_forge.stage6_independent.redteam.write_fixture_set",
+  "case_count": 25,
+  "metamorphic_case_count": 4,
+  "cases": [
+    "missing_record",
+    "duplicate_record",
+    "extra_record",
+    "modified_record",
+    "unpaired_record",
+    "misweighted_record",
+    "relabeled_record",
+    "shard_missing",
+    "shard_duplicate",
+    "shard_wrong_roster",
+    "record_hash",
+    "manifest_hash",
+    "metrics_hash",
+    "metrics_value",
+    "bootstrap_seed",
+    "bootstrap_samples",
+    "bootstrap_interval",
+    "bootstrap_values",
+    "provenance_commit",
+    "provenance_dataset",
+    "provenance_config",
+    "provenance_dirty",
+    "provenance_schema",
+    "label_sensitive_relabeling",
+    "fraction_float_drift"
+  ],
+  "metamorphic_cases": [
+    "shard_permutation",
+    "record_permutation",
+    "harmless_timing_change",
+    "equivalent_relabeling"
+  ]
+}
