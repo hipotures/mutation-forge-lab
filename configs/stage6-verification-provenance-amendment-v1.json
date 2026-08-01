@@ -1,0 +1,93 @@
+{
+  "schema_version": "stage6.verification.provenance-amendment.v1",
+  "issue": 16,
+  "original_freeze": {
+    "freeze_commit": "6eaf9a446668751706239e6c1d8d10a26e32fde2",
+    "freeze_tag": "stage6-verification-frozen-v1",
+    "freeze_tag_object": "6b7a0c9232f307187d51e3c291f80c6750a68cb0",
+    "freeze_tag_peeled_commit": "6eaf9a446668751706239e6c1d8d10a26e32fde2",
+    "freeze_payload_sha256": "d252c8c0e037a9e515708eecf630cf7fbf02f6ff3f45a248238fba32824a7f98",
+    "freeze_file_sha256": "39eaaef22707a03c4db70b7f8ee75d39ee23da527ff165234fd4e7e372cd66a3",
+    "freeze_payload_blob": "a48ae102748efdba60c7ee089ab9b588ac117dde",
+    "implementation_time_project_commit": "b278d5ed4c75d120b63a6426856ba8499960393d",
+    "incorrectly_recorded_required_project_commit": "cc2f7b7254705d47fd4995a4b8a2bd45d545795c",
+    "original_config_sha256": "e8752c4c442da3a995d4d64885b8b47b95c5defe700b7cef5dbf23bec8fab601"
+  },
+  "issue_required_base_commit": "af8a3b5760fc2a8a9778aa575e63f573fd7eb828",
+  "actual_commits": {
+    "implementation": "b278d5ed4c75d120b63a6426856ba8499960393d",
+    "freeze": "6eaf9a446668751706239e6c1d8d10a26e32fde2",
+    "final": "633c67829a27bbb7b1a7d8963b92fbc70f60d2d2"
+  },
+  "git_proof": {
+    "merge_base_required_base_to_final": "af8a3b5760fc2a8a9778aa575e63f573fd7eb828",
+    "ancestry": {
+      "required_base_to_implementation": true,
+      "required_base_to_freeze": true,
+      "required_base_to_final": true
+    },
+    "stage5_before_stage6_preregistration": {
+      "stage6_preregistration_commit": "6eaf9a446668751706239e6c1d8d10a26e32fde2",
+      "stage5_implementation_preregistration_commit": "6405965495bcfdd21057aeed429b6a83b98eced9",
+      "stage5_preservation_metadata_commit": "e938e01c81b4e9db023bbae3a043e13cd94f2366",
+      "stage5_final_report_commit": "af8a3b5760fc2a8a9778aa575e63f573fd7eb828",
+      "stage5_implementation_is_ancestor_of_preregistration": true,
+      "stage5_preservation_metadata_is_ancestor_of_preregistration": true,
+      "stage5_final_report_is_ancestor_of_preregistration": true,
+      "preregistration_tree": "902cd95a775f2d014809627178d2f2ad80a29dec",
+      "all_stage5_paths_present_at_preregistration": true,
+      "paths": {
+        "src/mutation_forge/stage5.py": "7f867b46c20498a71ddb147d3c6bc254bbdd2c6a",
+        "src/mutation_forge/stage5_config.py": "109d8e516769762f04656af41cd456e7f9dd5664",
+        "src/mutation_forge/stage5_execution.py": "7a52efa49605dea7b22c8c0dfaa73558cd1ec2ab",
+        "src/mutation_forge/stage5_metrics.py": "3aa92518700f50805ff077a55248c083c11f9a18",
+        "src/mutation_forge/stage5_relabel.py": "2fae621bd66d78136d0cf59c678c4cd0d1515a34",
+        "configs/stage5-generalization.toml": "e55282dcb6b6e6a115c6c6ed949b2fe29569526d",
+        "configs/schemas/stage5-generalization-config.schema.json": "3df7c21baeddb4a051197f2a014aa0fe2e78b329",
+        "configs/schemas/stage5-generalization-episode.schema.json": "927f1bf4f958f92b305cbaa7a7b976cca29dce59",
+        "configs/schemas/stage5-generalization-manifest.schema.json": "1854e702c770444dc9297235fdb3a5ec966c6428",
+        "configs/schemas/stage5-generalization-reduction.schema.json": "bda28a628b27d398d60935be4db73482a7e6b1d8",
+        "configs/manifests/stage5-generalization-v1.json": "0901fa846ab8e94963c621e607163908218d4aeb",
+        "configs/stage5-generalization-freeze-v1.json": "0710ccbf21b24bc7995a255da64ceed5f22c7acd",
+        "docs/reports/STAGE5_GENERALIZATION_REPORT.md": "760b21742dbdd90b0e19ce4ae88aa8e1a9bbad37",
+        "tests/unit/test_stage5.py": "f4786537dba22a5d863abaab9fe4a24cabfd65a4"
+      }
+    }
+  },
+  "affected_validation_assertion": {
+    "name": "stage6_exact_project_entry_commit",
+    "original_behavior": "The frozen required_project_commit was an older ancestor and ancestry-only validation accepted it.",
+    "corrected_behavior": "validate_exact_project_entry requires exact equality with the issue-required commit before checking descendant ancestry.",
+    "implementation_paths": [
+      "src/mutation_forge/stage6_independent/config.py",
+      "src/mutation_forge/stage6_independent/orchestrator.py"
+    ],
+    "regression_test": "tests/unit/test_stage6_independent.py::test_exact_entry_guard_rejects_older_ancestor"
+  },
+  "scientific_impact": {
+    "severity": "medium",
+    "classification": "resolved provenance-validation finding",
+    "disposition": "resolved",
+    "validation_could_have_been_weakened": true,
+    "scientific_run_affected": false,
+    "scientific_inputs_changed": false,
+    "retained_results_changed": false,
+    "evidence_artifacts_changed": false,
+    "reason": "The actual implementation, freeze, and final commits all descend exactly from the issue-required Stage 5 final commit; the discrepancy was confined to the recorded guard value."
+  },
+  "scientific_inputs_and_results": {
+    "changed": {
+      "policies": false,
+      "manifest": false,
+      "seeds": false,
+      "metrics": false,
+      "bootstrap": false,
+      "thresholds": false,
+      "gates": false,
+      "outcome_rows": false,
+      "evidence_artifacts": false
+    },
+    "explicit_no_change_statement": "No policy, manifest, seed, metric, bootstrap, threshold, gate, outcome row, or evidence artifact changed."
+  },
+  "amendment_sha256": "f7d4a80c1591f584562e47f95a9a53df8fb036e7100f53208ee5530b0cb3111a"
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage6-verification-provenance-amendment.schema.json",
+  "title": "Stage 6 post-result provenance amendment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "issue",
+    "original_freeze",
+    "issue_required_base_commit",
+    "actual_commits",
+    "git_proof",
+    "affected_validation_assertion",
+    "scientific_impact",
+    "scientific_inputs_and_results",
+    "amendment_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "stage6.verification.provenance-amendment.v1"},
+    "issue": {"const": 16},
+    "original_freeze": {"type": "object"},
+    "issue_required_base_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "actual_commits": {"type": "object"},
+    "git_proof": {"type": "object"},
+    "affected_validation_assertion": {"type": "object"},
+    "scientific_impact": {"type": "object"},
+    "scientific_inputs_and_results": {"type": "object"},
+    "amendment_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

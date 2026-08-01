@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
+import subprocess
 from pathlib import Path
 
-from mutation_forge.stage6_independent.config import build_manifest, load_config, validate_manifest
+import pytest
+
+from mutation_forge.stage6_independent.config import (
+    REQUIRED_ENTRY_COMMIT,
+    build_manifest,
+    load_config,
+    validate_exact_project_entry,
+    validate_manifest,
+)
 from mutation_forge.stage6_independent.metrics import (
     POLICY_IDS,
     bootstrap,
@@ -24,6 +35,45 @@ def test_frozen_config_and_manifest_are_exact() -> None:
     assert manifest["episode_count"] == 768
     assert len(manifest["shards"]) == 12
     assert all(item["episode_count"] == 64 for item in manifest["shards"])
+
+
+def test_exact_entry_guard_rejects_older_ancestor() -> None:
+    repo = Path(__file__).parents[2]
+    older_ancestor = "cc2f7b7254705d47fd4995a4b8a2bd45d545795c"
+    assert subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "merge-base",
+            "--is-ancestor",
+            older_ancestor,
+            REQUIRED_ENTRY_COMMIT,
+        ],
+        capture_output=True,
+        timeout=30,
+    ).returncode == 0
+    with pytest.raises(ValueError, match="exactly match"):
+        validate_exact_project_entry(repo, older_ancestor, current_commit=REQUIRED_ENTRY_COMMIT)
+
+
+def test_provenance_amendment_hash_and_freeze_tag_are_immutable() -> None:
+    repo = Path(__file__).parents[2]
+    amendment_path = repo / "configs/stage6-verification-provenance-amendment-v1.json"
+    amendment = json.loads(amendment_path.read_text(encoding="utf-8"))
+    payload = {key: value for key, value in amendment.items() if key != "amendment_sha256"}
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    assert amendment["amendment_sha256"] == hashlib.sha256(canonical).hexdigest()
+    freeze_path = repo / "configs/stage6-verification-freeze-v1.json"
+    assert hashlib.sha256(freeze_path.read_bytes()).hexdigest() == (
+        "39eaaef22707a03c4db70b7f8ee75d39ee23da527ff165234fd4e7e372cd66a3"
+    )
+    assert subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "stage6-verification-frozen-v1^{}"],
+        text=True,
+    ).strip() == "6eaf9a446668751706239e6c1d8d10a26e32fde2"
 
 
 def test_dry_run_shard_and_replay_are_deterministic() -> None:

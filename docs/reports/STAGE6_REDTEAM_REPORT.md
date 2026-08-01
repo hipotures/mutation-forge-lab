@@ -21,6 +21,30 @@ The fixture corpus is also retained under
 Severity describes the impact of the attempted corruption, not an unresolved
 defect. Every listed fixture has `passed: true`.
 
+## Post-result provenance amendment — resolved validation finding
+
+An independent post-result review found that the immutable Stage 6 freeze
+recorded `required_project_commit` as the older ancestor
+`cc2f7b7254705d47fd4995a4b8a2bd45d545795c` instead of the issue-required Stage 5
+final commit `af8a3b5760fc2a8a9778aa575e63f573fd7eb828`. This is classified as a
+medium-severity provenance-validation finding: an ancestry-only check could have
+accepted the stale ancestor and weakened entry validation. It is resolved by an
+exact-entry guard and regression test; the original freeze payload and
+`stage6-verification-frozen-v1` tag remain immutable.
+
+The machine-readable amendment is
+`configs/stage6-verification-provenance-amendment-v1.json` with canonical
+SHA-256 `f7d4a80c1591f584562e47f95a9a53df8fb036e7100f53208ee5530b0cb3111a`.
+Its Git-object proof shows merge-base
+`af8a3b5760fc2a8a9778aa575e63f573fd7eb828` and exact ancestry from that commit
+to the Stage 6 implementation, freeze, and final commits. It also records the
+Stage 5 implementation/report tree as present before preregistration. The
+actual run therefore used the required integrated base; no policy, manifest,
+seed, metric, bootstrap, threshold, gate, outcome row, or evidence artifact
+changed, and no experiment or scientific reduction was rerun. The existing
+scientific terminal decision **`GO_TO_STAGE_7`** remains valid, and Stage 7 was
+not started.
+
 ## Required corruption fixtures
 
 The verifier rejected each of the following: missing episode; duplicate

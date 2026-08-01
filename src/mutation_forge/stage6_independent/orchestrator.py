@@ -20,6 +20,7 @@ from .config import (
     HEG_COMMIT,
     POLICY_IDS,
     PROJECT_COMMIT,
+    REQUIRED_ENTRY_COMMIT,
     STAGE5_EVIDENCE_MANIFEST_SHA256,
     Stage6Config,
     load_config,
@@ -58,6 +59,7 @@ DECISIONS = (
 FREEZE_SCHEMA = "stage6.verification.freeze.v1"
 FREEZE_TAG = "stage6-verification-frozen-v1"
 FREEZE_PATH = Path("configs/stage6-verification-freeze-v1.json")
+PROVENANCE_AMENDMENT_PATH = Path("configs/stage6-verification-provenance-amendment-v1.json")
 REPORT_SCHEMA = "stage6.verification.report.v1"
 
 
@@ -90,6 +92,38 @@ def _freeze_file(config: Stage6Config) -> Path:
     return (config.project_repo / FREEZE_PATH).resolve()
 
 
+def _historical_freeze_pin_is_amended(
+    config: Stage6Config,
+    freeze: Mapping[str, Any],
+) -> bool:
+    """Accept only the retained old pin covered by the immutable amendment."""
+
+    path = (config.project_repo / PROVENANCE_AMENDMENT_PATH).resolve()
+    if not path.is_file():
+        return False
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, Mapping):
+        return False
+    expected_hash = hashlib.sha256(
+        canonical_bytes({key: item for key, item in value.items() if key != "amendment_sha256"})
+    ).hexdigest()
+    original = value.get("original_freeze")
+    scientific = value.get("scientific_impact")
+    return bool(
+        value.get("amendment_sha256") == expected_hash
+        and value.get("issue_required_base_commit") == REQUIRED_ENTRY_COMMIT
+        and isinstance(original, Mapping)
+        and original.get("freeze_tag") == FREEZE_TAG
+        and original.get("freeze_payload_sha256") == freeze.get("freeze_sha256")
+        and original.get("incorrectly_recorded_required_project_commit") == PROJECT_COMMIT
+        and isinstance(scientific, Mapping)
+        and scientific.get("scientific_inputs_changed") is False
+    )
+
+
 def _load_freeze(config: Stage6Config) -> dict[str, Any]:
     path = _freeze_file(config)
     if not path.is_file():
@@ -105,7 +139,11 @@ def _load_freeze(config: Stage6Config) -> dict[str, Any]:
         raise ValueError("Stage 6 freeze payload hash mismatch")
     if freeze.get("freeze_tag") != FREEZE_TAG:
         raise ValueError("Stage 6 freeze tag identity mismatch")
-    if freeze.get("required_project_commit") != PROJECT_COMMIT or freeze.get("required_heg_commit") != HEG_COMMIT:
+    recorded_project_commit = freeze.get("required_project_commit")
+    project_pin_ok = recorded_project_commit == REQUIRED_ENTRY_COMMIT or (
+        recorded_project_commit == PROJECT_COMMIT and _historical_freeze_pin_is_amended(config, freeze)
+    )
+    if not project_pin_ok or freeze.get("required_heg_commit") != HEG_COMMIT:
         raise ValueError("Stage 6 freeze repository pins differ")
     if freeze.get("heg_commit") != HEG_COMMIT or freeze.get("heg_dirty") is not False:
         raise ValueError("Stage 6 freeze HEG provenance is not clean")
@@ -152,7 +190,7 @@ def freeze(config_path: str | Path = "configs/stage6-verification.toml") -> dict
         "stage5_evidence_manifest_sha256": config.expected_stage5_evidence_manifest_sha256,
         "stage5_freeze_sha256": _sha(config.stage5_freeze_path),
         "project_commit": project_commit,
-        "required_project_commit": PROJECT_COMMIT,
+        "required_project_commit": REQUIRED_ENTRY_COMMIT,
         "heg_commit": heg_commit,
         "required_heg_commit": HEG_COMMIT,
         "heg_dirty": heg_dirty,

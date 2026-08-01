@@ -23,6 +23,38 @@ false`. The four policy identities were frozen in
 metric, threshold, or gate was changed after the freeze. No model, Codex App
 Server, provider, oracle, or runtime-network call was made.
 
+## Post-result provenance amendment — resolved validation finding
+
+The immutable freeze payload recorded `required_project_commit` as
+`cc2f7b7254705d47fd4995a4b8a2bd45d545795c`, an older ancestor of the issue-required
+Stage 5 final commit `af8a3b5760fc2a8a9778aa575e63f573fd7eb828`. This was a
+medium-severity provenance-validation finding: an ancestry-only guard could have
+accepted an older entry point and therefore weakened stage-entry validation.
+The machine-readable amendment is
+`configs/stage6-verification-provenance-amendment-v1.json` with canonical
+amendment SHA-256
+`f7d4a80c1591f584562e47f95a9a53df8fb036e7100f53208ee5530b0cb3111a`.
+
+The exact Git proof is recorded in that amendment: the merge-base of the
+required base and final commit is `af8a3b5760fc2a8a9778aa575e63f573fd7eb828`,
+and that required base is an ancestor of the implementation commit
+`b278d5ed4c75d120b63a6426856ba8499960393d`, the freeze commit
+`6eaf9a446668751706239e6c1d8d10a26e32fde2`, and the final commit
+`633c67829a27bbb7b1a7d8963b92fbc70f60d2d2`. The complete Stage 5
+implementation and report paths were present in the preregistration tree before
+the Stage 6 freeze. The regression guard now requires exact equality with the
+issue-required entry SHA before checking ancestry.
+
+The original freeze payload and annotated tag were not modified or retagged:
+the tag object is `6b7a0c9232f307187d51e3c291f80c6750a68cb0`, it peels to
+`6eaf9a446668751706239e6c1d8d10a26e32fde2`, and the retained freeze payload
+SHA-256 remains `d252c8c0e037a9e515708eecf630cf7fbf02f6ff3f45a248238fba32824a7f98`.
+No policy, manifest, seed, metric, bootstrap, threshold, gate, outcome row, or
+Stage 5/Stage 6 evidence artifact changed, and no experiment, shard, replay,
+bootstrap, audit, red-team corpus, or reduction was rerun. Because the actual
+Git ancestry is exact and all scientific evidence is unchanged, the terminal
+decision remains **`GO_TO_STAGE_7`**; Stage 7 has not started.
+
 Fresh Stage 6 inputs were the exact frozen matrix: orders 20/24/28; graph seeds
 701--708; relabeling seeds 7101/7102; policy seeds 7001--7016; horizon 32;
 768 identities; 12 shards of 64. The fresh manifest hash is

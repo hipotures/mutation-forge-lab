@@ -26,7 +26,14 @@ STAGE6_MANIFEST_VERSION = "stage6.verification.manifest.v1"
 
 # The Stage 5 freeze is the reviewed baseline from which this independent
 # verification is derived.  Stage 6 does not import Stage 5 analysis modules.
+#
+# ``PROJECT_COMMIT`` is retained as the project identity embedded in the
+# already-frozen Stage 6 manifest.  That historical metadata must not be
+# rewritten after the result.  The exact Stage 6 entry guard is deliberately
+# separate: an older ancestor is not an acceptable substitute for the issue's
+# required Stage 5 final commit.
 PROJECT_COMMIT = "cc2f7b7254705d47fd4995a4b8a2bd45d545795c"
+REQUIRED_ENTRY_COMMIT = "af8a3b5760fc2a8a9778aa575e63f573fd7eb828"
 HEG_COMMIT = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
 STAGE5_MANIFEST_SHA256 = "ded50562899fd3b5d6214757f2581a2aab6507444a216643ac11fba0bb748c9d"
 STAGE5_EVIDENCE_MANIFEST_SHA256 = "e996563c145ac12bc7e7ae9bb284ae98d14a2990aaac9bce17e9992486780cce"
@@ -209,6 +216,35 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def validate_exact_project_entry(
+    project_repo: Path,
+    configured_required_commit: object,
+    required_commit: str = REQUIRED_ENTRY_COMMIT,
+    *,
+    current_commit: str | None = None,
+) -> str:
+    """Require the exact frozen entry SHA before checking descendant ancestry.
+
+    A merge-base ancestry check alone accepts any older ancestor.  The exact
+    equality check is intentionally performed first so a stale provenance pin
+    cannot silently satisfy a newer stage-entry requirement.
+    """
+
+    if not isinstance(configured_required_commit, str) or configured_required_commit != required_commit:
+        raise ValueError(
+            "project entry commit must exactly match the required frozen SHA"
+        )
+    current = current_commit or _git(project_repo, "rev-parse", "HEAD")
+    ancestor = subprocess.run(
+        ["git", "-C", str(project_repo), "merge-base", "--is-ancestor", required_commit, current],
+        capture_output=True,
+        timeout=30,
+    )
+    if ancestor.returncode != 0:
+        raise ValueError("project repository is not based on the required frozen SHA")
+    return current
+
+
 def load_config(path: str | Path = "configs/stage6-verification.toml") -> Stage6Config:
     source_path = Path(path).resolve()
     raw = _load_raw(source_path)
@@ -259,10 +295,10 @@ def load_config(path: str | Path = "configs/stage6-verification.toml") -> Stage6
     heg_repo = _path(base, repositories.get("heg_repo"), "repositories.heg_repo")
     if repositories.get("frozen_project_commit") != PROJECT_COMMIT or repositories.get("frozen_heg_commit") != HEG_COMMIT:
         raise ValueError("Stage 6 repository pins differ")
-    current_project = _git(project_repo, "rev-parse", "HEAD")
-    ancestor = subprocess.run(["git", "-C", str(project_repo), "merge-base", "--is-ancestor", PROJECT_COMMIT, current_project], capture_output=True, timeout=30)
-    if ancestor.returncode != 0:
-        raise ValueError("project repository is not based on the required frozen SHA")
+    # The retained ``frozen_project_commit`` field belongs to the immutable
+    # scientific manifest.  Validate the issue-required entry independently so
+    # that its older historical value cannot weaken stage-entry validation.
+    validate_exact_project_entry(project_repo, REQUIRED_ENTRY_COMMIT)
     if _git(heg_repo, "rev-parse", "HEAD") != HEG_COMMIT or _git(heg_repo, "status", "--short"):
         raise ValueError("HEG is not clean at the frozen pin")
 
@@ -446,8 +482,9 @@ def write_manifest(config: Stage6Config) -> dict[str, JsonValue]:
 
 __all__ = [
     "BOOTSTRAP_SAMPLES", "BOOTSTRAP_SEED", "CHAMPION_RANDOM_THRESHOLD", "CHAMPION_STAGE3_THRESHOLD",
-    "CONFIDENCE_LEVEL", "HEG_COMMIT", "POLICY_IDS", "PROJECT_COMMIT", "STAGE5_EVIDENCE_MANIFEST_SHA256", "STAGE5_MANIFEST_SHA256",
+    "CONFIDENCE_LEVEL", "HEG_COMMIT", "POLICY_IDS", "PROJECT_COMMIT", "REQUIRED_ENTRY_COMMIT", "STAGE5_EVIDENCE_MANIFEST_SHA256", "STAGE5_MANIFEST_SHA256",
     "STAGE6_CONFIG_VERSION", "STAGE6_MANIFEST_VERSION", "STRUCTURAL_RETENTION_THRESHOLD", "Stage6Config",
     "Stage6Experiment", "Stage6Policy", "Stage6Resources", "build_manifest", "episode_id", "load_config",
     "manifest_hash", "sha256_bytes", "sha256_value", "validate_manifest", "write_manifest",
+    "validate_exact_project_entry",
 ]
