@@ -413,8 +413,9 @@ def finalize_stage5(
     manifest_file = next((path for path in manifest_candidates if path.is_file()), None)
     if manifest_file is None or sha256_bytes(manifest_file.read_bytes()) != evidence_manifest_sha256:
         raise ValueError("preserved evidence manifest is missing or has the wrong hash")
-    result["preserved_evidence_path"] = str(preserved)
-    result["preserved_evidence_manifest_sha256"] = evidence_manifest_sha256
+    # Preservation coordinates belong in the report and issue handoff, not in
+    # the hashed run artifact itself; this avoids a self-referential evidence
+    # manifest while keeping the terminal result hash stable.
     gates = cast(dict[str, bool], result.get("gates", {}))
     gates["15_artifact_provenance_preservation_repository_verified"] = True
     result["gates"] = gates
