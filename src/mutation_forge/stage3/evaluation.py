@@ -245,7 +245,10 @@ def _apply(
 
 
 def _rankers(
-    config: object, policies: Mapping[str, Any]
+    config: object,
+    policies: Mapping[str, Any],
+    *,
+    require_baselines: bool = True,
 ) -> tuple[dict[str, Any], list[str], list[SourceRanker]]:
     result: dict[str, Any] = {}
     owned: list[SourceRanker] = []
@@ -264,7 +267,7 @@ def _rankers(
         else:
             raise TypeError(f"policy {name} must be SourceRanker or source text")
     names = list(result)
-    if "random" not in names or "structural" not in names:
+    if require_baselines and ("random" not in names or "structural" not in names):
         raise ValueError("frozen random and structural policies are required")
     if len(names) != len(set(names)):
         raise ValueError("policy IDs must be unique")
@@ -285,11 +288,16 @@ def run_development_episode(
     policies: Mapping[str, Any],
     *,
     backend: GraphBackend | None = None,
+    require_baselines: bool = True,
 ) -> dict[str, JsonValue]:
     owned = backend is None
     be = backend or ToyBackend()
     started = time.perf_counter_ns()
-    rankers, names, owned_rankers = _rankers(config, policies)
+    rankers, names, owned_rankers = _rankers(
+        config,
+        policies,
+        require_baselines=require_baselines,
+    )
     try:
         graph = be.generate_seed(order=int(episode["order"]), seed=int(episode["graph_seed"]))
         initial_validation = be.validate(graph)

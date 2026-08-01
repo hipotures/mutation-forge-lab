@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from mutation_forge import __version__
+from mutation_forge import stage4e as stage4e_commands
 from mutation_forge import stage4r as stage4r_commands
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
@@ -416,6 +417,17 @@ def _stage4r(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in {"completed", "ok"} else 1
 
 
+def _stage4e(args: argparse.Namespace) -> int:
+    if args.stage4e_command == "freeze":
+        result = stage4e_commands.freeze_stage4e(args.config)
+    elif args.stage4e_command == "confirm":
+        result = stage4e_commands.confirm_stage4e(args.config)
+    else:
+        raise ValueError(f"unknown Stage 4E command {args.stage4e_command!r}")
+    _emit_stage3(result, json_output=args.json)
+    return 0 if result.get("status") in {"completed", "ok"} else 1
+
+
 def _policy_validate(path: Path, *, json_output: bool) -> int:
     result = validate_policy(path.read_text()).as_dict()
     _emit_policy_result(result, json_output=json_output)
@@ -807,6 +819,17 @@ def build_parser() -> argparse.ArgumentParser:
     stage4r_diagnose = stage4r_commands_parser.add_parser("diagnose-deltas")
     stage4r_diagnose.add_argument("--run", type=Path, default=stage4r_defaults["run"])
     stage4r_diagnose.add_argument("--json", action="store_true")
+
+    stage4e = commands.add_parser("stage4e")
+    stage4e_commands_parser = stage4e.add_subparsers(
+        dest="stage4e_command",
+        required=True,
+    )
+    stage4e_defaults = {"config": Path("configs/stage4e-confirmation.toml")}
+    for command_name in ("freeze", "confirm"):
+        stage4e_command = stage4e_commands_parser.add_parser(command_name)
+        stage4e_command.add_argument("--config", type=Path, default=stage4e_defaults["config"])
+        stage4e_command.add_argument("--json", action="store_true")
     return parser
 
 
@@ -861,6 +884,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stage4(args)
         if args.command == "stage4r":
             return _stage4r(args)
+        if args.command == "stage4e":
+            return _stage4e(args)
     except Exception as error:
         if getattr(args, "json", False):
             print(

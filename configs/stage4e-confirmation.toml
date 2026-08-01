@@ -1,0 +1,56 @@
+schema_version = "stage4e.confirmation.v1"
+
+[run]
+run_root = "../runs/stage4e-confirmation"
+
+[repositories]
+project_repo = ".."
+heg_repo = "../../heg"
+frozen_project_commit = "584f8092ef15ca7c12ffdbb6d7fbb30ad80ada41"
+frozen_heg_commit = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
+
+[inputs]
+stage2b_config = "stage2b-preregistered.toml"
+manifest = "manifests/stage4e-confirmation-v1.json"
+prior_manifests = [
+  "manifests/stage2d-episodes-v1.json",
+  "manifests/stage3-development-v1.json",
+  "manifests/stage4-search-v1.json",
+  "manifests/stage4-validation-v1.json",
+  "stage4r-validation-frozen-v1.json",
+  "../runs/stage4r-search/issue-11/search-freeze.json",
+  "../runs/stage4r-search/issue-11/validation-freeze.json",
+]
+
+[policies]
+champion_id = "program-d5ad1c8203e0d9f25f03aabd"
+champion_source = "../runs/stage4r-search/issue-11/recovery/sources/program-d5ad1c8203e0d9f25f03aabd.py"
+champion_source_sha256 = "e444562c1b308e3b23cb732be5f769ea1923ac1809501cea8571318c4aff0a7b"
+champion_ast_sha256 = "2243214df58c805e9a9343dc31ed082279e1c2ac31b21243bf889dbc9a19e165"
+comparator_id = "candidate-slot-04"
+comparator_source = "../runs/stage3-development/stage3-generation-1f7f0784e37c-attempt-01/revalidation/slots/slot-04/source.py"
+comparator_source_sha256 = "a5f540459695bbf7d454eeccbb8e48158d6130df6a769b67d1447de18276dc01"
+comparator_ast_sha256 = "cef05bb644e2e0a9acbc4972fbaa6d4ba3e033ee8a73ecd756da44100c767f5c"
+
+[experiment]
+orders = [10, 12, 16]
+graph_seeds = [501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 511, 512, 513, 514, 515, 516]
+policy_seeds = [5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010, 5011, 5012, 5013, 5014, 5015, 5016, 5017, 5018, 5019, 5020, 5021, 5022, 5023, 5024, 5025, 5026, 5027, 5028, 5029, 5030, 5031, 5032]
+horizon = 32
+shard_count = 24
+episodes_per_shard = 64
+
+[resources]
+workers = 8
+reserved_physical_cores = 8
+thread_count = 1
+
+[bootstrap]
+samples = 10000
+seed = 2026080102
+confidence_level = 0.95
+
+[gate]
+relative_improvement_threshold = 0.02
+lower_bound_strict_positive = true
+order_effects_nonnegative = true
