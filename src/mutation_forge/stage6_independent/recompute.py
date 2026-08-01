@@ -115,7 +115,7 @@ def _payload_equal(left: Any, right: Any) -> bool:
         return len(left) == len(right) and all(
             _payload_equal(a, b) for a, b in zip(left, right, strict=True)
         )
-    return left == right
+    return bool(left == right)
 
 
 def _effect_payload(summary: Any, effect: str) -> dict[str, Any]:

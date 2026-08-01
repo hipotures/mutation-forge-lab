@@ -210,7 +210,7 @@ def plan(
         rows = _rows_from_manifest(manifest)
         if isinstance(manifest, Mapping) and isinstance(manifest.get("shards"), list):
             manifest_shards = [cast(Mapping[str, Any], item) for item in cast(list[Any], manifest["shards"])]
-    if any(int(row.get("horizon", -1)) != HORIZON for row in rows):
+    if any(int(cast(Any, row.get("horizon", -1))) != HORIZON for row in rows):
         raise ValueError("all Stage 6 episodes require horizon 32")
     if strict_layout and len(rows) != EPISODE_COUNT:
         raise ValueError("Stage 6 manifest must contain exactly 768 episodes")
@@ -298,7 +298,7 @@ def _select(policy: Any, context: Mapping[str, Any], pool: Any, workers: dict[st
     elif workers is not None and policy_id in workers:
         priorities: list[tuple[float, str, Any]] = []
         for index, candidate in enumerate(candidates):
-            result = workers[policy_id].call(context, _candidate_payload(candidate))
+            result = workers[policy_id].call(cast(Any, context), cast(Any, _candidate_payload(candidate)))
             if result.status != "ok" or result.priority is None:
                 raise RuntimeError(f"policy worker failed for {policy_id}")
             priorities.append((float(result.priority), _candidate_id(candidate, index), candidate))
@@ -531,7 +531,7 @@ def _episode(
     base_graph = graph
     graph, permutation = _relabel_graph(graph, graph_seed=int(row["graph_seed"]), relabeling_seed=int(row["relabeling_seed"]))
     initial = _score(backend, scorer, graph)
-    states = {policy_id: {"graph": graph, "score": initial, "best": initial.total_capped_witnesses, "curve": [], "accepted": 0, "rejected": 0} for policy_id in POLICY_IDS}
+    states: dict[str, dict[str, Any]] = {policy_id: {"graph": graph, "score": initial, "best": initial.total_capped_witnesses, "curve": [], "accepted": 0, "rejected": 0} for policy_id in POLICY_IDS}
     steps: list[dict[str, Any]] = []
     for step in range(horizon):
         traces: dict[str, Any] = {}
@@ -585,6 +585,7 @@ def run_shard(
     ids = [str(item) for item in cast(list[Any], groups[index].get("episode_ids", []))]
     by_id = {str(row["episode_id"]): row for row in cast(list[Mapping[str, Any]], prepared["episodes"])}
     rows = [by_id[item] for item in ids]
+    selected_policies: dict[str, Any]
     if policies is None and config is not None:
         configured_paths = getattr(config, "policy_paths", {})
         selected_policies = {
@@ -592,7 +593,7 @@ def run_shard(
             for policy_id in POLICY_IDS
         }
     else:
-        selected_policies = policies or {
+        selected_policies = dict(policies) if policies is not None else {
             policy_id: (lambda _ctx, _proposal, _i=i: -_i)
             for i, policy_id in enumerate(POLICY_IDS)
         }

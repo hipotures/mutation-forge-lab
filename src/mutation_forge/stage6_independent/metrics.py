@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 # These identifiers are duplicated deliberately: importing Stage 5 config (or
 # any other Stage 5 module) would defeat the purpose of an independent path.
@@ -315,14 +315,14 @@ def summarize(episodes: Iterable[PolicyAreaEpisode], policy_ids: Sequence[str] =
         {p: _mean([x.areas[p] for x in vals], "policy-seed mean") for p in ids}, len(vals))
         for (o, g, r), vals in sorted(by_relabel.items())]
     by_graph: dict[tuple[int, int], list[RelabelAreaSummary]] = {}
-    for value in relabel_summaries:
-        by_graph.setdefault((value.order, value.graph_seed), []).append(value)
-    graph_summaries = [GraphAreaSummary(o, g,
+    for relabel_summary in relabel_summaries:
+        by_graph.setdefault((relabel_summary.order, relabel_summary.graph_seed), []).append(relabel_summary)
+    graph_summaries: list[GraphAreaSummary] = [GraphAreaSummary(o, g,
         {p: _mean([x.policy_means[p] for x in vals], "relabel mean") for p in ids}, len(vals),
         sum(x.episode_count for x in vals)) for (o, g), vals in sorted(by_graph.items())]
     by_order: dict[int, list[GraphAreaSummary]] = {}
-    for value in graph_summaries:
-        by_order.setdefault(value.order, []).append(value)
+    for graph_summary in graph_summaries:
+        by_order.setdefault(graph_summary.order, []).append(graph_summary)
     order_summaries = [OrderAreaSummary(o,
         {p: _mean([x.policy_means[p] for x in vals], "graph mean") for p in ids}, len(vals),
         sum(x.episode_count for x in vals)) for o, vals in sorted(by_order.items())]
@@ -437,7 +437,7 @@ def bootstrap(summary: MetricsSummary, *, samples: int = DEFAULT_BOOTSTRAP_SAMPL
     confidence = _fraction(confidence_level, "confidence_level")
     if not Fraction(0) < confidence < Fraction(1):
         raise ValueError("confidence_level must be in (0, 1)")
-    draws = {effect: [] for effect in EFFECTS}
+    draws: dict[str, list[Fraction]] = {effect: [] for effect in EFFECTS}
     for index in range(samples):
         draw = _bootstrap_draw(summary, _sample_rng(seed, index))
         for effect in EFFECTS:
@@ -491,7 +491,7 @@ def as_dict(value: Any) -> dict[str, Any]:
     method = getattr(value, "as_dict", None)
     if method is None or not callable(method):
         raise TypeError("value does not provide an as_dict helper")
-    return method()
+    return cast(dict[str, Any], method())
 
 
 # Familiar Stage 5 names are aliases, while all computation remains local.

@@ -246,7 +246,13 @@ def audit_stage5(
         proof = row.get("relabel_proof")
         graph_ok &= row.get("invalid_graphs") == 0 and isinstance(proof, Mapping) and proof.get("base_graph_hash") == row.get("base_graph_hash") and proof.get("relabeled_graph_hash") == row.get("relabeled_graph_hash") and proof.get("canonical_unlabeled_hash") == row.get("canonical_unlabeled_hash")
         perm = proof.get("permutation") if isinstance(proof, Mapping) else None
-        relabel_ok &= isinstance(perm, list) and len(perm) == int(row.get("order", 0)) and sorted(perm) == list(range(int(row.get("order", 0)))) and proof.get("algorithm") == "fisher-yates-sha256-v1"
+        relabel_ok &= (
+            isinstance(perm, list)
+            and len(perm) == int(row.get("order", 0))
+            and sorted(perm) == list(range(int(row.get("order", 0))))
+            and isinstance(proof, Mapping)
+            and proof.get("algorithm") == "fisher-yates-sha256-v1"
+        )
     refs = [str(analysis_root / "primary"), str(analysis_root / "replay")]
     _assertion(report, "four_policy_roster_and_metrics_input", policy_ok and metrics_ok, refs)
     _assertion(report, "zero_counters_and_equal_budgets", counters_ok and budgets_ok, refs)

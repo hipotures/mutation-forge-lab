@@ -49,6 +49,7 @@ from mutation_forge.stage2d.evaluation import (
 from mutation_forge.stage3 import commands as stage3_commands
 from mutation_forge.stage4 import commands as stage4_commands
 from mutation_forge.stage6_independent import orchestrator as stage6_commands
+from mutation_forge.stage6_independent.config import POLICY_IDS as STAGE6_POLICY_IDS
 from mutation_forge.stage6_independent.config import load_config as load_stage6_config
 from mutation_forge.stage6_independent.runner import run_shard as run_stage6_shard
 from mutation_forge.stage6_independent.runner import verify_replay as verify_stage6_replay
@@ -473,7 +474,7 @@ def _stage6(args: argparse.Namespace) -> int:
         prepared = stage6_commands.plan_fresh(args.config)
         policies = {
             policy_id: config.policy_paths[policy_id].read_text(encoding="utf-8")
-            for policy_id in stage6_commands.POLICY_IDS
+            for policy_id in STAGE6_POLICY_IDS
         }
         output_dir = config.run_root / args.pass_name
         result = run_stage6_shard(
