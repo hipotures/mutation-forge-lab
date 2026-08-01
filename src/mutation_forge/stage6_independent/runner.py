@@ -66,7 +66,10 @@ def _digest_int(domain: str, *parts: object) -> int:
 def _relabel_graph(graph: GraphState, *, graph_seed: int, relabeling_seed: int) -> tuple[GraphState, tuple[int, ...]]:
     values = list(range(graph.order))
     for index in range(graph.order - 1, 0, -1):
-        swap = _digest_int("stage6.relabel.v1", graph.order, graph_seed, relabeling_seed, index) % (index + 1)
+        # The frozen Fisher--Yates contract uses a domain-separated digest;
+        # spelling it out here keeps this runner independent of any prior
+        # stage implementation while preserving the published permutation.
+        swap = _digest_int("stage5.relabel.permutation.v1", graph.order, graph_seed, relabeling_seed, index) % (index + 1)
         values[index], values[swap] = values[swap], values[index]
     edges = tuple(sorted((min(values[u], values[v]), max(values[u], values[v])) for u, v in graph.edges))
     return GraphState(graph.order, edges), tuple(values)
