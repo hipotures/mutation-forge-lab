@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ from mutation_forge.stage7_heg_bridge.fixtures import build_fixture, fixture_spe
 
 
 @pytest.fixture()
-def bridge() -> HegPolicyBridge:
+def bridge() -> Generator[HegPolicyBridge, None, None]:
     instance = HegPolicyBridge(Path("../heg"))
     try:
         yield instance

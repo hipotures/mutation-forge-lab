@@ -207,7 +207,12 @@ could recommend HEG policy integration after a final scientific GO. Stages
 approval.
 
 Current milestone status: issue #15 completed Stage 5 with terminal
-`GO_TO_STAGE_6`, and issue #16 completed Stage 6 with terminal
-`GO_TO_STAGE_7`. The independent Stage 6 evidence and reports are retained;
-Stage 7 has not started, HEG remains read-only, and issue #16 remains open for
-review.
+`GO_TO_STAGE_6`, issue #16 completed Stage 6 with terminal `GO_TO_STAGE_7`,
+and issue #17 completed Stage 7 with terminal `NO_GO`. The Stage 7 replay,
+fixtures, red-team corpus, 100,000-call bounded benchmark, compatibility audit,
+contract, risk register, and complete future HEG issue draft are retained. The
+two failed gates are the unresolved pinned-HEG change-surface findings and the
+unavailable faithful HEG throughput projection; this is not an infrastructure
+failure. HEG remains clean, pinned, and read-only. No HEG issue, branch, pull
+request, migration, or production integration was created, and issue #17
+remains open for review.

@@ -3,6 +3,9 @@
 This is a draft only. Stage 7 does not create the issue, branch, pull request,
 migration, or production rollout.
 
+Stage 7 terminal decision: `NO_GO`. The draft is retained for a separately
+reviewed future HEG issue; it was not created automatically.
+
 ## Base and reviewed identity
 
 - base HEG commit: `fd97451b0f3d87400d1d955a2c6b1b18303344ff`;

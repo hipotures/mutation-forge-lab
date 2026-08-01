@@ -129,7 +129,16 @@ preserved at `/home/user/DEV/mutation-forge-evidence/stage5-generalization/issue
 Issue #16 then completed the independent Stage 6 audit, raw-shard
 recomputation, red-team corpus, and fresh 768-identity replication.
 `docs/reports/STAGE6_VERIFICATION_REPORT.md` records the exact terminal result
-`GO_TO_STAGE_7`. Stage 7 has not started and HEG remains read-only.
+`GO_TO_STAGE_7`. Issue #17 then completed the frozen Stage 7 HEG compatibility
+and integration-readiness decision. `docs/reports/STAGE7_HEG_INTEGRATION_DECISION.md`
+records the exact terminal result `NO_GO`: the required proposal-pool/ranker,
+feature-semantic, checkpoint/recovery, M4, process-boundary, and faithful
+throughput seams are not present in the pinned HEG. The out-of-tree bridge and
+all authoritative evidence are retained at
+`/home/user/mutation-forge-evidence/stage7-heg-integration/issue-17-final`.
+HEG remains clean, pinned, and read-only; no HEG issue, branch, pull request,
+migration, or production integration was created. The future issue draft is
+retained for separate review only.
 
 The Phase 1 statement refers to the official campaign. Before the fresh v6
 freeze, three explicitly user-authorized adapter connectivity turns were

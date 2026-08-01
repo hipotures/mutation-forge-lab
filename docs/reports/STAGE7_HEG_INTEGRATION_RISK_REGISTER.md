@@ -14,6 +14,8 @@ HEG `fd97451b0f3d87400d1d955a2c6b1b18303344ff` (clean, read-only).
 | R-07 | medium | HEG/Mutation Forge throughput telemetry has different denominators and resource assumptions. | Freeze one-thread benchmark and require a faithful HEG projection; do not invent a rate. | benchmark gate fails when projection unavailable |
 | R-08 | low | Existing HEG tests emit teardown resource warnings. | Add explicit close/reap assertions to the future issue. | non-scientific maintenance |
 
-No model, Codex App Server, provider, oracle, runtime-network, or HEG write
-occurred. The authoritative decision must fail closed while any blocker above
-remains unresolved.
+Authoritative execution completed with no model, Codex App Server, provider,
+oracle, runtime-network, or HEG write. The two high/material operational
+blockers remained unresolved, so the terminal decision failed closed as
+`NO_GO`. The future issue draft records the smallest additive HEG change
+surface; it was not created automatically.

@@ -39,6 +39,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
 "fixtures/stage4-seeds/*.py" = ["E501"]
+"fixtures/stage7/mutation_policy_stage4r_v1.py" = ["E741"]
 
 [tool.mypy]
 python_version = "3.12"
