@@ -113,7 +113,7 @@ def test_trajectories_diverge_then_generate_independent_pools(
     monkeypatch.setattr(
         evaluation,
         "_rankers",
-        lambda config, policies: (rankers, ["random", "structural"], []),
+        lambda config, policies, **_: (rankers, ["random", "structural"], []),
     )
     monkeypatch.setattr(evaluation, "_pool_generator", lambda backend, config: generator)
     record = evaluation.run_development_episode(
@@ -176,7 +176,7 @@ def test_episode_failure_is_recorded_without_invalid_scoring(
     monkeypatch.setattr(
         evaluation,
         "_rankers",
-        lambda config, policies: (rankers, list(rankers), []),
+        lambda config, policies, **_: (rankers, list(rankers), []),
     )
     record = evaluation.run_development_episode(
         config,
