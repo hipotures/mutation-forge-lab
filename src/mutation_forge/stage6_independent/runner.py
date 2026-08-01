@@ -258,7 +258,8 @@ def _episode(row: Mapping[str, Any], *, backend: Any, scorer: Any, proposer: Any
         records = {}
         for policy_index, policy_id in enumerate(POLICY_IDS):
             curve = [max(0, 8 - ((step + policy_index) % 9)) for step in range(horizon)]
-            records[policy_id] = {"normalized_best_so_far_curve": curve, "auc": sum(curve) / max(1, horizon), "best_total_witnesses": min(curve), "accepted_count": sum(1 for step in range(horizon) if step % 3 == policy_index % 3), "rejected_count": horizon, "failure_count": 0}
+            accepted = sum(1 for step in range(horizon) if step % 3 == policy_index % 3)
+            records[policy_id] = {"normalized_best_so_far_curve": curve, "auc": sum(curve) / max(1, horizon), "best_total_witnesses": min(curve), "accepted_count": accepted, "rejected_count": horizon - accepted, "failure_count": 0}
         base = {"schema_version": SCHEMA_VERSION, "terminal_status": "completed", "episode_id": eid, **{key: row[key] for key in ("order", "graph_seed", "relabeling_seed", "policy_seed", "horizon", "shard_id") if key in row}, "policies": records, "steps": [], "initial_score_calls": 1, "selected_score_calls": horizon * len(POLICY_IDS), "oracle_score_calls": 0, "provider_calls": 0, "timing_ns": {"episode_total": time.perf_counter_ns() - started}}
         base["canonical_hash"] = canonical_record_hash(base)
         return base
