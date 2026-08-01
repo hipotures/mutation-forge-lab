@@ -5,6 +5,8 @@ Stage 5 implementation is imported: parsing, integrity checks, metrics,
 bootstrap, and field-level comparison all use the independent package.
 """
 
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import gzip
@@ -188,6 +190,124 @@ def compare_retained_result(
     return {"exact": not differences, "differences": differences}
 
 
+def _canonical_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _all_rows(rows: list[dict[str, Any]], predicate: Any) -> bool:
+    return all(bool(predicate(row)) for row in rows)
+
+
+def _recompute_stage5_gates(
+    primary_summary: Mapping[str, Any],
+    replay_summary: Mapping[str, Any],
+    primary_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+    freeze: Mapping[str, Any],
+    replay_exact: bool,
+    metric_gates: Mapping[str, bool],
+) -> dict[str, bool]:
+    frozen_policies = freeze.get("policies", {})
+    policy_provenance = isinstance(frozen_policies, Mapping) and _all_rows(
+        primary_rows + replay_rows,
+        lambda row: set(row.get("policies", {})) == set(POLICY_IDS)
+        and row.get("policy_source_sha256")
+        == {
+            policy: cast(Mapping[str, Any], frozen_policies[policy]).get("source_sha256")
+            for policy in POLICY_IDS
+        },
+    )
+    primary_ids = [str(row.get("episode_id", "")) for row in primary_rows]
+    replay_ids = [str(row.get("episode_id", "")) for row in replay_rows]
+    manifest_disjointness = freeze.get("manifest_disjointness", {})
+    manifest_complete = (
+        len(primary_rows) == 1536
+        and len(replay_rows) == 1536
+        and len(primary_ids) == len(set(primary_ids))
+        and len(replay_ids) == len(set(replay_ids))
+        and sorted(primary_ids) == sorted(str(item) for item in primary_summary.get("manifest_episode_ids", []))
+        and sorted(replay_ids) == sorted(str(item) for item in replay_summary.get("manifest_episode_ids", []))
+        and isinstance(manifest_disjointness, Mapping)
+        and all(bool(manifest_disjointness.get(key)) for key in ("orders_disjoint", "base_identities_disjoint", "complete_identities_disjoint"))
+    )
+    budgets = _all_rows(
+        primary_rows + replay_rows,
+        lambda row: row.get("evaluation_count") == 128
+        and row.get("selected_score_calls") == 128
+        and row.get("horizon") == 32
+        and isinstance(row.get("metrics_input"), Mapping)
+        and set(cast(Mapping[str, Any], row["metrics_input"]).get("policies", {})) == set(POLICY_IDS),
+    )
+    graph_valid = _all_rows(
+        primary_rows + replay_rows,
+        lambda row: row.get("invalid_graphs") == 0
+        and isinstance(row.get("relabel_proof"), Mapping)
+        and _valid_permutation(cast(Mapping[str, Any], row["relabel_proof"]).get("permutation"), row.get("order"))
+        and cast(Mapping[str, Any], row["relabel_proof"]).get("base_graph_hash") == row.get("base_graph_hash")
+        and cast(Mapping[str, Any], row["relabel_proof"]).get("relabeled_graph_hash") == row.get("relabeled_graph_hash")
+        and cast(Mapping[str, Any], row["relabel_proof"]).get("canonical_unlabeled_hash") == row.get("canonical_unlabeled_hash"),
+    )
+    worker_clean = _all_rows(
+        primary_rows + replay_rows,
+        lambda row: row.get("terminal_status") == "completed"
+        and row.get("policy_failures") == 0
+        and all(
+            not bool(cast(Mapping[str, Any], trace).get(flag))
+            for step in cast(list[Any], row.get("steps", []))
+            for trace in cast(Mapping[str, Any], step).get("policies", {}).values()
+            for flag in ("exception", "timeout", "crash", "protocol")
+        ),
+    )
+    selected_only = _all_rows(
+        primary_rows + replay_rows,
+        lambda row: row.get("oracle_score_calls") == 0
+        and row.get("selected_score_calls") == row.get("evaluation_count") == 128,
+    )
+    zero_calls = _all_rows(
+        primary_rows + replay_rows,
+        lambda row: all(row.get(key) == 0 for key in ("model_calls", "app_server_calls", "runtime_network_calls"))
+        and row.get("oracle_score_calls") == 0,
+    )
+    artifact_provenance = (
+        primary_summary.get("status") == "completed"
+        and replay_summary.get("status") == "completed"
+        and primary_summary.get("shard_count") == replay_summary.get("shard_count") == 24
+        and primary_summary.get("record_count") == replay_summary.get("record_count") == 1536
+        and freeze.get("provider_calls_allowed") is False
+        and freeze.get("stage6_started") is False
+        and freeze.get("freeze_sha256") == _canonical_hash({key: value for key, value in freeze.items() if key != "freeze_sha256"})
+    )
+    return {
+        "1_policy_provenance_exact": policy_provenance,
+        "2_manifest_complete_and_disjoint": manifest_complete,
+        "3_primary_and_replay_complete_equal_budgets": budgets and primary_summary.get("status") == "completed" and replay_summary.get("status") == "completed",
+        "4_timing_stripped_replay_identity_exact": replay_exact,
+        "5_graph_validity_100_percent": graph_valid,
+        "6_zero_worker_failures_crashes_timeouts_protocol_violations": worker_clean,
+        "7_selected_plan_only_zero_oracle": selected_only,
+        "8_zero_model_app_server_runtime_network_calls": zero_calls,
+        "9_C_vs_stage3_relative_improvement_ge_2_percent": bool(metric_gates.get("relative_improvement_C_vs_stage3_at_least_threshold")),
+        "10_C_vs_stage3_bootstrap_lower_bound_positive": bool(metric_gates.get("bootstrap_C_vs_stage3_lower_bound_positive")),
+        "11_C_vs_stage3_nonnegative_each_order": bool(metric_gates.get("C_vs_stage3_nonnegative_each_order")),
+        "12_C_vs_stage3_nonnegative_all_six_order_relabel_strata": bool(metric_gates.get("C_vs_stage3_nonnegative_all_six_order_relabel_strata")),
+        "13_C_vs_random_threshold_and_lower_bound": bool(metric_gates.get("relative_improvement_C_vs_random_at_least_threshold")) and bool(metric_gates.get("bootstrap_C_vs_random_lower_bound_positive")),
+        "14_structural_retention_ge_99_percent": bool(metric_gates.get("structural_retention_at_least_threshold")),
+        "15_artifact_provenance_preservation_repository_verified": artifact_provenance,
+    }
+
+
+def _valid_permutation(value: Any, order: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    try:
+        expected = list(range(int(order)))
+    except (TypeError, ValueError):
+        return False
+    return len(value) == len(expected) and sorted(value) == expected
+
+
 def recompute_stage5(evidence: str | Path) -> dict[str, Any]:
     """Recompute Stage 5 science from raw primary shards and compare it."""
 
@@ -210,6 +330,22 @@ def recompute_stage5(evidence: str | Path) -> dict[str, Any]:
         champion_random_threshold=0.05,
         structural_retention_threshold=0.99,
     )
+    freeze = _json(Path(evidence).resolve() / "stage5-generalization-freeze-v1.json")
+    recomputed_gates = _recompute_stage5_gates(
+        primary_summary,
+        replay_summary,
+        primary_rows,
+        replay_rows,
+        freeze,
+        replay_exact,
+        metric_gates,
+    )
+    retained_gates = retained.get("gates")
+    gates_exact = _payload_equal(recomputed_gates, retained_gates)
+    decision = "GO_TO_STAGE_6" if all(recomputed_gates.values()) else "NO_GO"
+    comparison["differences"].append({"path": "$.gates", "independent": recomputed_gates, "retained": retained_gates}) if not gates_exact else None
+    comparison["differences"].append({"path": "$.decision", "independent": decision, "retained": retained.get("decision")}) if decision != retained.get("decision") else None
+    comparison["exact"] = not comparison["differences"]
     return {
         "schema_version": "stage6.verification.recomputation.v1",
         "status": "passed" if comparison["exact"] and replay_exact else "failed",
@@ -220,6 +356,8 @@ def recompute_stage5(evidence: str | Path) -> dict[str, Any]:
         "comparison": comparison,
         "metrics": scientific,
         "metric_gates": metric_gates,
+        "gates": recomputed_gates,
+        "terminal_decision": decision,
         "retained_result_sha256": _sha(retained_path),
     }
 

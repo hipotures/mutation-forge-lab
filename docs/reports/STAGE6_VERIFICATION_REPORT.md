@@ -59,8 +59,8 @@ timing-only replay projection. The original evidence was not modified.
 shards directly and independently recomputes normalized curves, paired-area
 effects, hierarchy, policy means, relative effects, structural retention, all
 10,000 Stage 5 bootstrap draws (seed `2026080103`), intervals, sign counts, and
-all seven retained metric gates. The primary/replay projection is exact for all
-1,536 rows, the field-by-field comparison has `exact: true` and
+all 15 Stage 5 gates. The primary/replay projection is exact for all 1,536
+rows, the field-by-field comparison has `exact: true` and
 `differences: []`, and the retained result SHA-256 is
 `7b004772e2ac341c5af57fd10b850714b82b83405eaa7b6a2d8d61425675bb83`.
 
@@ -132,9 +132,9 @@ All 15 gates in `runs/stage6-verification/issue-16/stage6-terminal.json` passed:
 The run root is `runs/stage6-verification/issue-16`. The final preserved copy is
 `/home/user/mutation-forge-evidence/stage6-verification/issue-16-final` with
 122 files, sorted-manifest SHA-256
-`ea2843e26527d036d989c6e3eaeff2d4028c81cba3b1a21f282cbd0a5ca1ac28`, and
+`66064a1b9a7583da588d64cab2e3e4a79be6a5f77997be3df0e4fbbfd3677e87`, and
 byte-identical tree SHA-256
-`cf099462f9e1a01aeb434a2e583dcffe5fa3ceb09a0bd81375190a0bf18f1e5c`.
+`1690d264cc20cc7bba889fe94da76d8382d4b656be3f2338618b611fac1790b4`.
 Prior reducer checkpoints were retained separately; no Stage 5 or Stage 6
 evidence was deleted.
 
