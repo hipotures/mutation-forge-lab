@@ -60,7 +60,9 @@ METAMORPHIC_CASES: tuple[str, ...] = (
     "record_permutation",
     "harmless_timing_change",
     "equivalent_relabeling",
+    "fraction_float_drift",
 )
+METAMORPHIC_ACCEPTED_CASES = frozenset(METAMORPHIC_CASES) - {"fraction_float_drift"}
 
 _TIMING_FIELDS = frozenset(
     {
@@ -456,6 +458,7 @@ def tamper_fixture(value: Mapping[str, Any] | None, case: str) -> dict[str, Any]
     elif case == "runtime_network_or_provider_call": fixture["provenance"]["provider_calls"] = 1
     elif case == "sandbox_timeout_crash_protocol_input_mutation": fixture["provenance"]["sandbox_status"] = "timeout"
     elif case == "evidence_path_traversal_or_unsafe_output_overwrite": fixture["provenance"]["artifact_path"] = "../../unsafe"
+    elif case == "fraction_float_drift": rows[0]["score"] = 0.3333333333
     elif case == "shard_permutation": fixture["shards"] = list(reversed(fixture["shards"]))
     elif case == "record_permutation": fixture["records"] = list(reversed(fixture["records"]))
     elif case == "harmless_timing_change":
@@ -482,13 +485,13 @@ def run_redteam(config: Any = None, evidence: Any = None, fixture_root: str | Pa
         baseline = make_fixture()
     findings: list[dict[str, Any]] = []
     for case in CASE_NAMES + METAMORPHIC_CASES:
-        expected_accept = case in METAMORPHIC_CASES
+        expected_accept = case in METAMORPHIC_ACCEPTED_CASES
         result = verify_fixture(tamper_fixture(baseline, case))
         observed_accept = bool(result["exact"])
         passed = observed_accept == expected_accept
         findings.append({
             "case": case,
-            "severity": "informational" if expected_accept else ("critical" if case in {"altered_trajectory_curve_or_selected_score", "altered_policy_source_or_ast_identity", "runtime_network_or_provider_call", "evidence_path_traversal_or_unsafe_output_overwrite"} else "high"),
+            "severity": "informational" if expected_accept else ("medium" if case == "fraction_float_drift" else ("critical" if case in {"altered_trajectory_curve_or_selected_score", "altered_policy_source_or_ast_identity", "runtime_network_or_provider_call", "evidence_path_traversal_or_unsafe_output_overwrite"} else "high")),
             "evidence": {"expected_accept": expected_accept, "observed_accept": observed_accept, "errors": result["errors"]},
             "impact": "accepted metamorphic change" if expected_accept else "tampered evidence was rejected" if not observed_accept else "tampered evidence bypassed verification",
             "disposition": "allowed" if expected_accept and passed else "rejected" if not expected_accept and passed else "failure",
@@ -523,6 +526,7 @@ verify_tampering = run_redteam
 __all__ = [
     "CASE_NAMES",
     "METAMORPHIC_CASES",
+    "METAMORPHIC_ACCEPTED_CASES",
     "FIXTURE_SCHEMA",
     "make_fixture",
     "make_label_sensitive_fixture",

@@ -34,6 +34,7 @@
     "shard_permutation",
     "record_permutation",
     "harmless_timing_change",
-    "equivalent_relabeling"
+    "equivalent_relabeling",
+    "fraction_float_drift"
   ]
 }
