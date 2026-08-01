@@ -218,6 +218,17 @@ def make_fixture() -> dict[str, Any]:
     return fixture
 
 
+def make_label_sensitive_fixture() -> dict[str, Any]:
+    """Return the same tiny corpus with labels declared semantically fixed.
+
+    This fixture is useful for proving that the isomorphism-invariant relabeling
+    exemption is not accidentally applied to a label-sensitive metric.
+    """
+    fixture = make_fixture()
+    fixture["manifest"]["label_mode"] = "label-sensitive"
+    return fixture
+
+
 def _attach_integrity(fixture: dict[str, Any]) -> None:
     records = fixture["records"]
     for row in records:
@@ -312,6 +323,8 @@ def verify_fixture(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
             by_pair.setdefault(pair, []).append(row)
             if row.get("label_sensitive") != "role-a":
                 errors.append({"code": "label_sensitive_relabel", "path": f"$.records[{row.get('record_id')}].label_sensitive"})
+            if manifest.get("label_mode") == "label-sensitive" and row.get("vertex_labels") != ["a", "b", "c"]:
+                errors.append({"code": "label_sensitive_fixture", "path": f"$.records[{row.get('record_id')}].vertex_labels"})
             try:
                 if _fraction(row.get("weight")) != 1:
                     errors.append({"code": "misweighted_record", "path": f"$.records[{row.get('record_id')}].weight"})
@@ -452,6 +465,7 @@ __all__ = [
     "METAMORPHIC_CASES",
     "FIXTURE_SCHEMA",
     "make_fixture",
+    "make_label_sensitive_fixture",
     "run_redteam",
     "tamper_fixture",
     "verify_fixture",
