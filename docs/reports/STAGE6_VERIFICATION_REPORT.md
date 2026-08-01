@@ -132,9 +132,9 @@ All 15 gates in `runs/stage6-verification/issue-16/stage6-terminal.json` passed:
 The run root is `runs/stage6-verification/issue-16`. The final preserved copy is
 `/home/user/mutation-forge-evidence/stage6-verification/issue-16-final` with
 122 files, sorted-manifest SHA-256
-`20d5652f2dc10091d675ac7665175cbad98fd4334bc7d5344d13d82a42ebf7c6`, and
+`ea2843e26527d036d989c6e3eaeff2d4028c81cba3b1a21f282cbd0a5ca1ac28`, and
 byte-identical tree SHA-256
-`536ca3669482a7962176ed7c867b20f9ab07558328152ab4dad90499d9c09d3c`.
+`cf099462f9e1a01aeb434a2e583dcffe5fa3ceb09a0bd81375190a0bf18f1e5c`.
 Prior reducer checkpoints were retained separately; no Stage 5 or Stage 6
 evidence was deleted.
 

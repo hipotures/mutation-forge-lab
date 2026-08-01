@@ -205,6 +205,12 @@ def audit_stage5(
         report["audit_path"] = str(destination)
         report["audit_sha256"] = _tree_sha256(destination) if destination.is_dir() else None
         _assertion(report, "byte_identical_audit_copy", copied and copy_error is None and report["source_sha256"] == report["audit_sha256"], [str(source), str(destination)], copy_error)
+        _assertion(
+            report,
+            "audit_copy_sorted_manifest_matches_source",
+            destination.is_dir() and build_sha256_manifest(source) == build_sha256_manifest(destination),
+            [str(source), str(destination)],
+        )
 
     analysis_root = Path(str(report["audit_path"])).resolve() if report.get("audit_path") else source
 
