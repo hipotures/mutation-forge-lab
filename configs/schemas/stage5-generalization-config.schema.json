@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stage 5 generalization configuration",
+  "type": "object",
+  "required": ["schema_version", "run", "repositories", "inputs", "policies", "experiment", "relabeling", "resources", "bootstrap", "gates"],
+  "properties": {
+    "schema_version": {"const": "stage5.generalization.v1"},
+    "run": {"type": "object", "required": ["run_root"]},
+    "repositories": {"type": "object", "required": ["project_repo", "heg_repo", "frozen_project_commit", "frozen_heg_commit"]},
+    "inputs": {"type": "object", "required": ["stage2b_config", "manifest", "prior_manifests"]},
+    "policies": {"type": "object", "required": ["policy_ids", "champion_source", "stage3_comparator_source", "random_source", "structural_source", "behavior_sha256"]},
+    "experiment": {"type": "object", "required": ["orders", "graph_seeds", "relabeling_seeds", "policy_seeds", "horizon", "shard_count", "episodes_per_shard"]},
+    "relabeling": {"type": "object", "required": ["algorithm"]},
+    "resources": {"type": "object", "required": ["workers", "reserved_physical_cores", "thread_count"]},
+    "bootstrap": {"type": "object", "required": ["samples", "seed", "confidence_level"]},
+    "gates": {"type": "object", "required": ["champion_stage3_threshold", "champion_random_threshold", "structural_retention_threshold"]}
+  },
+  "additionalProperties": false
+}

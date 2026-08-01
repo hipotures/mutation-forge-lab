@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stage 5 terminal reduction",
+  "type": "object",
+  "required": ["schema_version", "decision", "gates", "metrics", "provider_calls", "stage6_started"],
+  "properties": {
+    "schema_version": {"const": "stage5.generalization.result.v1"},
+    "decision": {"enum": ["GO_TO_STAGE_6", "NO_GO", "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"]},
+    "gates": {"type": "object", "minProperties": 15},
+    "metrics": {"type": "object"},
+    "provider_calls": {"const": 0},
+    "stage6_started": {"const": false}
+  },
+  "additionalProperties": true
+}

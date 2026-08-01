@@ -1,0 +1,526 @@
+"""Frozen configuration and held-out manifest construction for Stage 5.
+
+The Stage 5 protocol is intentionally independent from the provider-backed
+generation stages.  This module validates every scientific input before an
+executor is allowed to evaluate an episode and builds the complete manifest
+deterministically from the preregistered tuple ranges.
+"""
+# ruff: noqa: E501
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import tomllib
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, cast
+
+from mutation_forge.models import JsonValue
+from mutation_forge.sandbox.validation import validate_policy
+from mutation_forge.stage2b.config import Stage2BConfig, load_stage2b_config
+from mutation_forge.stage3.manifest import canonical_bytes
+
+STAGE5_CONFIG_VERSION = "stage5.generalization.v1"
+STAGE5_MANIFEST_VERSION = "stage5.generalization.manifest.v1"
+STAGE5_FREEZE_VERSION = "stage5.generalization.freeze.v1"
+START_COMMIT = "cc2f7b7254705d47fd4995a4b8a2bd45d545795c"
+HEG_COMMIT = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
+
+CHAMPION_ID = "program-d5ad1c8203e0d9f25f03aabd"
+STAGE3_COMPARATOR_ID = "candidate-slot-04"
+RANDOM_ID = "random"
+STRUCTURAL_ID = "structural"
+POLICY_IDS = (CHAMPION_ID, STAGE3_COMPARATOR_ID, RANDOM_ID, STRUCTURAL_ID)
+
+CHAMPION_SOURCE_SHA256 = "e444562c1b308e3b23cb732be5f769ea1923ac1809501cea8571318c4aff0a7b"
+CHAMPION_AST_SHA256 = "2243214df58c805e9a9343dc31ed082279e1c2ac31b21243bf889dbc9a19e165"
+STAGE3_COMPARATOR_SOURCE_SHA256 = "a5f540459695bbf7d454eeccbb8e48158d6130df6a769b67d1447de18276dc01"
+STAGE3_COMPARATOR_AST_SHA256 = "cef05bb644e2e0a9acbc4972fbaa6d4ba3e033ee8a73ecd756da44100c767f5c"
+RANDOM_SOURCE_SHA256 = "d4994fb96bdc3c23b8b24d9bca041f2822bc30329bcf8f9cdbd2e277e65b0612"
+RANDOM_AST_SHA256 = "f7f502b0319df5dc32ef0f8476024c4986dcb3422ef2e03b117a3d394bbfc7b7"
+STRUCTURAL_SOURCE_SHA256 = "68aba299d7735198d38a8d30e221ef99cdbb7d846c502aca41691c49ceef87be"
+STRUCTURAL_AST_SHA256 = "5b017c2ba79953e31b224df91e060d4af27c3b212695a03e8650ec91e8b0ad81"
+
+# The signatures are the retained Stage 3 10,000-call behavior probes.  They
+# are evidence of the reviewed baseline identity, not a new policy outcome.
+BEHAVIOR_SIGNATURES = {
+    CHAMPION_ID: "8c2bdaa213f11b253d3ffcae1653bd01536879bb5c254a1586ded9ae522a868e",
+    STAGE3_COMPARATOR_ID: "3694bd0b8813621c2abe98186dbbe933f3f7758b7b660d4c9229616e77d76c3c",
+    RANDOM_ID: "2bc6f8a22a1b43431ee6cc1817716f7a55c688f736a8d5e04be020c7bf1821f2",
+    STRUCTURAL_ID: "8ab4d5d6f5ed5d908fca2a637cbb1541c5bf7e6e09d5bbadeb3b703b2aa673aa",
+}
+
+BOOTSTRAP_SAMPLES = 10_000
+BOOTSTRAP_SEED = 2_026_080_103
+CONFIDENCE_LEVEL = 0.95
+CHAMPION_STAGE3_THRESHOLD = 0.02
+CHAMPION_RANDOM_THRESHOLD = 0.05
+STRUCTURAL_RETENTION_THRESHOLD = 0.99
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_value(value: object) -> str:
+    return sha256_bytes(canonical_bytes(value))
+
+
+def episode_id(order: int, graph_seed: int, relabeling_seed: int, policy_seed: int) -> str:
+    return f"o{order:02d}-g{graph_seed:04d}-r{relabeling_seed:04d}-p{policy_seed:04d}"
+
+
+@dataclass(frozen=True, slots=True)
+class Stage5Experiment:
+    orders: tuple[int, ...]
+    graph_seeds: tuple[int, ...]
+    relabeling_seeds: tuple[int, ...]
+    policy_seeds: tuple[int, ...]
+    horizon: int
+    shard_count: int
+    episodes_per_shard: int
+
+    @property
+    def episode_count(self) -> int:
+        return (
+            len(self.orders)
+            * len(self.graph_seeds)
+            * len(self.relabeling_seeds)
+            * len(self.policy_seeds)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Stage5Resources:
+    workers: int
+    reserved_physical_cores: int
+    thread_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class Stage5Config:
+    source_path: Path
+    run_root: Path
+    project_repo: Path
+    heg_repo: Path
+    frozen_project_commit: str
+    frozen_heg_commit: str
+    stage2b_config_path: Path
+    stage2b: Stage2BConfig
+    manifest_path: Path
+    prior_manifest_paths: tuple[Path, ...]
+    policy_paths: dict[str, Path]
+    policy_source_hashes: dict[str, str]
+    policy_ast_hashes: dict[str, str]
+    policy_behavior_hashes: dict[str, str]
+    experiment: Stage5Experiment
+    resources: Stage5Resources
+    relabel_algorithm: str
+    bootstrap_samples: int
+    bootstrap_seed: int
+    confidence_level: float
+    champion_stage3_threshold: float
+    champion_random_threshold: float
+    structural_retention_threshold: float
+
+    def resolved_dict(self) -> dict[str, JsonValue]:
+        raw = asdict(self)
+
+        def normalize(value: object) -> object:
+            if isinstance(value, Path):
+                return str(value)
+            if isinstance(value, Mapping):
+                return {str(key): normalize(item) for key, item in value.items()}
+            if isinstance(value, (tuple, list)):
+                return [normalize(item) for item in value]
+            return value
+
+        result = cast(dict[str, JsonValue], normalize(raw))
+        result.pop("source_path", None)
+        result.pop("stage2b", None)
+        result["stage2b_config_sha256"] = sha256_bytes(self.stage2b_config_path.read_bytes())
+        return result
+
+    def stable_hash(self) -> str:
+        return sha256_value(self.resolved_dict())
+
+    @property
+    def limits(self) -> Stage5Resources:
+        return self.resources
+
+
+def _path(base: Path, value: object, name: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty path")
+    candidate = Path(value)
+    return (base / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+
+
+def _sha(value: object, name: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise ValueError(f"{name} must be a lowercase SHA-256")
+    return value
+
+
+def _tuple_ints(value: object, expected: tuple[int, ...], name: str) -> tuple[int, ...]:
+    if not isinstance(value, list) or tuple(value) != expected:
+        raise ValueError(f"{name} is not frozen as {expected}")
+    return expected
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result.stdout.strip()
+
+
+def _load_raw(path: Path) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        value = tomllib.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError("Stage 5 config must be a TOML table")
+    return value
+
+
+def load_stage5_config(path: str | Path = "configs/stage5-generalization.toml") -> Stage5Config:
+    source_path = Path(path).resolve()
+    raw = _load_raw(source_path)
+    if raw.get("schema_version") != STAGE5_CONFIG_VERSION:
+        raise ValueError("invalid Stage 5 schema_version")
+    required_tables = (
+        "run",
+        "repositories",
+        "inputs",
+        "policies",
+        "experiment",
+        "relabeling",
+        "resources",
+        "bootstrap",
+        "gates",
+    )
+    if any(not isinstance(raw.get(table), dict) for table in required_tables):
+        raise ValueError("Stage 5 config is missing a required table")
+    base = source_path.parent
+    run = cast(dict[str, Any], raw["run"])
+    repositories = cast(dict[str, Any], raw["repositories"])
+    inputs = cast(dict[str, Any], raw["inputs"])
+    policies = cast(dict[str, Any], raw["policies"])
+    experiment = cast(dict[str, Any], raw["experiment"])
+    relabeling = cast(dict[str, Any], raw["relabeling"])
+    resources = cast(dict[str, Any], raw["resources"])
+    bootstrap = cast(dict[str, Any], raw["bootstrap"])
+    gates = cast(dict[str, Any], raw["gates"])
+
+    parsed_experiment = Stage5Experiment(
+        _tuple_ints(experiment.get("orders"), (14, 18, 22), "experiment.orders"),
+        _tuple_ints(experiment.get("graph_seeds"), tuple(range(601, 617)), "experiment.graph_seeds"),
+        _tuple_ints(experiment.get("relabeling_seeds"), (6101, 6102), "experiment.relabeling_seeds"),
+        _tuple_ints(experiment.get("policy_seeds"), tuple(range(6001, 6017)), "experiment.policy_seeds"),
+        int(experiment.get("horizon", 0)),
+        int(experiment.get("shard_count", 0)),
+        int(experiment.get("episodes_per_shard", 0)),
+    )
+    if (
+        parsed_experiment.horizon,
+        parsed_experiment.shard_count,
+        parsed_experiment.episodes_per_shard,
+        parsed_experiment.episode_count,
+    ) != (32, 24, 64, 1536):
+        raise ValueError("Stage 5 experiment matrix is not frozen")
+    parsed_resources = Stage5Resources(
+        int(resources.get("workers", 0)),
+        int(resources.get("reserved_physical_cores", 0)),
+        int(resources.get("thread_count", 0)),
+    )
+    if parsed_resources != Stage5Resources(8, 8, 1):
+        raise ValueError("Stage 5 resources are not frozen")
+    if (
+        int(bootstrap.get("samples", 0)) != BOOTSTRAP_SAMPLES
+        or int(bootstrap.get("seed", 0)) != BOOTSTRAP_SEED
+        or float(bootstrap.get("confidence_level", 0)) != CONFIDENCE_LEVEL
+    ):
+        raise ValueError("Stage 5 bootstrap is not frozen")
+    parsed_gates = (
+        float(gates.get("champion_stage3_threshold", 0)),
+        float(gates.get("champion_random_threshold", 0)),
+        float(gates.get("structural_retention_threshold", 0)),
+    )
+    if parsed_gates != (
+        CHAMPION_STAGE3_THRESHOLD,
+        CHAMPION_RANDOM_THRESHOLD,
+        STRUCTURAL_RETENTION_THRESHOLD,
+    ):
+        raise ValueError("Stage 5 gates are not frozen")
+    if relabeling.get("algorithm") != "fisher-yates-sha256-v1":
+        raise ValueError("Stage 5 relabeling algorithm is not frozen")
+
+    project_repo = _path(base, repositories.get("project_repo"), "repositories.project_repo")
+    heg_repo = _path(base, repositories.get("heg_repo"), "repositories.heg_repo")
+    if repositories.get("frozen_project_commit") != START_COMMIT:
+        raise ValueError("Stage 5 project pin differs")
+    if repositories.get("frozen_heg_commit") != HEG_COMMIT:
+        raise ValueError("Stage 5 HEG pin differs")
+    current_project = _git(project_repo, "rev-parse", "HEAD")
+    ancestor = subprocess.run(
+        ["git", "-C", str(project_repo), "merge-base", "--is-ancestor", START_COMMIT, current_project],
+        capture_output=True,
+        timeout=30,
+    )
+    if ancestor.returncode != 0:
+        raise ValueError("project repository is not based on the required main SHA")
+    if _git(heg_repo, "rev-parse", "HEAD") != HEG_COMMIT or _git(heg_repo, "status", "--short"):
+        raise ValueError("HEG is not clean at the frozen pin")
+
+    stage2b_path = _path(base, inputs.get("stage2b_config"), "inputs.stage2b_config")
+    stage2b = load_stage2b_config(stage2b_path)
+    manifest_path = _path(base, inputs.get("manifest"), "inputs.manifest")
+    prior_raw = inputs.get("prior_manifests")
+    if not isinstance(prior_raw, list) or not prior_raw:
+        raise ValueError("Stage 5 prior_manifests must be a non-empty list")
+    prior = tuple(_path(base, value, "inputs.prior_manifest") for value in prior_raw)
+    if any(not path.is_file() for path in prior):
+        missing = [str(path) for path in prior if not path.is_file()]
+        raise FileNotFoundError(", ".join(missing))
+
+    expected_source = {
+        CHAMPION_ID: CHAMPION_SOURCE_SHA256,
+        STAGE3_COMPARATOR_ID: STAGE3_COMPARATOR_SOURCE_SHA256,
+        RANDOM_ID: RANDOM_SOURCE_SHA256,
+        STRUCTURAL_ID: STRUCTURAL_SOURCE_SHA256,
+    }
+    expected_ast = {
+        CHAMPION_ID: CHAMPION_AST_SHA256,
+        STAGE3_COMPARATOR_ID: STAGE3_COMPARATOR_AST_SHA256,
+        RANDOM_ID: RANDOM_AST_SHA256,
+        STRUCTURAL_ID: STRUCTURAL_AST_SHA256,
+    }
+    path_fields = {
+        CHAMPION_ID: "champion_source",
+        STAGE3_COMPARATOR_ID: "stage3_comparator_source",
+        RANDOM_ID: "random_source",
+        STRUCTURAL_ID: "structural_source",
+    }
+    policy_paths = {
+        policy_id: _path(base, policies.get(field), f"policies.{field}")
+        for policy_id, field in path_fields.items()
+    }
+    configured_ids = tuple(policies.get("policy_ids", []))
+    if configured_ids != POLICY_IDS:
+        raise ValueError("Stage 5 policy IDs are not frozen")
+    source_hashes: dict[str, str] = {}
+    ast_hashes: dict[str, str] = {}
+    for policy_id in POLICY_IDS:
+        path_value = policy_paths[policy_id]
+        if not path_value.is_file():
+            raise FileNotFoundError(path_value)
+        source = path_value.read_text(encoding="utf-8")
+        source_hash = sha256_bytes(source.encode("utf-8"))
+        if source_hash != expected_source[policy_id]:
+            raise ValueError(f"{policy_id} source hash mismatch")
+        validation = validate_policy(source, stage2b.sandbox)
+        if not validation.valid or validation.identity.normalized_ast_sha256 != expected_ast[policy_id]:
+            raise ValueError(f"{policy_id} normalized AST identity mismatch")
+        source_hashes[policy_id] = source_hash
+        ast_hashes[policy_id] = validation.identity.normalized_ast_sha256
+    behavior_hashes: dict[str, str] = {}
+    configured_behavior = policies.get("behavior_sha256")
+    if not isinstance(configured_behavior, dict):
+        raise ValueError("policies.behavior_sha256 must be a table")
+    for policy_id in POLICY_IDS:
+        behavior_hashes[policy_id] = _sha(configured_behavior.get(policy_id), f"behavior_sha256.{policy_id}")
+        if behavior_hashes[policy_id] != BEHAVIOR_SIGNATURES[policy_id]:
+            raise ValueError(f"{policy_id} behavior signature is not reviewed")
+
+    return Stage5Config(
+        source_path=source_path,
+        run_root=_path(base, run.get("run_root"), "run.run_root"),
+        project_repo=project_repo,
+        heg_repo=heg_repo,
+        frozen_project_commit=START_COMMIT,
+        frozen_heg_commit=HEG_COMMIT,
+        stage2b_config_path=stage2b_path,
+        stage2b=stage2b,
+        manifest_path=manifest_path,
+        prior_manifest_paths=prior,
+        policy_paths=policy_paths,
+        policy_source_hashes=source_hashes,
+        policy_ast_hashes=ast_hashes,
+        policy_behavior_hashes=behavior_hashes,
+        experiment=parsed_experiment,
+        resources=parsed_resources,
+        relabel_algorithm=str(relabeling["algorithm"]),
+        bootstrap_samples=BOOTSTRAP_SAMPLES,
+        bootstrap_seed=BOOTSTRAP_SEED,
+        confidence_level=CONFIDENCE_LEVEL,
+        champion_stage3_threshold=CHAMPION_STAGE3_THRESHOLD,
+        champion_random_threshold=CHAMPION_RANDOM_THRESHOLD,
+        structural_retention_threshold=STRUCTURAL_RETENTION_THRESHOLD,
+    )
+
+
+def _collect_episode_keys(value: object, result: set[tuple[int, int, int, int | None]]) -> None:
+    if isinstance(value, Mapping):
+        if {"order", "graph_seed", "policy_seed"}.issubset(value) and all(
+            isinstance(value[key], int) and not isinstance(value[key], bool)
+            for key in ("order", "graph_seed", "policy_seed")
+        ):
+                relabel = value.get("relabeling_seed")
+                if relabel is None or (isinstance(relabel, int) and not isinstance(relabel, bool)):
+                    result.add((int(value["order"]), int(value["graph_seed"]), int(value["policy_seed"]), None if relabel is None else int(relabel)))
+        for item in value.values():
+            _collect_episode_keys(item, result)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_episode_keys(item, result)
+
+
+def _prior_keys(paths: tuple[Path, ...]) -> tuple[set[tuple[int, int, int]], set[tuple[int, int, int, int]], set[int], dict[str, str]]:
+    base: set[tuple[int, int, int]] = set()
+    complete: set[tuple[int, int, int, int]] = set()
+    orders: set[int] = set()
+    hashes: dict[str, str] = {}
+    for path in paths:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        keys: set[tuple[int, int, int, int | None]] = set()
+        _collect_episode_keys(raw, keys)
+        for order, graph_seed, policy_seed, relabel in keys:
+            base.add((order, graph_seed, policy_seed))
+            orders.add(order)
+            if relabel is not None:
+                complete.add((order, graph_seed, relabel, policy_seed))
+        hashes[str(path)] = sha256_bytes(path.read_bytes())
+    return base, complete, orders, hashes
+
+
+def build_manifest(config: Stage5Config) -> dict[str, JsonValue]:
+    rows: list[dict[str, JsonValue]] = []
+    grouped: dict[str, list[str]] = {f"shard-{index:02d}": [] for index in range(config.experiment.shard_count)}
+    index = 0
+    for order in config.experiment.orders:
+        for graph_seed in config.experiment.graph_seeds:
+            for relabeling_seed in config.experiment.relabeling_seeds:
+                for policy_seed in config.experiment.policy_seeds:
+                    row: dict[str, JsonValue] = {
+                        "episode_id": episode_id(order, graph_seed, relabeling_seed, policy_seed),
+                        "order": order,
+                        "graph_seed": graph_seed,
+                        "relabeling_seed": relabeling_seed,
+                        "policy_seed": policy_seed,
+                        "horizon": config.experiment.horizon,
+                        "shard_id": f"shard-{index % config.experiment.shard_count:02d}",
+                    }
+                    rows.append(row)
+                    grouped[str(row["shard_id"])].append(str(row["episode_id"]))
+                    index += 1
+    shards = [
+        {"shard_id": shard_id, "episode_ids": ids, "episode_count": len(ids)}
+        for shard_id, ids in grouped.items()
+    ]
+    base: dict[str, JsonValue] = {
+        "schema_version": STAGE5_MANIFEST_VERSION,
+        "dataset": "stage5-heldout-relabeled-toy-graphs",
+        "held_out": True,
+        "orders": list(config.experiment.orders),
+        "graph_seeds": list(config.experiment.graph_seeds),
+        "relabeling_seeds": list(config.experiment.relabeling_seeds),
+        "policy_seeds": list(config.experiment.policy_seeds),
+        "horizon": config.experiment.horizon,
+        "episode_count": len(rows),
+        "shard_count": config.experiment.shard_count,
+        "episodes_per_shard": config.experiment.episodes_per_shard,
+        "episodes": cast(list[JsonValue], rows),
+        "shards": cast(list[JsonValue], shards),
+        "frozen_policy_ids": list(POLICY_IDS),
+        "stage5_base_commit": START_COMMIT,
+        "heg_commit": HEG_COMMIT,
+        "relabeling_algorithm": config.relabel_algorithm,
+    }
+    return {**base, "manifest_sha256": sha256_value(base)}
+
+
+def validate_manifest(manifest: Mapping[str, Any], config: Stage5Config) -> dict[str, Any]:
+    expected = build_manifest(config)
+    if dict(manifest) != expected:
+        raise ValueError("Stage 5 manifest differs from the frozen deterministic manifest")
+    if manifest.get("manifest_sha256") != sha256_value({key: value for key, value in manifest.items() if key != "manifest_sha256"}):
+        raise ValueError("Stage 5 manifest hash mismatch")
+    rows = cast(list[Mapping[str, Any]], manifest["episodes"])
+    new_base = {(int(row["order"]), int(row["graph_seed"]), int(row["policy_seed"])) for row in rows}
+    new_complete = {(int(row["order"]), int(row["graph_seed"]), int(row["relabeling_seed"]), int(row["policy_seed"])) for row in rows}
+    if len(new_base) != len(rows) // len(config.experiment.relabeling_seeds) or len(new_complete) != len(rows):
+        raise ValueError("Stage 5 episode identities are not unique")
+    prior_base, prior_complete, prior_orders, prior_hashes = _prior_keys(config.prior_manifest_paths)
+    if set(config.experiment.orders) & prior_orders:
+        raise ValueError("Stage 5 orders overlap a prior scientific manifest")
+    if new_base & prior_base:
+        raise ValueError("Stage 5 base seed identities overlap a prior manifest")
+    if new_complete & prior_complete:
+        raise ValueError("Stage 5 relabeled seed identities overlap a prior manifest")
+    return {
+        "new_base_identity_count": len(new_base),
+        "new_complete_identity_count": len(new_complete),
+        "prior_base_identity_count": len(prior_base),
+        "prior_complete_identity_count": len(prior_complete),
+        "prior_orders": sorted(prior_orders),
+        "prior_manifest_sha256": prior_hashes,
+        "orders_disjoint": True,
+        "base_identities_disjoint": True,
+        "complete_identities_disjoint": True,
+    }
+
+
+def write_manifest(config: Stage5Config) -> dict[str, JsonValue]:
+    manifest = build_manifest(config)
+    validate_manifest(manifest, config)
+    config.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    config.manifest_path.write_bytes(canonical_bytes(manifest) + b"\n")
+    return manifest
+
+
+def load_manifest(config: Stage5Config) -> dict[str, JsonValue]:
+    value = json.loads(config.manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("Stage 5 manifest must be an object")
+    manifest = cast(dict[str, JsonValue], value)
+    validate_manifest(manifest, config)
+    return manifest
+
+
+__all__ = [
+    "BEHAVIOR_SIGNATURES",
+    "BOOTSTRAP_SAMPLES",
+    "BOOTSTRAP_SEED",
+    "CHAMPION_ID",
+    "CHAMPION_RANDOM_THRESHOLD",
+    "CHAMPION_STAGE3_THRESHOLD",
+    "CONFIDENCE_LEVEL",
+    "HEG_COMMIT",
+    "POLICY_IDS",
+    "RANDOM_ID",
+    "STAGE3_COMPARATOR_ID",
+    "STAGE5_CONFIG_VERSION",
+    "STAGE5_FREEZE_VERSION",
+    "STAGE5_MANIFEST_VERSION",
+    "START_COMMIT",
+    "STRUCTURAL_ID",
+    "STRUCTURAL_RETENTION_THRESHOLD",
+    "Stage5Config",
+    "Stage5Experiment",
+    "Stage5Resources",
+    "build_manifest",
+    "episode_id",
+    "load_manifest",
+    "load_stage5_config",
+    "sha256_bytes",
+    "sha256_value",
+    "validate_manifest",
+    "write_manifest",
+]

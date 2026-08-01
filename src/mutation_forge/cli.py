@@ -18,6 +18,7 @@ from mutation_forge import __version__
 from mutation_forge import stage4e as stage4e_commands
 from mutation_forge import stage4e_retained_recovery as stage4e_recovery_commands
 from mutation_forge import stage4r as stage4r_commands
+from mutation_forge import stage5 as stage5_commands
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
 from mutation_forge.evaluation.benchmark import load_summary, run_benchmark
@@ -435,6 +436,24 @@ def _stage4e(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in {"completed", "ok"} else 1
 
 
+def _stage5(args: argparse.Namespace) -> int:
+    if args.stage5_command == "freeze":
+        result = stage5_commands.freeze_stage5(args.config)
+    elif args.stage5_command == "generalize":
+        result = stage5_commands.generalize_stage5(args.config)
+    elif args.stage5_command == "finalize":
+        result = stage5_commands.finalize_stage5(
+            args.config,
+            preserved_evidence_path=args.preserved_evidence,
+            evidence_manifest_sha256=args.evidence_manifest_sha256,
+            report_path=args.report,
+        )
+    else:
+        raise ValueError(f"unknown Stage 5 command {args.stage5_command!r}")
+    _emit_stage3(result, json_output=args.json)
+    return 0 if result.get("status", "completed") in {"completed", "ok"} else 1
+
+
 def _policy_validate(path: Path, *, json_output: bool) -> int:
     result = validate_policy(path.read_text()).as_dict()
     _emit_policy_result(result, json_output=json_output)
@@ -846,6 +865,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("docs/reports/STAGE4E_RETAINED_RECOVERY_REPORT.md"),
     )
     stage4e_recover.add_argument("--json", action="store_true")
+
+    stage5 = commands.add_parser("stage5")
+    stage5_commands_parser = stage5.add_subparsers(
+        dest="stage5_command",
+        required=True,
+    )
+    stage5_defaults = {"config": Path("configs/stage5-generalization.toml")}
+    for command_name in ("freeze", "generalize"):
+        stage5_command = stage5_commands_parser.add_parser(command_name)
+        stage5_command.add_argument("--config", type=Path, default=stage5_defaults["config"])
+        stage5_command.add_argument("--json", action="store_true")
+    stage5_finalize = stage5_commands_parser.add_parser("finalize")
+    stage5_finalize.add_argument("--config", type=Path, default=stage5_defaults["config"])
+    stage5_finalize.add_argument("--preserved-evidence", type=Path, required=True)
+    stage5_finalize.add_argument("--evidence-manifest-sha256", required=True)
+    stage5_finalize.add_argument(
+        "--report",
+        type=Path,
+        default=Path("docs/reports/STAGE5_GENERALIZATION_REPORT.md"),
+    )
+    stage5_finalize.add_argument("--json", action="store_true")
     return parser
 
 
@@ -902,6 +942,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stage4r(args)
         if args.command == "stage4e":
             return _stage4e(args)
+        if args.command == "stage5":
+            return _stage5(args)
     except Exception as error:
         if getattr(args, "json", False):
             print(

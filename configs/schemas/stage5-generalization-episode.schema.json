@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stage 5 compact episode",
+  "type": "object",
+  "required": ["schema_version", "terminal_status", "episode_id", "order", "graph_seed", "relabeling_seed", "policy_seed", "horizon", "policies", "steps", "metrics_input", "canonical_episode_sha256"],
+  "properties": {
+    "schema_version": {"const": "stage5.generalization.execution.v1"},
+    "terminal_status": {"const": "completed"},
+    "episode_id": {"type": "string"},
+    "order": {"type": "integer"},
+    "graph_seed": {"type": "integer"},
+    "relabeling_seed": {"type": "integer"},
+    "policy_seed": {"type": "integer"},
+    "horizon": {"const": 32},
+    "policies": {"type": "object", "minProperties": 4, "maxProperties": 4},
+    "steps": {"type": "array", "maxItems": 32},
+    "metrics_input": {"type": "object"},
+    "canonical_episode_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}
