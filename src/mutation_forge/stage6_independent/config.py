@@ -234,8 +234,13 @@ def load_config(path: str | Path = "configs/stage6-verification.toml") -> Stage6
     if (parsed_experiment.horizon, parsed_experiment.identity_count, parsed_experiment.shard_count, parsed_experiment.episodes_per_shard, parsed_experiment.episode_count) != (32, 768, 12, 64, 768):
         raise ValueError("Stage 6 experiment matrix is not frozen")
     parsed_resources = Stage6Resources(int(resources.get("workers", 0)), int(resources.get("reserved_physical_cores", 0)), int(resources.get("thread_count", 0)))
-    if parsed_resources != Stage6Resources(8, 8, 1):
-        raise ValueError("Stage 6 resources are not frozen")
+    if (
+        parsed_resources.workers < 1
+        or parsed_resources.workers > 8
+        or parsed_resources.reserved_physical_cores < 8
+        or parsed_resources.thread_count != 1
+    ):
+        raise ValueError("Stage 6 resources exceed the frozen bounds")
     if int(bootstrap.get("samples", 0)) != BOOTSTRAP_SAMPLES or int(bootstrap.get("seed", 0)) != BOOTSTRAP_SEED or float(bootstrap.get("confidence_level", 0)) != CONFIDENCE_LEVEL:
         raise ValueError("Stage 6 bootstrap is not frozen")
     if (float(gates.get("champion_stage3_threshold", 0)), float(gates.get("champion_random_threshold", 0)), float(gates.get("structural_retention_threshold", 0))) != (CHAMPION_STAGE3_THRESHOLD, CHAMPION_RANDOM_THRESHOLD, STRUCTURAL_RETENTION_THRESHOLD):

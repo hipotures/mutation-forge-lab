@@ -436,7 +436,12 @@ def run_redteam(config: Any = None, evidence: Any = None, fixture_root: str | Pa
     """Run all tamper and metamorphic checks, returning JSON-compatible output."""
     source = evidence if evidence is not None else fixture_root
     if source is None and config is not None:
-        source = config.get("evidence") if isinstance(config, Mapping) else getattr(config, "evidence", None)
+        if isinstance(config, Mapping):
+            source = config.get("evidence", config.get("evidence_root", config.get("artifact_root")))
+        else:
+            source = getattr(config, "evidence", None)
+            if source is None:
+                source = getattr(config, "evidence_root", getattr(config, "artifact_root", None))
     baseline = _load(source)
     if not verify_fixture(baseline)["exact"]:
         baseline = make_fixture()
