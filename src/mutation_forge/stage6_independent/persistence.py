@@ -195,6 +195,8 @@ def write_state(root: str | Path, state: Mapping[str, Any], *, name: str = "stat
     target = safe_child(Path(root).resolve(), name)
     payload = dict(state)
     payload.setdefault("schema_version", SCHEMA_VERSION)
+    payload.pop("state_sha256", None)
+    payload["state_sha256"] = sha256_value(payload)
     return write_json(target, payload, overwrite=overwrite)
 
 
@@ -205,6 +207,10 @@ def load_state(root: str | Path, *, name: str = "state.json") -> dict[str, Any] 
     state = read_json(target)
     if state.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("state schema mismatch")
+    declared = state.get("state_sha256")
+    actual = sha256_value({key: value for key, value in state.items() if key != "state_sha256"})
+    if declared != actual:
+        raise ValueError("state hash mismatch")
     return state
 
 
