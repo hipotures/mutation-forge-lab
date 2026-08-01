@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stage 6 independent verification manifest",
+  "type": "object",
+  "required": ["schema_version", "held_out", "independent", "orders", "graph_seeds", "relabeling_seeds", "policy_seeds", "horizon", "identity_count", "episode_count", "shard_count", "episodes_per_shard", "episodes", "shards", "frozen_policy_ids", "stage5_manifest_sha256", "project_commit", "heg_commit", "relabeling_algorithm", "manifest_sha256"],
+  "properties": {
+    "schema_version": {"const": "stage6.verification.manifest.v1"},
+    "held_out": {"const": true},
+    "independent": {"const": true},
+    "orders": {"const": [20, 24, 28]},
+    "graph_seeds": {"const": [701, 702, 703, 704, 705, 706, 707, 708]},
+    "relabeling_seeds": {"const": [7101, 7102]},
+    "policy_seeds": {"const": [7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008, 7009, 7010, 7011, 7012, 7013, 7014, 7015, 7016]},
+    "horizon": {"const": 32},
+    "identity_count": {"const": 768},
+    "episode_count": {"const": 768},
+    "shard_count": {"const": 12},
+    "episodes_per_shard": {"const": 64},
+    "episodes": {"type": "array", "minItems": 768, "maxItems": 768},
+    "shards": {"type": "array", "minItems": 12, "maxItems": 12},
+    "frozen_policy_ids": {"const": ["program-d5ad1c8203e0d9f25f03aabd", "candidate-slot-04", "random", "structural"]},
+    "stage5_manifest_sha256": {"pattern": "^[0-9a-f]{64}$"},
+    "project_commit": {"pattern": "^[0-9a-f]{40}$"},
+    "heg_commit": {"pattern": "^[0-9a-f]{40}$"},
+    "relabeling_algorithm": {"const": "fisher-yates-sha256-v1"},
+    "manifest_sha256": {"pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}
