@@ -209,13 +209,13 @@ def load_stage4e_config(path: str | Path = "configs/stage4e-confirmation.toml") 
         "comparator_source_sha256": _sha(policies.get("comparator_source_sha256"), "comparator source hash"),
         "comparator_ast_sha256": _sha(policies.get("comparator_ast_sha256"), "comparator AST hash"),
     }
-    for name, source_path, source_hash, ast_hash in (
+    for name, policy_path, source_hash, ast_hash in (
         ("champion", champion_path, expected["champion_source_sha256"], expected["champion_ast_sha256"]),
         ("comparator", comparator_path, expected["comparator_source_sha256"], expected["comparator_ast_sha256"]),
     ):
-        if not source_path.is_file():
-            raise FileNotFoundError(source_path)
-        source = source_path.read_text(encoding="utf-8")
+        if not policy_path.is_file():
+            raise FileNotFoundError(policy_path)
+        source = policy_path.read_text(encoding="utf-8")
         if sha256_bytes(source.encode("utf-8")) != source_hash:
             raise ValueError(f"{name} source hash mismatch")
         validation = validate_policy(source, stage2b.sandbox)
