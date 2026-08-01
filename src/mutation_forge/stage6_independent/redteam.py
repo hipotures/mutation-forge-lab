@@ -489,9 +489,11 @@ def run_redteam(config: Any = None, evidence: Any = None, fixture_root: str | Pa
         result = verify_fixture(tamper_fixture(baseline, case))
         observed_accept = bool(result["exact"])
         passed = observed_accept == expected_accept
+        severity = "informational" if expected_accept else ("medium" if case == "fraction_float_drift" else ("critical" if case in {"altered_trajectory_curve_or_selected_score", "altered_policy_source_or_ast_identity", "runtime_network_or_provider_call", "evidence_path_traversal_or_unsafe_output_overwrite"} else "high"))
         findings.append({
             "case": case,
-            "severity": "informational" if expected_accept else ("medium" if case == "fraction_float_drift" else ("critical" if case in {"altered_trajectory_curve_or_selected_score", "altered_policy_source_or_ast_identity", "runtime_network_or_provider_call", "evidence_path_traversal_or_unsafe_output_overwrite"} else "high")),
+            "severity": severity,
+            "classification": severity,
             "evidence": {"expected_accept": expected_accept, "observed_accept": observed_accept, "errors": result["errors"]},
             "impact": "accepted metamorphic change" if expected_accept else "tampered evidence was rejected" if not observed_accept else "tampered evidence bypassed verification",
             "disposition": "allowed" if expected_accept and passed else "rejected" if not expected_accept and passed else "failure",
