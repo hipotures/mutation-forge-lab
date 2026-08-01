@@ -468,6 +468,12 @@ def write_fixture_set(root: str | Path) -> Path:
     return destination
 
 
+def generate_tamper_cases(value: Mapping[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    """Return all named mutations in memory, keyed by deterministic case name."""
+    base = copy.deepcopy(dict(value) if value is not None else make_fixture())
+    return {case: tamper_fixture(base, case) for case in CASE_NAMES + METAMORPHIC_CASES}
+
+
 # Friendly aliases used by callers that describe the operation as generation or
 # verification rather than fixture construction.
 generate_tamper_fixtures = write_fixture_set
@@ -484,6 +490,7 @@ __all__ = [
     "tamper_fixture",
     "verify_fixture",
     "write_fixture_set",
+    "generate_tamper_cases",
     "generate_tamper_fixtures",
     "verify_tampering",
 ]
