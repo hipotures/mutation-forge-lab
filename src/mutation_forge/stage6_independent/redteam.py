@@ -62,7 +62,17 @@ METAMORPHIC_CASES: tuple[str, ...] = (
     "equivalent_relabeling",
 )
 
-_TIMING_FIELDS = frozenset({"timing_ns", "elapsed_ns", "started_at", "finished_at"})
+_TIMING_FIELDS = frozenset(
+    {
+        "timing_ns",
+        "elapsed_ns",
+        "started_at",
+        "finished_at",
+        "timing",
+        "timing_profile",
+        "elapsed_seconds",
+    }
+)
 _EXPECTED_PROVENANCE = {
     "implementation_commit": "stage6-impl-0001",
     "heg_commit": "heg-0001",
