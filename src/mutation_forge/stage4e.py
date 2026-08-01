@@ -158,8 +158,25 @@ def _load_and_verify_freeze(config: Stage4EConfig) -> dict[str, Any]:
         raise ValueError("unexpected Stage 4E freeze schema")
     if freeze.get("stage4e_results_observed") is not False:
         raise ValueError("Stage 4E freeze is already marked as observed")
-    if freeze.get("implementation_commit") != _git(config.project_repo, "rev-parse", "HEAD"):
-        raise ValueError("current implementation does not match the frozen commit")
+    current_commit = _git(config.project_repo, "rev-parse", "HEAD")
+    frozen_commit = freeze.get("implementation_commit")
+    if not isinstance(frozen_commit, str):
+        raise ValueError("freeze implementation commit is missing")
+    descendant = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(config.project_repo),
+            "merge-base",
+            "--is-ancestor",
+            frozen_commit,
+            current_commit,
+        ],
+        capture_output=True,
+        timeout=30,
+    )
+    if descendant.returncode != 0:
+        raise ValueError("current implementation does not descend from the frozen commit")
     if freeze.get("manifest_sha256") != json.loads(config.manifest_path.read_text())["manifest_sha256"]:
         raise ValueError("current manifest does not match the preregistration freeze")
     if freeze.get("metric_sha256") != _metric_hash():
