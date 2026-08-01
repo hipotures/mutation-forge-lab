@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage7.heg.replay.v1",
+  "type": "object",
+  "required": ["schema_version", "policy_identity", "record_count", "corpus_hash", "records"],
+  "properties": {
+    "schema_version": {"const": "stage7.heg.replay.v1"},
+    "record_count": {"type": "integer", "minimum": 2048},
+    "corpus_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "records": {"type": "array", "minItems": 2048}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage7.heg.integration.contract.v1",
+  "type": "object",
+  "required": ["schema_version", "catalog", "entry", "activation", "determinism", "authority", "security", "telemetry", "rollback", "change_surface"],
+  "properties": {
+    "schema_version": {"const": "stage7.heg.integration.contract.v1"},
+    "catalog": {
+      "type": "object",
+      "required": ["catalog_id", "policy_id", "source_sha256", "normalized_ast_sha256", "behavior_signature_sha256", "validator_version", "runtime_protocol_version"],
+      "properties": {
+        "catalog_id": {"const": "mutation_forge_stage4r_v1"},
+        "policy_id": {"const": "program-d5ad1c8203e0d9f25f03aabd"},
+        "source_sha256": {"const": "e444562c1b308e3b23cb732be5f769ea1923ac1809501cea8571318c4aff0a7b"},
+        "normalized_ast_sha256": {"const": "2243214df58c805e9a9343dc31ed082279e1c2ac31b21243bf889dbc9a19e165"},
+        "behavior_signature_sha256": {"const": "8c2bdaa213f11b253d3ffcae1653bd01536879bb5c254a1586ded9ae522a868e"},
+        "validator_version": {"const": "stage2a.validator.v2"},
+        "runtime_protocol_version": {"const": "stage2a.worker.v1"}
+      },
+      "additionalProperties": false
+    },
+    "activation": {"type": "object", "required": ["default_enabled", "reviewed_id_only", "explicit_lane_parameter_required", "silent_resume_activation"]},
+    "determinism": {"type": "object", "required": ["validator_version", "runtime_protocol_version", "feature_contract_version", "proposal_pool_contract_version", "tie_breaking_rule", "failure_policy", "resume_requires_exact_identity"]},
+    "authority": {"type": "object", "required": ["host_owns_legal_pool", "policy_calls_scorer", "policy_calls_m4", "selected_plan_only_scoring", "m4_is_only_certification_authority", "no_runtime_fallback"]},
+    "security": {"type": "object", "required": ["accepted_worker", "filesystem", "environment", "subprocess", "network", "database", "dynamic_code", "inherited_stdin", "source_path_from_director"]},
+    "telemetry": {"type": "object", "required": ["scope", "per_proposal_history", "fields"]},
+    "rollback": {"type": "object", "required": ["new_lanes_default_disabled", "historical_evidence_rewritten", "checkpoint_readable", "migration"]},
+    "change_surface": {"type": "object", "required": ["heg", "mutation_forge_reference_only"]}
+  },
+  "additionalProperties": false
+}

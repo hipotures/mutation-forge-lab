@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage7.heg.capability-matrix.v1",
+  "type": "object",
+  "required": ["schema_version", "heg", "required_heg_commit", "entries", "unknown_after_inspection", "capability_matrix_sha256"],
+  "properties": {
+    "schema_version": {"const": "stage7.heg.capability-matrix.v1"},
+    "required_heg_commit": {"const": "fd97451b0f3d87400d1d955a2c6b1b18303344ff"},
+    "entries": {"type": "array", "minItems": 1},
+    "unknown_after_inspection": {"const": []},
+    "capability_matrix_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}

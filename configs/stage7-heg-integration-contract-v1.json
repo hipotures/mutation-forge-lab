@@ -1,0 +1,110 @@
+{
+  "activation": {
+    "default_enabled": false,
+    "explicit_lane_parameter_required": true,
+    "reviewed_id_only": true,
+    "silent_resume_activation": false
+  },
+  "authority": {
+    "host_owns_legal_pool": true,
+    "m4_is_only_certification_authority": true,
+    "no_runtime_fallback": true,
+    "policy_calls_m4": false,
+    "policy_calls_scorer": false,
+    "selected_plan_only_scoring": true
+  },
+  "catalog": {
+    "behavior_signature_sha256": "8c2bdaa213f11b253d3ffcae1653bd01536879bb5c254a1586ded9ae522a868e",
+    "catalog_id": "mutation_forge_stage4r_v1",
+    "normalized_ast_sha256": "2243214df58c805e9a9343dc31ed082279e1c2ac31b21243bf889dbc9a19e165",
+    "policy_id": "program-d5ad1c8203e0d9f25f03aabd",
+    "runtime_protocol_version": "stage2a.worker.v1",
+    "source_sha256": "e444562c1b308e3b23cb732be5f769ea1923ac1809501cea8571318c4aff0a7b",
+    "validator_version": "stage2a.validator.v2"
+  },
+  "change_surface": {
+    "heg": [
+      "src/sglab/targets/erdos_gyarfas.py",
+      "src/sglab/targets/base.py",
+      "src/sglab/research/catalog.py",
+      "src/sglab/research/validation.py",
+      "src/sglab/research/lanes.py",
+      "src/sglab/research/recovery.py",
+      "src/sglab/research/store.py",
+      "src/sglab/db.py",
+      "tests/test_search.py",
+      "tests/test_lanes.py",
+      "tests/test_score_worker.py",
+      "tests/test_certification.py"
+    ],
+    "mutation_forge_reference_only": [
+      "src/mutation_forge/stage7_heg_bridge/",
+      "fixtures/stage7/"
+    ]
+  },
+  "contract_sha256": "846c6e5a2f7d21350930824ea01d6bf4c37bcbdb0bb6f85f582a6b88eb051d4f",
+  "determinism": {
+    "failure_policy": "fail_closed_no_silent_fallback",
+    "feature_contract_version": "stage2b.context.v1+stage2b.proposal.v1",
+    "feature_limits": {
+      "cycle_node_budget": 20000,
+      "distance_query_budget": 256,
+      "forbidden_lengths": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "local_risk_budget": 2048,
+      "witness_sample_cap": 32
+    },
+    "proposal_pool_contract_version": "stage2b.pool.v1",
+    "resume_requires_exact_identity": true,
+    "runtime_protocol_version": "stage2a.worker.v1",
+    "tie_breaking_rule": "descending_priority_then_lexicographic_proposal_id",
+    "validator_version": "stage2a.validator.v2"
+  },
+  "entry": {
+    "heg_commit": "fd97451b0f3d87400d1d955a2c6b1b18303344ff",
+    "mutation_forge_commit": "a6f0da20fa5a3e1c8b58cbc77a0d613c54d9f051",
+    "stage5_evidence_manifest_sha256": "e996563c145ac12bc7e7ae9bb284ae98d14a2990aaac9bce17e9992486780cce",
+    "stage6_evidence_manifest_sha256": "66064a1b9a7583da588d64cab2e3e4a79be6a5f77997be3df0e4fbbfd3677e87",
+    "stage6_freeze_commit": "6eaf9a446668751706239e6c1d8d10a26e32fde2",
+    "stage6_provenance_sha256": "f7d4a80c1591f584562e47f95a9a53df8fb036e7100f53208ee5530b0cb3111a"
+  },
+  "rollback": {
+    "checkpoint_readable": true,
+    "historical_evidence_rewritten": false,
+    "migration": "additive_or_online_backup_restore; no_downgrade",
+    "new_lanes_default_disabled": true
+  },
+  "schema_version": "stage7.heg.integration.contract.v1",
+  "security": {
+    "accepted_worker": "stage2a.worker.v1",
+    "database": false,
+    "dynamic_code": false,
+    "environment": false,
+    "filesystem": false,
+    "inherited_stdin": false,
+    "network": false,
+    "source_path_from_director": false,
+    "subprocess": false
+  },
+  "telemetry": {
+    "fields": [
+      "policy_call_count",
+      "invalid_result_count",
+      "timeout_crash_protocol_count",
+      "selection_latency_ns_sum",
+      "selected_k_counts",
+      "selector_counts",
+      "tie_count",
+      "pool_generation_ns",
+      "feature_computation_ns"
+    ],
+    "per_proposal_history": false,
+    "scope": "bounded_micro_batch"
+  }
+}

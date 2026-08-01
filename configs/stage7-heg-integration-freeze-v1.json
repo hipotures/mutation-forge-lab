@@ -1,0 +1,90 @@
+{
+  "authoritative_results_observed": false,
+  "benchmark_policy_calls": 100000,
+  "benchmark_schema_version": "stage7.heg.benchmark.v1",
+  "benchmark_spec": {
+    "median_throughput_regression": 0.1,
+    "policy_calls": 100000,
+    "policy_p99_ms": 5.0,
+    "stratum_throughput_regression": 0.15
+  },
+  "benchmark_spec_sha256": "8a01657516550ba75388682d4a5cf4d559087f30d49dc1c53428adf617696436",
+  "capability_matrix_sha256": "f54d0725686d5463d6775f5037afa45d90ce00fad4b068097067aea369dfed87",
+  "catalog_id": "mutation_forge_stage4r_v1",
+  "contract_sha256": "846c6e5a2f7d21350930824ea01d6bf4c37bcbdb0bb6f85f582a6b88eb051d4f",
+  "decision_gate_names": [
+    "stage3_6_evidence_chain",
+    "frozen_champion_identity",
+    "heg_exact_pin_clean_read_only",
+    "exact_mapping_or_bounded_additive_plan",
+    "no_semantic_mismatch_or_unknown",
+    "contract_preserves_authority_boundaries",
+    "activation_default_off_reviewed_id_only",
+    "resume_identity_exact",
+    "fail_closed_no_silent_fallback",
+    "replay_100_percent",
+    "heg_fixture_legality_and_parity",
+    "rng_and_completion_order_stable",
+    "redteam_all_cases",
+    "no_unresolved_high_or_material_medium",
+    "security_resource_boundaries",
+    "operational_thresholds",
+    "default_disabled_behavior_exact",
+    "rollback_and_additive_migration_plan",
+    "future_heg_issue_complete",
+    "repository_freeze_and_pin_checks"
+  ],
+  "entry_state": {
+    "current_commit": "a6f0da20fa5a3e1c8b58cbc77a0d613c54d9f051",
+    "entry_commit_ancestor": true,
+    "required_entry_commit": "a6f0da20fa5a3e1c8b58cbc77a0d613c54d9f051",
+    "required_stage6_freeze_peeled_commit": "6eaf9a446668751706239e6c1d8d10a26e32fde2",
+    "stage6_freeze_peeled_commit": "6eaf9a446668751706239e6c1d8d10a26e32fde2",
+    "working_tree_clean": false
+  },
+  "evidence_chain": {
+    "chain_ok": true,
+    "stage5_audit_reported_manifest_sha256": "e996563c145ac12bc7e7ae9bb284ae98d14a2990aaac9bce17e9992486780cce",
+    "stage5_audit_revalidated": true,
+    "stage5_evidence_manifest_sha256": "e996563c145ac12bc7e7ae9bb284ae98d14a2990aaac9bce17e9992486780cce",
+    "stage6_evidence_manifest_sha256": "66064a1b9a7583da588d64cab2e3e4a79be6a5f77997be3df0e4fbbfd3677e87",
+    "stage6_freeze_file_sha256": "39eaaef22707a03c4db70b7f8ee75d39ee23da527ff165234fd4e7e372cd66a3",
+    "stage6_provenance_expected_sha256": "f7d4a80c1591f584562e47f95a9a53df8fb036e7100f53208ee5530b0cb3111a",
+    "stage6_provenance_file_sha256": "f7d4a80c1591f584562e47f95a9a53df8fb036e7100f53208ee5530b0cb3111a",
+    "stage6_reports_present": true
+  },
+  "expected_report_paths": [
+    "docs/reports/STAGE7_HEG_INTEGRATION_DECISION.md",
+    "docs/reports/STAGE7_HEG_INTEGRATION_CONTRACT.md",
+    "docs/reports/STAGE7_HEG_INTEGRATION_RISK_REGISTER.md",
+    "docs/reports/STAGE7_HEG_INTEGRATION_ISSUE_DRAFT.md"
+  ],
+  "fixture_manifest_sha256": "0918b157f28aa27027bb4ab1c61e929308cd299ae0e50ab4c144e789818b85dc",
+  "freeze_sha256": "95cc67c0e01d19510b5ce6a041bf6db4755964f303a2c1411fdeb2153eeb848e",
+  "heg_commit": "fd97451b0f3d87400d1d955a2c6b1b18303344ff",
+  "policy_identity": {
+    "behavior_signature_sha256": "8c2bdaa213f11b253d3ffcae1653bd01536879bb5c254a1586ded9ae522a868e",
+    "catalog_id": "mutation_forge_stage4r_v1",
+    "normalized_ast_sha256": "2243214df58c805e9a9343dc31ed082279e1c2ac31b21243bf889dbc9a19e165",
+    "policy_id": "program-d5ad1c8203e0d9f25f03aabd",
+    "runtime_protocol_version": "stage2a.worker.v1",
+    "source_sha256": "e444562c1b308e3b23cb732be5f769ea1923ac1809501cea8571318c4aff0a7b",
+    "validator_version": "stage2a.validator.v2"
+  },
+  "project_entry_commit": "a6f0da20fa5a3e1c8b58cbc77a0d613c54d9f051",
+  "redteam_findings_sha256": "dfe0239a1f2a1150a9ff5b13e99c809feddeadaef92aaa12b9a9bebd6a3be069",
+  "replay_corpus_sha256": "dafe31cbb832395e1ee6ae7b51f0fd51613ca175a7c391ba512640092110ab4f",
+  "replay_record_count": 2048,
+  "schema_version": "stage7.heg.freeze.v1",
+  "status": "preregistered",
+  "terminal_decisions": [
+    "GO_TO_HEG_INTEGRATION_ISSUE",
+    "NO_GO",
+    "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"
+  ],
+  "thresholds": {
+    "policy_call_p99_ms": 5.0,
+    "stratum_regression": 0.15,
+    "throughput_regression": 0.1
+  }
+}

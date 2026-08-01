@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage7.heg.decision.v1",
+  "type": "object",
+  "required": ["schema_version", "decision", "gates", "policy_identity", "heg_commit", "authoritative_results_observed"],
+  "properties": {
+    "schema_version": {"const": "stage7.heg.decision.v1"},
+    "decision": {"enum": ["GO_TO_HEG_INTEGRATION_ISSUE", "NO_GO", "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"]},
+    "heg_commit": {"const": "fd97451b0f3d87400d1d955a2c6b1b18303344ff"},
+    "authoritative_results_observed": {"const": true},
+    "gates": {"type": "object", "minProperties": 20, "additionalProperties": {"type": "boolean"}}
+  },
+  "additionalProperties": true
+}

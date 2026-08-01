@@ -1,0 +1,12 @@
+{
+  "behavior_identity_authority": "stage4r_stage5_stage6_preserved_evidence",
+  "behavior_signature_sha256": "8c2bdaa213f11b253d3ffcae1653bd01536879bb5c254a1586ded9ae522a868e",
+  "catalog_id": "mutation_forge_stage4r_v1",
+  "catalog_source_path": "fixtures/stage7/mutation_policy_stage4r_v1.py",
+  "normalized_ast_sha256": "2243214df58c805e9a9343dc31ed082279e1c2ac31b21243bf889dbc9a19e165",
+  "policy_id": "program-d5ad1c8203e0d9f25f03aabd",
+  "runtime_protocol_version": "stage2a.worker.v1",
+  "source_sha256": "e444562c1b308e3b23cb732be5f769ea1923ac1809501cea8571318c4aff0a7b",
+  "status": "verified",
+  "validator_version": "stage2a.validator.v2"
+}

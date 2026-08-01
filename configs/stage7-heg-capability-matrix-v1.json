@@ -1,0 +1,213 @@
+{
+  "capability_matrix_sha256": "f54d0725686d5463d6775f5037afa45d90ce00fad4b068097067aea369dfed87",
+  "entries": [
+    {
+      "classification": "exact_existing_capability",
+      "contract_item": "pinned_clean_read_only_checkout",
+      "evidence": "git HEAD/status",
+      "observed": {
+        "commit": "fd97451b0f3d87400d1d955a2c6b1b18303344ff",
+        "dirty": false,
+        "read_only": true,
+        "repo": "/home/user/DEV/heg"
+      }
+    },
+    {
+      "classification": "exact_existing_capability",
+      "contract_item": "immutable_graph_representation_and_identity",
+      "evidence": "src/sglab/model.py BitGraph, graph6, stable_hash",
+      "observed": {
+        "bitgraph": "BitGraph",
+        "stable_identity": "graph6_sha256"
+      }
+    },
+    {
+      "classification": "exact_existing_capability",
+      "contract_item": "two_edge_switch_legality",
+      "evidence": "src/sglab/targets/erdos_gyarfas.py bounded two-edge operators",
+      "observed": {
+        "forbidden_cycle": true,
+        "uniform": true
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "generalized_legal_k_switch_k2_k3_k4",
+      "evidence": "target operator allowlist contains only two-edge operators",
+      "observed": {
+        "k2": true,
+        "k3": false,
+        "k4": false
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "host_generated_bounded_proposal_pool",
+      "evidence": "no proposal pool/ranker interface in pinned HEG lanes",
+      "observed": {
+        "priority_worker": false,
+        "proposal_pool": false
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "stage2b_context_exact_mapping",
+      "evidence": "HEG exposes order/score but not the policy callback context",
+      "observed": {
+        "history_fields": false,
+        "order": true,
+        "weighted_penalty": "score result"
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "stage2b_forbidden_lengths_4_5_6_7_8_9",
+      "evidence": "HEG target forbidden lengths are powers of two; Stage 2B vectors are frozen independently",
+      "observed": {
+        "heg_target_lengths": "powers_of_two",
+        "stage2b_lengths": [
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "stage2b_proposal_features",
+      "evidence": "feature computation is absent from HEG and must remain host-owned",
+      "observed": {
+        "all_fields": false,
+        "host_adaptor": true
+      }
+    },
+    {
+      "classification": "exact_existing_capability",
+      "contract_item": "deterministic_rng_ownership",
+      "evidence": "research/lanes.py per-lane Random and checkpoint state",
+      "observed": {
+        "per_lane_rng": "present",
+        "policy_rng": "forbidden"
+      }
+    },
+    {
+      "classification": "exact_existing_capability",
+      "contract_item": "selected_plan_only_authoritative_scoring",
+      "evidence": "lane scoring and M4 candidate lifecycle",
+      "observed": {
+        "full_pool_scoring": false,
+        "selected_only": true
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "policy_worker_process_bounds",
+      "evidence": "accepted Stage 2A worker is in Mutation Forge; HEG generic launchers have weaker bounds",
+      "observed": {
+        "accepted_worker": "stage2a.worker.v1",
+        "heg_generic_launcher": "not sufficient"
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "checkpoint_resume_policy_identity",
+      "evidence": "HEG checks scientific/lane hashes but no reviewed policy identity field",
+      "observed": {
+        "checkpoint_id_binding": false,
+        "lane_version": true,
+        "policy_identity": false
+      }
+    },
+    {
+      "classification": "exact_existing_capability",
+      "contract_item": "director_reviewed_name_only_catalog",
+      "evidence": "research/catalog.py and context validation",
+      "observed": {
+        "known_names_only": true,
+        "source_text": false
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "persistence_and_additive_migration",
+      "evidence": "schema v17 exists; reviewed policy fields are absent and v16-v17 has no down migration",
+      "observed": {
+        "down_migration": false,
+        "schema_version": 17
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "bounded_batch_telemetry",
+      "evidence": "HEG batch telemetry exists; policy counters/histograms are absent",
+      "observed": {
+        "batch_telemetry": true,
+        "policy_telemetry": false
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "failure_restart_cancel_process_orphans",
+      "evidence": "HEG restart/cancel paths exist; generic close does not kill process groups",
+      "observed": {
+        "cancel": true,
+        "group_kill": false,
+        "restart": true
+      }
+    },
+    {
+      "classification": "exact_existing_capability",
+      "contract_item": "m4_candidate_certification_isolation",
+      "evidence": "verification_broker and certification lifecycle",
+      "observed": {
+        "m4_authority": true,
+        "policy_m4_access": false
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "live_frontier_checkpoint_determinism",
+      "evidence": "transient live frontier can affect passive scheduling before durable checkpoint",
+      "observed": {
+        "event_order_independent": false,
+        "transient_frontier": true
+      }
+    },
+    {
+      "classification": "bounded_additive_change_required",
+      "contract_item": "mandatory_cpp_scorer_no_python_fallback",
+      "evidence": "HEG ADR requires C++ fail-closed; sibling adapter fallback is not production-compatible",
+      "observed": {
+        "adapter_fallback": true,
+        "heg_fail_closed": true
+      }
+    }
+  ],
+  "heg": {
+    "commit": "fd97451b0f3d87400d1d955a2c6b1b18303344ff",
+    "dirty": false,
+    "read_only": true,
+    "repo": "/home/user/DEV/heg"
+  },
+  "high_findings_resolved_by_contract": [
+    "k3_k4_generation_is_host_additive_and_not_silently_restricted",
+    "mandatory_cpp_scorer_and_process_group_cleanup",
+    "policy_identity_bound_checkpoint_resume"
+  ],
+  "required_heg_commit": "fd97451b0f3d87400d1d955a2c6b1b18303344ff",
+  "schema_version": "stage7.heg.capability-matrix.v1",
+  "source_fingerprints": {
+    "catalog_sha256": "44451dc619d027c28bef840b975b6b6c5ffdaf7de21977f51c978eb85e6a7607",
+    "db_sha256": "eac32331899f06efc7a078a1b648842ace0ef368e626361ee50b213cd9882253",
+    "lanes_sha256": "8811ae75ce11947e5b74e214cddfe6a219d8023c62a7e3277fd0d272517018c6",
+    "model_sha256": "f55781ec292ab4f1708d26f1a7cfecb091ca4a9c7496fd54b3baf31cd5a8386b",
+    "recovery_sha256": "4d2cfa320b6ec7f8ed5698bfe0cb4ed5335d11094a5e8caf868d92a15bdef587",
+    "resources_sha256": "f22939fe9821c8cab7cee4283be4aafa3b2ee27dba52978199d12d81fee90ea4",
+    "score_worker_sha256": "592825fa627ff1c7d03486c9c06ec626d129590621c5fef8a3eadf1c8289dbea",
+    "target_sha256": "68ceffb4de741145157d74fb60e078c803f75f05a4183dcbd3657e172186e8d3"
+  },
+  "unknown_after_inspection": []
+}

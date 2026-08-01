@@ -1,0 +1,20 @@
+{
+  "call_target": 100000,
+  "faithful_heg_throughput_projection_required": true,
+  "heg_commit": "fd97451b0f3d87400d1d955a2c6b1b18303344ff",
+  "policy_identity": {
+    "behavior_signature_sha256": "8c2bdaa213f11b253d3ffcae1653bd01536879bb5c254a1586ded9ae522a868e",
+    "catalog_id": "mutation_forge_stage4r_v1",
+    "normalized_ast_sha256": "2243214df58c805e9a9343dc31ed082279e1c2ac31b21243bf889dbc9a19e165",
+    "policy_id": "program-d5ad1c8203e0d9f25f03aabd",
+    "runtime_protocol_version": "stage2a.worker.v1",
+    "source_sha256": "e444562c1b308e3b23cb732be5f769ea1923ac1809501cea8571318c4aff0a7b",
+    "validator_version": "stage2a.validator.v2"
+  },
+  "schema_version": "stage7.heg.benchmark.v1",
+  "thresholds": {
+    "median_throughput_regression": 0.1,
+    "policy_p99_ns": 5000000,
+    "stratum_throughput_regression": 0.15
+  }
+}

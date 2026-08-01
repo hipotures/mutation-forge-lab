@@ -53,6 +53,7 @@ from mutation_forge.stage6_independent.config import POLICY_IDS as STAGE6_POLICY
 from mutation_forge.stage6_independent.config import load_config as load_stage6_config
 from mutation_forge.stage6_independent.runner import run_shard as run_stage6_shard
 from mutation_forge.stage6_independent.runner import verify_replay as verify_stage6_replay
+from mutation_forge.stage7_heg_bridge import commands as stage7_commands
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -495,6 +496,19 @@ def _stage6(args: argparse.Namespace) -> int:
         result = verify_stage6_replay(args.primary, args.replay)
     else:
         raise ValueError(f"unknown Stage 6 command {command!r}")
+    _emit_policy_result(result, json_output=args.json)
+    if isinstance(result, Mapping):
+        return 0 if result.get("status", "completed") not in {"failed", "error"} else 1
+    return 0
+
+
+def _stage7(args: argparse.Namespace) -> int:
+    if args.stage7_command == "freeze":
+        result = stage7_commands.freeze(args.config)
+    elif args.stage7_command == "run":
+        result = stage7_commands.run_authoritative(args.config)
+    else:
+        raise ValueError(f"unknown Stage 7 command {args.stage7_command!r}")
     _emit_policy_result(result, json_output=args.json)
     if isinstance(result, Mapping):
         return 0 if result.get("status", "completed") not in {"failed", "error"} else 1
@@ -964,6 +978,20 @@ def build_parser() -> argparse.ArgumentParser:
     stage6_replay.add_argument("--primary", type=Path, required=True)
     stage6_replay.add_argument("--replay", type=Path, required=True)
     stage6_replay.add_argument("--json", action="store_true")
+
+    stage7 = commands.add_parser("stage7")
+    stage7_commands_parser = stage7.add_subparsers(
+        dest="stage7_command",
+        required=True,
+    )
+    for command_name in ("freeze", "run"):
+        command = stage7_commands_parser.add_parser(command_name)
+        command.add_argument(
+            "--config",
+            type=Path,
+            default=Path("configs/stage7-heg-integration-decision.toml"),
+        )
+        command.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1024,6 +1052,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stage5(args)
         if args.command == "stage6":
             return _stage6(args)
+        if args.command == "stage7":
+            return _stage7(args)
     except Exception as error:
         if getattr(args, "json", False):
             print(

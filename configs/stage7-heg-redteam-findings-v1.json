@@ -1,0 +1,189 @@
+{
+  "case_count": 30,
+  "cases": [
+    {
+      "case": "arbitrary_source_path",
+      "evidence": "catalog_source_path accepts reviewed ID only",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "bool_output",
+      "evidence": "validate_priority rejects non-finite/bool/container output",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "changed_policy_resume",
+      "evidence": "reviewed catalog ID and source/AST/behavior hashes are persisted",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "container_output",
+      "evidence": "validate_priority rejects non-finite/bool/container output",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "crash",
+      "evidence": "PolicyWorker protocol has bounded wall/request/response frames and fail-closed errors",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "director_source_text",
+      "evidence": "catalog_source_path accepts reviewed ID only",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "duplicate_proposal_ids",
+      "evidence": "bridge.validate_pool rejected duplicate IDs",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "extra_field",
+      "evidence": "Stage 2B worker input validator rejects malformed mappings",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "full_pool_scorer_leakage",
+      "evidence": "scorer count unchanged during rank-only selection",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "infinity_output",
+      "evidence": "validate_priority rejects non-finite/bool/container output",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "m4_coupling",
+      "evidence": "bridge telemetry m4_calls remains zero",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "missing_field",
+      "evidence": "Stage 2B worker input validator rejects malformed mappings",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "modified_source_bytes",
+      "evidence": "packaged source hash is checked before worker start",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "mutated_input",
+      "evidence": "freeze_plain_data returns immutable mappings",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "nan_output",
+      "evidence": "validate_priority rejects non-finite/bool/container output",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "non_legal_pool",
+      "evidence": "bridge.validate_pool rejected non-legal rewrite",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "oversized_frame",
+      "evidence": "PolicyWorker protocol has bounded wall/request/response frames and fail-closed errors",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "path_traversal",
+      "evidence": "catalog_source_path accepts reviewed ID only",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "process_orphans",
+      "evidence": "PolicyWorker closes and reaps the persistent worker; no fallback process is created",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "protocol_corruption",
+      "evidence": "PolicyWorker protocol has bounded wall/request/response frames and fail-closed errors",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "runtime_authority",
+      "evidence": "source validator permits no imports, reflection, subprocess, filesystem, or network",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "silent_fallback",
+      "evidence": "bridge raises BridgeError and never selects a baseline fallback",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "stale_checkpoint_identity",
+      "evidence": "contract requires exact identity equality on resume",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "telemetry_cardinality_explosion",
+      "evidence": "telemetry is fixed-key batch counters",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "timeout",
+      "evidence": "PolicyWorker protocol has bounded wall/request/response frames and fail-closed errors",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "unstable_tie_breaking",
+      "evidence": "repeated rank order and selected ID are identical",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "unsupported_contract_version",
+      "evidence": "Stage 2B worker input validator rejects malformed mappings",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "wrong_ast_identity",
+      "evidence": "normalized AST/source identity mismatch rejected",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "wrong_behavior_identity",
+      "evidence": "catalog binds preserved Stage 4R/5/6 behavior SHA-256",
+      "severity": "high",
+      "status": "passed"
+    },
+    {
+      "case": "wrong_source_identity",
+      "evidence": "source_identity rejects modified SHA-256",
+      "severity": "high",
+      "status": "passed"
+    }
+  ],
+  "findings_sha256": "dfe0239a1f2a1150a9ff5b13e99c809feddeadaef92aaa12b9a9bebd6a3be069",
+  "schema_version": "stage7.heg.redteam.v1",
+  "status": "passed",
+  "unresolved": []
+}

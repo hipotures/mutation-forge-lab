@@ -1,0 +1,39 @@
+schema_version = "stage7.heg.integration.config.v1"
+
+[entry]
+mutation_forge_commit = "a6f0da20fa5a3e1c8b58cbc77a0d613c54d9f051"
+heg_commit = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
+catalog_id = "mutation_forge_stage4r_v1"
+contract_schema_version = "stage7.heg.integration.contract.v1"
+replay_schema_version = "stage7.heg.replay.v1"
+redteam_schema_version = "stage7.heg.redteam.v1"
+benchmark_schema_version = "stage7.heg.benchmark.v1"
+
+[paths]
+capability_matrix = "configs/stage7-heg-capability-matrix-v1.json"
+contract = "configs/stage7-heg-integration-contract-v1.json"
+identity = "configs/stage7-heg-frozen-policy-identity-v1.json"
+fixtures = "configs/stage7-heg-compatibility-fixtures-v1.json"
+replay = "configs/stage7-heg-replay-corpus-v1.json"
+redteam = "configs/stage7-heg-redteam-findings-v1.json"
+benchmark = "configs/stage7-heg-operational-benchmark-v1.json"
+evidence_root = "/home/user/mutation-forge-evidence/stage7-heg-integration/issue-17-final"
+
+[replay]
+record_count = 2048
+
+[benchmark]
+policy_calls = 100000
+
+[sandbox]
+max_source_bytes = 12288
+max_ast_nodes = 500
+max_static_loop_bound = 256
+address_space_bytes = 134217728
+per_call_wall_seconds = 0.025
+total_wall_seconds = 60.0
+request_bytes = 65536
+response_bytes = 16384
+captured_output_bytes = 65536
+open_files = 16
+process_count = 1
