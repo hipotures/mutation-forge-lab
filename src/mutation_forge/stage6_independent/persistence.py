@@ -4,6 +4,7 @@ This module deliberately has no dependency on any stage runner.  Shards are
 newline-delimited canonical JSON members in deterministic gzip containers;
 every write is read back and hashed before the state file is advanced.
 """
+# ruff: noqa: E501
 
 from __future__ import annotations
 

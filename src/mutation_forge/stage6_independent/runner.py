@@ -4,13 +4,14 @@ The runner intentionally composes only the immutable graph model, a low-level
 backend/scorer/proposal source, and optional Stage 2A policy workers.  It does
 not delegate to a previous stage's high-level evaluator.
 """
+# ruff: noqa: E501
 
 from __future__ import annotations
 
 import hashlib
 import os
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, cast
@@ -19,14 +20,13 @@ from mutation_forge.models import GraphScore, GraphState, RewritePlan
 from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.worker import PolicyWorker
 
+from .persistence import SCHEMA_VERSION as PERSISTENCE_SCHEMA_VERSION
 from .persistence import (
-    SCHEMA_VERSION as PERSISTENCE_SCHEMA_VERSION,
     canonical_bytes,
     canonical_record_hash,
     load_state,
     read_shard,
     reduction_hash,
-    safe_component,
     timing_stripped,
     write_json,
     write_shard,
@@ -334,7 +334,7 @@ def run_shard(
                 worker_map[policy_id] = PolicyWorker(value.read_text(encoding="utf-8"), SandboxLimits())
                 owned_workers.append(worker_map[policy_id])
             elif hasattr(value, "path"):
-                source_path = Path(str(getattr(value, "path")))
+                source_path = Path(str(value.path))
                 worker_map[policy_id] = PolicyWorker(source_path.read_text(encoding="utf-8"), SandboxLimits())
                 owned_workers.append(worker_map[policy_id])
         records = [_episode(row, backend=backend, scorer=scorer, proposer=proposer, policies=selected_policies, dry_run=dry_run, policy_workers=worker_map) for row in rows]
@@ -437,9 +437,7 @@ def verify_replay(primary: Mapping[str, Any] | str | Path, replay: Mapping[str, 
     ids = set(left_rows) | set(right_rows)
     differences = []
     for eid in sorted(ids):
-        if eid not in left_rows or eid not in right_rows:
-            differences.append(eid)
-        elif timing_stripped(left_rows[eid]) != timing_stripped(right_rows[eid]):
+        if eid not in left_rows or eid not in right_rows or timing_stripped(left_rows[eid]) != timing_stripped(right_rows[eid]):
             differences.append(eid)
     exact = not differences and left.get("record_count") == right.get("record_count")
     return {"status": "completed" if exact else "failed", "decision": "exact" if exact else "mismatch", "exact": exact, "provider_calls": 0, "non_timing_differences": differences, "primary_timing_stripped_sha256": reduction_hash(left_rows.values(), timing_only=True), "replay_timing_stripped_sha256": reduction_hash(right_rows.values(), timing_only=True)}
