@@ -122,6 +122,15 @@ complete, but eight terminal accepted protocol failures lack exact usage.
 Validation was ineligible, Stage 5 was not started, and HEG remained
 read-only.
 
+Issue #15 subsequently completed the frozen Stage 5 held-out generalization.
+`docs/reports/STAGE5_GENERALIZATION_REPORT.md` records `GO_TO_STAGE_6`; the
+four-policy evidence, primary/replay shards, and evidence manifest remain
+preserved at `/home/user/DEV/mutation-forge-evidence/stage5-generalization/issue-15-final`.
+Issue #16 then completed the independent Stage 6 audit, raw-shard
+recomputation, red-team corpus, and fresh 768-identity replication.
+`docs/reports/STAGE6_VERIFICATION_REPORT.md` records the exact terminal result
+`GO_TO_STAGE_7`. Stage 7 has not started and HEG remains read-only.
+
 The Phase 1 statement refers to the official campaign. Before the fresh v6
 freeze, three explicitly user-authorized adapter connectivity turns were
 attempted, two completed and one ended with partial usage. Their fixed

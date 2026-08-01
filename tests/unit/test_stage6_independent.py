@@ -64,6 +64,12 @@ def test_metrics_use_exact_hierarchical_fractions() -> None:
     draws = bootstrap(summary, samples=4, seed=2026080104)
     assert summary.policy_means[POLICY_IDS[0]].numerator == 1
     assert summary.policy_means[POLICY_IDS[0]].denominator == 2
+    assert set(summary.relative_improvements) == {
+        "C_vs_stage3",
+        "C_vs_random",
+        "C_vs_structural",
+    }
+    assert all(value == 0 for value in summary.relative_improvements.values())
     assert draws.samples == 4
 
 

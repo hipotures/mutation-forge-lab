@@ -97,7 +97,32 @@ def _load_freeze(config: Stage6Config) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, Mapping) or value.get("schema_version") != FREEZE_SCHEMA:
         raise ValueError("invalid Stage 6 freeze")
-    return cast(dict[str, Any], dict(value))
+    freeze = cast(dict[str, Any], dict(value))
+    expected_hash = hashlib.sha256(
+        canonical_bytes({key: item for key, item in freeze.items() if key != "freeze_sha256"})
+    ).hexdigest()
+    if freeze.get("freeze_sha256") != expected_hash:
+        raise ValueError("Stage 6 freeze payload hash mismatch")
+    if freeze.get("freeze_tag") != FREEZE_TAG:
+        raise ValueError("Stage 6 freeze tag identity mismatch")
+    if freeze.get("required_project_commit") != PROJECT_COMMIT or freeze.get("required_heg_commit") != HEG_COMMIT:
+        raise ValueError("Stage 6 freeze repository pins differ")
+    if freeze.get("heg_commit") != HEG_COMMIT or freeze.get("heg_dirty") is not False:
+        raise ValueError("Stage 6 freeze HEG provenance is not clean")
+    tag_commit = _git(config.project_repo, "rev-list", "-n", "1", FREEZE_TAG)
+    frozen_commit = str(freeze.get("project_commit", ""))
+    if not frozen_commit or not tag_commit:
+        raise ValueError("Stage 6 freeze commit or tag is missing")
+    ancestry = subprocess.run(
+        ["git", "-C", str(config.project_repo), "merge-base", "--is-ancestor", frozen_commit, tag_commit],
+        capture_output=True,
+        timeout=30,
+    )
+    if ancestry.returncode != 0:
+        raise ValueError("Stage 6 freeze tag does not descend from its frozen commit")
+    if freeze.get("official_verification_started") is not False or freeze.get("stage6_results_observed") is not False or freeze.get("stage7_started") is not False:
+        raise ValueError("Stage 6 freeze is marked as observed or started")
+    return freeze
 
 
 def freeze(config_path: str | Path = "configs/stage6-verification.toml") -> dict[str, Any]:
@@ -434,9 +459,30 @@ def reduce(
         seed=config.bootstrap_seed,
         confidence_level=config.confidence_level,
     )
+    relative_improvements = summary.relative_improvements
+    effect_payloads: dict[str, dict[str, Any]] = {}
+    for effect in EFFECTS:
+        payload = dict(summary.effects[effect].as_dict())
+        payload["relative_improvement"] = {
+            "fraction": str(relative_improvements[effect].numerator)
+            + (
+                f"/{relative_improvements[effect].denominator}"
+                if relative_improvements[effect].denominator != 1
+                else ""
+            ),
+            "value": float(relative_improvements[effect]),
+        }
+        effect_payloads[effect] = payload
     independent_metrics = {
         "policy_means": {key: {"fraction": str(value.numerator) + (f"/{value.denominator}" if value.denominator != 1 else ""), "value": float(value)} for key, value in summary.policy_means.items()},
-        "effects": {effect: summary.effects[effect].as_dict() for effect in EFFECTS},
+        "effects": effect_payloads,
+        "relative_improvements": {
+            effect: {
+                "fraction": str(value.numerator) + (f"/{value.denominator}" if value.denominator != 1 else ""),
+                "value": float(value),
+            }
+            for effect, value in relative_improvements.items()
+        },
         "structural_retention": {"fraction": str(summary.structural_retention.numerator) + (f"/{summary.structural_retention.denominator}" if summary.structural_retention.denominator != 1 else ""), "value": float(summary.structural_retention)},
         "bootstrap": bootstrap_summary.as_dict(),
     }

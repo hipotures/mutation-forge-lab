@@ -205,3 +205,9 @@ would perform independent verification and red-team review. Stage 7 alone
 could recommend HEG policy integration after a final scientific GO. Stages
 5–7 have not started, and each requires a separate issue and explicit user
 approval.
+
+Current milestone status: issue #15 completed Stage 5 with terminal
+`GO_TO_STAGE_6`, and issue #16 completed Stage 6 with terminal
+`GO_TO_STAGE_7`. The independent Stage 6 evidence and reports are retained;
+Stage 7 has not started, HEG remains read-only, and issue #16 remains open for
+review.
