@@ -251,6 +251,10 @@ def _load(value: Any) -> dict[str, Any]:
             if candidate.is_file():
                 path = candidate
                 break
+        else:
+            # A fixture root may only contain the corpus manifest; generate the
+            # canonical tiny fixture in that case.
+            return make_fixture()
     return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
