@@ -1519,6 +1519,18 @@ def validate(
     return result
 
 
+def diagnose_deltas(
+    run: str | Path,
+    *,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run the provider-free issue #12 retained Stage 4R diagnostic."""
+
+    from mutation_forge.stage4r_diagnostics import diagnose_deltas as _diagnose_deltas
+
+    return _diagnose_deltas(run, output_dir=output_dir)
+
+
 __all__ = [
     "AUTH_MODE",
     "RETAINED_ARCHIVE_SHA256",
@@ -1530,4 +1542,5 @@ __all__ = [
     "freeze_validation",
     "recover",
     "validate",
+    "diagnose_deltas",
 ]

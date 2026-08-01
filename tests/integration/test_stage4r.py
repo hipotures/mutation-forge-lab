@@ -89,6 +89,7 @@ def test_stage4r_parser_exposes_bounded_commands() -> None:
         ["stage4r", "recover", "--auth-json", "/tmp/auth.json"],
         ["stage4r", "freeze-validation"],
         ["stage4r", "validate"],
+        ["stage4r", "diagnose-deltas", "--run", "runs/stage4r-search/issue-11"],
     )
     for arguments in cases:
         parsed = parser.parse_args(arguments)
@@ -281,3 +282,39 @@ def test_scientific_gate_returns_go_only_when_all_issue_11_checks_pass() -> None
         replay_health=health,
     )
     assert failed["decision"] == "NO_GO"
+
+
+def test_stage4r_delta_diagnostic_reproduces_frozen_pair_and_bootstrap(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "diagnostics"
+    first = stage4r.diagnose_deltas(
+        run=Path("runs/stage4r-search/issue-11"),
+        output_dir=output,
+    )
+    second = stage4r.diagnose_deltas(
+        run=Path("runs/stage4r-search/issue-11"),
+        output_dir=output,
+    )
+    assert first == second
+    assert first["status"] == "completed"
+    assert first["historical_decision"] == "NO_GO"
+    assert first["primary_replay"]["paired_rows"] == 128
+    assert first["bootstrap"]["pooled"]["interval"] == [0.0, 0.03125]
+    assert first["quantization"]["delta"]["sign_mass"] == {
+        "negative": 32,
+        "zero": 30,
+        "positive": 66,
+        "negative_fraction": 0.25,
+        "zero_fraction": 0.234375,
+        "positive_fraction": 0.515625,
+        "count": 128,
+    }
+    assert first["quantization"]["mechanism_for_0_03125"]["one_over_32_exemplar"][
+        "curve_difference_area_fraction"
+    ] == "1"
+    assert len(first["power_study"]["summary"]["cells"]) == 54
+    assert first["recommendation"]["token"] == "REDESIGN_PRIMARY_METRIC_BEFORE_CONFIRMATION"
+    assert (output / "paired-deltas.csv").is_file()
+    assert (output / "paired-deltas.jsonl").is_file()
+    assert (output / "bootstrap-support.json").is_file()

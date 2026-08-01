@@ -408,6 +408,8 @@ def _stage4r(args: argparse.Namespace) -> int:
             run=args.run,
             tracked_validation_freeze=args.tracked_validation_freeze,
         )
+    elif command == "diagnose-deltas":
+        result = stage4r_commands.diagnose_deltas(run=args.run)
     else:
         raise ValueError(f"unknown Stage 4R command {command!r}")
     _emit_stage3(result, json_output=args.json)
@@ -802,6 +804,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=stage4r_defaults["tracked_validation"],
     )
     stage4r_validate.add_argument("--json", action="store_true")
+    stage4r_diagnose = stage4r_commands_parser.add_parser("diagnose-deltas")
+    stage4r_diagnose.add_argument("--run", type=Path, default=stage4r_defaults["run"])
+    stage4r_diagnose.add_argument("--json", action="store_true")
     return parser
 
 
