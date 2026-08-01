@@ -26,31 +26,31 @@ from typing import Any, cast
 SCHEMA_VERSION = "stage6.redteam.v1"
 FIXTURE_SCHEMA = "stage6.synthetic.evidence.v1"
 CASE_NAMES: tuple[str, ...] = (
-    "missing_record",
-    "duplicate_record",
-    "extra_record",
-    "modified_record",
-    "unpaired_record",
-    "misweighted_record",
-    "relabeled_record",
-    "shard_missing",
-    "shard_duplicate",
-    "shard_wrong_roster",
-    "record_hash",
-    "manifest_hash",
-    "metrics_hash",
-    "metrics_value",
-    "bootstrap_seed",
-    "bootstrap_samples",
-    "bootstrap_interval",
-    "bootstrap_values",
-    "provenance_commit",
-    "provenance_dataset",
-    "provenance_config",
-    "provenance_dirty",
-    "provenance_schema",
-    "label_sensitive_relabeling",
-    "fraction_float_drift",
+    "missing_episode",
+    "duplicate_episode",
+    "extra_episode",
+    "swapped_policy_identity",
+    "altered_policy_source_or_ast_identity",
+    "changed_graph_relabeling_or_policy_seed",
+    "non_bijective_relabeling",
+    "relabeling_after_policy_observation",
+    "changed_initial_graph_one_policy",
+    "altered_trajectory_curve_or_selected_score",
+    "hidden_full_pool_oracle_score_accounting",
+    "unequal_proposal_score_horizon_budget",
+    "incorrect_order_weighting",
+    "incorrect_graph_relabeling_policy_hierarchy",
+    "unpaired_bootstrap_resampling",
+    "changed_bootstrap_seed_or_percentile_rule",
+    "stripping_scientific_field",
+    "retaining_timing_ns",
+    "completion_order_dependent_reduction",
+    "shard_truncation_or_decompression_corruption",
+    "manifest_or_schema_substitution",
+    "moved_preregistration_tag",
+    "runtime_network_or_provider_call",
+    "sandbox_timeout_crash_protocol_input_mutation",
+    "evidence_path_traversal_or_unsafe_output_overwrite",
 )
 
 # Metamorphic transformations are intentionally outside CASE_NAMES: accepting
@@ -79,6 +79,10 @@ _EXPECTED_PROVENANCE = {
     "dataset_manifest_sha256": "dataset-0001",
     "config_sha256": "config-0001",
     "dirty": False,
+    "preregistration_tag": "stage6-freeze-v1",
+    "provider_calls": 0,
+    "sandbox_status": "clean",
+    "artifact_path": "runs/stage6-safe",
 }
 
 
@@ -198,6 +202,22 @@ def make_fixture() -> dict[str, Any]:
             "timing_ns": 160,
         },
     ]
+    for row in records:
+        row.update(
+            {
+                "graph_seed": 101 if row["graph_id"] == "g01" else 102,
+                "relabeling_seed": 201,
+                "policy_seed": 301 if row["policy_id"] == "A" else 302,
+                "relabel_permutation": [0, 1, 2],
+                "observed_vertex_labels": ["a", "b", "c"],
+                "initial_graph_hash": f"initial:{row['graph_id']}",
+                "oracle_score_calls": 0,
+                "selected_score_calls": 1,
+                "proposal_budget": 1,
+                "horizon": 1,
+                "scientific_timing_ns": 1,
+            }
+        )
     shards = [
         {"shard_id": "shard-00", "record_ids": ["e01-A", "e01-B"], "weight": "1"},
         {"shard_id": "shard-01", "record_ids": ["e02-A", "e02-B"], "weight": "1"},
@@ -215,12 +235,16 @@ def make_fixture() -> dict[str, Any]:
         "metrics": {
             "policy_means": {"A": "5/8", "B": "3/8"},
             "paired_delta": "1/4",
+            "order_weight": "1/1",
+            "hierarchy": "policy>relabeling>graph>order",
+            "reduction_order": "record_id",
         },
         "bootstrap": {
             "seed": 1729,
             "samples": 8,
             "values": ["1/4"] * 8,
             "interval": ["1/4", "1/4"],
+            "percentile_rule": "linear_interpolation_at_p_times_n_minus_1",
         },
         "provenance": dict(_EXPECTED_PROVENANCE),
     }
@@ -339,6 +363,14 @@ def verify_fixture(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
                 errors.append({"code": "label_sensitive_relabel", "path": f"$.records[{row.get('record_id')}].label_sensitive"})
             if manifest.get("label_mode") == "label-sensitive" and row.get("vertex_labels") != ["a", "b", "c"]:
                 errors.append({"code": "label_sensitive_fixture", "path": f"$.records[{row.get('record_id')}].vertex_labels"})
+            if row.get("oracle_score_calls") != 0 or row.get("selected_score_calls") != 1 or row.get("proposal_budget") != 1 or row.get("horizon") != 1:
+                errors.append({"code": "execution_budget", "path": f"$.records[{row.get('record_id')}]"})
+            if row.get("relabel_permutation") != [0, 1, 2] or row.get("observed_vertex_labels") != ["a", "b", "c"]:
+                errors.append({"code": "relabel_proof", "path": f"$.records[{row.get('record_id')}]"})
+            if row.get("initial_graph_hash") != f"initial:{row.get('graph_id')}":
+                errors.append({"code": "initial_graph", "path": f"$.records[{row.get('record_id')}]"})
+            if row.get("scientific_timing_ns") != 1:
+                errors.append({"code": "scientific_timing", "path": f"$.records[{row.get('record_id')}]"})
             try:
                 if _fraction(row.get("weight")) != 1:
                     errors.append({"code": "misweighted_record", "path": f"$.records[{row.get('record_id')}].weight"})
@@ -370,6 +402,8 @@ def verify_fixture(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
                 ]
                 if _fraction(metrics["paired_delta"]) != sum(deltas, Fraction(0)) / len(deltas):
                     errors.append({"code": "paired_metric", "path": "$.metrics.paired_delta"})
+                if metrics.get("order_weight") != "1/1" or metrics.get("hierarchy") != "policy>relabeling>graph>order" or metrics.get("reduction_order") != "record_id":
+                    errors.append({"code": "hierarchy", "path": "$.metrics"})
             except Exception:
                 errors.append({"code": "metrics_invalid", "path": "$.metrics"})
         bootstrap = fixture.get("bootstrap")
@@ -381,7 +415,7 @@ def verify_fixture(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
                 errors.append({"code": "bootstrap_hash", "path": "$.bootstrap.sha256"})
             try:
                 values = [_fraction(v) for v in bootstrap["values"]]
-                if int(bootstrap["samples"]) != 8 or len(values) != 8 or any(v != Fraction(1, 4) for v in values) or [_fraction(v) for v in bootstrap["interval"]] != [Fraction(1, 4), Fraction(1, 4)] or int(bootstrap["seed"]) != 1729:
+                if int(bootstrap["samples"]) != 8 or len(values) != 8 or any(v != Fraction(1, 4) for v in values) or [_fraction(v) for v in bootstrap["interval"]] != [Fraction(1, 4), Fraction(1, 4)] or int(bootstrap["seed"]) != 1729 or bootstrap.get("percentile_rule") != "linear_interpolation_at_p_times_n_minus_1":
                     errors.append({"code": "bootstrap_invalid", "path": "$.bootstrap"})
             except Exception:
                 errors.append({"code": "bootstrap_invalid", "path": "$.bootstrap"})
@@ -397,30 +431,31 @@ def tamper_fixture(value: Mapping[str, Any] | None, case: str) -> dict[str, Any]
     """Apply one named deterministic mutation to a fixture."""
     fixture = copy.deepcopy(dict(value) if value is not None else make_fixture())
     rows = fixture["records"]
-    if case == "missing_record": rows.pop()
-    elif case == "duplicate_record": rows.append(copy.deepcopy(rows[0]))
-    elif case == "extra_record": rows.append({**copy.deepcopy(rows[0]), "record_id": "e99-X"})
-    elif case in {"modified_record", "record_hash"}: rows[0]["score"] = "7/8"
-    elif case == "unpaired_record": rows[0]["pair_id"] = "e99"
-    elif case == "misweighted_record": rows[0]["weight"] = "2"
-    elif case == "relabeled_record": rows[0]["policy_id"] = "C"
-    elif case == "shard_missing": fixture["shards"].pop()
-    elif case == "shard_duplicate": fixture["shards"].append(copy.deepcopy(fixture["shards"][0]))
-    elif case == "shard_wrong_roster": fixture["shards"][0]["record_ids"][0] = "e99-X"
-    elif case == "manifest_hash": fixture["manifest"]["records_sha256"] = "0" * 64
-    elif case == "metrics_hash": fixture["metrics"]["sha256"] = "0" * 64
-    elif case == "metrics_value": fixture["metrics"]["paired_delta"] = "1/3"
-    elif case == "bootstrap_seed": fixture["bootstrap"]["seed"] = 1730
-    elif case == "bootstrap_samples": fixture["bootstrap"]["samples"] = 9
-    elif case == "bootstrap_interval": fixture["bootstrap"]["interval"] = ["0", "1"]
-    elif case == "bootstrap_values": fixture["bootstrap"]["values"][0] = "0"
-    elif case == "provenance_commit": fixture["provenance"]["implementation_commit"] = "evil"
-    elif case == "provenance_dataset": fixture["provenance"]["dataset_manifest_sha256"] = "evil"
-    elif case == "provenance_config": fixture["provenance"]["config_sha256"] = "evil"
-    elif case == "provenance_dirty": fixture["provenance"]["dirty"] = True
-    elif case == "provenance_schema": fixture["schema_version"] = "stage6.synthetic.evidence.v0"
-    elif case == "label_sensitive_relabeling": rows[0]["label_sensitive"] = "role-b"
-    elif case == "fraction_float_drift": rows[0]["score"] = 0.3333333333
+    if case == "missing_episode": rows.pop()
+    elif case == "duplicate_episode": rows.append(copy.deepcopy(rows[0]))
+    elif case == "extra_episode": rows.append({**copy.deepcopy(rows[0]), "record_id": "e99-X"})
+    elif case == "swapped_policy_identity": rows[0]["policy_id"] = "C"
+    elif case == "altered_policy_source_or_ast_identity": fixture["provenance"]["implementation_commit"] = "evil"
+    elif case == "changed_graph_relabeling_or_policy_seed": rows[0]["graph_seed"] = 999
+    elif case == "non_bijective_relabeling": rows[0]["relabel_permutation"] = [0, 0, 1]
+    elif case == "relabeling_after_policy_observation": rows[0]["observed_vertex_labels"] = ["c", "b", "a"]
+    elif case == "changed_initial_graph_one_policy": rows[0]["initial_graph_hash"] = "initial:other"
+    elif case == "altered_trajectory_curve_or_selected_score": rows[0]["score"] = "7/8"
+    elif case == "hidden_full_pool_oracle_score_accounting": rows[0]["oracle_score_calls"] = 1
+    elif case == "unequal_proposal_score_horizon_budget": rows[0]["proposal_budget"] = 2
+    elif case == "incorrect_order_weighting": fixture["metrics"]["order_weight"] = "2/1"
+    elif case == "incorrect_graph_relabeling_policy_hierarchy": fixture["metrics"]["hierarchy"] = "order>graph>policy>relabeling"
+    elif case == "unpaired_bootstrap_resampling": fixture["bootstrap"]["values"][0] = "0"
+    elif case == "changed_bootstrap_seed_or_percentile_rule": fixture["bootstrap"]["seed"] = 1730
+    elif case == "stripping_scientific_field": rows[0].pop("score")
+    elif case == "retaining_timing_ns": rows[0]["scientific_timing_ns"] = 2
+    elif case == "completion_order_dependent_reduction": fixture["metrics"]["reduction_order"] = "completion"
+    elif case == "shard_truncation_or_decompression_corruption": fixture["shards"][0]["record_ids"].pop()
+    elif case == "manifest_or_schema_substitution": fixture["schema_version"] = "stage6.synthetic.evidence.v0"
+    elif case == "moved_preregistration_tag": fixture["provenance"]["preregistration_tag"] = "moved"
+    elif case == "runtime_network_or_provider_call": fixture["provenance"]["provider_calls"] = 1
+    elif case == "sandbox_timeout_crash_protocol_input_mutation": fixture["provenance"]["sandbox_status"] = "timeout"
+    elif case == "evidence_path_traversal_or_unsafe_output_overwrite": fixture["provenance"]["artifact_path"] = "../../unsafe"
     elif case == "shard_permutation": fixture["shards"] = list(reversed(fixture["shards"]))
     elif case == "record_permutation": fixture["records"] = list(reversed(fixture["records"]))
     elif case == "harmless_timing_change":
@@ -453,7 +488,7 @@ def run_redteam(config: Any = None, evidence: Any = None, fixture_root: str | Pa
         passed = observed_accept == expected_accept
         findings.append({
             "case": case,
-            "severity": "informational" if expected_accept else ("critical" if case in {"modified_record", "record_hash", "provenance_commit", "provenance_dataset", "provenance_config", "provenance_dirty"} else "high"),
+            "severity": "informational" if expected_accept else ("critical" if case in {"altered_trajectory_curve_or_selected_score", "altered_policy_source_or_ast_identity", "runtime_network_or_provider_call", "evidence_path_traversal_or_unsafe_output_overwrite"} else "high"),
             "evidence": {"expected_accept": expected_accept, "observed_accept": observed_accept, "errors": result["errors"]},
             "impact": "accepted metamorphic change" if expected_accept else "tampered evidence was rejected" if not observed_accept else "tampered evidence bypassed verification",
             "disposition": "allowed" if expected_accept and passed else "rejected" if not expected_accept and passed else "failure",
