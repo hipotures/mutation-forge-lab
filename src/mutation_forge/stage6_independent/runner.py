@@ -353,7 +353,11 @@ def _compact_authoritative_episode(
     behavior_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if raw.get("terminal_status") != "completed":
-        raise ValueError("Stage 6 evaluator returned a non-completed episode")
+        failure = raw.get("failure")
+        raise ValueError(
+            f"Stage 6 evaluator returned a non-completed episode "
+            f"{row.get('episode_id')}: {failure!r}"
+        )
     policies = raw.get("policies")
     if not isinstance(policies, Mapping) or set(policies) != set(POLICY_IDS):
         raise ValueError("Stage 6 policy roster drifted")
@@ -665,10 +669,54 @@ def _execute_pass(
         rows = read_shard(root, cast(Mapping[str, Any], entry), ids_by_shard[index])
         records.extend(rows)
         completed.add(index)
+    # A worker may have flushed a complete gzip shard just before a different
+    # worker failed.  Recover such an orphan checkpoint by validating it
+    # against the frozen roster; never rerun a valid completed shard.
+    for index in range(len(groups)):
+        if index in completed:
+            continue
+        filename = f"stage6-shard-{index:02d}.jsonl.gz"
+        candidate = root / filename
+        if not candidate.is_file():
+            continue
+        try:
+            import hashlib as _hashlib
+
+            entry = {
+                "path": filename,
+                "file_sha256": _hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                "episode_ids": ids_by_shard[index],
+                "record_count": len(ids_by_shard[index]),
+            }
+            rows = read_shard(root, entry, ids_by_shard[index])
+        except Exception:
+            # Keep malformed/partial evidence in place for forensic review and
+            # allow the shard to be regenerated from the last valid state.
+            continue
+        entries[str(index)] = entry
+        records.extend(rows)
+        completed.add(index)
+        write_state(
+            root,
+            {
+                "schema_version": PERSISTENCE_SCHEMA_VERSION,
+                "plan_sha256": identity,
+                "shards": entries,
+                "status": "shards_persisted",
+            },
+        )
     missing = [index for index in range(len(groups)) if index not in completed]
     # The official first shard is deliberately serialized before any resume.
     if 0 in missing:
-        outcome = run_shard(stage_plan, 0, output_dir=root, backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, config=config)
+        try:
+            outcome = run_shard(stage_plan, 0, output_dir=root, backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, config=config)
+        except Exception as error:
+            write_json(
+                root / "failure-shard-00.json",
+                {"schema_version": SCHEMA_VERSION, "shard": 0, "error_type": type(error).__name__, "error": str(error), "plan_sha256": identity},
+                overwrite=True,
+            )
+            raise
         entry = cast(dict[str, Any], outcome["shard"])
         entries["0"] = entry
         records.extend(cast(list[dict[str, Any]], outcome["records"]))
@@ -679,7 +727,15 @@ def _execute_pass(
             futures = {executor.submit(run_shard, stage_plan, index, output_dir=root, backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, config=config): index for index in missing}
             for future in as_completed(futures):
                 index = futures[future]
-                outcome = future.result()
+                try:
+                    outcome = future.result()
+                except Exception as error:
+                    write_json(
+                        root / f"failure-shard-{index:02d}.json",
+                        {"schema_version": SCHEMA_VERSION, "shard": index, "error_type": type(error).__name__, "error": str(error), "plan_sha256": identity},
+                        overwrite=True,
+                    )
+                    raise
                 entries[str(index)] = cast(dict[str, Any], outcome["shard"])
                 records.extend(cast(list[dict[str, Any]], outcome["records"]))
                 write_state(root, {"schema_version": PERSISTENCE_SCHEMA_VERSION, "plan_sha256": identity, "shards": entries, "status": "shards_persisted"})
