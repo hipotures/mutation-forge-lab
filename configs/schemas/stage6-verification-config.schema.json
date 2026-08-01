@@ -7,7 +7,7 @@
     "schema_version": {"const": "stage6.verification.v1"},
     "run": {"type": "object", "required": ["run_root"]},
     "repositories": {"type": "object", "required": ["project_repo", "heg_repo", "frozen_project_commit", "frozen_heg_commit"]},
-    "inputs": {"type": "object", "required": ["manifest", "stage5_freeze", "stage5_manifest", "expected_stage5_manifest_sha256", "prior_manifests"]},
+    "inputs": {"type": "object", "required": ["manifest", "stage5_freeze", "stage5_manifest", "stage5_evidence", "stage5_evidence_manifest", "expected_stage5_manifest_sha256", "expected_stage5_evidence_manifest_sha256", "stage2b_config", "prior_manifests"]},
     "policies": {"type": "object", "required": ["policy_ids", "paths", "source_sha256", "normalized_ast_sha256", "behavior_signature_sha256"]},
     "experiment": {"type": "object", "required": ["orders", "graph_seeds", "relabeling_seeds", "policy_seeds", "horizon", "identity_count", "shard_count", "episodes_per_shard"]},
     "relabeling": {"type": "object", "required": ["algorithm"]},

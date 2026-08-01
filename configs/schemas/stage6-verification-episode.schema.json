@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage6-verification-episode.schema.json",
+  "type": "object",
+  "required": ["schema_version", "terminal_status", "episode_id", "order", "graph_seed", "relabeling_seed", "policy_seed", "horizon", "policies", "steps", "relabel_proof", "metrics_input", "canonical_episode_sha256"],
+  "properties": {
+    "schema_version": {"const": "stage6.verification.episode.v1"},
+    "terminal_status": {"const": "completed"},
+    "episode_id": {"type": "string", "minLength": 1},
+    "order": {"type": "integer", "enum": [20, 24, 28]},
+    "graph_seed": {"type": "integer", "minimum": 701, "maximum": 708},
+    "relabeling_seed": {"type": "integer", "enum": [7101, 7102]},
+    "policy_seed": {"type": "integer", "minimum": 7001, "maximum": 7016},
+    "horizon": {"const": 32},
+    "policies": {"type": "object", "minProperties": 4, "maxProperties": 4},
+    "policy_identities": {"type": "object"},
+    "steps": {"type": "array", "minItems": 32, "maxItems": 32},
+    "relabel_proof": {"type": "object", "required": ["algorithm", "permutation", "permutation_sha256", "base_graph_hash", "relabeled_graph_hash", "canonical_unlabeled_hash"]},
+    "metrics_input": {"type": "object"},
+    "canonical_episode_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}

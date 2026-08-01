@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage6-verification-shard.schema.json",
+  "type": "object",
+  "required": ["schema_version", "status", "shard", "record_count", "records", "provider_calls"],
+  "properties": {
+    "schema_version": {"const": "stage6.independent.runner.v1"},
+    "status": {"const": "completed"},
+    "shard": {"type": "integer", "minimum": 0, "maximum": 11},
+    "record_count": {"const": 64},
+    "records": {"type": "array", "minItems": 64, "maxItems": 64},
+    "provider_calls": {"const": 0}
+  },
+  "additionalProperties": true
+}

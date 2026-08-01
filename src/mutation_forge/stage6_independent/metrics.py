@@ -30,7 +30,13 @@ POLICY_IDS = (CHAMPION_ID, STAGE3_COMPARATOR_ID, RANDOM_ID, STRUCTURAL_ID)
 
 DEFAULT_BOOTSTRAP_SAMPLES = 10_000
 DEFAULT_BOOTSTRAP_SEED = 2_026_080_103
+# Explicit name used by the Stage 5 comparison envelope and by callers that
+# want to assert the frozen draw count.
+BOOTSTRAP_SAMPLES = DEFAULT_BOOTSTRAP_SAMPLES
 DEFAULT_CONFIDENCE_LEVEL = Fraction(95, 100)
+DEFAULT_CHAMPION_STAGE3_THRESHOLD = Fraction(2, 100)
+DEFAULT_CHAMPION_RANDOM_THRESHOLD = Fraction(5, 100)
+DEFAULT_STRUCTURAL_RETENTION_THRESHOLD = Fraction(99, 100)
 FROZEN_PERCENTILE_RULE = "linear_interpolation_at_p_times_n_minus_1"
 EFFECT_STAGE3 = "C_vs_stage3"
 EFFECT_RANDOM = "C_vs_random"
@@ -219,7 +225,12 @@ class MetricsSummary:
 # Backwards-friendly aliases make the result pleasant to consume without
 # tying callers to the Stage 5 class name.
 Summary = MetricsSummary
+Stage5Summary = MetricsSummary
 Episode = PolicyAreaEpisode
+RelabelSummary = RelabelAreaSummary
+GraphSummary = GraphAreaSummary
+OrderSummary = OrderAreaSummary
+EffectSummary = PairEffectSummary
 
 
 def _sign_counts(values: Sequence[Fraction]) -> dict[str, int]:
@@ -256,17 +267,26 @@ def parse_metrics_episodes(rows: Iterable[Mapping[str, Any]], policy_ids: Sequen
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             raise ValueError(f"metrics row {index} must be an object")
+        # Some evidence records wrap the compact payload under ``metrics_input``;
+        # accept that representation while retaining the same validation.
+        nested = row.get("metrics_input")
+        source = nested if isinstance(nested, Mapping) else row
         policies = row.get("policies", row.get("policy_curves"))
+        if policies is None:
+            policies = source.get("policies", source.get("policy_curves"))
         if not isinstance(policies, Mapping):
             raise ValueError("compact metrics row has no policy rows")
         if set(policies) != set(ids):
             raise ValueError("policy roster mismatch")
         try:
-            order, graph_seed = int(row["order"]), int(row["graph_seed"])
-            relabeling_seed, policy_seed = int(row["relabeling_seed"]), int(row["policy_seed"])
+            order = int(row["order"] if "order" in row else source["order"])
+            graph_seed = int(row["graph_seed"] if "graph_seed" in row else source["graph_seed"])
+            relabeling_seed = int(row["relabeling_seed"] if "relabeling_seed" in row else source["relabeling_seed"])
+            policy_seed = int(row["policy_seed"] if "policy_seed" in row else source["policy_seed"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("metrics row is missing hierarchy identity") from exc
-        episode_id = str(row.get("episode_id", f"o{order:02d}-g{graph_seed:04d}-r{relabeling_seed:04d}-p{policy_seed:04d}"))
+        episode_id = str(row.get("episode_id", source.get(
+            "episode_id", f"o{order:02d}-g{graph_seed:04d}-r{relabeling_seed:04d}-p{policy_seed:04d}")))
         areas = {policy: curve_area(_policy_curve(policies[policy], policy), f"{policy} curve") for policy in ids}
         parsed.append(PolicyAreaEpisode(order, graph_seed, relabeling_seed, policy_seed, episode_id, areas))
     return tuple(parsed)
@@ -443,8 +463,10 @@ def _bootstrap_support(summary: MetricsSummary) -> BootstrapSupport:
                             len(summary.episodes))
 
 
-def gates(summary: MetricsSummary, bootstrap_summary: BootstrapSummary, *, champion_stage3_threshold: CurveValue,
-          champion_random_threshold: CurveValue, structural_retention_threshold: CurveValue) -> dict[str, bool]:
+def gates(summary: MetricsSummary, bootstrap_summary: BootstrapSummary, *,
+          champion_stage3_threshold: CurveValue = DEFAULT_CHAMPION_STAGE3_THRESHOLD,
+          champion_random_threshold: CurveValue = DEFAULT_CHAMPION_RANDOM_THRESHOLD,
+          structural_retention_threshold: CurveValue = DEFAULT_STRUCTURAL_RETENTION_THRESHOLD) -> dict[str, bool]:
     if any(bootstrap_summary.observed[e] != summary.effects[e].theta for e in EFFECTS):
         raise ValueError("bootstrap observed effects do not match the paired-area summary")
     relative = summary.relative_improvements
@@ -463,14 +485,24 @@ def fraction_payload(value: Fraction) -> dict[str, float | str]:
     return {"value": float(value), "fraction": fraction_text(value)}
 
 
+def as_dict(value: Any) -> dict[str, Any]:
+    """Convert any metrics dataclass to its canonical JSON-ready mapping."""
+
+    method = getattr(value, "as_dict", None)
+    if method is None or not callable(method):
+        raise TypeError("value does not provide an as_dict helper")
+    return method()
+
+
 # Familiar Stage 5 names are aliases, while all computation remains local.
 summarize_stage5 = summarize
 bootstrap_stage5 = bootstrap
 gate_checks = gates
 
 __all__ = ["CHAMPION_ID", "STAGE3_COMPARATOR_ID", "RANDOM_ID", "STRUCTURAL_ID", "POLICY_IDS", "EFFECTS",
-           "EFFECT_STAGE3", "EFFECT_RANDOM", "EFFECT_STRUCTURAL", "DEFAULT_BOOTSTRAP_SAMPLES", "DEFAULT_BOOTSTRAP_SEED",
-           "DEFAULT_CONFIDENCE_LEVEL", "FROZEN_PERCENTILE_RULE", "CurveValue", "PolicyAreaEpisode", "Episode", "RelabelAreaSummary",
-           "GraphAreaSummary", "OrderAreaSummary", "PairEffectSummary", "MetricsSummary", "Summary", "BootstrapSupport", "BootstrapSummary",
+           "EFFECT_STAGE3", "EFFECT_RANDOM", "EFFECT_STRUCTURAL", "BOOTSTRAP_SAMPLES", "DEFAULT_BOOTSTRAP_SAMPLES", "DEFAULT_BOOTSTRAP_SEED",
+           "DEFAULT_CONFIDENCE_LEVEL", "DEFAULT_CHAMPION_STAGE3_THRESHOLD", "DEFAULT_CHAMPION_RANDOM_THRESHOLD",
+           "DEFAULT_STRUCTURAL_RETENTION_THRESHOLD", "FROZEN_PERCENTILE_RULE", "CurveValue", "PolicyAreaEpisode", "Episode", "RelabelAreaSummary",
+           "GraphAreaSummary", "GraphSummary", "OrderAreaSummary", "OrderSummary", "PairEffectSummary", "EffectSummary", "MetricsSummary", "Summary", "Stage5Summary", "BootstrapSupport", "BootstrapSummary",
            "curve_area", "paired_area_delta", "parse_metrics_episodes", "summarize", "summarize_stage5", "bootstrap", "bootstrap_stage5",
-           "gates", "gate_checks", "fraction_text", "fraction_payload"]
+           "gates", "gate_checks", "fraction_text", "fraction_payload", "as_dict"]

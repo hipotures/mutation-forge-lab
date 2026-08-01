@@ -13,7 +13,11 @@ frozen_heg_commit = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
 manifest = "manifests/stage6-fresh-v1.json"
 stage5_freeze = "stage5-generalization-freeze-v1.json"
 stage5_manifest = "manifests/stage5-generalization-v1.json"
+stage2b_config = "stage2b-preregistered.toml"
+stage5_evidence = "/home/user/DEV/mutation-forge-evidence/stage5-generalization/issue-15-final"
+stage5_evidence_manifest = "/home/user/DEV/mutation-forge-evidence/stage5-generalization/issue-15-final/evidence-manifest.sha256"
 expected_stage5_manifest_sha256 = "ded50562899fd3b5d6214757f2581a2aab6507444a216643ac11fba0bb748c9d"
+expected_stage5_evidence_manifest_sha256 = "e996563c145ac12bc7e7ae9bb284ae98d14a2990aaac9bce17e9992486780cce"
 prior_manifests = [
   "manifests/stage2d-episodes-v1.json",
   "manifests/stage3-development-v1.json",

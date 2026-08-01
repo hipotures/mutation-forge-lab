@@ -52,7 +52,7 @@ def _tree_sha256(root: Path) -> str:
 
 def timing_stripped_projection(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {str(k): timing_stripped_projection(v) for k, v in value.items() if str(k) not in TIMING_KEYS and not str(k).endswith("_ns")}
+        return {str(k): timing_stripped_projection(v) for k, v in value.items() if str(k) not in TIMING_KEYS}
     if isinstance(value, (list, tuple)):
         return [timing_stripped_projection(item) for item in value]
     return value
@@ -103,7 +103,8 @@ def _copy_audit(source: Path, destination: Path) -> tuple[bool, str | None]:
     if source.resolve() == destination.resolve():
         return False, "audit copy must differ from source"
     if destination.exists():
-        return _tree_sha256(source) == _tree_sha256(destination), None
+        identical = _tree_sha256(source) == _tree_sha256(destination)
+        return identical, None if identical else "existing audit copy differs from source"
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=str(destination.parent)))
     try:
@@ -155,14 +156,26 @@ def audit_stage5(
     audit_copy: str | Path | None = None,
     project_repo: str | Path | None = None,
     heg_repo: str | Path | None = None,
+    expected_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Audit a preserved Stage 5 evidence tree without mutating it."""
     source = Path(evidence).resolve()
-    report: dict[str, Any] = {"status": "failed", "ok": False, "source_path": str(source), "source_sha256": None, "audit_path": None, "audit_sha256": None, "assertions": {}, "findings": [], "errors": []}
+    report: dict[str, Any] = {"status": "failed", "ok": False, "source_path": str(source), "source_sha256": None, "audit_path": None, "audit_sha256": None, "inventory": [], "assertions": {}, "findings": [], "errors": []}
     if not source.is_dir():
         report["errors"].append(f"evidence directory does not exist: {source}")
         return report
     report["source_sha256"] = _tree_sha256(source)
+    report["inventory"] = [
+        {
+            "path": path.relative_to(source).as_posix(),
+            "bytes": path.stat().st_size,
+            "sha256": _sha256(path),
+        }
+        for path in sorted(
+            (item for item in source.rglob("*") if item.is_file()),
+            key=lambda item: item.relative_to(source).as_posix(),
+        )
+    ]
     manifest_path = source / "evidence-manifest.sha256"
     declared_lines: list[str] = []
     if manifest_path.is_file():
@@ -174,6 +187,14 @@ def audit_stage5(
             actual = {line.split(None, 1)[1]: line.split(None, 1)[0] for line in build_sha256_manifest(source)}
             _assertion(report, "evidence_manifest_hashes", parsed == actual, [str(manifest_path)], {"missing": sorted(set(actual) - set(parsed)), "extra": sorted(set(parsed) - set(actual))})
             _assertion(report, "evidence_manifest_sorted", declared_lines == sorted(declared_lines, key=lambda line: line.split(None, 1)[1]), [str(manifest_path)])
+            if expected_manifest_sha256 is not None:
+                _assertion(
+                    report,
+                    "evidence_manifest_sha256_expected",
+                    _sha256(manifest_path) == expected_manifest_sha256,
+                    [str(manifest_path)],
+                    {"expected": expected_manifest_sha256, "actual": _sha256(manifest_path)},
+                )
         except Exception as exc:
             _assertion(report, "evidence_manifest_hashes", False, [str(manifest_path)], f"{type(exc).__name__}: {exc}")
     else:
@@ -185,9 +206,11 @@ def audit_stage5(
         report["audit_sha256"] = _tree_sha256(destination) if destination.is_dir() else None
         _assertion(report, "byte_identical_audit_copy", copied and copy_error is None and report["source_sha256"] == report["audit_sha256"], [str(source), str(destination)], copy_error)
 
-    freeze_path = source / "stage5-generalization-freeze-v1.json"
-    terminal_path = source / "stage5-terminal.json"
-    summary_path = source / "stage5-summary.json"
+    analysis_root = Path(str(report["audit_path"])).resolve() if report.get("audit_path") else source
+
+    freeze_path = analysis_root / "stage5-generalization-freeze-v1.json"
+    terminal_path = analysis_root / "stage5-terminal.json"
+    summary_path = analysis_root / "stage5-summary.json"
     freeze = _json(freeze_path) if freeze_path.is_file() else {}
     terminal = _json(terminal_path) if terminal_path.is_file() else {}
     final_summary = _json(summary_path) if summary_path.is_file() else {}
@@ -196,12 +219,12 @@ def audit_stage5(
 
     passes: dict[str, tuple[dict[str, Any] | None, dict[str, Any] | None, list[dict[str, Any]], list[str]]] = {}
     for name in ("primary", "replay"):
-        passes[name] = _load_pass(source / name, name)
+        passes[name] = _load_pass(analysis_root / name, name)
         summary, state, records, errors = passes[name]
-        _assertion(report, f"{name}_24_shards_and_roster", summary is not None and not errors and len(records) == 1536 and len({str(r.get("episode_id")) for r in records}) == 1536, [str(source / name)], errors or {"rows": len(records)})
-        _assertion(report, f"{name}_state_complete", state is not None and state.get("status") == "completed" and len(state.get("completed_shards", {})) == 24, [str(source / name / "*-state.json")])
+        _assertion(report, f"{name}_24_shards_and_roster", summary is not None and not errors and len(records) == 1536 and len({str(r.get("episode_id")) for r in records}) == 1536, [str(analysis_root / name)], errors or {"rows": len(records)})
+        _assertion(report, f"{name}_state_complete", state is not None and state.get("status") == "completed" and len(state.get("completed_shards", {})) == 24, [str(analysis_root / name / "*-state.json")])
         if summary:
-            _assertion(report, f"{name}_summary_schema", summary.get("status") == "completed" and summary.get("record_count") == 1536 and summary.get("shard_count") == 24 and summary.get("episodes_per_shard") == 64 and summary.get("policy_ids") == list(POLICIES), [str(source / name)])
+            _assertion(report, f"{name}_summary_schema", summary.get("status") == "completed" and summary.get("record_count") == 1536 and summary.get("shard_count") == 24 and summary.get("episodes_per_shard") == 64 and summary.get("policy_ids") == list(POLICIES), [str(analysis_root / name)])
 
     primary_records, replay_records = passes["primary"][2], passes["replay"][2]
     primary_ids, replay_ids = {str(r.get("episode_id")) for r in primary_records}, {str(r.get("episode_id")) for r in replay_records}
@@ -218,7 +241,7 @@ def audit_stage5(
         graph_ok &= row.get("invalid_graphs") == 0 and isinstance(proof, Mapping) and proof.get("base_graph_hash") == row.get("base_graph_hash") and proof.get("relabeled_graph_hash") == row.get("relabeled_graph_hash") and proof.get("canonical_unlabeled_hash") == row.get("canonical_unlabeled_hash")
         perm = proof.get("permutation") if isinstance(proof, Mapping) else None
         relabel_ok &= isinstance(perm, list) and len(perm) == int(row.get("order", 0)) and sorted(perm) == list(range(int(row.get("order", 0)))) and proof.get("algorithm") == "fisher-yates-sha256-v1"
-    refs = [str(source / "primary"), str(source / "replay")]
+    refs = [str(analysis_root / "primary"), str(analysis_root / "replay")]
     _assertion(report, "four_policy_roster_and_metrics_input", policy_ok and metrics_ok, refs)
     _assertion(report, "zero_counters_and_equal_budgets", counters_ok and budgets_ok, refs)
     _assertion(report, "graph_validity_and_relabel_proofs", graph_ok and relabel_ok, refs)

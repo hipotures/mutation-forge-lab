@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage6-verification-audit.schema.json",
+  "type": "object",
+  "required": ["schema_version", "status", "ok", "inventory", "assertions", "findings"],
+  "properties": {
+    "schema_version": {"const": "stage6.verification.audit.v1"},
+    "status": {"enum": ["passed", "failed"]},
+    "ok": {"type": "boolean"},
+    "inventory": {"type": "array"},
+    "assertions": {"type": "object"},
+    "findings": {"type": "array"}
+  },
+  "additionalProperties": true
+}

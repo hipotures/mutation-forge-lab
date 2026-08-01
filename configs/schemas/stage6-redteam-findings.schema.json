@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage6-redteam-findings.schema.json",
+  "type": "object",
+  "required": ["schema_version", "status", "findings"],
+  "properties": {
+    "schema_version": {"const": "stage6.redteam.v1"},
+    "status": {"enum": ["passed", "failed"]},
+    "findings": {"type": "array", "items": {"type": "object", "required": ["case", "severity", "classification", "passed"]}}
+  },
+  "additionalProperties": true
+}

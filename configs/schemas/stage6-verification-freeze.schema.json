@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage6-verification-freeze.schema.json",
+  "type": "object",
+  "required": ["schema_version", "freeze_tag", "config_sha256", "manifest_sha256", "stage5_evidence_manifest_sha256", "policy_ids", "experiment", "resources", "bootstrap", "gates", "freeze_sha256", "stage6_results_observed", "stage7_started"],
+  "properties": {
+    "schema_version": {"const": "stage6.verification.freeze.v1"},
+    "freeze_tag": {"const": "stage6-verification-frozen-v1"},
+    "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "stage5_evidence_manifest_sha256": {"type": "string", "const": "e996563c145ac12bc7e7ae9bb284ae98d14a2990aaac9bce17e9992486780cce"},
+    "policy_ids": {"type": "array", "minItems": 4, "maxItems": 4},
+    "experiment": {"type": "object"},
+    "resources": {"type": "object"},
+    "bootstrap": {"type": "object"},
+    "gates": {"type": "object"},
+    "freeze_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "stage6_results_observed": {"const": false},
+    "stage7_started": {"const": false}
+  },
+  "additionalProperties": true
+}

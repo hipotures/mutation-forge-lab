@@ -48,6 +48,10 @@ from mutation_forge.stage2d.evaluation import (
 )
 from mutation_forge.stage3 import commands as stage3_commands
 from mutation_forge.stage4 import commands as stage4_commands
+from mutation_forge.stage6_independent import orchestrator as stage6_commands
+from mutation_forge.stage6_independent.config import load_config as load_stage6_config
+from mutation_forge.stage6_independent.runner import run_shard as run_stage6_shard
+from mutation_forge.stage6_independent.runner import verify_replay as verify_stage6_replay
 
 
 def _doctor(heg_repo: Path, run_root: Path) -> int:
@@ -452,6 +456,48 @@ def _stage5(args: argparse.Namespace) -> int:
         raise ValueError(f"unknown Stage 5 command {args.stage5_command!r}")
     _emit_stage3(result, json_output=args.json)
     return 0 if result.get("status", "completed") in {"completed", "ok"} else 1
+
+
+def _stage6(args: argparse.Namespace) -> int:
+    command = args.stage6_command
+    if command == "freeze":
+        result = stage6_commands.freeze(args.config)
+    elif command == "audit-stage5":
+        result = stage6_commands.audit(args.config)
+    elif command == "redteam":
+        result = stage6_commands.redteam(args.config)
+    elif command == "plan-fresh":
+        result = stage6_commands.plan_fresh(args.config)
+    elif command == "run-shard":
+        config = load_stage6_config(args.config)
+        prepared = stage6_commands.plan_fresh(args.config)
+        policies = {
+            policy_id: config.policy_paths[policy_id].read_text(encoding="utf-8")
+            for policy_id in stage6_commands.POLICY_IDS
+        }
+        output_dir = config.run_root / args.pass_name
+        result = run_stage6_shard(
+            prepared,
+            args.shard,
+            output_dir=output_dir,
+            policies=policies,
+            config=config,
+        )
+    elif command == "run":
+        result = stage6_commands.run_fresh(args.config, workers=args.workers, replay=True)
+    elif command == "reduce":
+        result = stage6_commands.reduce(
+            args.config,
+            preservation_verified=args.preservation_verified,
+        )
+    elif command == "verify-replay":
+        result = verify_stage6_replay(args.primary, args.replay)
+    else:
+        raise ValueError(f"unknown Stage 6 command {command!r}")
+    _emit_policy_result(result, json_output=args.json)
+    if isinstance(result, Mapping):
+        return 0 if result.get("status", "completed") not in {"failed", "error"} else 1
+    return 0
 
 
 def _policy_validate(path: Path, *, json_output: bool) -> int:
@@ -886,6 +932,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("docs/reports/STAGE5_GENERALIZATION_REPORT.md"),
     )
     stage5_finalize.add_argument("--json", action="store_true")
+
+    stage6 = commands.add_parser("stage6")
+    stage6_commands_parser = stage6.add_subparsers(
+        dest="stage6_command",
+        required=True,
+    )
+    stage6_defaults = {"config": Path("configs/stage6-verification.toml")}
+    for command_name in ("freeze", "audit-stage5", "redteam", "plan-fresh", "run"):
+        command = stage6_commands_parser.add_parser(command_name)
+        command.add_argument("--config", type=Path, default=stage6_defaults["config"])
+        if command_name == "run":
+            command.add_argument("--workers", type=int, default=8)
+        command.add_argument("--json", action="store_true")
+    stage6_shard = stage6_commands_parser.add_parser("run-shard")
+    stage6_shard.add_argument("--config", type=Path, default=stage6_defaults["config"])
+    stage6_shard.add_argument(
+        "--pass",
+        dest="pass_name",
+        choices=("primary", "replay"),
+        required=True,
+    )
+    stage6_shard.add_argument("--shard", required=True)
+    stage6_shard.add_argument("--json", action="store_true")
+    stage6_reduce = stage6_commands_parser.add_parser("reduce")
+    stage6_reduce.add_argument("--config", type=Path, default=stage6_defaults["config"])
+    stage6_reduce.add_argument("--preservation-verified", action="store_true")
+    stage6_reduce.add_argument("--json", action="store_true")
+    stage6_replay = stage6_commands_parser.add_parser("verify-replay")
+    stage6_replay.add_argument("--primary", type=Path, required=True)
+    stage6_replay.add_argument("--replay", type=Path, required=True)
+    stage6_replay.add_argument("--json", action="store_true")
     return parser
 
 
@@ -944,6 +1021,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stage4e(args)
         if args.command == "stage5":
             return _stage5(args)
+        if args.command == "stage6":
+            return _stage6(args)
     except Exception as error:
         if getattr(args, "json", False):
             print(

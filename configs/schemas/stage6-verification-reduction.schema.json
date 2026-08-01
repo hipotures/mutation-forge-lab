@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage6-verification-reduction.schema.json",
+  "type": "object",
+  "required": ["schema_version", "decision", "gates", "metrics", "replay_verification", "stage5_recomputation", "redteam"],
+  "properties": {
+    "schema_version": {"const": "stage6.verification.report.v1"},
+    "decision": {"enum": ["GO_TO_STAGE_7", "NO_GO", "INCONCLUSIVE_INFRASTRUCTURE_FAILURE"]},
+    "gates": {"type": "object", "minProperties": 15},
+    "metrics": {"type": "object"},
+    "replay_verification": {"type": "object"},
+    "stage5_recomputation": {"type": "object"},
+    "redteam": {"type": "object"}
+  },
+  "additionalProperties": true
+}

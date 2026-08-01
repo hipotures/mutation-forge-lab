@@ -16,9 +16,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, cast
 
+from mutation_forge.backends.toy import ToyBackend
 from mutation_forge.models import GraphScore, GraphState, RewritePlan
 from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.worker import PolicyWorker
+from mutation_forge.stage3.evaluation import run_development_episode
 
 from .persistence import SCHEMA_VERSION as PERSISTENCE_SCHEMA_VERSION
 from .persistence import (
@@ -58,6 +60,23 @@ POLICY_IDS = (
     "structural",
 )
 
+TIMING_ONLY_FIELDS = frozenset(
+    {
+        "timing_ns",
+        "first_improvement_ns",
+        "ranker_elapsed_ns",
+        "selected_scoring_ns",
+        "pool_legality_ns",
+        "pool_feature_ns",
+        "elapsed_ns",
+        "started_at",
+        "finished_at",
+        "timing",
+        "timing_profile",
+        "elapsed_seconds",
+    }
+)
+
 
 def _digest_int(domain: str, *parts: object) -> int:
     return int.from_bytes(hashlib.sha256(canonical_bytes([domain, *parts])).digest()[:8], "big")
@@ -73,6 +92,75 @@ def _relabel_graph(graph: GraphState, *, graph_seed: int, relabeling_seed: int) 
         values[index], values[swap] = values[swap], values[index]
     edges = tuple(sorted((min(values[u], values[v]), max(values[u], values[v])) for u, v in graph.edges))
     return GraphState(graph.order, edges), tuple(values)
+
+
+def _graph_label_hash(graph: GraphState) -> str:
+    return hashlib.sha256(
+        canonical_bytes({"order": graph.order, "edges": [list(edge) for edge in graph.edges]})
+    ).hexdigest()
+
+
+def _canonical_unlabeled_identity(graph: GraphState) -> str:
+    adjacency = [set[int]() for _ in range(graph.order)]
+    for left, right in graph.edges:
+        adjacency[left].add(right)
+        adjacency[right].add(left)
+    colors = [str(len(neighbors)) for neighbors in adjacency]
+    for _ in range(graph.order):
+        signatures = [
+            (colors[vertex], tuple(sorted(colors[neighbor] for neighbor in adjacency[vertex])))
+            for vertex in range(graph.order)
+        ]
+        palette = {
+            signature: str(index)
+            for index, signature in enumerate(sorted(set(signatures), key=repr))
+        }
+        refined = [palette[signature] for signature in signatures]
+        if refined == colors:
+            break
+        colors = refined
+    profiles: list[tuple[int, ...]] = []
+    for start in range(graph.order):
+        distances = [-1] * graph.order
+        distances[start] = 0
+        frontier = [start]
+        while frontier:
+            vertex = frontier.pop(0)
+            for neighbor in sorted(adjacency[vertex]):
+                if distances[neighbor] == -1:
+                    distances[neighbor] = distances[vertex] + 1
+                    frontier.append(neighbor)
+        profiles.append(tuple(sorted(distances)))
+    certificate = {
+        "algorithm": "wl-distance-edge-v1",
+        "order": graph.order,
+        "vertex_colors": sorted(colors),
+        "distance_profiles": sorted(profiles),
+        "edge_colors": sorted(
+            (min(colors[left], colors[right]), max(colors[left], colors[right]))
+            for left, right in graph.edges
+        ),
+    }
+    return hashlib.sha256(canonical_bytes(certificate)).hexdigest()
+
+
+class RelabeledToyBackend(ToyBackend):
+    """Toy scorer exposing one frozen relabeled graph to every policy."""
+
+    def __init__(self, *, order: int, graph_seed: int, relabeling_seed: int) -> None:
+        super().__init__()
+        self.order_identity = order
+        self.graph_seed_identity = graph_seed
+        self.relabeling_seed_identity = relabeling_seed
+        self.base_graph = super().generate_seed(order=order, seed=graph_seed)
+        self.graph, self.permutation = _relabel_graph(
+            self.base_graph, graph_seed=graph_seed, relabeling_seed=relabeling_seed
+        )
+
+    def generate_seed(self, *, order: int, seed: int) -> GraphState:
+        if (order, seed) != (self.order_identity, self.graph_seed_identity):
+            raise ValueError("Stage 6 backend received a foreign graph identity")
+        return self.graph
 
 
 def _episode_id(order: int, graph_seed: int, relabeling_seed: int, policy_seed: int) -> str:
@@ -235,6 +323,137 @@ def _select(policy: Any, context: Mapping[str, Any], pool: Any, workers: dict[st
     return selected, {"ranker_elapsed_ns": elapsed, "selected_proposal_id": _candidate_id(selected, candidates.index(selected) if selected in candidates else 0), "ranker_flags": {}}
 
 
+def _compact_trace(value: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "step", "pool_hash", "rank_pool_hash", "pool_size", "pool_attempted",
+        "pool_deduplicated", "pool_rejected", "selected_proposal_id", "selected_k",
+        "selected_operator_family", "selected_selector_tags", "accepted",
+        "selected_ordering_key", "previous_ordering_key", "selected_total_witnesses",
+        "previous_total_witnesses", "current_total_witnesses", "selected_witness_delta",
+        "selected_penalty_delta", "best_total_witnesses", "state_hash", "ranker_flags",
+    )
+    return {key: timing_stripped(value.get(key)) for key in keys}
+
+
+def _compact_policy(value: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "auc", "normalized_best_so_far_curve", "best_total_witnesses", "accepted_count",
+        "rejected_count", "nonimproving_count", "divergence_count", "first_improvement_step",
+        "evaluations_to_first_improvement", "failure_count",
+    )
+    return {key: timing_stripped(value.get(key)) for key in keys}
+
+
+def _compact_authoritative_episode(
+    raw: Mapping[str, Any],
+    row: Mapping[str, Any],
+    source_hashes: Mapping[str, str],
+    backend: RelabeledToyBackend,
+    ast_hashes: Mapping[str, str] | None = None,
+    behavior_hashes: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    if raw.get("terminal_status") != "completed":
+        raise ValueError("Stage 6 evaluator returned a non-completed episode")
+    policies = raw.get("policies")
+    if not isinstance(policies, Mapping) or set(policies) != set(POLICY_IDS):
+        raise ValueError("Stage 6 policy roster drifted")
+    for counter in ("model_calls", "app_server_calls", "oracle_score_calls", "runtime_network_calls"):
+        if int(raw.get(counter, 0)) != 0:
+            raise ValueError(f"forbidden counter is nonzero: {counter}")
+    if int(raw.get("invalid_graphs", 0)) != 0 or int(raw.get("policy_failures", 0)) != 0:
+        raise ValueError("Stage 6 episode contains a failed policy or invalid graph")
+    proof = {
+        "algorithm": "fisher-yates-sha256-v1",
+        "order": int(row["order"]),
+        "graph_seed": int(row["graph_seed"]),
+        "relabeling_seed": int(row["relabeling_seed"]),
+        "permutation": list(backend.permutation),
+        "permutation_sha256": hashlib.sha256(canonical_bytes(list(backend.permutation))).hexdigest(),
+        "base_graph_hash": _graph_label_hash(backend.base_graph),
+        "relabeled_graph_hash": _graph_label_hash(backend.graph),
+        "canonical_unlabeled_hash": _canonical_unlabeled_identity(backend.graph),
+        "labels_changed": backend.base_graph.edges != backend.graph.edges,
+    }
+    compact: dict[str, Any] = {
+        "schema_version": "stage6.verification.episode.v1",
+        "terminal_status": "completed",
+        "episode_id": str(row["episode_id"]),
+        "order": int(row["order"]),
+        "graph_seed": int(row["graph_seed"]),
+        "relabeling_seed": int(row["relabeling_seed"]),
+        "policy_seed": int(row["policy_seed"]),
+        "horizon": int(row.get("horizon", HORIZON)),
+        "shard_id": str(row.get("shard_id", "")),
+        "initial_graph_hash": raw.get("initial_graph_hash"),
+        "base_graph_hash": proof["base_graph_hash"],
+        "relabeled_graph_hash": proof["relabeled_graph_hash"],
+        "canonical_unlabeled_hash": proof["canonical_unlabeled_hash"],
+        "relabel_proof": proof,
+        "divergence_step": raw.get("divergence_step"),
+        "shared_pool_steps": raw.get("shared_pool_steps"),
+        "independent_pool_steps": raw.get("independent_pool_steps"),
+        "policies": {
+            policy_id: _compact_policy(cast(Mapping[str, Any], policies[policy_id]))
+            for policy_id in POLICY_IDS
+        },
+        "policy_identities": {
+            policy_id: {
+                "source_sha256": str(source_hashes[policy_id]),
+                "normalized_ast_sha256": str((ast_hashes or {}).get(policy_id, "")),
+                "behavior_signature_sha256": str(
+                    (behavior_hashes or {}).get(policy_id, "")
+                ),
+            }
+            for policy_id in POLICY_IDS
+        },
+        "steps": [
+            {
+                "step": item.get("step"),
+                "trajectory_seed": item.get("trajectory_seed"),
+                "states_identical_before_step": item.get("states_identical_before_step"),
+                "shared_pool": item.get("shared_pool"),
+                "policies": {
+                    policy_id: _compact_trace(
+                        cast(Mapping[str, Any], cast(Mapping[str, Any], item["policies"])[policy_id])
+                    )
+                    for policy_id in POLICY_IDS
+                },
+            }
+            for item in cast(list[Mapping[str, Any]], raw.get("steps", []))
+        ],
+        "initial_score_calls": int(raw.get("initial_score_calls", 0)),
+        "selected_score_calls": int(raw.get("selected_score_calls", 0)),
+        "evaluation_count": int(raw.get("evaluation_count", 0)),
+        "invalid_graphs": int(raw.get("invalid_graphs", 0)),
+        "policy_failures": int(raw.get("policy_failures", 0)),
+        "model_calls": int(raw.get("model_calls", 0)),
+        "app_server_calls": int(raw.get("app_server_calls", 0)),
+        "oracle_score_calls": int(raw.get("oracle_score_calls", 0)),
+        "runtime_network_calls": int(raw.get("runtime_network_calls", 0)),
+        "policy_source_sha256": dict(source_hashes),
+    }
+    compact["metrics_input"] = {
+        "episode_id": compact["episode_id"],
+        "order": compact["order"],
+        "graph_seed": compact["graph_seed"],
+        "relabeling_seed": compact["relabeling_seed"],
+        "policy_seed": compact["policy_seed"],
+        "horizon": compact["horizon"],
+        "policies": {
+            policy_id: {
+                key: compact["policies"][policy_id].get(key)
+                for key in (
+                    "auc", "normalized_best_so_far_curve", "best_total_witnesses",
+                    "accepted_count", "failure_count",
+                )
+            }
+            for policy_id in POLICY_IDS
+        },
+    }
+    compact["canonical_episode_sha256"] = canonical_record_hash(compact)
+    return compact
+
+
 def _rewrite(candidate: Any) -> RewritePlan:
     if isinstance(candidate, RewritePlan):
         return candidate
@@ -250,7 +469,17 @@ def _rewrite(candidate: Any) -> RewritePlan:
     raise TypeError("proposal candidate does not contain a RewritePlan")
 
 
-def _episode(row: Mapping[str, Any], *, backend: Any, scorer: Any, proposer: Any, policies: Mapping[str, Any], dry_run: bool, policy_workers: dict[str, PolicyWorker] | None) -> dict[str, Any]:
+def _episode(
+    row: Mapping[str, Any],
+    *,
+    backend: Any,
+    scorer: Any,
+    proposer: Any,
+    policies: Mapping[str, Any],
+    dry_run: bool,
+    policy_workers: dict[str, PolicyWorker] | None,
+    config: Any | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter_ns()
     eid = str(row["episode_id"])
     horizon = int(row.get("horizon", HORIZON))
@@ -263,6 +492,35 @@ def _episode(row: Mapping[str, Any], *, backend: Any, scorer: Any, proposer: Any
         base = {"schema_version": SCHEMA_VERSION, "terminal_status": "completed", "episode_id": eid, **{key: row[key] for key in ("order", "graph_seed", "relabeling_seed", "policy_seed", "horizon", "shard_id") if key in row}, "policies": records, "steps": [], "initial_score_calls": 1, "selected_score_calls": horizon * len(POLICY_IDS), "oracle_score_calls": 0, "provider_calls": 0, "timing_ns": {"episode_total": time.perf_counter_ns() - started}}
         base["canonical_hash"] = canonical_record_hash(base)
         return base
+    if config is not None:
+        # The official path is the immutable Stage 3 evaluator with a fresh
+        # relabeled backend.  This call is deliberately made here, below the
+        # Stage 6 orchestration layer, so the runner cannot accidentally use a
+        # Stage 5 high-level runner or search implementation.
+        relabeled_backend = RelabeledToyBackend(
+            order=int(row["order"]),
+            graph_seed=int(row["graph_seed"]),
+            relabeling_seed=int(row["relabeling_seed"]),
+        )
+        try:
+            raw = run_development_episode(
+                config,
+                row,
+                policies,
+                backend=relabeled_backend,
+                require_baselines=True,
+            )
+            source_hashes = getattr(config, "policy_source_hashes", {})
+            return _compact_authoritative_episode(
+                cast(Mapping[str, Any], raw),
+                row,
+                cast(Mapping[str, str], source_hashes),
+                relabeled_backend,
+                cast(Mapping[str, str], getattr(config, "policy_ast_hashes", {})),
+                cast(Mapping[str, str], getattr(config, "policy_behavior_hashes", {})),
+            )
+        finally:
+            relabeled_backend.close()
     if backend is None:
         raise ValueError("backend is required unless dry_run=True")
     graph = backend.generate_seed(order=int(row["order"]), seed=int(row["graph_seed"]))
@@ -312,6 +570,7 @@ def run_shard(
     proposer: Any = None,
     policies: Mapping[str, Any] | None = None,
     dry_run: bool = False,
+    config: Any | None = None,
 ) -> dict[str, Any]:
     """Evaluate and optionally persist one deterministic shard."""
     prepared = _resolve_plan(stage_plan)
@@ -322,7 +581,17 @@ def run_shard(
     ids = [str(item) for item in cast(list[Any], groups[index].get("episode_ids", []))]
     by_id = {str(row["episode_id"]): row for row in cast(list[Mapping[str, Any]], prepared["episodes"])}
     rows = [by_id[item] for item in ids]
-    selected_policies = policies or {policy_id: (lambda _ctx, _proposal, _i=i: -_i) for i, policy_id in enumerate(POLICY_IDS)}
+    if policies is None and config is not None:
+        configured_paths = getattr(config, "policy_paths", {})
+        selected_policies = {
+            policy_id: Path(configured_paths[policy_id]).read_text(encoding="utf-8")
+            for policy_id in POLICY_IDS
+        }
+    else:
+        selected_policies = policies or {
+            policy_id: (lambda _ctx, _proposal, _i=i: -_i)
+            for i, policy_id in enumerate(POLICY_IDS)
+        }
     if set(selected_policies) != set(POLICY_IDS):
         raise ValueError("Stage 6 requires exactly the four frozen policy IDs")
     for name, value in THREAD_ENVIRONMENT.items():
@@ -331,6 +600,11 @@ def run_shard(
     owned_workers: list[PolicyWorker] = []
     try:
         for policy_id, value in selected_policies.items():
+            if config is not None:
+                # The authoritative evaluator creates its own SourceRanker
+                # instances and owns their lifecycle; no Stage 6 worker is
+                # needed for this path.
+                continue
             if isinstance(value, str):
                 worker_map[policy_id] = PolicyWorker(value, SandboxLimits())
                 owned_workers.append(worker_map[policy_id])
@@ -341,7 +615,19 @@ def run_shard(
                 source_path = Path(str(value.path))
                 worker_map[policy_id] = PolicyWorker(source_path.read_text(encoding="utf-8"), SandboxLimits())
                 owned_workers.append(worker_map[policy_id])
-        records = [_episode(row, backend=backend, scorer=scorer, proposer=proposer, policies=selected_policies, dry_run=dry_run, policy_workers=worker_map) for row in rows]
+        records = [
+            _episode(
+                row,
+                backend=backend,
+                scorer=scorer,
+                proposer=proposer,
+                policies=selected_policies,
+                dry_run=dry_run,
+                policy_workers=worker_map,
+                config=config,
+            )
+            for row in rows
+        ]
     finally:
         for worker in owned_workers:
             worker.close()
@@ -352,7 +638,18 @@ def run_shard(
     return result
 
 
-def _execute_pass(stage_plan: Mapping[str, Any], root: Path, *, backend: Any, scorer: Any, proposer: Any, policies: Mapping[str, Any] | None, dry_run: bool, workers: int) -> dict[str, Any]:
+def _execute_pass(
+    stage_plan: Mapping[str, Any],
+    root: Path,
+    *,
+    backend: Any,
+    scorer: Any,
+    proposer: Any,
+    policies: Mapping[str, Any] | None,
+    dry_run: bool,
+    workers: int,
+    config: Any | None = None,
+) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     identity = str(stage_plan.get("plan_sha256", hashlib.sha256(canonical_bytes(stage_plan)).hexdigest()))
     existing = load_state(root)
@@ -371,7 +668,7 @@ def _execute_pass(stage_plan: Mapping[str, Any], root: Path, *, backend: Any, sc
     missing = [index for index in range(len(groups)) if index not in completed]
     # The official first shard is deliberately serialized before any resume.
     if 0 in missing:
-        outcome = run_shard(stage_plan, 0, output_dir=root, backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run)
+        outcome = run_shard(stage_plan, 0, output_dir=root, backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, config=config)
         entry = cast(dict[str, Any], outcome["shard"])
         entries["0"] = entry
         records.extend(cast(list[dict[str, Any]], outcome["records"]))
@@ -379,7 +676,7 @@ def _execute_pass(stage_plan: Mapping[str, Any], root: Path, *, backend: Any, sc
         missing.remove(0)
     if missing:
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, workers))) as executor:
-            futures = {executor.submit(run_shard, stage_plan, index, output_dir=root, backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run): index for index in missing}
+            futures = {executor.submit(run_shard, stage_plan, index, output_dir=root, backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, config=config): index for index in missing}
             for future in as_completed(futures):
                 index = futures[future]
                 outcome = future.result()
@@ -404,15 +701,16 @@ def run_pass(
     workers: int = MAX_WORKERS,
     dry_run: bool = False,
     replay: bool = True,
+    config: Any | None = None,
 ) -> dict[str, Any]:
     if not 1 <= int(workers) <= MAX_WORKERS:
         raise ValueError("workers must be between 1 and 8")
     prepared = _resolve_plan(stage_plan)
     root = Path(output_dir).resolve()
-    primary = _execute_pass(prepared, root / "primary", backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, workers=workers)
+    primary = _execute_pass(prepared, root / "primary", backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, workers=workers, config=config)
     result: dict[str, Any] = {"primary": primary, "provider_calls": 0}
     if replay:
-        replay_summary = _execute_pass(prepared, root / "replay", backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, workers=workers)
+        replay_summary = _execute_pass(prepared, root / "replay", backend=backend, scorer=scorer, proposer=proposer, policies=policies, dry_run=dry_run, workers=workers, config=config)
         result["replay"] = replay_summary
         result["replay_verification"] = verify_replay(primary, replay_summary)
     return result

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from mutation_forge.models import JsonValue
+from mutation_forge.stage2b.config import Stage2BConfig, load_stage2b_config
 from mutation_forge.stage3.manifest import canonical_bytes
 
 STAGE6_CONFIG_VERSION = "stage6.verification.v1"
@@ -28,6 +29,7 @@ STAGE6_MANIFEST_VERSION = "stage6.verification.manifest.v1"
 PROJECT_COMMIT = "cc2f7b7254705d47fd4995a4b8a2bd45d545795c"
 HEG_COMMIT = "fd97451b0f3d87400d1d955a2c6b1b18303344ff"
 STAGE5_MANIFEST_SHA256 = "ded50562899fd3b5d6214757f2581a2aab6507444a216643ac11fba0bb748c9d"
+STAGE5_EVIDENCE_MANIFEST_SHA256 = "e996563c145ac12bc7e7ae9bb284ae98d14a2990aaac9bce17e9992486780cce"
 STAGE5_FREEZE_SHA256 = "53f2df2d71b723dbdcd5983d24dcff25f977e2709a0089011882c4c56f860645"
 
 POLICY_IDS = (
@@ -122,6 +124,11 @@ class Stage6Config:
     stage5_freeze_path: Path
     stage5_manifest_path: Path
     expected_stage5_manifest_sha256: str
+    stage5_evidence_path: Path
+    stage5_evidence_manifest_path: Path
+    expected_stage5_evidence_manifest_sha256: str
+    stage2b_config_path: Path
+    stage2b: Stage2BConfig
     manifest_path: Path
     prior_manifest_paths: tuple[Path, ...]
     policy_paths: dict[str, Path]
@@ -261,8 +268,25 @@ def load_config(path: str | Path = "configs/stage6-verification.toml") -> Stage6
 
     stage5_freeze_path = _path(base, inputs.get("stage5_freeze"), "inputs.stage5_freeze")
     stage5_manifest_path = _path(base, inputs.get("stage5_manifest"), "inputs.stage5_manifest")
+    stage5_evidence_path = _path(base, inputs.get("stage5_evidence"), "inputs.stage5_evidence")
+    stage5_evidence_manifest_path = _path(
+        base, inputs.get("stage5_evidence_manifest"), "inputs.stage5_evidence_manifest"
+    )
+    stage2b_config_path = _path(base, inputs.get("stage2b_config"), "inputs.stage2b_config")
+    stage2b = load_stage2b_config(stage2b_config_path)
     expected_stage5_manifest = _sha(inputs.get("expected_stage5_manifest_sha256"), "inputs.expected_stage5_manifest_sha256")
-    if expected_stage5_manifest != STAGE5_MANIFEST_SHA256 or not stage5_freeze_path.is_file() or not stage5_manifest_path.is_file():
+    expected_stage5_evidence_manifest = _sha(
+        inputs.get("expected_stage5_evidence_manifest_sha256"),
+        "inputs.expected_stage5_evidence_manifest_sha256",
+    )
+    if (
+        expected_stage5_manifest != STAGE5_MANIFEST_SHA256
+        or expected_stage5_evidence_manifest != STAGE5_EVIDENCE_MANIFEST_SHA256
+        or not stage5_freeze_path.is_file()
+        or not stage5_manifest_path.is_file()
+        or not stage5_evidence_path.is_dir()
+        or not stage5_evidence_manifest_path.is_file()
+    ):
         raise ValueError("Stage 5 evidence paths or hash are not frozen")
     stage5_manifest_raw = json.loads(stage5_manifest_path.read_text(encoding="utf-8"))
     if not isinstance(stage5_manifest_raw, Mapping) or stage5_manifest_raw.get("manifest_sha256") != expected_stage5_manifest:
@@ -270,6 +294,8 @@ def load_config(path: str | Path = "configs/stage6-verification.toml") -> Stage6
     freeze_raw = json.loads(stage5_freeze_path.read_text(encoding="utf-8"))
     if not isinstance(freeze_raw, Mapping) or freeze_raw.get("manifest_sha256") != expected_stage5_manifest:
         raise ValueError("Stage 5 freeze does not reference the expected manifest")
+    if sha256_bytes(stage5_evidence_manifest_path.read_bytes()) != expected_stage5_evidence_manifest:
+        raise ValueError("Stage 5 evidence manifest SHA-256 mismatch")
 
     manifest_path = _path(base, inputs.get("manifest"), "inputs.manifest")
     prior_raw = inputs.get("prior_manifests")
@@ -307,7 +333,9 @@ def load_config(path: str | Path = "configs/stage6-verification.toml") -> Stage6
     return Stage6Config(
         source_path, _path(base, run.get("run_root"), "run.run_root"), project_repo, heg_repo,
         PROJECT_COMMIT, HEG_COMMIT, stage5_freeze_path, stage5_manifest_path,
-        expected_stage5_manifest, manifest_path, prior, policy_paths, source_hashes,
+        expected_stage5_manifest, stage5_evidence_path, stage5_evidence_manifest_path,
+        expected_stage5_evidence_manifest, stage2b_config_path, stage2b, manifest_path, prior,
+        policy_paths, source_hashes,
         ast_hashes, behavior_hashes, parsed_experiment, parsed_resources,
         str(relabeling["algorithm"]), BOOTSTRAP_SAMPLES, BOOTSTRAP_SEED,
         CONFIDENCE_LEVEL, CHAMPION_STAGE3_THRESHOLD, CHAMPION_RANDOM_THRESHOLD,
@@ -418,7 +446,7 @@ def write_manifest(config: Stage6Config) -> dict[str, JsonValue]:
 
 __all__ = [
     "BOOTSTRAP_SAMPLES", "BOOTSTRAP_SEED", "CHAMPION_RANDOM_THRESHOLD", "CHAMPION_STAGE3_THRESHOLD",
-    "CONFIDENCE_LEVEL", "HEG_COMMIT", "POLICY_IDS", "PROJECT_COMMIT", "STAGE5_MANIFEST_SHA256",
+    "CONFIDENCE_LEVEL", "HEG_COMMIT", "POLICY_IDS", "PROJECT_COMMIT", "STAGE5_EVIDENCE_MANIFEST_SHA256", "STAGE5_MANIFEST_SHA256",
     "STAGE6_CONFIG_VERSION", "STAGE6_MANIFEST_VERSION", "STRUCTURAL_RETENTION_THRESHOLD", "Stage6Config",
     "Stage6Experiment", "Stage6Policy", "Stage6Resources", "build_manifest", "episode_id", "load_config",
     "manifest_hash", "sha256_bytes", "sha256_value", "validate_manifest", "write_manifest",
