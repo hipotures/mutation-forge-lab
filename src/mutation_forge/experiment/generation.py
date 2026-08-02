@@ -528,6 +528,7 @@ _REPAIRABLE = frozenset(
         "non_finite_literal",
         "string_too_large",
         "top_level_contract",
+        "behavior_error",
     }
 )
 
