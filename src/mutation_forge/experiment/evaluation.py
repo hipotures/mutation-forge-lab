@@ -461,8 +461,15 @@ def evaluate_candidate(
     sandbox_limits: SandboxLimits | None = None,
 ) -> dict[str, JsonValue]:
     """Evaluate one validated ranker source and persist development/replay evidence."""
-    if not candidate_id:
-        raise ValueError("candidate_id must be non-empty")
+    if (
+        not candidate_id
+        or candidate_id in {".", ".."}
+        or "/" in candidate_id
+        or "\\" in candidate_id
+        or "\x00" in candidate_id
+        or Path(candidate_id).name != candidate_id
+    ):
+        raise ValueError("candidate_id must be one safe directory/file name")
     if source is None:
         source = ranker_source
     if source is None:
