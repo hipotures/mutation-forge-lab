@@ -122,6 +122,24 @@ def usage_complete(value: Mapping[str, Any] | None) -> bool:
     )
 
 
+def usage_quality(value: Mapping[str, Any] | None) -> str:
+    """Classify retained usage without promoting partial counters to exact."""
+
+    if usage_complete(value):
+        return "exact"
+    if value is not None and (
+        value.get("partial") is True
+        or any(
+            isinstance(value.get(name), int)
+            and not isinstance(value.get(name), bool)
+            and int(value[name]) >= 0
+            for name in _USAGE_FIELDS
+        )
+    ):
+        return "partial"
+    return "unknown"
+
+
 def _json_lines(value: object) -> bytes:
     if isinstance(value, (str, bytes)):
         return _text(value)
@@ -179,6 +197,8 @@ class TurnArtifactStore:
         provider_turn_id: str | None = None,
         terminal_status: str = "completed",
         request_accepted: bool = False,
+        charged: bool | None = None,
+        uncharged: bool | None = None,
         content_received: bool | None = None,
         validation_completed: bool = False,
         error: str | None = None,
@@ -329,6 +349,9 @@ class TurnArtifactStore:
             "terminal_status": terminal_status,
             "request_accepted": request_accepted,
             "usage_final_exact": usage_complete(usage),
+            "usage_quality": usage_quality(usage),
+            "charged": charged,
+            "uncharged": uncharged,
             "content_received": bool(effective_content),
             "source_extraction": source_extracted,
             "validation_completed": validation_completed,
@@ -520,6 +543,15 @@ class TurnArtifactStore:
             "terminal_status": terminal_status,
             "request_accepted": request_accepted,
             "usage_final_exact": usage_complete(usage),
+            "usage_quality": usage_quality(usage),
+            "charged": (
+                result.get("charged") if isinstance(result.get("charged"), bool) else None
+            ),
+            "uncharged": (
+                result.get("uncharged")
+                if isinstance(result.get("uncharged"), bool)
+                else None
+            ),
             "content_received": content_received,
             "source_extraction": (root / "source.py").is_file(),
             "validation_completed": bool(result.get("validation_completed"))

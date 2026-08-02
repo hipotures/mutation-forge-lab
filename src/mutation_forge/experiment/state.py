@@ -18,6 +18,13 @@ from typing import Any
 STATE_SCHEMA_VERSION = 1
 TERMINAL_STATES = frozenset({"completed"})
 VALID_STATES = frozenset({"created", "running", "idle", "interrupted", "failed", "completed"})
+_USAGE_FIELDS = (
+    "inputTokens",
+    "cachedInputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+)
 
 
 class StateError(RuntimeError):
@@ -43,6 +50,29 @@ def _json(value: object) -> str:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _usage_quality(value: Mapping[str, Any]) -> str:
+    exact = (
+        value.get("final") is True
+        and value.get("partial") is False
+        and all(
+            isinstance(value.get(name), int)
+            and not isinstance(value.get(name), bool)
+            and int(value[name]) >= 0
+            for name in _USAGE_FIELDS
+        )
+    )
+    if exact:
+        return "exact"
+    if value.get("partial") is True or any(
+        isinstance(value.get(name), int)
+        and not isinstance(value.get(name), bool)
+        and int(value[name]) >= 0
+        for name in _USAGE_FIELDS
+    ):
+        return "partial"
+    return "unknown"
 
 
 def process_alive(pid: int) -> bool:
@@ -430,6 +460,7 @@ class ExperimentStateStore:
         error: str | None = None,
     ) -> bool:
         usage_value = dict(usage or {})
+        usage_value["quality"] = _usage_quality(usage_value)
         total_tokens = usage_value.get("totalTokens", 0)
         if state == "completed" and (
             not isinstance(total_tokens, int)
@@ -439,6 +470,13 @@ class ExperimentStateStore:
             raise ValueError("completed provider turn requires non-negative totalTokens")
         terminal = state in {"completed", "failed"}
         completed = state == "completed"
+        observed_tokens = (
+            int(total_tokens)
+            if isinstance(total_tokens, int)
+            and not isinstance(total_tokens, bool)
+            and total_tokens >= 0
+            else 0
+        )
         try:
             # The turn row, per-session delta, and experiment cumulative totals
             # are one crash-safe accounting unit.  A duplicate completed key
@@ -493,14 +531,13 @@ class ExperimentStateStore:
                     "provider_turns_completed=provider_turns_completed+?,"
                     "token_usage_delta=token_usage_delta+? "
                     "WHERE session_id=(SELECT current_session_id FROM experiment LIMIT 1)",
-                    (1 if completed else 0, int(total_tokens) if completed else 0),
+                    (1 if completed else 0, observed_tokens),
                 )
-            if completed:
                 self.connection.execute(
                     "UPDATE experiment SET "
-                    "cumulative_model_turns=cumulative_model_turns+1,"
+                    "cumulative_model_turns=cumulative_model_turns+?,"
                     "cumulative_tokens=cumulative_tokens+?,updated_at=?",
-                    (int(total_tokens), _now()),
+                    (1 if completed else 0, observed_tokens, _now()),
                 )
             self.connection.commit()
             return True

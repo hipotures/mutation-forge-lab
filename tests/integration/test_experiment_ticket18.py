@@ -19,6 +19,7 @@ from mutation_forge.experiment.service import (
 from mutation_forge.experiment.sessions import SessionContext
 from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.experiment.status import experiment_status
+from mutation_forge.stage4.app_server import Stage4ProviderError
 from mutation_forge.stage4.config import load_stage4_config
 from mutation_forge.stage4.generation import GenerationConfig, GenerationCoordinator
 
@@ -183,6 +184,46 @@ class _RepairingProvider(_Provider):
             json.dumps(result), encoding="utf-8"
         )
         return result
+
+
+class _ChargedFailureProvider(_Provider):
+    def generate(self, request: dict[str, Any]) -> dict[str, Any]:
+        result = super().generate(request)
+        usage = {
+            "inputTokens": 8_000,
+            "cachedInputTokens": 0,
+            "outputTokens": 4_000,
+            "reasoningOutputTokens": 1_000,
+            "totalTokens": 12_000,
+            "final": False,
+            "partial": True,
+        }
+        evidence = {
+            "accepted": True,
+            "charged": True,
+            "content": False,
+            "uncharged": False,
+            "usage": usage,
+            "thread_id": "thread-failed",
+            "turn_id": "turn-failed",
+        }
+        root = Path(request["artifact_dir"])
+        prefix = str(request["artifact_prefix"])
+        (root / f"{prefix}.usage.json").write_text(
+            json.dumps(usage), encoding="utf-8"
+        )
+        (root / f"{prefix}.response.json").write_text(
+            json.dumps(
+                {
+                    **result,
+                    **evidence,
+                    "status": "error",
+                    "error": "transport timeout",
+                }
+            ),
+            encoding="utf-8",
+        )
+        raise Stage4ProviderError("transport timeout", evidence=evidence)
 
 
 class _CoordinatorInterruptingEngine:
@@ -440,6 +481,103 @@ def test_completed_turn_accounting_survives_hard_crash_before_session_finish(
     current = resumed_state.session("session-000002")
     assert current is not None
     assert current["provider_turns_completed"] == 0
+    assert current["token_usage_delta"] == 0
+    resumed_state.close()
+
+
+def test_charged_failed_turn_usage_survives_hard_crash_without_retry(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path / "experiment.toml")
+    config = load_experiment_config(config_path)
+    layout = ExperimentLayout.from_config(config)
+    ExperimentStateStore.initialize(
+        layout.state,
+        exp_id=config.exp_id,
+        lock_hash="test-lock",
+        root=layout.root,
+    )
+    stage4 = load_stage4_config(
+        Path(__file__).resolve().parents[2] / "configs" / "stage4-search.toml"
+    )
+    request = {
+        "campaign_id": "ticket18-failed-usage",
+        "generation": 0,
+        "slot": "slot-00",
+        "phase": "initial",
+        "idempotency_key": "charged-failed-turn",
+    }
+    provider = _ChargedFailureProvider()
+
+    state = ExperimentStateStore(layout.state)
+    state.create_session(
+        number=1,
+        session_id="session-000001",
+        wall_seconds=30,
+        starting_checkpoint=None,
+    )
+    failed_session = SessionContext(1, "session-000001", tmp_path, 30, "now", None)
+    first = _WorkspaceStage4Provider(
+        provider,
+        layout,
+        state,
+        failed_session,
+        sandbox_limits=stage4.sandbox,
+    )
+    with pytest.raises(Stage4ProviderError, match="transport timeout"):
+        first.generate(request)
+    manifest_path = (
+        layout.generation_slot_phase(0, "slot-00", "initial")
+        / "turn-manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["terminal_status"] == "failed"
+    assert manifest["artifact_complete"] is True
+    assert manifest["usage_final_exact"] is False
+    assert manifest["usage_quality"] == "partial"
+    assert manifest["charged"] is True
+    assert state.cumulative()["provider_turns"] == 0
+    assert state.cumulative()["total_tokens"] == 12_000
+    state.close()
+
+    resumed_state = ExperimentStateStore(layout.state)
+    resumed_state.create_session(
+        number=2,
+        session_id="session-000002",
+        wall_seconds=30,
+        starting_checkpoint=None,
+    )
+    resumed_session = SessionContext(2, "session-000002", tmp_path, 30, "now", None)
+    resumed = _WorkspaceStage4Provider(
+        provider,
+        layout,
+        resumed_state,
+        resumed_session,
+        sandbox_limits=stage4.sandbox,
+    )
+    retained = resumed.generate(request)
+
+    assert retained["retained"] is True
+    assert retained["status"] == "failed"
+    assert retained["charged"] is True
+    assert provider.calls == 1
+    assert resumed_state.cumulative()["provider_turns"] == 0
+    assert resumed_state.cumulative()["total_tokens"] == 12_000
+    failed_row = resumed_state.provider_turn("charged-failed-turn")
+    assert failed_row is not None
+    assert failed_row["state"] == "failed"
+    assert failed_row["provider_thread_id"] == "thread-failed"
+    assert failed_row["provider_turn_id"] == "turn-failed"
+    failed_usage = json.loads(failed_row["usage_json"])
+    assert failed_usage["quality"] == "partial"
+    interrupted = resumed_state.session("session-000001")
+    assert interrupted is not None
+    assert interrupted["provider_turns_attempted"] == 1
+    assert interrupted["provider_turns_completed"] == 0
+    assert interrupted["token_usage_delta"] == 12_000
+    current = resumed_state.session("session-000002")
+    assert current is not None
+    assert current["provider_turns_attempted"] == 0
     assert current["token_usage_delta"] == 0
     resumed_state.close()
 

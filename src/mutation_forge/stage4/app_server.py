@@ -864,6 +864,19 @@ class Stage4AppServerProvider:
                 partial_usage.update(
                     {"final": partial.usage.final, "partial": partial.usage.partial}
                 )
+            elif isinstance(observed_usage, Mapping):
+                partial_usage.update(
+                    {
+                        "final": usage_state.get("final") is True,
+                        "partial": usage_state.get("partial") is True,
+                    }
+                )
+            observed_total = partial_usage.get("totalTokens")
+            observed_charged = (
+                isinstance(observed_total, int)
+                and not isinstance(observed_total, bool)
+                and observed_total > 0
+            )
             thread_id = (
                 partial.thread_id
                 if partial is not None
@@ -878,7 +891,7 @@ class Stage4AppServerProvider:
                 # Once a private thread or usage event exists, replacement is
                 # fail-closed even if no final turn envelope was assembled.
                 "accepted": turn_evidence_observed,
-                "charged": bool(partial is not None and partial.usage.total_tokens > 0),
+                "charged": observed_charged,
                 "content": bool(partial is not None and partial.text),
                 "uncharged": not turn_evidence_observed,
                 "usage": partial_usage,

@@ -191,7 +191,15 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
             "slot": "slot-00",
             "phase": "initial",
             "state": "completed",
-            "usage": {"totalTokens": 3},
+            "usage": {
+                "inputTokens": 1,
+                "cachedInputTokens": 0,
+                "outputTokens": 2,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 3,
+                "final": True,
+                "partial": False,
+            },
         }
         assert state.record_provider_turn(**values) is True
         assert state.record_provider_turn(**values) is False
@@ -205,19 +213,42 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
             "total_tokens": 3,
             "compute_seconds": 0.0,
         }
+        assert state.record_provider_turn(
+            idempotency_key="turn-failed",
+            generation=0,
+            slot="slot-01",
+            phase="initial",
+            state="failed",
+            usage={
+                "inputTokens": 4,
+                "cachedInputTokens": 0,
+                "outputTokens": 1,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 5,
+                "final": False,
+                "partial": True,
+            },
+            error="transport timeout",
+        )
+        failed = state.provider_turn("turn-failed")
+        assert failed is not None
+        failed_usage = json.loads(failed["usage_json"])
+        assert failed_usage["quality"] == "partial"
+        assert state.cumulative()["provider_turns"] == 1
+        assert state.cumulative()["total_tokens"] == 8
 
         state.finish_session(
             "session-000001",
             status="idle",
             ending_state="idle",
             ending_checkpoint=None,
-            provider_turns_attempted=1,
+            provider_turns_attempted=2,
             provider_turns_completed=1,
-            token_usage_delta=3,
-            cumulative_tokens=3,
+            token_usage_delta=8,
+            cumulative_tokens=8,
         )
         assert state.cumulative()["provider_turns"] == 1
-        assert state.cumulative()["total_tokens"] == 3
+        assert state.cumulative()["total_tokens"] == 8
 
 
 def test_status_is_versioned_and_read_only(tmp_path: Path) -> None:

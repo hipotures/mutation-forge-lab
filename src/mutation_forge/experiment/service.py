@@ -443,11 +443,15 @@ class _WorkspaceStage4Provider:
             provider_thread_id=(
                 str(result["provider_thread_id"])
                 if result.get("provider_thread_id") is not None
+                else str(result["thread_id"])
+                if result.get("thread_id") is not None
                 else None
             ),
             provider_turn_id=(
                 str(result["provider_turn_id"])
                 if result.get("provider_turn_id") is not None
+                else str(result["turn_id"])
+                if result.get("turn_id") is not None
                 else None
             ),
             error=str(result.get("error")) if result.get("error") else None,
@@ -529,8 +533,19 @@ class _WorkspaceStage4Provider:
         with suppress(Exception):
             self._record(request, result)
 
+    @staticmethod
+    def _retained_usage(directory: Path) -> Mapping[str, Any]:
+        for usage_path in reversed(sorted(directory.glob("*.usage.json"))):
+            try:
+                value = json.loads(usage_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, Mapping):
+                return cast(Mapping[str, Any], value)
+        return {}
+
     def _retained_result(self, request: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        """Recover a completed provider envelope before issuing a duplicate call."""
+        """Recover a terminal provider envelope before issuing a duplicate call."""
 
         key = self._key(request)
         existing = self.state.provider_turn(key)
@@ -542,22 +557,86 @@ class _WorkspaceStage4Provider:
         manifest_path = directory / "turn-manifest.json"
         if existing is None and not manifest_path.is_file():
             return None
-        if existing is not None and existing.get("state") != "completed":
+        if existing is not None and existing.get("state") not in {"completed", "failed"}:
             return None
         self.turns.verify_turn(directory)
         try:
             manifest = json.loads((directory / "turn-manifest.json").read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ArtifactIncompleteError(
-                "completed provider turn has no readable manifest"
+                "terminal provider turn has no readable manifest"
             ) from exc
         if not isinstance(manifest, Mapping) or manifest.get("request_idempotency_key") != key:
             raise ArtifactIncompleteError(
-                "completed provider turn idempotency key does not match request"
+                "terminal provider turn idempotency key does not match request"
             )
-        if manifest.get("usage_final_exact") is not True:
+        terminal_status = str(manifest.get("terminal_status", ""))
+        if terminal_status not in {"completed", "failed"}:
+            raise ArtifactIncompleteError("retained provider turn is not terminal")
+        if existing is not None and existing.get("state") != terminal_status:
+            raise ArtifactIncompleteError("retained provider turn state does not match SQLite")
+        usage = self._retained_usage(directory)
+        if terminal_status == "completed" and manifest.get("usage_final_exact") is not True:
             raise ArtifactIncompleteError("completed provider turn has non-exact usage")
         response_paths = sorted(directory.glob("*.response.json")) if directory.is_dir() else []
+        if terminal_status == "failed":
+            raw: Mapping[str, Any] = {}
+            for response_path in reversed(response_paths):
+                try:
+                    value = json.loads(response_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    continue
+                if isinstance(value, Mapping):
+                    raw = cast(Mapping[str, Any], value)
+                    break
+            failed_result: dict[str, Any] = {
+                "status": "failed",
+                "accepted": manifest.get("request_accepted") is True,
+                "accepted_turn": manifest.get("request_accepted") is True,
+                "charged": manifest.get("charged"),
+                "uncharged": manifest.get("uncharged"),
+                "content": manifest.get("content_received") is True,
+                "response": raw.get("response"),
+                "usage": dict(usage),
+                "provider_request_id": raw.get(
+                    "provider_request_id", raw.get("request_id")
+                ),
+                "provider_thread_id": manifest.get("provider_thread_id"),
+                "provider_turn_id": manifest.get("provider_turn_id"),
+                "error": manifest.get("error"),
+                "retained": True,
+            }
+            if existing is None:
+                recovered = self.state.record_provider_turn(
+                    idempotency_key=key,
+                    generation=int(request.get("generation", 0)),
+                    slot=str(request.get("slot", "slot-00")),
+                    phase=self._phase(request),
+                    state="failed",
+                    artifact_path=str(directory),
+                    usage=usage,
+                    provider_thread_id=(
+                        str(failed_result["provider_thread_id"])
+                        if failed_result.get("provider_thread_id") is not None
+                        else None
+                    ),
+                    provider_turn_id=(
+                        str(failed_result["provider_turn_id"])
+                        if failed_result.get("provider_turn_id") is not None
+                        else None
+                    ),
+                    error=(
+                        str(failed_result["error"])
+                        if failed_result.get("error")
+                        else None
+                    ),
+                )
+                if recovered:
+                    self.session.provider_turns_attempted += 1
+                    total = usage.get("totalTokens")
+                    if isinstance(total, int) and not isinstance(total, bool):
+                        self.session.token_usage_delta += total
+            return failed_result
         for response_path in reversed(response_paths):
             try:
                 raw = json.loads(response_path.read_text(encoding="utf-8"))
@@ -578,15 +657,7 @@ class _WorkspaceStage4Provider:
                     response_text = text_path.read_text(encoding="utf-8")
                 except OSError:
                     response_text = None
-            usage: Mapping[str, Any] = {}
-            usage_path = response_path.with_name(
-                response_path.name.removesuffix(".response.json") + ".usage.json"
-            )
-            try:
-                value = json.loads(usage_path.read_text(encoding="utf-8"))
-                if isinstance(value, Mapping):
-                    usage = cast(Mapping[str, Any], value)
-            except (OSError, UnicodeError, json.JSONDecodeError):
+            if not usage:
                 value = raw.get("usage")
                 if isinstance(value, Mapping):
                     usage = cast(Mapping[str, Any], value)

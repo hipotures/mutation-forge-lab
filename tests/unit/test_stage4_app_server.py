@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from mutation_forge.stage3.app_server import IsolationError
+from mutation_forge.stage3.app_server import CodexAppServerAdapter, IsolationError
 from mutation_forge.stage4.app_server import (
     FROZEN_STAGE4_EFFORT,
     FROZEN_STAGE4_MODEL,
@@ -262,6 +262,38 @@ def test_post_thread_provider_failure_is_not_retried(tmp_path: Path) -> None:
     assert evidence["accepted"] is True
     assert evidence["thread_id"] == "thread-1"
     assert evidence["uncharged"] is False
+    assert not infrastructure_retry_eligible(evidence)
+
+
+def test_observed_partial_usage_marks_failed_turn_charged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        CodexAppServerAdapter,
+        "inspect_usage",
+        lambda _adapter: {
+            "final": False,
+            "partial": True,
+            "raw": {
+                "inputTokens": 8,
+                "cachedInputTokens": 0,
+                "outputTokens": 4,
+                "reasoningOutputTokens": 1,
+                "totalTokens": 12,
+            },
+        },
+    )
+    provider = _provider(tmp_path, FakeScenario(terminal_status="failed"))
+    with pytest.raises(Stage4ProviderError) as raised:
+        provider.generate(_request(artifact_prefix="charged-failure"))
+
+    evidence = raised.value.evidence
+    assert evidence["accepted"] is True
+    assert evidence["charged"] is True
+    assert evidence["uncharged"] is False
+    assert evidence["usage"]["totalTokens"] == 12
+    assert evidence["usage"]["final"] is False
+    assert evidence["usage"]["partial"] is True
     assert not infrastructure_retry_eligible(evidence)
 
 
