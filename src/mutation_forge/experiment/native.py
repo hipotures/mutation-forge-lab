@@ -13,9 +13,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+from mutation_forge.proposals.k_switch import FeatureLimits
 from mutation_forge.sandbox.contracts import SandboxLimits
-from mutation_forge.sandbox.policy import probe_policy
-from mutation_forge.sandbox.validation import validate_policy
+from mutation_forge.sandbox.policy import probe_scientific_policy
+from mutation_forge.sandbox.validation import accessed_policy_fields, validate_policy
 
 from .artifacts import (
     ArtifactIncompleteError,
@@ -24,7 +25,7 @@ from .artifacts import (
     is_generated_policy,
 )
 from .config import ExperimentConfig
-from .evaluation import evaluate_candidate
+from .evaluation import DEFAULT_FORBIDDEN_LENGTHS, DEFAULT_WITNESS_CAP, evaluate_candidate
 from .generation import Candidate, GenerationConfig, GenerationCoordinator, SlotResult
 from .layout import ExperimentLayout, WorkspaceError
 from .provider import LocalCodexAppServerProvider
@@ -69,9 +70,9 @@ def _asset_path(name: str) -> Path:
         "request": root / "prompts" / "native" / "request.md",
         "repair": root / "prompts" / "native" / "repair.md",
         "schema": root / "configs" / "native" / "generated-policy.schema.json",
-        "context": root / "configs" / "native" / "context.schema.json",
-        "proposal": root / "configs" / "native" / "proposal.schema.json",
-        "semantic": root / "configs" / "native" / "semantic-descriptions.json",
+        "context": root / "configs" / "schemas" / "stage2b-context.schema.json",
+        "proposal": root / "configs" / "schemas" / "stage2b-proposal.schema.json",
+        "semantic": root / "configs" / "stage3-field-semantics.v1.json",
         "baseline": root / "configs" / "native" / "baseline-rankers.json",
     }
     try:
@@ -113,17 +114,38 @@ def _load_assets() -> tuple[
     )
 
 
+def _load_slot_briefs() -> dict[str, str]:
+    root = Path(__file__).resolve().parents[3] / "configs" / "stage3-slots"
+    briefs: dict[str, str] = {}
+    for index in range(8):
+        slot = f"slot-{index:02d}"
+        path = root / f"{slot}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise NativeExperimentError(f"cannot load native mutation brief {path}") from exc
+        brief = value.get("brief") if isinstance(value, Mapping) else None
+        if (
+            not isinstance(brief, str)
+            or not brief.strip()
+            or value.get("slot_id") != slot
+        ):
+            raise NativeExperimentError(f"invalid native mutation brief {path}")
+        briefs[slot] = brief.strip()
+    return briefs
+
+
 def _native_behavior(
     source: str, limits: SandboxLimits
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    result = probe_policy(source, limits)
+    result = probe_scientific_policy(source, limits)
     if result.get("status") != "completed":
         telemetry = result.get("worker_telemetry")
         retained_telemetry = dict(telemetry) if isinstance(telemetry, Mapping) else {}
-        startup_error = retained_telemetry.get("startup_error")
-        if isinstance(startup_error, Mapping):
-            error_type = str(startup_error.get("error_type", "BehaviorProbeError"))
-            message = str(startup_error.get("message", ""))
+        failure = result.get("error")
+        if isinstance(failure, Mapping):
+            error_type = str(failure.get("error_type", failure.get("code", "BehaviorProbeError")))
+            message = str(failure.get("message", ""))
         else:
             error_type = "BehaviorProbeError"
             message = str(result.get("status", "behavior probe failed"))
@@ -296,6 +318,20 @@ class _NativeProvider:
             usage = (
                 json.loads(usage_path.read_text(encoding="utf-8")) if usage_path.is_file() else {}
             )
+            retained_evidence: dict[str, Any] = {}
+            for key_name, filename in (
+                ("validation", "validation.json"),
+                ("identity", "identity.json"),
+                ("behavior", "behavior.json"),
+                ("worker_telemetry", "worker_telemetry.json"),
+                ("canonical_response", "canonical_response.json"),
+                ("metadata_validation", "metadata-validation.json"),
+            ):
+                evidence_path = directory / filename
+                if evidence_path.is_file():
+                    retained_evidence[key_name] = json.loads(
+                        evidence_path.read_text(encoding="utf-8")
+                    )
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ArtifactIncompleteError(
                 "retained native provider evidence is unreadable"
@@ -338,6 +374,7 @@ class _NativeProvider:
             "provider_turn_id": manifest.get("provider_turn_id"),
             "retained": True,
             "error": manifest.get("error"),
+            **retained_evidence,
         }
 
     def _evidence(self, result: Mapping[str, Any]) -> dict[str, Any]:
@@ -380,6 +417,46 @@ class _NativeProvider:
             value["validation"] = validation.as_dict()
             value["identity"] = validation.identity.as_dict()
             value["validation_completed"] = True
+            canonical_response = dict(cast(Mapping[str, Any], response))
+            declared_fields = cast(Mapping[str, Any], response).get("used_fields")
+            declared = (
+                [str(item) for item in declared_fields if isinstance(item, str)]
+                if isinstance(declared_fields, list)
+                else []
+            )
+            extracted = list(accessed_policy_fields(source)) if validation.valid else []
+            matches = (
+                validation.valid
+                and len(declared) == len(set(declared))
+                and sorted(declared) == extracted
+            )
+            value["metadata_validation"] = {
+                "schema_version": "mforge.native.metadata-validation.v1",
+                "status": (
+                    "matched"
+                    if matches
+                    else "mismatch"
+                    if validation.valid
+                    else "not_validated"
+                ),
+                "declared_used_fields": declared,
+                "extracted_used_fields": extracted,
+                "errors": (
+                    []
+                    if matches or not validation.valid
+                    else [
+                        {
+                            "code": "used_fields_mismatch",
+                            "message": (
+                                "declared used_fields do not match fields extracted "
+                                "from validated source"
+                            ),
+                        }
+                    ]
+                ),
+            }
+            if validation.valid:
+                canonical_response["used_fields"] = extracted
             if validation.valid:
                 try:
                     behavior, telemetry = _native_behavior(source, self.sandbox_limits)
@@ -398,7 +475,7 @@ class _NativeProvider:
                 else:
                     value["behavior"] = behavior
                     value["worker_telemetry"] = telemetry
-            value["canonical_response"] = dict(cast(Mapping[str, Any], response))
+            value["canonical_response"] = canonical_response
         provenance = value.get("provenance")
         value["provenance"] = {
             **(dict(provenance) if isinstance(provenance, Mapping) else {}),
@@ -473,6 +550,14 @@ class _NativeProvider:
                 ),
                 response_diagnostics=cast(
                     Sequence[Mapping[str, Any]] | None, value.get("response_diagnostics")
+                ),
+                transport_diagnostics=cast(
+                    Sequence[Mapping[str, Any]] | None,
+                    value.get("transport_diagnostics"),
+                ),
+                metadata_validation=cast(
+                    Mapping[str, Any] | None,
+                    value.get("metadata_validation"),
                 ),
                 codex_profile={"model": request.get("model"), "effort": request.get("effort")},
                 rpc=value.get("rpc", []),
@@ -677,6 +762,7 @@ class NativeExperimentAdapter:
                 "proposal_schema_sha256": _sha256(proposal),
                 "semantic_descriptions_sha256": _sha256(semantic),
                 "baseline_rankers_sha256": _sha256(baseline),
+                "mutation_briefs_sha256": _sha256(_load_slot_briefs()),
             },
             "heg": {"repo": str(heg), "backend": "generic"},
         }
@@ -788,6 +874,7 @@ class NativeExperimentAdapter:
             semantic_descriptions,
             baseline_rankers,
         ) = _load_assets()
+        slot_briefs = _load_slot_briefs()
         auth_path = Path.home() / ".codex" / "auth.json"
         provider = self.provider or LocalCodexAppServerProvider(
             model=config.model.name,
@@ -881,6 +968,68 @@ class NativeExperimentAdapter:
                     "thread_count": config.resources.thread_count,
                 },
             }
+            feature_limits = FeatureLimits()
+            numeric_scales = {
+                "ctx.order": {
+                    "values_in_this_experiment": list(config.evaluation.orders),
+                },
+                "ctx.forbidden_lengths": {
+                    "values": list(DEFAULT_FORBIDDEN_LENGTHS),
+                },
+                "ctx.capped_cycle_counts": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum": DEFAULT_WITNESS_CAP,
+                },
+                "ctx.weighted_penalty": {
+                    "minimum": 0,
+                    "note": "pool-constant current-state score; not a candidate signal",
+                },
+                "ctx.step": {
+                    "minimum": 0,
+                    "maximum": config.evaluation.horizon - 1,
+                },
+                "ctx.remaining_steps": {
+                    "minimum": 0,
+                    "maximum": config.evaluation.horizon - 1,
+                },
+                "ctx.stagnation": {
+                    "minimum": 0,
+                    "maximum": config.evaluation.horizon,
+                },
+                "ctx.recent_best_improvement": {
+                    "minimum": 0,
+                    "maximum": 1,
+                },
+                "ctx.recent_acceptance_rate": {"minimum": 0, "maximum": 1},
+                "ctx.recent_duplicate_rate": {"minimum": 0, "maximum": 1},
+                "proposal.k": {"values": [2, 3, 4]},
+                "proposal.broken_sampled_witnesses_by_length": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum": feature_limits.witness_sample_cap,
+                },
+                "proposal.removed_edge_load_sum_by_length": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum": (
+                        feature_limits.witness_sample_cap * 4
+                    ),
+                },
+                "proposal.removed_edge_load_max_by_length": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum": feature_limits.witness_sample_cap,
+                },
+                "proposal.distance_fields": {
+                    "minimum": 0,
+                    "maximum": "ctx.order (sentinel when the distance budget is exhausted)",
+                },
+                "proposal.local_triangle_risk": {
+                    "minimum": 0,
+                    "operation_budget": feature_limits.local_risk_budget,
+                },
+                "proposal.local_c4_risk": {
+                    "minimum": 0,
+                    "operation_budget": feature_limits.local_risk_budget,
+                },
+            }
             sections = [
                 "# Mutation Forge native ranker task",
                 "",
@@ -944,6 +1093,10 @@ class NativeExperimentAdapter:
                 "",
                 fenced(semantic_descriptions),
                 "",
+                "## Numeric scales and bounds",
+                "",
+                fenced(numeric_scales),
+                "",
                 "## Baseline rankers",
                 "",
                 fenced(baseline_rankers),
@@ -986,6 +1139,73 @@ class NativeExperimentAdapter:
         best_candidate_id: str | None = None
         last_ir: float | None = None
         last_timing_profile: Mapping[str, Any] | None = None
+
+        def stored_evaluation_summary(candidate_id: str) -> dict[str, Any]:
+            row = state.evaluation(f"{candidate_id}:development")
+            raw_result = row.get("result_json") if isinstance(row, Mapping) else None
+            if not isinstance(raw_result, str):
+                return {}
+            try:
+                result = json.loads(raw_result)
+            except json.JSONDecodeError:
+                return {}
+            summary = result.get("summary") if isinstance(result, Mapping) else None
+            return dict(summary) if isinstance(summary, Mapping) else {}
+
+        def render_search_feedback(
+            _generation: int,
+            _slot: str,
+            parent_id: str,
+        ) -> str:
+            summary = stored_evaluation_summary(parent_id)
+            if not summary:
+                return ""
+            return pretty(
+                {
+                    "parent_id": parent_id,
+                    "mean_auc": summary.get("mean_auc"),
+                    "best_auc": summary.get("best_auc"),
+                    "baseline_auc": summary.get("baseline_auc", {}),
+                    "instruction": (
+                        "Keep evidence-backed strengths, change the assigned brief's "
+                        "mechanism, and avoid repeating recorded failure modes."
+                    ),
+                }
+            )
+
+        def render_archive_context(
+            _generation: int,
+            _slot: str,
+            _parent_id: str,
+        ) -> str:
+            rows = state.connection.execute(
+                "SELECT candidate_id FROM evaluations "
+                "WHERE state='completed' ORDER BY completed_at, candidate_id"
+            ).fetchall()
+            summaries = [
+                {
+                    "candidate_id": str(row["candidate_id"]),
+                    **stored_evaluation_summary(str(row["candidate_id"])),
+                }
+                for row in rows
+                if row["candidate_id"]
+            ]
+            summaries.sort(
+                key=lambda item: (
+                    -(
+                        float(item["mean_auc"])
+                        if isinstance(item.get("mean_auc"), (int, float))
+                        and not isinstance(item.get("mean_auc"), bool)
+                        else 0.0
+                    ),
+                    str(item["candidate_id"]),
+                )
+            )
+            return (
+                pretty({"evaluated_candidates": summaries[:8]})
+                if summaries
+                else ""
+            )
 
         def on_generation(
             generation: int, candidates: Sequence[Candidate], results: Sequence[SlotResult]
@@ -1180,17 +1400,6 @@ class NativeExperimentAdapter:
                         if isinstance(metric, (int, float))
                         else {}
                     }
-                    selection_candidates.append(
-                        replace(
-                            candidate,
-                            behavior_signature={
-                                **dict(candidate.behavior_signature),
-                                "score": (
-                                    float(metric) if isinstance(metric, (int, float)) else 0.0
-                                ),
-                            },
-                        )
-                    )
                     state.record_candidate(
                         program_id,
                         source_sha256=candidate.source_sha256,
@@ -1200,13 +1409,44 @@ class NativeExperimentAdapter:
                         status="created",
                         metadata=metadata,
                     )
-            return self._select_parents(
+                evaluation_row = state.evaluation(identity)
+                evaluation_result: Mapping[str, Any] = {}
+                if isinstance(evaluation_row, Mapping):
+                    raw_result = evaluation_row.get("result_json")
+                    if isinstance(raw_result, str):
+                        try:
+                            decoded_result = json.loads(raw_result)
+                        except json.JSONDecodeError:
+                            decoded_result = {}
+                        if isinstance(decoded_result, Mapping):
+                            evaluation_result = decoded_result
+                evaluation_summary = evaluation_result.get("summary")
+                if not isinstance(evaluation_summary, Mapping):
+                    evaluation_summary = {}
+                evaluation_metric = evaluation_summary.get("mean_auc")
+                numeric_metric = (
+                    float(evaluation_metric)
+                    if isinstance(evaluation_metric, (int, float))
+                    and not isinstance(evaluation_metric, bool)
+                    else 0.0
+                )
+                selection_candidates.append(
+                    replace(
+                        candidate,
+                        behavior_signature={
+                            **dict(candidate.behavior_signature),
+                            "score": numeric_metric,
+                        },
+                    )
+                )
+            selected = self._select_parents(
                 generation,
                 selection_candidates or candidates,
                 config.search.population_size,
                 config.search.selection,
                 results,
             )
+            return selected
 
         try:
             engine = self.engine
@@ -1250,11 +1490,14 @@ class NativeExperimentAdapter:
                 coordinator = GenerationCoordinator(
                     wrapped,
                     config=generation_config,
+                    briefs=slot_briefs,
                     parent_sources=parent_sources,
                     parent_records=parent_records,
                     existing_sources=baseline_sources,
                     prompt_renderer=render_prompt,
                     selection_callback=on_generation,
+                    search_feedback=render_search_feedback,
+                    archive_context=render_archive_context,
                     behavior_evaluator=_native_behavior,
                     retry_infrastructure=True,
                     budget_exhausted=session.budget_exhausted,

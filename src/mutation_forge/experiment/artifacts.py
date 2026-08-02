@@ -118,6 +118,25 @@ _GENERATED_POLICY_FIELDS = (
     "assumptions",
     "expected_failure_modes",
 )
+_USED_FIELD_NAME = re.compile(r"^(?:ctx|proposal)\.[A-Za-z][A-Za-z0-9_]*$")
+
+
+def _known_used_fields() -> frozenset[str]:
+    root = Path(__file__).resolve().parents[3] / "configs" / "schemas"
+    fields: set[str] = set()
+    for prefix, filename in (
+        ("ctx", "stage2b-context.schema.json"),
+        ("proposal", "stage2b-proposal.schema.json"),
+    ):
+        try:
+            schema = json.loads((root / filename).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return frozenset()
+        properties = schema.get("properties") if isinstance(schema, Mapping) else None
+        if not isinstance(properties, Mapping):
+            return frozenset()
+        fields.update(f"{prefix}.{name}" for name in properties)
+    return frozenset(fields)
 
 
 def _decoded_mapping(value: object) -> Mapping[str, Any] | None:
@@ -198,10 +217,29 @@ def generated_policy_diagnostics(value: object) -> tuple[dict[str, str], ...]:
                 }
             )
     fields = decoded.get("used_fields")
-    if isinstance(fields, list) and any(isinstance(item, str) and not item for item in fields):
-        diagnostics.append(
-            {"code": "invalid_string", "message": "used_fields items must be non-empty"}
-        )
+    if isinstance(fields, list) and all(isinstance(item, str) for item in fields):
+        if len(set(fields)) != len(fields):
+            diagnostics.append(
+                {"code": "duplicate_value", "message": "used_fields items must be unique"}
+            )
+        malformed = sorted(item for item in fields if not _USED_FIELD_NAME.fullmatch(item))
+        if malformed:
+            diagnostics.append(
+                {
+                    "code": "invalid_string",
+                    "message": (
+                        "used_fields must use canonical ctx.<field> or proposal.<field> names"
+                    ),
+                }
+            )
+        unknown = sorted(set(fields).difference(_known_used_fields()))
+        if unknown:
+            diagnostics.append(
+                {
+                    "code": "unknown_field",
+                    "message": f"used_fields contains undocumented field {unknown[0]!r}",
+                }
+            )
     return tuple(diagnostics)
 
 
@@ -327,6 +365,8 @@ class TurnArtifactStore:
         output_schema: Mapping[str, Any] | None = None,
         response_projection_valid: bool | None = None,
         response_diagnostics: Sequence[Mapping[str, Any]] | None = None,
+        transport_diagnostics: Sequence[Mapping[str, Any]] | None = None,
+        metadata_validation: Mapping[str, Any] | None = None,
         request_text_redact: bool = True,
         codex_profile: object | None = None,
         rpc: object | None = None,
@@ -431,6 +471,11 @@ class TurnArtifactStore:
             missing[f"{slot_text}.response.md"] = "not applicable: no textual content received"
         if diagnostics:
             put_json(f"{slot_text}.response-diagnostics.json", diagnostics)
+        if transport_diagnostics:
+            put_json(
+                f"{slot_text}.transport-diagnostics.json",
+                transport_diagnostics,
+            )
 
         put_json(f"{slot_text}.request.json", request)
         # Keep a parsed object for syntactically valid responses, even when
@@ -443,6 +488,7 @@ class TurnArtifactStore:
         put_json("behavior.json", behavior)
         put_json("provenance.json", provenance)
         put_json("validation.json", validation)
+        put_json("metadata-validation.json", metadata_validation)
         put_json("worker_telemetry.json", worker_telemetry)
         put_json(f"{slot_text}.provider-raw.json", provider_raw)
         put_json(f"{slot_text}.codex-profile.json", codex_profile)
@@ -631,6 +677,7 @@ class TurnArtifactStore:
             ("worker_telemetry.json", "worker_telemetry"),
             ("provenance.json", "provenance"),
             ("canonical_response.json", "canonical_response"),
+            ("metadata-validation.json", "metadata_validation"),
         ):
             value = result.get(key)
             path = root / name
@@ -717,7 +764,13 @@ class TurnArtifactStore:
         if source_path.is_file() and request_accepted and not failure_boundary:
             required_finalization = ["validation.json", "identity.json"]
             if validation_is_valid:
-                required_finalization.extend(["behavior.json", "worker_telemetry.json"])
+                required_finalization.extend(
+                    [
+                        "behavior.json",
+                        "worker_telemetry.json",
+                        "metadata-validation.json",
+                    ]
+                )
             for name in required_finalization:
                 if name not in names:
                     missing[name] = "turn finalization did not retain this evidence"

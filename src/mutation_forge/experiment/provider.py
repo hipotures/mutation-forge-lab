@@ -267,9 +267,8 @@ class _CodexTransport:
             "response": response,
             "response_text": response_text,
             "response_projection_valid": response_projection_valid,
-            "response_diagnostics": [dict(item) for item in response_diagnostics]
-            if response_diagnostics
-            else [dict(item) for item in result.diagnostics],
+            "response_diagnostics": [dict(item) for item in response_diagnostics],
+            "transport_diagnostics": [dict(item) for item in result.diagnostics],
             "usage": usage,
             "provider_thread_id": result.thread_id,
             "provider_turn_id": result.turn_id,
@@ -291,10 +290,15 @@ class _CodexTransport:
                 adapter.logger.remove("response.md")
             if isinstance(response, Mapping):
                 adapter.logger.document("response.json", response)
-            if response_diagnostics or result.diagnostics:
+            if response_diagnostics:
                 adapter.logger.document(
                     "response-diagnostics.json",
-                    [dict(item) for item in (response_diagnostics or result.diagnostics)],
+                    [dict(item) for item in response_diagnostics],
+                )
+            if result.diagnostics:
+                adapter.logger.document(
+                    "transport-diagnostics.json",
+                    [dict(item) for item in result.diagnostics],
                 )
             adapter.logger.document(
                 "provider-raw.json",
@@ -305,7 +309,7 @@ class _CodexTransport:
                     "thread_id": result.thread_id,
                     "turn_id": result.turn_id,
                     "request_id": result.request_id,
-                    "diagnostics": list(result.diagnostics),
+                    "transport_diagnostics": list(result.diagnostics),
                 },
             )
             value["artifact_refs"] = sorted(

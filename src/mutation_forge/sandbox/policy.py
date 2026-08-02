@@ -17,6 +17,8 @@ from mutation_forge.sandbox.contracts import (
     ProbeContext,
     ProbeProposal,
     SandboxLimits,
+    ScientificContext,
+    ScientificProposal,
 )
 from mutation_forge.sandbox.errors import (
     ProtocolError,
@@ -72,6 +74,135 @@ FIXED_PROBE_BUNDLES: tuple[
                 "kind": "probe",
                 "features": {"weight": 0.0, "penalty": 0, "values": []},
             },
+        ),
+    ),
+)
+
+SCIENTIFIC_PROBE_SCHEMA_VERSION = "mforge.native.behavior-probe.v1"
+SCIENTIFIC_BEHAVIOR_SCHEMA_VERSION = "mforge.native.behavior.v1"
+
+
+def _scientific_proposal(
+    index: int,
+    *,
+    k: int,
+    selector: str,
+    broken: tuple[int, int, int],
+    load: tuple[int, int, int],
+    distance: int,
+    risk: int,
+) -> ScientificProposal:
+    return {
+        "schema_version": "stage2b.proposal.v1",
+        "proposal_id": f"{index:064x}",
+        "k": k,
+        "operator_family": f"legal_{k}_switch",
+        "selector_tags": [selector],
+        "anchor_forbidden_length": 4 if selector != "uniform_random" else None,
+        "broken_sampled_witnesses_by_length": list(broken),
+        "removed_edge_load_sum_by_length": list(load),
+        "removed_edge_load_max_by_length": [max(0, value - 1) for value in load],
+        "minimum_distance_between_removed_edges": max(0, distance - 1),
+        "mean_distance_between_removed_edges": float(distance),
+        "minimum_preexisting_distance_for_new_edges": distance,
+        "mean_preexisting_distance_for_new_edges": float(distance) + 0.5,
+        "local_triangle_risk": risk,
+        "local_c4_risk": risk + 1,
+        "reconnection_span": float(distance) + 0.5,
+    }
+
+
+SCIENTIFIC_PROBE_BUNDLES: tuple[
+    tuple[str, ScientificContext, tuple[ScientificProposal, ...]], ...
+] = (
+    (
+        "early-search",
+        {
+            "schema_version": "stage2b.context.v1",
+            "order": 12,
+            "forbidden_lengths": [4, 5, 6],
+            "capped_cycle_counts": [12, 5, 1],
+            "weighted_penalty": 39,
+            "step": 0,
+            "remaining_steps": 31,
+            "stagnation": 0,
+            "recent_best_improvement": 0.125,
+            "recent_acceptance_rate": 0.75,
+            "recent_duplicate_rate": 0.0,
+        },
+        (
+            _scientific_proposal(
+                1,
+                k=2,
+                selector="uniform_random",
+                broken=(1, 0, 0),
+                load=(2, 1, 0),
+                distance=2,
+                risk=0,
+            ),
+            _scientific_proposal(
+                2,
+                k=3,
+                selector="high_sampled_witness_load",
+                broken=(4, 2, 1),
+                load=(8, 4, 2),
+                distance=3,
+                risk=2,
+            ),
+            _scientific_proposal(
+                3,
+                k=4,
+                selector="pairwise_distant_disjoint",
+                broken=(2, 1, 0),
+                load=(4, 2, 1),
+                distance=6,
+                risk=1,
+            ),
+        ),
+    ),
+    (
+        "stagnated-search",
+        {
+            "schema_version": "stage2b.context.v1",
+            "order": 30,
+            "forbidden_lengths": [4, 5, 6],
+            "capped_cycle_counts": [64, 40, 17],
+            "weighted_penalty": 315,
+            "step": 24,
+            "remaining_steps": 7,
+            "stagnation": 9,
+            "recent_best_improvement": 0.0,
+            "recent_acceptance_rate": 0.125,
+            "recent_duplicate_rate": 0.5,
+        },
+        (
+            _scientific_proposal(
+                4,
+                k=2,
+                selector="sampled_forbidden_cycle_anchored",
+                broken=(7, 3, 1),
+                load=(15, 7, 3),
+                distance=2,
+                risk=4,
+            ),
+            _scientific_proposal(
+                5,
+                k=3,
+                selector="mixed_exploit_explore",
+                broken=(3, 2, 1),
+                load=(7, 5, 2),
+                distance=7,
+                risk=1,
+            ),
+            _scientific_proposal(
+                6,
+                k=4,
+                selector="remote_from_anchor",
+                broken=(1, 1, 0),
+                load=(3, 2, 1),
+                distance=12,
+                risk=0,
+            ),
         ),
     ),
 )
@@ -236,6 +367,118 @@ def probe_policy(
                 "message": str(error)[:1024],
             },
         }
+    return result
+
+
+def probe_scientific_policy(
+    source: str,
+    limits: SandboxLimits | None = None,
+) -> dict[str, JsonValue]:
+    """Probe a generated ranker with the same contracts used by HEG evaluation."""
+
+    applied_limits = limits or SandboxLimits()
+    validation = validate_policy(source, applied_limits)
+    input_contract: dict[str, JsonValue] = {
+        "context": "stage2b.context.v1",
+        "proposal": "stage2b.proposal.v1",
+    }
+    result: dict[str, JsonValue] = {
+        "schema_version": SCIENTIFIC_PROBE_SCHEMA_VERSION,
+        "status": "invalid",
+        "input_contract": input_contract,
+        "validation": validation.as_dict(),
+        "identity": validation.identity.as_dict(),
+        "limits": applied_limits.as_dict(),
+        "behavior_signature": None,
+        "worker_telemetry": None,
+        "error": None,
+    }
+    if not validation.valid:
+        return result
+    worker: PolicyWorker | None = None
+    try:
+        worker = PolicyWorker(source, applied_limits)
+        probes: list[JsonValue] = []
+        failure: dict[str, JsonValue] | None = None
+        for probe_id, ctx, proposals in SCIENTIFIC_PROBE_BUNDLES:
+            priorities: list[dict[str, JsonValue]] = []
+            for proposal in proposals:
+                try:
+                    call = worker.call(ctx, proposal)
+                except Exception as error:
+                    kind = _failure_kind(error)
+                    failure = {
+                        "code": f"worker_{kind}",
+                        "error_type": type(error).__name__,
+                        "message": str(error)[:1024],
+                    }
+                    break
+                if call.status != "ok" or call.priority is None:
+                    detail = call.error if isinstance(call.error, dict) else {}
+                    error_type = str(detail.get("error_type", "PolicyError"))
+                    code = str(detail.get("code", "policy_exception"))
+                    if code == "policy_exception":
+                        code = f"policy_{error_type.lower()}"
+                    failure = {
+                        "code": code,
+                        "error_type": error_type,
+                        "message": str(detail.get("message", "policy call failed"))[:1024],
+                    }
+                    break
+                priorities.append(
+                    {
+                        "proposal_id": proposal["proposal_id"],
+                        "priority": call.priority,
+                    }
+                )
+            ranked = sorted(priorities, key=_rank_key)
+            probe: dict[str, JsonValue] = {
+                "probe_id": probe_id,
+                "priorities": cast(list[JsonValue], priorities),
+                "rank_order": cast(
+                    list[JsonValue],
+                    [item["proposal_id"] for item in ranked],
+                ),
+                "selected_proposal_id": (
+                    ranked[0]["proposal_id"] if ranked else None
+                ),
+            }
+            probes.append(probe)
+            if failure is not None:
+                break
+        telemetry = worker.telemetry()
+        result["worker_telemetry"] = telemetry
+        if failure is not None:
+            result["status"] = "failed"
+            result["error"] = failure
+            return result
+        signature_base: dict[str, JsonValue] = {
+            "schema_version": SCIENTIFIC_BEHAVIOR_SCHEMA_VERSION,
+            "input_contract": input_contract,
+            "identity": validation.identity.as_dict(),
+            "probes": probes,
+            "terminal_status": "completed",
+        }
+        result["behavior_signature"] = {
+            **signature_base,
+            "signature_sha256": canonical_json_hash(signature_base),
+        }
+        result["status"] = "completed"
+    except Exception as error:
+        result["status"] = "failed"
+        result["error"] = {
+            "code": f"worker_{_failure_kind(error)}",
+            "error_type": type(error).__name__,
+            "message": str(error)[:1024],
+        }
+        result["worker_telemetry"] = {
+            "calls": 0,
+            "failures": 1,
+            "startup_error": cast(dict[str, JsonValue], result["error"]),
+        }
+    finally:
+        if worker is not None:
+            worker.close()
     return result
 
 

@@ -11,7 +11,6 @@ from mutation_forge.sandbox.contracts import (
     MAX_INTEGER_BITS,
     MAX_SEQUENCE_ITEMS,
     MAX_STRING_BYTES,
-    PROBE_SCHEMA_VERSION,
     VALIDATOR_VERSION,
     SandboxLimits,
 )
@@ -49,10 +48,13 @@ def render_policy_validator_contract(limits: SandboxLimits | None = None) -> str
             "- Do not use attribute access or method calls.",
             "- Read `ctx` and `proposal` only with subscription syntax such as "
             '`ctx["field"]` and `proposal["field"]`; nested subscriptions are allowed.',
+            "- Direct `ctx` and `proposal` field names must be string literals.",
             "- The function must contain exactly one `return`, and it must be the final "
             "top-level statement.",
             f"- The complete allowed-call whitelist is: {allowed_calls}.",
             "- Do not call any other built-in, function, callable value, or method.",
+            "- Generator expressions and all comprehensions are forbidden, including "
+            "inside allowed built-ins such as `sum`.",
             f"- Source size must not exceed {configured.max_source_bytes} UTF-8 bytes.",
             f"- The parsed program must not exceed {configured.max_ast_nodes} AST nodes.",
         )
@@ -140,7 +142,6 @@ class ProgramIdentity:
     normalized_ast_sha256: str | None
     ast_node_count: int
     validator_version: str = VALIDATOR_VERSION
-    probe_schema_version: str = PROBE_SCHEMA_VERSION
 
     def as_dict(self) -> dict[str, JsonValue]:
         return {
@@ -148,7 +149,6 @@ class ProgramIdentity:
             "normalized_ast_sha256": self.normalized_ast_sha256,
             "ast_node_count": self.ast_node_count,
             "validator_version": self.validator_version,
-            "probe_schema_version": self.probe_schema_version,
         }
 
 
@@ -328,6 +328,23 @@ class _PolicyValidator(ast.NodeVisitor):
             self.error(node, "call_keywords", "keyword arguments are not allowed")
         self.generic_visit(node)
 
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id in PARAMETERS
+            and not (
+                isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)
+                and node.slice.value
+            )
+        ):
+            self.error(
+                node,
+                "dynamic_input_field",
+                f"{node.value.id} field names must be non-empty string literals",
+            )
+        self.generic_visit(node)
+
     def visit_Expr(self, node: ast.Expr) -> None:
         if not (
             isinstance(node.value, ast.Constant)
@@ -424,6 +441,23 @@ def _normalized_ast_hash(tree: ast.Module) -> str:
     ast.fix_missing_locations(normalized)
     payload = ast.dump(normalized, annotate_fields=True, include_attributes=False)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def accessed_policy_fields(source: str) -> tuple[str, ...]:
+    """Return canonical direct input fields accessed by a valid policy source."""
+
+    tree = ast.parse(source, mode="exec")
+    fields = {
+        f"{node.value.id}.{node.slice.value}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in PARAMETERS
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+        and node.slice.value
+    }
+    return tuple(sorted(fields))
 
 
 def validate_policy(

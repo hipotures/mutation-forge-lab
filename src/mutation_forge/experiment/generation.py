@@ -135,6 +135,12 @@ class ProviderResult:
     provider_turn_id: str | None = None
     error: str | None = None
     retained: bool = False
+    validation: Mapping[str, Any] = field(default_factory=dict)
+    identity: Mapping[str, Any] = field(default_factory=dict)
+    behavior: Mapping[str, Any] = field(default_factory=dict)
+    worker_telemetry: Mapping[str, Any] = field(default_factory=dict)
+    canonical_response: Mapping[str, Any] = field(default_factory=dict)
+    metadata_validation: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_value(cls, value: Any) -> ProviderResult:
@@ -161,6 +167,30 @@ class ProviderResult:
                 provider_turn_id=value.get("provider_turn_id"),
                 error=str(value.get("error")) if value.get("error") is not None else None,
                 retained=value.get("retained") is True,
+                validation=cast(Mapping[str, Any], value.get("validation", {}))
+                if isinstance(value.get("validation"), Mapping)
+                else {},
+                identity=cast(Mapping[str, Any], value.get("identity", {}))
+                if isinstance(value.get("identity"), Mapping)
+                else {},
+                behavior=cast(Mapping[str, Any], value.get("behavior", {}))
+                if isinstance(value.get("behavior"), Mapping)
+                else {},
+                worker_telemetry=cast(
+                    Mapping[str, Any], value.get("worker_telemetry", {})
+                )
+                if isinstance(value.get("worker_telemetry"), Mapping)
+                else {},
+                canonical_response=cast(
+                    Mapping[str, Any], value.get("canonical_response", {})
+                )
+                if isinstance(value.get("canonical_response"), Mapping)
+                else {},
+                metadata_validation=cast(
+                    Mapping[str, Any], value.get("metadata_validation", {})
+                )
+                if isinstance(value.get("metadata_validation"), Mapping)
+                else {},
             )
         if all(hasattr(value, name) for name in ("response", "status", "usage")):
             return cls(
@@ -207,6 +237,12 @@ class ProviderResult:
             "provider_turn_id": self.provider_turn_id,
             "error": self.error,
             "retained": self.retained,
+            "validation": _safe(dict(self.validation)),
+            "identity": _safe(dict(self.identity)),
+            "behavior": _safe(dict(self.behavior)),
+            "worker_telemetry": _safe(dict(self.worker_telemetry)),
+            "canonical_response": _safe(dict(self.canonical_response)),
+            "metadata_validation": _safe(dict(self.metadata_validation)),
         }
 
 
@@ -694,7 +730,12 @@ class GenerationCoordinator:
     def slots(self) -> tuple[str, ...]:
         return tuple(f"slot-{index:02d}" for index in range(self.config.slots))
 
-    def _context(self, value: Any, generation: int, slot: str) -> str:
+    def _context(self, value: Any, generation: int, slot: str, parent: str) -> str:
+        if callable(value):
+            try:
+                value = value(generation, slot, parent)
+            except TypeError:
+                value = value(generation, slot)
         if isinstance(value, Mapping):
             value = value.get(generation, value.get(str(generation), value))
             if isinstance(value, Mapping):
@@ -766,8 +807,8 @@ class GenerationCoordinator:
         brief = self._brief(generation, slot)
         parent_source, parent_metadata = self._parent_source_metadata(parent)
         feedback, archive_context = (
-            self._context(self.search_feedback, generation, slot),
-            self._context(self.archive_context, generation, slot),
+            self._context(self.search_feedback, generation, slot, parent),
+            self._context(self.archive_context, generation, slot, parent),
         )
         render_values = {
             "brief": brief,
@@ -1037,6 +1078,38 @@ class GenerationCoordinator:
                 errors.extend(
                     {**item.as_dict(), "repair_class": "ast"} for item in validation.errors
                 )
+            elif raw.behavior:
+                self._emit(
+                    "behavior_probe_started",
+                    generation=request.generation,
+                    slot=request.slot,
+                    phase=request.phase,
+                    parent_id=request.parent_id,
+                )
+                if raw.behavior.get("status") == "failed":
+                    message = str(raw.behavior.get("error", "behavior probe failed"))[:256]
+                    errors.append({"code": "behavior_error", "message": message})
+                    self._emit(
+                        "behavior_probe_completed",
+                        generation=request.generation,
+                        slot=request.slot,
+                        phase=request.phase,
+                        parent_id=request.parent_id,
+                        status="failed",
+                        valid=False,
+                        error=message,
+                    )
+                else:
+                    behavior = raw.behavior
+                    self._emit(
+                        "behavior_probe_completed",
+                        generation=request.generation,
+                        slot=request.slot,
+                        phase=request.phase,
+                        parent_id=request.parent_id,
+                        status="completed",
+                        valid=True,
+                    )
             elif callable(self.behavior_evaluator):
                 self._emit(
                     "behavior_probe_started",
@@ -1811,9 +1884,9 @@ class GenerationCoordinator:
                                 0, self.config.max_repairs - repair_attempt
                             ),
                         )
-                        slots_state[req.idempotency_key] = repaired.as_dict()
-                        slots_state[initial_key] = repaired.as_dict()
-                        self._save(state)
+                    for state_key in (initial_key, *repair_keys):
+                        slots_state[state_key] = repaired.as_dict()
+                    self._save(state)
                     self._emit(
                         "repair_completed",
                         generation=generation,

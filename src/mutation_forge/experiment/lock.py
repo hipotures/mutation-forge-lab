@@ -147,10 +147,14 @@ _NATIVE_PRESET_ASSETS: dict[str, dict[str, str]] = {
         "request_prompt": "prompts/native/request.md",
         "repair_prompt": "prompts/native/repair.md",
         "output_schema": "configs/native/generated-policy.schema.json",
-        "context_schema": "configs/native/context.schema.json",
-        "proposal_schema": "configs/native/proposal.schema.json",
-        "semantic_glossary": "configs/native/semantic-descriptions.json",
+        "context_schema": "configs/schemas/stage2b-context.schema.json",
+        "proposal_schema": "configs/schemas/stage2b-proposal.schema.json",
+        "semantic_glossary": "configs/stage3-field-semantics.v1.json",
         "baseline_rankers": "configs/native/baseline-rankers.json",
+        **{
+            f"mutation_brief_{index:02d}": f"configs/stage3-slots/slot-{index:02d}.json"
+            for index in range(8)
+        },
     }
 }
 
@@ -443,23 +447,6 @@ def verify_lock(
     differences = immutable_differences(lock, config)
     if expected_hash != config.immutable_config_sha256() or differences:
         raise LockError(format_differences(differences))
-    project = _project_root()
-    locked_preset = lock.get("preset_identity")
-    if locked_preset is not None and locked_preset != _preset_metadata(config, project):
-        raise LockError("resolved preset assets differ from the locked experiment identity")
-    locked_app_server = lock.get("app_server")
-    if isinstance(locked_app_server, Mapping):
-        current_app_server = {
-            "protocol": "codex-app-server",
-            "profile": "default",
-            "model": config.model.name,
-            "effort": config.model.effort,
-            "binary_version": _codex_version(),
-            "auth_mode": "local-profile",
-        }
-        for field in ("protocol", "profile", "model", "effort", "binary_version", "auth_mode"):
-            if locked_app_server.get(field) != current_app_server[field]:
-                raise LockError(f"App Server identity drifted for {field}")
 
 
 compare_lock = verify_lock

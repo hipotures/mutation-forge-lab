@@ -281,6 +281,11 @@ def _trajectory(
             "accepted": 0,
             "failures": 0,
             "trace": [],
+            "initial_total": initial.total_capped_witnesses,
+            "stagnation": 0,
+            "recent_accepts": [],
+            "recent_improvements": [],
+            "recent_duplicate_rates": [],
         }
     pool_generator = KSwitchPoolGenerator(
         backend, pool_limits=PoolLimits(pool_size=settings["proposal_pool_size"])
@@ -289,12 +294,28 @@ def _trajectory(
         state = states[candidate_id]
         pool = pool_generator.generate(state["graph"], policy_seed=policy_seed, step=step)
         if pool.retained:
+            window = 8
+            recent_accepts = state["recent_accepts"][-window:]
+            recent_improvements = state["recent_improvements"][-window:]
+            recent_duplicates = state["recent_duplicate_rates"][-window:]
             context = make_scientific_context(
                 state["graph"],
                 state["score"],
                 forbidden_lengths=DEFAULT_FORBIDDEN_LENGTHS,
                 step=step,
                 remaining_steps=settings["horizon"] - step - 1,
+                stagnation=state["stagnation"],
+                recent_best_improvement=max(recent_improvements, default=0.0),
+                recent_acceptance_rate=(
+                    sum(recent_accepts) / len(recent_accepts)
+                    if recent_accepts
+                    else 0.0
+                ),
+                recent_duplicate_rate=(
+                    sum(recent_duplicates) / len(recent_duplicates)
+                    if recent_duplicates
+                    else 0.0
+                ),
             )
             rank = ranker.rank(context, pool)
             candidate = (
@@ -312,9 +333,18 @@ def _trajectory(
             if candidate is None:
                 raise RuntimeError(f"{candidate_id} ranker did not select a pool proposal")
             _advance(backend, state, candidate.rewrite, settings, step, _rank_projection(rank))
+            state["recent_duplicate_rates"].append(
+                pool.deduplicated / max(1, pool.attempted)
+            )
         else:
             state["failures"] += 1
             state["curve"].append(state["score"].total_capped_witnesses)
+            state["recent_accepts"].append(0)
+            state["recent_improvements"].append(0.0)
+            state["recent_duplicate_rates"].append(
+                pool.deduplicated / max(1, pool.attempted)
+            )
+            state["stagnation"] += 1
             state["trace"].append(
                 {
                     "step": step,
@@ -340,6 +370,7 @@ def _trajectory(
                 step,
                 {"operator_family": operator_family},
             )
+            baseline_state["recent_duplicate_rates"].append(0.0)
     policies: dict[str, JsonValue] = {}
     for name, state in states.items():
         policies[name] = _summary(
@@ -369,6 +400,7 @@ def _advance(
     step: int,
     rank: Mapping[str, Any],
 ) -> None:
+    previous = state["score"]
     try:
         proposed = backend.apply_rewrite(state["graph"], rewrite)
         if not backend.validate(proposed).valid:
@@ -377,6 +409,9 @@ def _advance(
     except Exception as error:
         state["failures"] += 1
         state["curve"].append(state["score"].total_capped_witnesses)
+        state["recent_accepts"].append(0)
+        state["recent_improvements"].append(0.0)
+        state["stagnation"] += 1
         state["trace"].append(
             {"step": step, "accepted": False, "error": str(error), "rank": dict(rank)}
         )
@@ -385,6 +420,20 @@ def _advance(
     if accepted:
         state["graph"], state["score"] = proposed, score
         state["accepted"] += 1
+        state["stagnation"] = 0
+    else:
+        state["stagnation"] += 1
+    state["recent_accepts"].append(int(accepted))
+    state["recent_improvements"].append(
+        max(
+            0.0,
+            (
+                previous.total_capped_witnesses
+                - state["score"].total_capped_witnesses
+            )
+            / max(1, state["initial_total"]),
+        )
+    )
     state["curve"].append(
         min(
             state["score"].total_capped_witnesses,

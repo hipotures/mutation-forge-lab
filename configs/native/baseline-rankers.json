@@ -11,9 +11,19 @@
     {
       "policy_id": "native_structural",
       "kind": "bounded_linear",
-      "description": "Prefer broken witnesses and new-edge distance while penalising local risk.",
-      "signals": ["broken_witnesses", "new_edge_distance", "local_risk"],
-      "weights": {"broken_witnesses": 1.0, "new_edge_distance": 0.25, "local_risk": -0.5},
+      "description": "Prefer sampled broken witnesses and remote reconnections while penalising local triangle and C4 risk.",
+      "signals": [
+        "broken_sampled_witnesses_by_length",
+        "mean_preexisting_distance_for_new_edges",
+        "local_triangle_risk",
+        "local_c4_risk"
+      ],
+      "weights": {
+        "broken_sampled_witnesses_by_length": 1.0,
+        "mean_preexisting_distance_for_new_edges": 0.25,
+        "local_triangle_risk": -0.25,
+        "local_c4_risk": -0.25
+      },
       "oracle_access": false
     }
   ]
