@@ -1217,6 +1217,8 @@ class CodexAppServerAdapter:
         self._stderr_thread = None
         self._drain_evidence()
         self._copy_rollout()
+        if self.logger:
+            self.logger.cleanup_temporary_files()
         if self._owns_capsule:
             self.capsule.cleanup()
 

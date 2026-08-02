@@ -280,11 +280,17 @@ def _experiment_run(
     else:
         sinks = [ProgressLineSink(sys.stdout)]
     try:
-        result = run_experiment(
-            config_path,
-            event_sinks=sinks,
-            profiling=profiling,
-        )
+        try:
+            result = run_experiment(
+                config_path,
+                event_sinks=sinks,
+                profiling=profiling,
+            )
+        except KeyboardInterrupt:
+            # The service has already persisted the interrupted session and
+            # released ownership.  Ctrl-C is a normal terminal outcome, not
+            # an uncaught traceback for the operator.
+            return 130
     finally:
         for sink in reversed(sinks):
             sink.close()

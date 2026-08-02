@@ -225,16 +225,33 @@ class TransportLogger:
             if stored_size - current_size + len(payload.encode()) > self.max_aggregate_bytes:
                 self.telemetry["write_failures"] += 1
                 raise ValueError("transport run exceeds aggregate byte limit")
-            fd, tmp = tempfile.mkstemp(prefix=".log.", dir=self.directory)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(payload)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, target)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # A provider can be interrupted while another adapter is draining
+            # its transport.  Retry one missing-temp-file race so a transient
+            # cleanup cannot turn an otherwise valid turn into a provider
+            # failure.  The second failure remains visible to the caller.
+            for attempt in range(2):
+                fd, tmp = tempfile.mkstemp(prefix=".log.", dir=self.directory)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(payload)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp, target)
+                    break
+                except FileNotFoundError:
+                    if attempt == 1:
+                        raise
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+
+    def cleanup_temporary_files(self) -> None:
+        """Remove interrupted atomic-write leftovers after logger shutdown."""
+
+        with _ARTIFACT_LOCK:
+            for path in self.directory.glob(".log.*"):
+                path.unlink(missing_ok=True)
 
     def _record_wire(
         self,

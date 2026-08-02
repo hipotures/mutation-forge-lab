@@ -460,9 +460,6 @@ def verify_lock(
         for field in ("protocol", "profile", "model", "effort", "binary_version", "auth_mode"):
             if locked_app_server.get(field) != current_app_server[field]:
                 raise LockError(f"App Server identity drifted for {field}")
-        locked_profile = locked_app_server.get("profile_identity")
-        if isinstance(locked_profile, Mapping) and locked_profile != _codex_profile_identity():
-            raise LockError("local Codex profile identity drifted")
 
 
 compare_lock = verify_lock

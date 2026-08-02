@@ -94,6 +94,8 @@ class _CodexTransport:
         self.sandbox_mode = sandbox_mode
         self.approval_policy = approval_policy
         self._adapters: list[Any] = []
+        self._adapters_lock = threading.RLock()
+        self._closed = False
 
     def _adapter(self, request: Mapping[str, Any]) -> Any:
         # This is the generic JSONL App Server transport.  It has no Stage 4
@@ -116,7 +118,12 @@ class _CodexTransport:
             sandbox_mode=self.sandbox_mode,
             approval_policy=self.approval_policy,
         )
-        self._adapters.append(adapter)
+        with self._adapters_lock:
+            if self._closed:
+                with suppress(Exception):
+                    adapter.close()
+                raise NativeProviderError("native transport is closed")
+            self._adapters.append(adapter)
         return adapter
 
     @staticmethod
@@ -316,10 +323,12 @@ class _CodexTransport:
         return self.generate(value)
 
     def close(self) -> None:
-        for adapter in self._adapters:
+        with self._adapters_lock:
+            self._closed = True
+            adapters, self._adapters = self._adapters, []
+        for adapter in adapters:
             with suppress(Exception):
                 adapter.close()
-        self._adapters.clear()
 
 
 class LocalCodexAppServerProvider:
@@ -498,14 +507,18 @@ class LocalCodexAppServerProvider:
         key = self._key(request, "initial")
         with self._lock:
             retained = self._retained.get(key)
+        if retained is not None:
+            return retained
+        result = self._transport.generate(request)
+        if not isinstance(result, Mapping):
+            result = {"status": "completed", "accepted": True, "response": result}
+        value = dict(result)
+        value.setdefault("status", "completed")
+        value.setdefault("accepted", value.get("status") == "completed")
+        with self._lock:
+            retained = self._retained.get(key)
             if retained is not None:
                 return retained
-            result = self._transport.generate(request)
-            if not isinstance(result, Mapping):
-                result = {"status": "completed", "accepted": True, "response": result}
-            value = dict(result)
-            value.setdefault("status", "completed")
-            value.setdefault("accepted", value.get("status") == "completed")
             if self.persist_artifacts:
                 self._persist(request, value, "initial")
             self._retained[key] = value
@@ -536,14 +549,18 @@ class LocalCodexAppServerProvider:
             if retained is not None:
                 return retained
             self._repair_counts[base] = count + 1
-            result = self._transport.repair(request, diagnostics)
-            value = (
-                dict(result)
-                if isinstance(result, Mapping)
-                else {"status": "completed", "accepted": True, "response": result}
-            )
-            value.setdefault("status", "completed")
-            value.setdefault("accepted", value.get("status") == "completed")
+        result = self._transport.repair(request, diagnostics)
+        value = (
+            dict(result)
+            if isinstance(result, Mapping)
+            else {"status": "completed", "accepted": True, "response": result}
+        )
+        value.setdefault("status", "completed")
+        value.setdefault("accepted", value.get("status") == "completed")
+        with self._lock:
+            retained = self._retained.get(key)
+            if retained is not None:
+                return retained
             if self.persist_artifacts:
                 self._persist(request, value, f"repair-{count + 1:02d}")
             self._retained[key] = value

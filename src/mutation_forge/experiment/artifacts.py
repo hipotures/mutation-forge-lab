@@ -582,7 +582,9 @@ class TurnArtifactStore:
         if manifest_path.exists():
             return cast(dict[str, Any], json.loads(manifest_path.read_text(encoding="utf-8")))
         slot_text = str(slot) if str(slot).startswith("slot-") else f"slot-{int(slot):02d}"
-        files = sorted(path for path in root.rglob("*") if path.is_file())
+        files = sorted(
+            path for path in root.rglob("*") if path.is_file() and not path.name.startswith(".log.")
+        )
         missing: dict[str, str] = {}
         blocking: set[str] = set()
         for path in files:
@@ -628,7 +630,9 @@ class TurnArtifactStore:
             path = root / name
             if isinstance(value, Mapping) and not path.exists():
                 _atomic_write(path, _canonical(redact(value)) + b"\n", exclusive=True)
-        files = sorted(path for path in root.rglob("*") if path.is_file())
+        files = sorted(
+            path for path in root.rglob("*") if path.is_file() and not path.name.startswith(".log.")
+        )
         for path in files:
             if path.stat().st_size > self.max_bytes:
                 relative = path.relative_to(root).as_posix()

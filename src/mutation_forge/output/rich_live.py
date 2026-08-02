@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import TextIO
 
@@ -40,8 +41,10 @@ class RichLiveSink:
             "_archive_seen": {},
         }
         self._native_mode = native
+        self._state_lock = threading.RLock()
         self._slot_details: dict[str, dict[str, JsonValue]] = {}
         self._recent_events: list[str] = []
+        self._session_started_monotonic: float | None = None
         self.live = Live(
             self._render(),
             console=self.console,
@@ -51,14 +54,29 @@ class RichLiveSink:
         self.live.start()
         self._last_refresh = time.monotonic()
         self._native_first_refresh = True
+        self._refresh_stop = threading.Event()
+        self._refresh_thread: threading.Thread | None = None
+        if self.console.is_terminal:
+            self._refresh_thread = threading.Thread(
+                target=self._refresh_loop,
+                name="mforge-dashboard-refresh",
+                daemon=True,
+            )
+            self._refresh_thread.start()
 
     def write(self, event: Event) -> None:
+        with self._state_lock:
+            self._write(event)
+
+    def _write(self, event: Event) -> None:
         if event.event_type == "generation_started":
             self._slot_details.clear()
             self.state["slot_states"] = {}
         self.state.update(event.payload)
         self.state["latest_event"] = event.event_type
         self.state["run_id"] = event.run_id
+        if event.event_type == "session_started":
+            self._session_started_monotonic = time.monotonic()
         native_event = event.event_type in {
             "preflight_started",
             "preflight_completed",
@@ -141,6 +159,35 @@ class RichLiveSink:
             if native_event:
                 self._native_first_refresh = False
 
+    def _refresh_loop(self) -> None:
+        while not self._refresh_stop.wait(REFRESH_INTERVAL_SECONDS):
+            try:
+                with self._state_lock:
+                    self._update_live_rates()
+                    self.live.update(self._render_unlocked(), refresh=True)
+            except Exception:
+                return
+
+    def _update_live_rates(self) -> None:
+        if self._session_started_monotonic is None:
+            return
+        elapsed = max(0.0, time.monotonic() - self._session_started_monotonic)
+        self.state["elapsed_seconds"] = elapsed
+        wall = self.state.get("configured_wall_seconds")
+        if isinstance(wall, int | float) and not isinstance(wall, bool):
+            self.state["remaining_seconds"] = max(0.0, float(wall) - elapsed)
+        completed = self.state.get("evaluations_completed")
+        if isinstance(completed, int) and not isinstance(completed, bool) and elapsed > 0:
+            self.state["evaluations_per_second"] = completed / elapsed
+
+    def _live_elapsed_seconds(self) -> float:
+        value = self.state.get("elapsed_seconds")
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return max(0.0, float(value))
+        if self._session_started_monotonic is not None:
+            return max(0.0, time.monotonic() - self._session_started_monotonic)
+        return 0.0
+
     def _update_native_counters(self, event: Event) -> None:
         """Accumulate counters when an event carries only a local delta."""
 
@@ -153,7 +200,10 @@ class RichLiveSink:
         def add(name: str, amount: int = 1) -> None:
             self.state[name] = integer(name) + amount
 
-        if event.event_type == "session_started":
+        if event.event_type == "generation_started":
+            self.state["completed_slots"] = 0
+            self.state["active_model_turns"] = 0
+        elif event.event_type == "session_started":
             usage = payload.get("usage")
             if isinstance(usage, dict):
                 self.state["_usage_cumulative"] = dict(usage)
@@ -393,6 +443,10 @@ class RichLiveSink:
         del self._recent_events[:-6]
 
     def _render(self) -> Group | Panel:
+        with self._state_lock:
+            return self._render_unlocked()
+
+    def _render_unlocked(self) -> Group | Panel:
         if self.state.get("native") is True or self._native_mode:
             return self._render_native()
         return self._render_legacy()
@@ -401,7 +455,7 @@ class RichLiveSink:
         width = max(40, self.console.size.width)
         height = max(8, self.console.size.height)
         profile_line = self._native_profile_line()
-        metrics = self._native_metrics_line()
+        metrics = self._native_metrics_line(width - 4)
         show_metrics = bool(metrics) and height >= 12
         show_profile = profile_line is not None and height >= 16
         activity_limit = 3 if height >= 16 else 1
@@ -459,14 +513,60 @@ class RichLiveSink:
         if concurrency is not None:
             add("workers", concurrency)
         add("phase", state.get("phase"))
-        add("mode", state.get("run_mode"))
+        base_values = list(values)
+        optional: list[str] = []
+        mode = state.get("run_mode")
+        if mode not in (None, "", "-"):
+            optional.append(f"mode {mode}")
         elapsed = self._seconds_value(state.get("elapsed_seconds"))
         remaining = self._seconds_value(state.get("remaining_seconds"))
         if elapsed is not None:
-            add("elapsed", elapsed)
+            optional.append(f"elapsed {elapsed}")
         if remaining is not None:
-            add("left", remaining)
-        return self._fit(" · ".join(values) or "initializing", width - 4)
+            optional.append(f"left {remaining}")
+        available = max(1, width - 4)
+        while optional and len(" · ".join(base_values + optional)) > available:
+            optional.pop()
+        values = base_values + optional
+        header = " · ".join(values) or "initializing"
+        if len(header) <= available:
+            return header
+        # At narrow terminals add fields in order and drop only the optional
+        # identity details that do not fit.  This keeps the stable Run/session
+        # identifiers readable for logs and preserves the phase whenever the
+        # viewport has enough room.
+        compact: list[str] = []
+        narrow_values = [
+            (
+                f"Run …{item[-8:]}"
+                if available <= 80 and item.startswith("Run ") and len(item) > 24
+                else item
+            )
+            for item in base_values
+        ]
+        for item in narrow_values:
+            if len(" · ".join([*compact, item])) <= available:
+                compact.append(item)
+        generation_item = next((item for item in narrow_values if item.startswith("gen ")), None)
+        if generation_item is not None and generation_item not in compact:
+            compact = [item for item in compact if not item.startswith("state ")]
+            if len(" · ".join([*compact, generation_item])) <= available:
+                compact.append(generation_item)
+        phase_item = next((item for item in narrow_values if item.startswith("phase ")), None)
+        if phase_item is not None and phase_item not in compact:
+            compact = [
+                item
+                for item in compact
+                if not item.startswith(("state ", "model ", "workers "))
+            ]
+            while (
+                len(" · ".join([*compact, phase_item])) > available
+                and len(compact) > 3
+            ):
+                compact.pop()
+            if len(" · ".join([*compact, phase_item])) <= available:
+                compact.append(phase_item)
+        return self._fit_header(" · ".join(compact), available)
 
     def _native_summary_line(self) -> str:
         state = self.state
@@ -507,7 +607,7 @@ class RichLiveSink:
             values.append(f"tokens {total_tokens:,}")
         return " · ".join(values)
 
-    def _native_metrics_line(self) -> str:
+    def _native_metrics_line(self, width: int) -> str:
         state = self.state
         values: list[str] = []
         current = state.get("current_objective")
@@ -518,15 +618,34 @@ class RichLiveSink:
                 f"{best if best is not None else '?'}"
             )
         rate = self._rate_value(state.get("evaluations_per_second"))
-        if rate is not None:
-            values.append(f"eval/s {rate}")
+        session = state.get("session_id")
+        if rate is None:
+            completed_evaluations = state.get("evaluations_completed")
+            elapsed = self._live_elapsed_seconds()
+            if (
+                isinstance(completed_evaluations, int)
+                and not isinstance(completed_evaluations, bool)
+                and elapsed > 0
+            ):
+                rate = f"{completed_evaluations / elapsed:.2f}"
+        if rate is not None or session not in (None, ""):
+            values.append(f"eval/s {rate if rate is not None else '0.00'}")
+        completed_turns = state.get("provider_turns_completed")
+        if (
+            isinstance(completed_turns, int)
+            and not isinstance(completed_turns, bool)
+            and session not in (None, "")
+        ):
+            elapsed = self._live_elapsed_seconds()
+            if elapsed > 0:
+                values.append(f"turn/s {completed_turns / elapsed:.2f}")
         recovered = state.get("recovered_work")
         if isinstance(recovered, int) and recovered:
             values.append(f"recovered {recovered}")
         error = state.get("error_summary")
         if isinstance(error, str) and error:
-            values.append(f"ERROR {error}")
-        return " · ".join(values)
+            values.append(f"ERROR {self._compact_text(error, max(32, width - 12))}")
+        return self._fit(" · ".join(values), width)
 
     def _native_slot_rows(self) -> list[dict[str, JsonValue]]:
         rows = [{**detail, "slot": slot} for slot, detail in self._slot_details.items()]
@@ -560,9 +679,11 @@ class RichLiveSink:
             slot = str(row.get("slot", "?"))
             parent = self._compact_parent(row.get("parent_id"))
             phase = str(row.get("phase", ""))
-            state = str(row.get("state", "queued"))
+            state = self._compact_state(row.get("state", "queued"))
             tokens = str(row.get("tokens", ""))
-            result = str(row.get("error", row.get("candidate", row.get("score", ""))))
+            result = self._compact_text(
+                str(row.get("error", row.get("candidate", row.get("score", "")))), 96
+            )
             if width >= 120:
                 table.add_row(slot, parent, phase, state, tokens, result)
             elif width >= 100:
@@ -574,6 +695,8 @@ class RichLiveSink:
     def _native_profile_line(self) -> str | None:
         profile = self.state.get("timing_profile")
         if not isinstance(profile, dict) or profile.get("enabled") is not True:
+            if self.state.get("profiling_enabled") is True:
+                return "Profile waiting for phase data"
             return None
         phases = profile.get("phase_seconds")
         if not isinstance(phases, dict):
@@ -620,6 +743,35 @@ class RichLiveSink:
         if width <= 1:
             return value[:width]
         return value[: width - 1] + "…"
+
+    @staticmethod
+    def _fit_header(value: str, width: int) -> str:
+        if len(value) <= width:
+            return value
+        if width <= 1:
+            return value[:width]
+        left = max(1, (width - 1) // 2)
+        right = max(0, width - left - 1)
+        return value[:left] + "…" + value[-right:] if right else value[:left] + "…"
+
+    @staticmethod
+    def _compact_text(value: str, limit: int) -> str:
+        normalized = " ".join(value.split())
+        if len(normalized) <= limit:
+            return normalized
+        if limit <= 1:
+            return normalized[:limit]
+        return normalized[: limit - 1] + "…"
+
+    @staticmethod
+    def _compact_state(value: object) -> str:
+        return {
+            "repair_pending": "repair",
+            "validating": "validate",
+            "probing": "probe",
+            "evaluating": "eval",
+            "accepted": "accepted",
+        }.get(str(value), str(value))
 
     def _render_legacy(self) -> Group:
         profile_table = self._profile_table()
@@ -1322,6 +1474,9 @@ class RichLiveSink:
         return table
 
     def close(self) -> None:
+        self._refresh_stop.set()
+        if self._refresh_thread is not None:
+            self._refresh_thread.join(timeout=1.0)
         self.live.stop()
 
 
