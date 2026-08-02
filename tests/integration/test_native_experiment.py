@@ -300,8 +300,8 @@ def test_native_live_progress_is_visible_before_blocked_provider_finishes(
         rendered = snapshot.getvalue()
         assert not errors
         assert sink.state["latest_event"] == "provider_turn_started"
-        assert "Active model turns" in rendered
-        assert "Provider turns" in rendered
+        assert "active 1" in rendered
+        assert "turns 0/1" in rendered
         assert "native-blocked" in rendered
     finally:
         release.set()

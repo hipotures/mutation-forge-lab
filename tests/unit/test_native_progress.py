@@ -172,27 +172,21 @@ def test_native_rich_field_coverage_and_profile() -> None:
             cumulative_tokens=18,
         )
 
-        Console(file=output, force_terminal=False, width=240).print(sink._render())
+        Console(file=output, force_terminal=False, width=120, height=30).print(sink._render())
         rendered = output.getvalue()
         for field in (
-            "Experiment ID",
-            "Workspace",
-            "Session",
-            "Generation",
-            "Slots completed",
-            "Provider turns",
-            "Input tokens",
-            "Reasoning tokens",
-            "Candidates accepted",
-            "Evaluation coordinates",
-            "Development / replay",
-            "Current / best objective",
-            "Latest checkpoint",
+            "Run native-progress",
+            "session session-000001",
+            "gen 0/2",
+            "turns 1/1",
+            "candidates 1/0/0",
+            "objective 0.75 / 0.8",
+            "Activity",
             "g0000-slot-00",
-            "Runtime profile",
-            "Top hotspots",
         ):
             assert field in rendered
+        assert "Workspace" not in rendered
+        assert len(rendered.splitlines()) <= 30
         assert sink.state["usage"] == {
             "inputTokens": 10,
             "cachedInputTokens": 2,
@@ -204,6 +198,80 @@ def test_native_rich_field_coverage_and_profile() -> None:
     finally:
         hub.close()
         sink.close()
+
+
+def test_native_dashboard_fits_required_viewports_and_keeps_active_rows_visible() -> None:
+    for width, height in ((160, 40), (120, 30), (100, 24), (80, 24)):
+        sink = RichLiveSink(
+            console=Console(file=io.StringIO(), width=width, height=height, force_terminal=False),
+            native=True,
+        )
+        try:
+            sink.write(
+                _event(
+                    "session_started",
+                    experiment_id="viewport-check",
+                    session_id="session-000001",
+                    run_mode="continuation",
+                    state="running",
+                    model="gpt-test",
+                    effort="high",
+                    effective_concurrency=8,
+                    elapsed_seconds=1.0,
+                    remaining_seconds=29.0,
+                )
+            )
+            sink.write(
+                _event(
+                    "generation_started",
+                    generation=0,
+                    generation_limit=4,
+                    population_size=8,
+                    phase="initial",
+                )
+            )
+            for index in range(8):
+                sink.write(
+                    _event(
+                        "slot_queued",
+                        generation=0,
+                        slot=f"slot-{index:02d}",
+                        parent_id="parent-0-slot-00",
+                        phase="initial",
+                        status="queued",
+                        completed_slots=index,
+                        population_size=8,
+                    )
+                )
+            sink.write(
+                _event(
+                    "provider_turn_started",
+                    generation=0,
+                    slot="slot-00",
+                    phase="initial",
+                )
+            )
+            sink.write(
+                _event(
+                    "provider_turn_failed",
+                    generation=0,
+                    slot="slot-00",
+                    phase="initial",
+                    error="transport EOF",
+                )
+            )
+            output = io.StringIO()
+            Console(file=output, width=width, height=height, force_terminal=False).print(
+                sink._render()
+            )
+            rendered = output.getvalue()
+            assert len(rendered.splitlines()) <= height
+            assert "slot-00" in rendered
+            assert "transport EOF" in rendered
+            assert "Workspace" not in rendered
+            assert "Dataset" not in rendered
+        finally:
+            sink.close()
 
 
 def test_profiling_disabled_omits_profile_panel() -> None:
@@ -218,6 +286,32 @@ def test_profiling_disabled_omits_profile_panel() -> None:
         assert "Deep score profile" not in rendered.getvalue()
     finally:
         hub.close()
+        sink.close()
+
+
+def test_native_profile_is_compact_and_conditional() -> None:
+    sink = RichLiveSink(
+        console=Console(file=io.StringIO(), width=80, height=24, force_terminal=False),
+        native=True,
+    )
+    try:
+        sink.state["timing_profile"] = {
+            "enabled": True,
+            "phase_seconds": {"provider": 2.0, "evaluation": 1.0},
+            "unattributed_fraction": 0.1,
+        }
+        output = io.StringIO()
+        Console(file=output, force_terminal=False, width=80, height=24).print(sink._render())
+        rendered = output.getvalue()
+        assert "Profile" in rendered
+        assert "provider 2.00s" in rendered
+        assert len(rendered.splitlines()) <= 24
+
+        sink.state["timing_profile"] = {"enabled": False}
+        output = io.StringIO()
+        Console(file=output, force_terminal=False, width=80, height=24).print(sink._render())
+        assert "Profile" not in output.getvalue()
+    finally:
         sink.close()
 
 

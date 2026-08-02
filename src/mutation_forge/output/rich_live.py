@@ -17,14 +17,14 @@ REFRESH_INTERVAL_SECONDS = 1.0
 
 
 class RichLiveSink:
-    def __init__(self, *, console: Console | None = None) -> None:
+    def __init__(self, *, console: Console | None = None, native: bool = False) -> None:
         self.console = console or Console()
         self.state: dict[str, JsonValue] = {
             "stage": "initializing",
             "latest_event": "none",
             "evaluations": 0,
             "episodes_completed": 0,
-            "native": False,
+            "native": native,
             "state": "starting",
             "slot_states": {},
             "active_model_turns": 0,
@@ -39,6 +39,9 @@ class RichLiveSink:
             "_usage_cumulative": {},
             "_archive_seen": {},
         }
+        self._native_mode = native
+        self._slot_details: dict[str, dict[str, JsonValue]] = {}
+        self._recent_events: list[str] = []
         self.live = Live(
             self._render(),
             console=self.console,
@@ -50,6 +53,9 @@ class RichLiveSink:
         self._native_first_refresh = True
 
     def write(self, event: Event) -> None:
+        if event.event_type == "generation_started":
+            self._slot_details.clear()
+            self.state["slot_states"] = {}
         self.state.update(event.payload)
         self.state["latest_event"] = event.event_type
         self.state["run_id"] = event.run_id
@@ -85,6 +91,8 @@ class RichLiveSink:
         if native_event:
             self.state["native"] = True
             self._update_native_counters(event)
+            self._update_native_slot(event)
+            self._record_recent_event(event)
         if event.event_type == "session_started":
             self.state["state"] = "running"
         elif event.event_type == "experiment_completed":
@@ -280,7 +288,340 @@ class RichLiveSink:
         elif event.event_type == "behavior_probe_completed" and payload.get("valid") is False:
             self.state["error_summary"] = payload.get("error", "behavior probe failed")
 
-    def _render(self) -> Group:
+    def _update_native_slot(self, event: Event) -> None:
+        payload = event.payload
+        slot = payload.get("slot")
+        if not isinstance(slot, str):
+            return
+        detail = self._slot_details.setdefault(slot, {})
+        for key in ("generation", "parent_id", "phase"):
+            value = payload.get(key)
+            if value is not None:
+                detail[key] = value
+        event_type = event.event_type
+        phase = payload.get("phase")
+        state = payload.get("status")
+        if event_type == "provider_turn_started":
+            state = "repair" if phase == "repair" else "model"
+        elif event_type == "provider_turn_completed":
+            state = "accepted" if payload.get("accepted") is True else "failed"
+        elif event_type == "provider_turn_failed":
+            state = "failed"
+        elif event_type == "repair_started":
+            state = "repair"
+        elif event_type == "validation_started":
+            state = "validating"
+        elif event_type == "validation_completed":
+            state = "validating" if payload.get("valid") is True else "invalid"
+        elif event_type == "behavior_probe_started":
+            state = "probing"
+        elif event_type == "behavior_probe_completed":
+            state = "probing" if payload.get("valid") is True else "failed"
+        elif event_type == "evaluation_started":
+            state = "evaluating"
+        elif event_type == "candidate_archived":
+            state = payload.get("status")
+        if isinstance(state, str) and state:
+            detail["state"] = state
+            slots = self.state.get("slot_states")
+            if not isinstance(slots, dict):
+                slots = {}
+                self.state["slot_states"] = slots
+            slots[slot] = state
+        usage = payload.get("usage")
+        tokens = payload.get("totalTokens")
+        if isinstance(usage, dict):
+            tokens = usage.get("totalTokens", tokens)
+        if isinstance(tokens, int) and not isinstance(tokens, bool):
+            detail["tokens"] = tokens
+        candidate = payload.get("candidate_id")
+        if isinstance(candidate, str) and candidate:
+            detail["candidate"] = candidate
+        score = payload.get("best_score", payload.get("best_objective"))
+        if isinstance(score, int | float) and not isinstance(score, bool):
+            detail["score"] = score
+        error = payload.get("error")
+        if isinstance(error, str) and error:
+            detail["error"] = error
+
+    def _record_recent_event(self, event: Event) -> None:
+        meaningful = {
+            "preflight_started",
+            "preflight_completed",
+            "workspace_initialized",
+            "workspace_resumed",
+            "session_started",
+            "generation_started",
+            "slot_queued",
+            "provider_turn_started",
+            "provider_turn_completed",
+            "provider_turn_failed",
+            "repair_started",
+            "repair_completed",
+            "validation_completed",
+            "behavior_probe_completed",
+            "candidate_archived",
+            "evaluation_completed",
+            "evaluation_failed",
+            "selection_completed",
+            "checkpoint_written",
+            "budget_boundary_reached",
+            "experiment_completed",
+            "experiment_interrupted",
+            "experiment_failed",
+        }
+        if event.event_type not in meaningful:
+            return
+        payload = event.payload
+        if event.event_type == "candidate_archived" and payload.get("status") == "accepted":
+            pass
+        elif event.event_type == "slot_queued" and payload.get("status") != "recovered":
+            return
+        label = event.event_type.removeprefix("experiment_").replace("_", " ")
+        slot = payload.get("slot")
+        if isinstance(slot, str):
+            label += f" {slot}"
+        status = payload.get("status")
+        if isinstance(status, str) and status:
+            label += f" {status}"
+        error = payload.get("error")
+        if isinstance(error, str) and error:
+            label += f": {error}"
+        timestamp = event.timestamp[11:19] if len(event.timestamp) >= 19 else ""
+        entry = f"{timestamp} {label}".strip()
+        self._recent_events.append(entry)
+        del self._recent_events[:-6]
+
+    def _render(self) -> Group | Panel:
+        if self.state.get("native") is True or self._native_mode:
+            return self._render_native()
+        return self._render_legacy()
+
+    def _render_native(self) -> Panel:
+        width = max(40, self.console.size.width)
+        height = max(8, self.console.size.height)
+        profile_line = self._native_profile_line()
+        metrics = self._native_metrics_line()
+        show_metrics = bool(metrics) and height >= 12
+        show_profile = profile_line is not None and height >= 16
+        activity_limit = 3 if height >= 16 else 1
+        fixed = 1 + 1 + (1 if show_metrics else 0) + 1 + activity_limit
+        if show_profile:
+            fixed += 1
+        details = self._native_slot_rows()
+        max_rows = max(0, min(len(details), height - 2 - fixed - 1))
+        parts: list[Text | Table] = [Text(self._native_header(width), style="bold")]
+        summary = self._native_summary_line()
+        if summary:
+            parts.append(Text(summary))
+        if show_metrics:
+            parts.append(Text(metrics))
+        if details and max_rows:
+            parts.append(self._native_slot_table(width, details[:max_rows]))
+        else:
+            parts.append(Text("Slots  waiting for generation"))
+        activity = self._recent_events[-activity_limit:]
+        if activity:
+            parts.extend(Text(f"Activity  {item}" if index == 0 else f"          {item}")
+                         for index, item in enumerate(activity))
+        else:
+            parts.append(Text("Activity  waiting for native events"))
+        if show_profile and profile_line is not None:
+            parts.append(Text(profile_line))
+        return Panel(
+            Group(*parts),
+            title="Mutation Forge Lab · Native experiment",
+            border_style="cyan",
+            padding=(0, 1),
+            expand=True,
+        )
+
+    def _native_header(self, width: int) -> str:
+        state = self.state
+        values: list[str] = []
+
+        def add(label: str, value: object) -> None:
+            if value not in (None, "", "-"):
+                values.append(f"{label} {value}")
+
+        add("Run", state.get("experiment_id", state.get("run_id")))
+        add("session", state.get("session_id"))
+        add("state", state.get("state", state.get("stage")))
+        generation = state.get("generation")
+        generation_limit = state.get("generation_limit")
+        if generation is not None and generation_limit is not None:
+            add("gen", f"{generation}/{generation_limit}")
+        model = state.get("model")
+        effort = state.get("effort")
+        if model not in (None, "-"):
+            add("model", f"{model}/{effort}" if effort not in (None, "-") else model)
+        concurrency = state.get("effective_concurrency")
+        if concurrency is not None:
+            add("workers", concurrency)
+        add("phase", state.get("phase"))
+        add("mode", state.get("run_mode"))
+        elapsed = self._seconds_value(state.get("elapsed_seconds"))
+        remaining = self._seconds_value(state.get("remaining_seconds"))
+        if elapsed is not None:
+            add("elapsed", elapsed)
+        if remaining is not None:
+            add("left", remaining)
+        return self._fit(" · ".join(values) or "initializing", width - 4)
+
+    def _native_summary_line(self) -> str:
+        state = self.state
+        values: list[str] = []
+
+        def number(name: str) -> int:
+            value = state.get(name)
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+        completed = number("completed_slots")
+        total = state.get("population_size", state.get("slot_count"))
+        if isinstance(total, int) and not isinstance(total, bool):
+            values.append(f"slots {completed}/{total}")
+        attempts = number("provider_turns_attempted")
+        completed_turns = number("provider_turns_completed")
+        if attempts or completed_turns:
+            values.append(f"turns {completed_turns}/{attempts}")
+        active = number("active_model_turns")
+        if active:
+            values.append(f"active {active}")
+        repairs = number("repair_turns")
+        if repairs:
+            values.append(f"repairs {repairs}")
+        accepted = number("accepted_candidates")
+        invalid = number("invalid_candidates")
+        duplicate = number("duplicate_candidates")
+        if accepted or invalid or duplicate:
+            values.append(f"candidates {accepted}/{invalid}/{duplicate}")
+        evaluations = number("evaluations_completed")
+        queued = number("evaluations_queued")
+        if evaluations or queued:
+            values.append(f"eval {evaluations}/{queued or evaluations}")
+        usage = state.get("usage")
+        total_tokens = usage.get("totalTokens") if isinstance(usage, dict) else None
+        if not isinstance(total_tokens, int):
+            total_tokens = state.get("cumulative_tokens")
+        if isinstance(total_tokens, int) and total_tokens:
+            values.append(f"tokens {total_tokens:,}")
+        return " · ".join(values)
+
+    def _native_metrics_line(self) -> str:
+        state = self.state
+        values: list[str] = []
+        current = state.get("current_objective")
+        best = state.get("best_objective")
+        if current is not None or best is not None:
+            values.append(
+                f"objective {current if current is not None else '?'} / "
+                f"{best if best is not None else '?'}"
+            )
+        rate = self._rate_value(state.get("evaluations_per_second"))
+        if rate is not None:
+            values.append(f"eval/s {rate}")
+        recovered = state.get("recovered_work")
+        if isinstance(recovered, int) and recovered:
+            values.append(f"recovered {recovered}")
+        error = state.get("error_summary")
+        if isinstance(error, str) and error:
+            values.append(f"ERROR {error}")
+        return " · ".join(values)
+
+    def _native_slot_rows(self) -> list[dict[str, JsonValue]]:
+        rows = [{**detail, "slot": slot} for slot, detail in self._slot_details.items()]
+        if not rows:
+            slots = self.state.get("slot_states")
+            if isinstance(slots, dict):
+                rows = [{"slot": slot, "state": value} for slot, value in slots.items()]
+        for row in rows:
+            row.setdefault("slot", "?")
+        return sorted(rows, key=lambda row: str(row.get("slot", "")))
+
+    def _native_slot_table(self, width: int, rows: list[dict[str, JsonValue]]) -> Table:
+        table = Table(box=None, expand=True, padding=(0, 1), pad_edge=False)
+        table.add_column("slot", no_wrap=True, style="cyan")
+        if width >= 120:
+            table.add_column("parent", no_wrap=True)
+            table.add_column("phase", no_wrap=True)
+            table.add_column("state", no_wrap=True)
+            table.add_column("tokens", justify="right", no_wrap=True)
+            table.add_column("candidate / error", no_wrap=True, overflow="ellipsis")
+        elif width >= 100:
+            table.add_column("parent", no_wrap=True)
+            table.add_column("state", no_wrap=True)
+            table.add_column("tokens", justify="right", no_wrap=True)
+            table.add_column("result", no_wrap=True, overflow="ellipsis")
+        else:
+            table.add_column("state", no_wrap=True)
+            table.add_column("tokens", justify="right", no_wrap=True)
+            table.add_column("result", no_wrap=True, overflow="ellipsis")
+        for row in rows:
+            slot = str(row.get("slot", "?"))
+            parent = self._compact_parent(row.get("parent_id"))
+            phase = str(row.get("phase", ""))
+            state = str(row.get("state", "queued"))
+            tokens = str(row.get("tokens", ""))
+            result = str(row.get("error", row.get("candidate", row.get("score", ""))))
+            if width >= 120:
+                table.add_row(slot, parent, phase, state, tokens, result)
+            elif width >= 100:
+                table.add_row(slot, parent, state, tokens, result)
+            else:
+                table.add_row(slot, state, tokens, result)
+        return table
+
+    def _native_profile_line(self) -> str | None:
+        profile = self.state.get("timing_profile")
+        if not isinstance(profile, dict) or profile.get("enabled") is not True:
+            return None
+        phases = profile.get("phase_seconds")
+        if not isinstance(phases, dict):
+            return None
+        top = sorted(
+            ((name, seconds) for name, seconds in phases.items()
+             if isinstance(name, str) and isinstance(seconds, int | float)
+             and not isinstance(seconds, bool)),
+            key=lambda item: float(item[1]),
+            reverse=True,
+        )[:3]
+        if not top:
+            return None
+        parts = [f"{name} {float(seconds):.2f}s" for name, seconds in top]
+        unattributed = profile.get("unattributed_fraction")
+        if isinstance(unattributed, int | float) and not isinstance(unattributed, bool):
+            parts.append(f"unattributed {float(unattributed) * 100:.1f}%")
+        return "Profile  " + " · ".join(parts)
+
+    @staticmethod
+    def _compact_parent(value: JsonValue) -> str:
+        if not isinstance(value, str) or not value:
+            return "root"
+        if value.startswith("parent-"):
+            return "root"
+        return value[-12:]
+
+    @staticmethod
+    def _seconds_value(value: JsonValue) -> str | None:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return f"{value:.1f}s"
+        return None
+
+    @staticmethod
+    def _rate_value(value: JsonValue) -> str | None:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return f"{value:.2f}"
+        return None
+
+    @staticmethod
+    def _fit(value: str, width: int) -> str:
+        if len(value) <= width:
+            return value
+        if width <= 1:
+            return value[:width]
+        return value[: width - 1] + "…"
+
+    def _render_legacy(self) -> Group:
         profile_table = self._profile_table()
         deep_profile_table = self._deep_profile_table()
         deep_score_profile_table = self._deep_score_profile_table()

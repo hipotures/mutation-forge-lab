@@ -276,7 +276,7 @@ def _experiment_run(
     if machine_output:
         sinks = [JsonlSink(sys.stderr)]
     elif sys.stdout.isatty():
-        sinks = [RichLiveSink(console=Console(file=sys.stdout))]
+        sinks = [RichLiveSink(console=Console(file=sys.stdout), native=True)]
     else:
         sinks = [ProgressLineSink(sys.stdout)]
     try:
