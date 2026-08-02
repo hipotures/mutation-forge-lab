@@ -9,7 +9,6 @@ import platform
 import subprocess
 import tomllib
 from collections.abc import Mapping
-from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -114,15 +113,6 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _optional_path(raw: Mapping[str, Any], base: Path, *names: str) -> Path | None:
-    for name in names:
-        value = raw.get(name)
-        if isinstance(value, str) and value:
-            path = Path(value)
-            return (base / path).resolve() if not path.is_absolute() else path.resolve()
-    return None
-
-
 def _path_identities(value: object, base: Path, prefix: str = "") -> dict[str, Any]:
     result: dict[str, Any] = {}
     if isinstance(value, Mapping):
@@ -151,106 +141,59 @@ def _sandbox_limits(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _preset_metadata(
-    config: ExperimentConfig, project: Path, *, require_freeze: bool = False
-) -> dict[str, Any]:
-    """Resolve the scientific assets named by the experiment preset."""
+_NATIVE_PRESET_ASSETS: dict[str, dict[str, str]] = {
+    "heg-ranker-evolution-v1": {
+        "system_prompt": "prompts/native/system.md",
+        "request_prompt": "prompts/native/request.md",
+        "repair_prompt": "prompts/native/repair.md",
+        "output_schema": "configs/native/generated-policy.schema.json",
+        "context_schema": "configs/native/context.schema.json",
+        "proposal_schema": "configs/native/proposal.schema.json",
+        "semantic_glossary": "configs/native/semantic-descriptions.json",
+        "baseline_rankers": "configs/native/baseline-rankers.json",
+    }
+}
 
-    if config.preset != "heg-ranker-evolution-v1":
+
+def _preset_metadata(config: ExperimentConfig, project: Path) -> dict[str, Any]:
+    """Resolve a preset from version-controlled, stage-independent assets."""
+
+    asset_names = _NATIVE_PRESET_ASSETS.get(config.preset)
+    if asset_names is None:
         return {"name": config.preset, "resolved": False, "assets": {}}
-    configured = config.raw.get("legacy_stage4_config")
-    stage4_path = (
-        (config.source_dir / configured).resolve()
-        if isinstance(configured, str) and configured and not Path(configured).is_absolute()
-        else Path(configured).resolve()
-        if isinstance(configured, str) and configured
-        else project / "configs" / "stage4-search.toml"
-    )
+    assets: dict[str, Any] = {}
+    for name, relative_path in asset_names.items():
+        path = (project / relative_path).resolve()
+        digest = sha256_file(path)
+        if digest is None:
+            raise LockError(f"native preset asset is missing: {path}")
+        assets[name] = {"path": str(path), "sha256": digest}
+
+    baseline_identities: dict[str, Any] = {}
     try:
-        from mutation_forge.sandbox.validation import validate_policy
-        from mutation_forge.stage4.config import load_stage4_config
-
-        stage4 = load_stage4_config(stage4_path)
-        asset_paths = {
-            name: getattr(stage4, name)
-            for name in (
-                "system_prompt_path",
-                "request_prompt_path",
-                "repair_prompt_path",
-                "output_schema_path",
-                "context_schema_path",
-                "proposal_schema_path",
-                "semantic_glossary_path",
-                "seed_manifest_path",
-                "manifest_path",
-                "validation_manifest_path",
-                "random_policy_path",
-                "structural_policy_path",
-            )
-        }
-        identities = {
-            name: {
-                "path": str(Path(path).resolve()),
-                "sha256": sha256_file(Path(path)),
+        baseline_path = Path(assets["baseline_rankers"]["path"])
+        baseline_value = json.loads(baseline_path.read_text(encoding="utf-8"))
+        rankers = baseline_value.get("rankers") if isinstance(baseline_value, Mapping) else None
+        if not isinstance(rankers, list):
+            raise ValueError("rankers must be an array")
+        source_sha256 = sha256_file(baseline_path)
+        for ranker in rankers:
+            if not isinstance(ranker, Mapping) or not isinstance(ranker.get("policy_id"), str):
+                raise ValueError("each baseline ranker must have a policy_id")
+            policy_id = str(ranker["policy_id"])
+            identity = {
+                "source_sha256": source_sha256,
+                "definition_sha256": sha256_bytes(canonical_bytes(ranker)),
             }
-            for name, path in asset_paths.items()
-        }
-        baseline_identities: dict[str, Any] = {}
-        for name, path in (
-            ("random", stage4.random_policy_path),
-            ("structural", stage4.structural_policy_path),
-        ):
-            source = Path(path).read_text(encoding="utf-8")
-            identity = validate_policy(source, stage4.sandbox).identity
-            baseline_identities[name] = {
-                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-                "normalized_ast_sha256": identity.normalized_ast_sha256,
-            }
-        try:
-            from mutation_forge.stage4.commands import campaign_root
-
-            freeze_path = campaign_root(stage4) / "search-freeze.json"
-            if not freeze_path.is_file():
-                if require_freeze:
-                    raise LockError(f"Stage 4 search freeze is missing: {freeze_path}")
-                return {
-                    "name": config.preset,
-                    "resolved": True,
-                    "stage4_config": str(stage4_path.resolve()),
-                    "stage4_config_sha256": sha256_file(stage4_path),
-                    "resolved_config": stage4.resolved_dict(),
-                    "identity": asdict(stage4.identity),
-                    "assets": identities,
-                    "baseline_identities": baseline_identities,
-                    "search_freeze": {"missing": True},
-                    "selection": stage4.model.max_accepted_turns,
-                }
-            freeze_value = json.loads(freeze_path.read_text(encoding="utf-8"))
-            if not isinstance(freeze_value, Mapping):
-                raise LockError("Stage 4 search freeze must be a JSON object")
-            freeze_identity = {
-                "path": str(freeze_path.resolve()),
-                "sha256": sha256_file(freeze_path),
-                "doctor_sha256": freeze_value.get("doctor_sha256"),
-            }
-        except LockError:
-            raise
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise LockError("cannot read Stage 4 search freeze") from exc
-        return {
-            "name": config.preset,
-            "resolved": True,
-            "stage4_config": str(stage4_path.resolve()),
-            "stage4_config_sha256": sha256_file(stage4_path),
-            "resolved_config": stage4.resolved_dict(),
-            "identity": asdict(stage4.identity),
-            "assets": identities,
-            "baseline_identities": baseline_identities,
-            "search_freeze": freeze_identity,
-            "selection": stage4.model.max_accepted_turns,
-        }
-    except Exception as exc:
-        raise LockError(f"cannot resolve experiment preset {config.preset!r}: {exc}") from exc
+            baseline_identities[policy_id.removeprefix("native_")] = identity
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise LockError(f"cannot resolve native preset {config.preset!r}") from exc
+    return {
+        "name": config.preset,
+        "resolved": True,
+        "assets": assets,
+        "baseline_identities": baseline_identities,
+    }
 
 
 def _redact(value: object, key: str = "") -> object:
@@ -277,24 +220,14 @@ def build_lock(
 
     project = _project_root()
     raw = config.raw
-    repositories = raw.get("repositories")
-    repositories_map = repositories if isinstance(repositories, Mapping) else {}
-    heg_path = _optional_path(
-        repositories_map,
-        config.source_dir,
-        "heg_repo",
-        "backend_repo",
-    )
-    if heg_path is None:
-        # Stage 1 keeps the sibling checkout read-only, but its exact identity
-        # still belongs in experiment metadata even when the minimal config
-        # omits an explicit repositories table.
-        heg_path = project.parent / "heg"
+    # The sibling HEG checkout is a required, read-only dependency.  Its
+    # current commit and dirty state are part of the lock; callers cannot
+    # redirect it through experiment.toml.
+    heg_path = project.parent / "heg"
     uv_lock = project / "uv.lock"
     preflight_doctor = preflight.get("doctor") if isinstance(preflight, Mapping) else None
-    require_freeze = isinstance(preflight_doctor, Mapping)
-    preset_metadata = _preset_metadata(config, project, require_freeze=require_freeze)
-    doctor_sha = raw.get("app_server_doctor_sha256")
+    preset_metadata = _preset_metadata(config, project)
+    doctor_sha: object = None
     if isinstance(preflight_doctor, Mapping):
         doctor_sha = sha256_bytes(canonical_bytes(preflight_doctor))
     if doctor_sha is not None and (
@@ -303,9 +236,6 @@ def build_lock(
         or any(char not in "0123456789abcdef" for char in doctor_sha)
     ):
         raise LockError("app_server_doctor_sha256 must be a lowercase SHA-256")
-    freeze_doctor = preset_metadata.get("search_freeze", {}).get("doctor_sha256")
-    if doctor_sha is None and isinstance(freeze_doctor, str):
-        doctor_sha = freeze_doctor
     immutable = config.immutable_projection()
     source_hash = config.source_sha256
     prompt_identities = _path_identities(raw, config.source_dir)
@@ -355,6 +285,27 @@ def build_lock(
             "provider": config.model.provider,
             "name": config.model.name,
             "effort": config.model.effort,
+            "concurrency": config.model.concurrency,
+            "max_repairs": config.model.max_repairs,
+        },
+        "search": {
+            "population_size": config.search.population_size,
+            "max_generations": config.search.max_generations,
+            "max_model_turns": config.search.max_model_turns,
+            "selection": config.search.selection,
+        },
+        "evaluation": {
+            "orders": list(config.evaluation.orders),
+            "graph_seeds": list(config.evaluation.graph_seeds),
+            "policy_seeds": list(config.evaluation.policy_seeds),
+            "horizon": config.evaluation.horizon,
+            "proposal_pool_size": config.evaluation.proposal_pool_size,
+            "baselines": list(config.evaluation.baselines),
+            "replay": config.evaluation.replay,
+        },
+        "resources": {
+            "workers": config.resources.workers,
+            "thread_count": config.resources.thread_count,
         },
         "prompt_identities": resolved_prompt_identities,
         "response_schema_identities": {
@@ -394,8 +345,8 @@ def build_lock(
         "baseline_identities": preset_metadata.get("baseline_identities", {}),
         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
         "app_server": {
-            "protocol": str(raw.get("app_server_protocol", "codex-app-server")),
-            "profile": str(raw.get("app_server_profile", "default")),
+            "protocol": "codex-app-server",
+            "profile": "default",
             "model": config.model.name,
             "effort": config.model.effort,
             "binary_version": binary_version,
@@ -499,8 +450,8 @@ def verify_lock(
     locked_app_server = lock.get("app_server")
     if isinstance(locked_app_server, Mapping):
         current_app_server = {
-            "protocol": str(config.raw.get("app_server_protocol", "codex-app-server")),
-            "profile": str(config.raw.get("app_server_profile", "default")),
+            "protocol": "codex-app-server",
+            "profile": "default",
             "model": config.model.name,
             "effort": config.model.effort,
             "binary_version": _codex_version(),
@@ -515,16 +466,15 @@ def verify_lock(
     locked_provenance = lock.get("provenance")
     if isinstance(locked_provenance, Mapping):
         current_project = _git_state(project)
-        current_heg = locked_provenance.get("heg")
-        heg_repo = current_heg.get("repo") if isinstance(current_heg, Mapping) else None
-        current_heg_state = _git_state(Path(str(heg_repo))) if heg_repo else None
-        for name, current in (("mutation_forge", current_project), ("heg", current_heg_state)):
+        current_heg = _git_state(project.parent / "heg")
+        for name, current in (("mutation_forge", current_project), ("heg", current_heg)):
             locked = locked_provenance.get(name)
             if (
                 isinstance(locked, Mapping)
                 and isinstance(current, Mapping)
                 and (
-                    locked.get("commit") != current.get("commit")
+                    locked.get("repo") != current.get("repo")
+                    or locked.get("commit") != current.get("commit")
                     or locked.get("dirty") != current.get("dirty")
                 )
             ):

@@ -51,6 +51,17 @@ def _table(raw: Mapping[str, Any], name: str) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def _reject_unknown_fields(
+    value: Mapping[str, Any], name: str, allowed: set[str]
+) -> None:
+    """Reject typoed or legacy keys instead of silently ignoring them."""
+
+    unknown = set(value).difference(allowed)
+    if unknown:
+        prefix = f"[{name}]" if name else "top-level"
+        raise ValueError(f"unsupported {prefix} fields: {sorted(unknown)}")
+
+
 def _strings(value: object, name: str, *, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     if value is None:
         if default:
@@ -244,6 +255,22 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         raise ValueError("experiment configuration must be a TOML table")
     raw = raw_value
     _reject_credentials(raw)
+    _reject_unknown_fields(
+        raw,
+        "",
+        {
+            "schema_version",
+            "exp_id",
+            "workspace",
+            "kind",
+            "preset",
+            "run",
+            "model",
+            "search",
+            "evaluation",
+            "resources",
+        },
+    )
     if raw.get("schema_version") != EXPERIMENT_SCHEMA_VERSION:
         raise ValueError(
             f"schema_version must be {EXPERIMENT_SCHEMA_VERSION!r}, "
@@ -267,9 +294,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         raise ValueError("preset must be a non-empty string")
 
     run_raw = _table(raw, "run")
-    unknown_run_keys = set(run_raw).difference({"wall_seconds", "output"})
-    if unknown_run_keys:
-        raise ValueError(f"unsupported [run] fields: {sorted(unknown_run_keys)}")
+    _reject_unknown_fields(run_raw, "run", {"wall_seconds", "output"})
     output = run_raw.get("output", "rich")
     if output not in {"rich", "json"}:
         raise ValueError("run.output must be 'rich' or 'json'")
@@ -278,6 +303,11 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     )
 
     model_raw = _table(raw, "model")
+    _reject_unknown_fields(
+        model_raw,
+        "model",
+        {"provider", "name", "effort", "concurrency", "max_repairs"},
+    )
     provider, name, effort = (model_raw.get(key) for key in ("provider", "name", "effort"))
     if not all(isinstance(item, str) and item for item in (provider, name, effort)):
         raise ValueError("model.provider, model.name, and model.effort must be non-empty strings")
@@ -290,6 +320,11 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     )
 
     search_raw = _table(raw, "search")
+    _reject_unknown_fields(
+        search_raw,
+        "search",
+        {"population_size", "max_generations", "max_model_turns", "selection"},
+    )
     selection = search_raw.get("selection")
     if not isinstance(selection, str) or not selection:
         raise ValueError("search.selection must be a non-empty string")
@@ -301,6 +336,19 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     )
 
     evaluation_raw = _table(raw, "evaluation")
+    _reject_unknown_fields(
+        evaluation_raw,
+        "evaluation",
+        {
+            "orders",
+            "graph_seeds",
+            "policy_seeds",
+            "horizon",
+            "proposal_pool_size",
+            "baselines",
+            "replay",
+        },
+    )
     replay = evaluation_raw.get("replay")
     if not isinstance(replay, bool):
         raise ValueError("evaluation.replay must be a boolean")
@@ -315,6 +363,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     )
 
     resources_raw = _table(raw, "resources")
+    _reject_unknown_fields(resources_raw, "resources", {"workers", "thread_count"})
     resources = ExperimentResourcesConfig(
         _positive_int(resources_raw.get("workers"), "resources.workers"),
         _positive_int(resources_raw.get("thread_count"), "resources.thread_count"),
