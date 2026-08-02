@@ -183,7 +183,20 @@ class SessionManager:
         session.ending_checkpoint = session.ending_checkpoint or (
             str(latest_checkpoint["checkpoint_id"]) if latest_checkpoint is not None else None
         )
-        cumulative_tokens = int(self.state.cumulative()["total_tokens"]) + session.token_usage_delta
+        durable = self.state.session(session.session_id) or {}
+        session.provider_turns_attempted = max(
+            session.provider_turns_attempted,
+            int(durable.get("provider_turns_attempted", 0)),
+        )
+        session.provider_turns_completed = max(
+            session.provider_turns_completed,
+            int(durable.get("provider_turns_completed", 0)),
+        )
+        session.token_usage_delta = max(
+            session.token_usage_delta,
+            int(durable.get("token_usage_delta", 0)),
+        )
+        cumulative_tokens = int(self.state.cumulative()["total_tokens"])
         result = session.as_dict(
             ending_state=state,
             exit_status=exit_status,

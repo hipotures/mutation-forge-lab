@@ -318,6 +318,12 @@ def test_manifest_only_turn_recovery_accounts_usage_once(tmp_path: Path) -> None
         root=layout.root,
     )
     state = ExperimentStateStore(layout.state)
+    state.create_session(
+        number=1,
+        session_id="session-000001",
+        wall_seconds=30,
+        starting_checkpoint=None,
+    )
     session = SessionContext(1, "session-000001", tmp_path, 30, "now", None)
     stage4 = load_stage4_config(
         Path(__file__).resolve().parents[2] / "configs" / "stage4-search.toml"
@@ -357,7 +363,85 @@ def test_manifest_only_turn_recovery_accounts_usage_once(tmp_path: Path) -> None
     assert (session.provider_turns_attempted, session.provider_turns_completed) == (1, 1)
     assert session.token_usage_delta == 2
     assert provider.calls == 1
+    assert state.cumulative()["provider_turns"] == 1
+    assert state.cumulative()["total_tokens"] == 2
     state.close()
+
+
+def test_completed_turn_accounting_survives_hard_crash_before_session_finish(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path / "experiment.toml")
+    config = load_experiment_config(config_path)
+    layout = ExperimentLayout.from_config(config)
+    ExperimentStateStore.initialize(
+        layout.state,
+        exp_id=config.exp_id,
+        lock_hash="test-lock",
+        root=layout.root,
+    )
+    stage4 = load_stage4_config(
+        Path(__file__).resolve().parents[2] / "configs" / "stage4-search.toml"
+    )
+    request = {
+        "campaign_id": "ticket18-coordinator",
+        "generation": 0,
+        "slot": "slot-00",
+        "phase": "initial",
+        "idempotency_key": "durable-completed-turn",
+    }
+    provider = _RepairingProvider()
+
+    state = ExperimentStateStore(layout.state)
+    state.create_session(
+        number=1,
+        session_id="session-000001",
+        wall_seconds=30,
+        starting_checkpoint=None,
+    )
+    first_session = SessionContext(1, "session-000001", tmp_path, 30, "now", None)
+    first = _WorkspaceStage4Provider(
+        provider,
+        layout,
+        state,
+        first_session,
+        sandbox_limits=stage4.sandbox,
+    )
+    first.generate(request)
+    assert state.cumulative()["provider_turns"] == 1
+    assert state.cumulative()["total_tokens"] == 2
+    state.close()
+
+    resumed_state = ExperimentStateStore(layout.state)
+    resumed_state.create_session(
+        number=2,
+        session_id="session-000002",
+        wall_seconds=30,
+        starting_checkpoint=None,
+    )
+    resumed_session = SessionContext(2, "session-000002", tmp_path, 30, "now", None)
+    resumed = _WorkspaceStage4Provider(
+        provider,
+        layout,
+        resumed_state,
+        resumed_session,
+        sandbox_limits=stage4.sandbox,
+    )
+    retained = resumed.generate(request)
+
+    assert retained["retained"] is True
+    assert provider.calls == 1
+    assert resumed_state.cumulative()["provider_turns"] == 1
+    assert resumed_state.cumulative()["total_tokens"] == 2
+    interrupted = resumed_state.session("session-000001")
+    assert interrupted is not None
+    assert interrupted["provider_turns_completed"] == 1
+    assert interrupted["token_usage_delta"] == 2
+    current = resumed_state.session("session-000002")
+    assert current is not None
+    assert current["provider_turns_completed"] == 0
+    assert current["token_usage_delta"] == 0
+    resumed_state.close()
 
 
 def test_incompatible_stage4_config_fails_before_workspace_creation(tmp_path: Path) -> None:

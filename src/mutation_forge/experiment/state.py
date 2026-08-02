@@ -296,8 +296,10 @@ class ExperimentStateStore:
     ) -> None:
         self.connection.execute(
             "UPDATE sessions SET finished_at=?,ending_checkpoint=?,ending_state=?,status=?,"
-            "provider_turns_attempted=?,provider_turns_completed=?,candidates_created=?,"
-            "evaluations_completed=?,token_usage_delta=?,cumulative_tokens=?,runtime_seconds=?,"
+            "provider_turns_attempted=MAX(provider_turns_attempted,?),"
+            "provider_turns_completed=MAX(provider_turns_completed,?),candidates_created=?,"
+            "evaluations_completed=?,token_usage_delta=MAX(token_usage_delta,?),"
+            "cumulative_tokens=?,runtime_seconds=?,"
             "stop_reason=?,exit_status=?,summary_json=? WHERE session_id=?",
             (
                 _now(),
@@ -319,14 +321,11 @@ class ExperimentStateStore:
         )
         self.connection.execute(
             "UPDATE experiment SET state=?,updated_at=?,"
-            "cumulative_model_turns=cumulative_model_turns+?,"
-            "cumulative_tokens=?,cumulative_runtime_seconds=cumulative_runtime_seconds+?,"
+            "cumulative_runtime_seconds=cumulative_runtime_seconds+?,"
             "last_error=?,terminal_stop_reason=? WHERE current_session_id=?",
             (
                 ending_state,
                 _now(),
-                provider_turns_completed,
-                cumulative_tokens,
                 runtime_seconds,
                 (summary or {}).get("last_error") if summary else None,
                 stop_reason,
@@ -430,46 +429,84 @@ class ExperimentStateStore:
         provider_turn_id: str | None = None,
         error: str | None = None,
     ) -> bool:
-        existing = self.provider_turn(idempotency_key)
-        if existing is not None:
-            if existing.get("state") == "completed":
+        usage_value = dict(usage or {})
+        total_tokens = usage_value.get("totalTokens", 0)
+        if state == "completed" and (
+            not isinstance(total_tokens, int)
+            or isinstance(total_tokens, bool)
+            or total_tokens < 0
+        ):
+            raise ValueError("completed provider turn requires non-negative totalTokens")
+        terminal = state in {"completed", "failed"}
+        completed = state == "completed"
+        try:
+            # The turn row, per-session delta, and experiment cumulative totals
+            # are one crash-safe accounting unit.  A duplicate completed key
+            # exits without touching any ledger.
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT state FROM provider_turns WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if row is not None and row["state"] == "completed":
+                self.connection.rollback()
                 return False
-            self.connection.execute(
-                "UPDATE provider_turns SET state=?,provider_thread_id=?,provider_turn_id=?,"
-                "artifact_path=?,usage_json=?,completed_at=?,error=? WHERE idempotency_key=?",
-                (
-                    state,
-                    provider_thread_id,
-                    provider_turn_id,
-                    artifact_path,
-                    _json(dict(usage or {})),
-                    _now() if state in {"completed", "failed"} else None,
-                    error,
-                    idempotency_key,
-                ),
-            )
+            if row is not None:
+                self.connection.execute(
+                    "UPDATE provider_turns SET state=?,provider_thread_id=?,provider_turn_id=?,"
+                    "artifact_path=?,usage_json=?,completed_at=?,error=? "
+                    "WHERE idempotency_key=?",
+                    (
+                        state,
+                        provider_thread_id,
+                        provider_turn_id,
+                        artifact_path,
+                        _json(usage_value),
+                        _now() if terminal else None,
+                        error,
+                        idempotency_key,
+                    ),
+                )
+            else:
+                self.connection.execute(
+                    "INSERT INTO provider_turns(idempotency_key,generation,slot,phase,state,"
+                    "provider_thread_id,provider_turn_id,artifact_path,usage_json,"
+                    "completed_at,error) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        idempotency_key,
+                        generation,
+                        slot,
+                        phase,
+                        state,
+                        provider_thread_id,
+                        provider_turn_id,
+                        artifact_path,
+                        _json(usage_value),
+                        _now() if terminal else None,
+                        error,
+                    ),
+                )
+            if terminal:
+                self.connection.execute(
+                    "UPDATE sessions SET provider_turns_attempted=provider_turns_attempted+1,"
+                    "provider_turns_completed=provider_turns_completed+?,"
+                    "token_usage_delta=token_usage_delta+? "
+                    "WHERE session_id=(SELECT current_session_id FROM experiment LIMIT 1)",
+                    (1 if completed else 0, int(total_tokens) if completed else 0),
+                )
+            if completed:
+                self.connection.execute(
+                    "UPDATE experiment SET "
+                    "cumulative_model_turns=cumulative_model_turns+1,"
+                    "cumulative_tokens=cumulative_tokens+?,updated_at=?",
+                    (int(total_tokens), _now()),
+                )
             self.connection.commit()
             return True
-        cursor = self.connection.execute(
-            "INSERT OR IGNORE INTO provider_turns(idempotency_key,generation,slot,phase,state,"
-            "provider_thread_id,provider_turn_id,artifact_path,usage_json,completed_at,error) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                idempotency_key,
-                generation,
-                slot,
-                phase,
-                state,
-                provider_thread_id,
-                provider_turn_id,
-                artifact_path,
-                _json(dict(usage or {})),
-                _now() if state in {"completed", "failed"} else None,
-                error,
-            ),
-        )
-        self.connection.commit()
-        return cursor.rowcount > 0
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def provider_turn(self, idempotency_key: str) -> dict[str, Any] | None:
         row = self.connection.execute(

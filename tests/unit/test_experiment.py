@@ -168,6 +168,58 @@ def test_active_owner_and_stale_recovery(tmp_path: Path) -> None:
         assert state.owner()["session_id"] == "session-other"
 
 
+def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    ExperimentStateStore.initialize(
+        state_path,
+        exp_id="demo",
+        lock_hash="test-lock",
+        root=tmp_path,
+    )
+    with ExperimentStateStore(state_path) as state:
+        state.create_session(
+            number=1,
+            session_id="session-000001",
+            wall_seconds=30,
+            starting_checkpoint=None,
+        )
+        values: dict[str, Any] = {
+            "idempotency_key": "turn-1",
+            "generation": 0,
+            "slot": "slot-00",
+            "phase": "initial",
+            "state": "completed",
+            "usage": {"totalTokens": 3},
+        }
+        assert state.record_provider_turn(**values) is True
+        assert state.record_provider_turn(**values) is False
+        session = state.session("session-000001")
+        assert session is not None
+        assert session["provider_turns_attempted"] == 1
+        assert session["provider_turns_completed"] == 1
+        assert session["token_usage_delta"] == 3
+        assert state.cumulative() == {
+            "provider_turns": 1,
+            "total_tokens": 3,
+            "compute_seconds": 0.0,
+        }
+
+        state.finish_session(
+            "session-000001",
+            status="idle",
+            ending_state="idle",
+            ending_checkpoint=None,
+            provider_turns_attempted=1,
+            provider_turns_completed=1,
+            token_usage_delta=3,
+            cumulative_tokens=3,
+        )
+        assert state.cumulative()["provider_turns"] == 1
+        assert state.cumulative()["total_tokens"] == 3
+
+
 def test_status_is_versioned_and_read_only(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
     before = experiment_status(path)
