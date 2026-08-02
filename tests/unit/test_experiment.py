@@ -20,7 +20,11 @@ from mutation_forge.experiment.config import (
 from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.experiment.service import ExperimentService, NullExperimentAdapter
 from mutation_forge.experiment.state import ActiveSessionError, ExperimentStateStore
-from mutation_forge.experiment.status import STATUS_SCHEMA_VERSION, experiment_status
+from mutation_forge.experiment.status import (
+    STATUS_SCHEMA_VERSION,
+    experiment_status,
+    render_status,
+)
 
 
 def _config(*, exp_id: str = "demo", workspace: str = "./workspace", wall: int = 1) -> str:
@@ -260,6 +264,10 @@ def test_status_is_versioned_and_read_only(tmp_path: Path) -> None:
     after = experiment_status(path)
     assert after["state"] == "idle"
     assert after["provider_turns"] == 0
+    rendered = render_status(after)
+    assert "Results: 0 accepted candidates, 0 evaluations" in rendered
+    assert "Winner: none — no candidate was accepted" in rendered
+    assert "Tokens: input 0, cached 0, output 0, reasoning 0, total 0" in rendered
 
 
 def test_manifest_reconciliation_rejects_modified_committed_artifact(tmp_path: Path) -> None:
@@ -287,6 +295,8 @@ def test_manifest_reconciliation_rejects_modified_committed_artifact(tmp_path: P
 
 def test_status_reads_nested_stage4_search_metrics(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
+    source_path = tmp_path / "program-1.py"
+    source_path.write_text("def priority(ctx, proposal):\n    return 1.0\n", encoding="utf-8")
 
     class CandidateAdapter:
         def run(
@@ -298,8 +308,34 @@ def test_status_reads_nested_stage4_search_metrics(tmp_path: Path) -> None:
         ) -> dict[str, str]:
             state.record_candidate(
                 "program-1",
+                archive_path=str(source_path),
+                generation=2,
+                slot="slot-01",
                 status="created",
                 metadata={"search_metrics": {"pooled_median_auc": 0.75}},
+            )
+            state.record_evaluation(
+                "program-1:development",
+                candidate_id="program-1",
+                kind="development",
+                state="completed",
+                result={"summary": {"mean_auc": 0.75}},
+            )
+            state.record_provider_turn(
+                idempotency_key="turn-1",
+                generation=2,
+                slot="slot-01",
+                phase="initial",
+                state="completed",
+                usage={
+                    "inputTokens": 10,
+                    "cachedInputTokens": 2,
+                    "outputTokens": 5,
+                    "reasoningOutputTokens": 3,
+                    "totalTokens": 15,
+                    "final": True,
+                    "partial": False,
+                },
             )
             return {"state": "idle"}
 
@@ -307,6 +343,32 @@ def test_status_reads_nested_stage4_search_metrics(tmp_path: Path) -> None:
     status = experiment_status(path)
     assert status["best_program_id"] == "program-1"
     assert status["best_primary_metric"] == 0.75
+    assert status["winner_source"] == str(source_path)
+    assert status["evaluation_count"] == 1
+    assert status["ranked_candidates"] == [
+        {
+            "candidate_id": "program-1",
+            "metric": 0.75,
+            "generation": 2,
+            "slot": "slot-01",
+            "status": "created",
+            "source_path": str(source_path),
+        }
+    ]
+    assert status["token_usage"] == {
+        "inputTokens": 10,
+        "cachedInputTokens": 2,
+        "outputTokens": 5,
+        "reasoningOutputTokens": 3,
+        "totalTokens": 15,
+        "quality": "exact",
+        "chargedFailedTurns": 0,
+    }
+    rendered = render_status(status)
+    assert "Winner: program-1, primary metric 0.75" in rendered
+    assert f"Winner code: {source_path}" in rendered
+    assert "Best mutations:" in rendered
+    assert "Tokens: input 10, cached 2, output 5, reasoning 3, total 15 (exact)" in rendered
 
 
 def test_cli_public_help_is_stage_free() -> None:

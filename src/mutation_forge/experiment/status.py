@@ -14,6 +14,12 @@ from .lock import LockError, load_lock, verify_lock
 from .state import ExperimentStateStore, StateError, process_alive
 
 STATUS_SCHEMA_VERSION = "mforge.experiment.status.v1"
+_USAGE_FIELDS = (
+    "inputTokens",
+    "cachedInputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+)
 
 
 def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, Any]:
@@ -30,10 +36,23 @@ def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str
         "slot_count": config.search.population_size,
         "candidate_count": 0,
         "unique_candidate_count": 0,
+        "evaluation_count": 0,
         "best_program_id": None,
         "best_primary_metric": None,
+        "winner_source": None,
+        "ranked_candidates": [],
+        "artifacts": {},
         "provider_turns": 0,
         "total_tokens": 0,
+        "token_usage": {
+            "inputTokens": 0,
+            "cachedInputTokens": 0,
+            "outputTokens": 0,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 0,
+            "quality": "unknown",
+            "chargedFailedTurns": 0,
+        },
         "ir": None,
         "compute_seconds": 0,
         "last_checkpoint": None,
@@ -125,7 +144,14 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         completed_slots = checkpoint.get("completed_slots", 0) if checkpoint else 0
         if not isinstance(completed_slots, int):
             completed_slots = len(completed_slots) if isinstance(completed_slots, list) else 0
-        best_id, best_metric = _best_candidate(state)
+        ranked_candidates = _ranked_candidates(state)
+        best = next(
+            (candidate for candidate in ranked_candidates if candidate["metric"] is not None),
+            None,
+        )
+        best_id = str(best["candidate_id"]) if best is not None else None
+        best_metric = best["metric"] if best is not None else None
+        token_usage = _token_usage(state, total_tokens=int(current["total_tokens"]))
         last_error = checkpoint_error or state.latest_error()
         session_metrics: dict[str, Any] = {}
         if session is not None:
@@ -135,23 +161,39 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
                 parsed = {}
             if isinstance(parsed, Mapping):
                 session_metrics = dict(parsed)
+        session_id = str(session["session_id"]) if session is not None else None
+        artifacts: dict[str, str] = {}
+        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json"
+        if native_checkpoint.is_file():
+            artifacts["generation_checkpoint"] = str(native_checkpoint)
+        if session_id is not None:
+            session_summary = layout.sessions / session_id / "summary.json"
+            if session_summary.is_file():
+                artifacts["session_summary"] = str(session_summary)
+        if layout.archive.is_dir():
+            artifacts["candidate_archive"] = str(layout.archive)
         return {
             "schema_version": STATUS_SCHEMA_VERSION,
             "exp_id": config.exp_id,
             "state": current_state,
             "resumable": current_state in {"idle", "interrupted"},
             "workspace": str(layout.root),
-            "session_id": session.get("session_id") if session else None,
+            "session_id": session_id,
             "generation": generation,
             "max_generations": config.search.max_generations,
             "completed_slots": completed_slots,
             "slot_count": config.search.population_size,
             "candidate_count": counts["candidate_count"],
             "unique_candidate_count": counts["unique_candidate_count"],
+            "evaluation_count": counts["evaluation_count"],
             "best_program_id": best_id,
             "best_primary_metric": best_metric,
+            "winner_source": best.get("source_path") if best is not None else None,
+            "ranked_candidates": ranked_candidates,
+            "artifacts": artifacts,
             "provider_turns": counts["provider_turns"],
             "total_tokens": int(current["total_tokens"]),
+            "token_usage": token_usage,
             "ir": session_metrics.get("ir"),
             "compute_seconds": float(current["compute_seconds"]),
             "last_checkpoint": checkpoint.get("checkpoint_id")
@@ -165,32 +207,97 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         state.close()
 
 
-def _best_candidate(state: ExperimentStateStore) -> tuple[str | None, float | int | None]:
+def _candidate_metric(metadata: Mapping[str, Any]) -> float | int | None:
+    search_metrics = metadata.get("search_metrics")
+    nested = search_metrics if isinstance(search_metrics, Mapping) else {}
+    nested_metric = nested.get("best_primary_metric", nested.get("pooled_auc"))
+    if nested_metric is None:
+        nested_metric = nested.get("pooled_median_auc")
+    metric = metadata.get("best_primary_metric", metadata.get("pooled_auc", nested_metric))
+    return (
+        metric
+        if isinstance(metric, int | float) and not isinstance(metric, bool)
+        else None
+    )
+
+
+def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
     rows = state.connection.execute(
-        "SELECT candidate_id,metadata_json FROM candidates "
-        "WHERE status NOT IN ('duplicate','invalid')"
+        "SELECT candidate_id,archive_path,generation,slot,status,metadata_json "
+        "FROM candidates WHERE status NOT IN ('duplicate','invalid')"
     ).fetchall()
-    best_id: str | None = None
-    best_value: float | int | None = None
+    candidates: list[dict[str, Any]] = []
     for row in rows:
         try:
             metadata = json.loads(str(row["metadata_json"]))
         except json.JSONDecodeError:
-            continue
+            metadata = {}
         if not isinstance(metadata, Mapping):
+            metadata = {}
+        candidates.append(
+            {
+                "candidate_id": str(row["candidate_id"]),
+                "metric": _candidate_metric(metadata),
+                "generation": row["generation"],
+                "slot": row["slot"],
+                "status": str(row["status"]),
+                "source_path": str(row["archive_path"]) if row["archive_path"] else None,
+            }
+        )
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            candidate["metric"] is None,
+            -float(candidate["metric"]) if candidate["metric"] is not None else 0.0,
+            str(candidate["candidate_id"]),
+        ),
+    )
+
+
+def _token_usage(
+    state: ExperimentStateStore, *, total_tokens: int
+) -> dict[str, int | str]:
+    totals = {field: 0 for field in _USAGE_FIELDS}
+    qualities: set[str] = set()
+    charged_failed_turns = 0
+    rows = state.connection.execute(
+        "SELECT state,usage_json FROM provider_turns"
+    ).fetchall()
+    for row in rows:
+        try:
+            usage = json.loads(str(row["usage_json"]))
+        except json.JSONDecodeError:
+            usage = {}
+        if not isinstance(usage, Mapping):
             continue
-        search_metrics = metadata.get("search_metrics")
-        nested = search_metrics if isinstance(search_metrics, Mapping) else {}
-        nested_metric = nested.get("best_primary_metric", nested.get("pooled_auc"))
-        if nested_metric is None:
-            nested_metric = nested.get("pooled_median_auc")
-        metric = metadata.get("best_primary_metric", metadata.get("pooled_auc", nested_metric))
-        if not isinstance(metric, int | float) or isinstance(metric, bool):
-            continue
-        if best_value is None or float(metric) > float(best_value):
-            best_id = str(row["candidate_id"])
-            best_value = metric
-    return best_id, best_value
+        for field in _USAGE_FIELDS:
+            value = usage.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                totals[field] += value
+        quality = usage.get("quality")
+        if isinstance(quality, str):
+            qualities.add(quality)
+        turn_total = usage.get("totalTokens")
+        if (
+            row["state"] == "failed"
+            and isinstance(turn_total, int)
+            and not isinstance(turn_total, bool)
+            and turn_total > 0
+        ):
+            charged_failed_turns += 1
+    quality = (
+        "unknown"
+        if not qualities or qualities == {"unknown"}
+        else "exact"
+        if qualities == {"exact"}
+        else "partial"
+    )
+    return {
+        **totals,
+        "totalTokens": total_tokens,
+        "quality": quality,
+        "chargedFailedTurns": charged_failed_turns,
+    }
 
 
 def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> str:
@@ -206,16 +313,68 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
         )
     state_label = f"{state}, resumable" if status.get("resumable") else state
     lines = [f"Experiment: {status['exp_id']}", f"State: {state_label}"]
+    if status.get("session_id"):
+        lines.append(f"Session: {status['session_id']}")
+    if status.get("workspace"):
+        lines.append(f"Workspace: {status['workspace']}")
+    if status.get("last_checkpoint"):
+        lines.append(f"Checkpoint: {status['last_checkpoint']}")
     if status.get("generation") is not None:
         lines.append(
-            f"Progress: generation {status['generation']}/{status['max_generations']}, "
-            f"{status['unique_candidate_count']} unique candidates"
+            f"Progress: {status['generation']} completed generations "
+            f"(batch size {status['max_generations']})"
         )
+    lines.append(
+        f"Results: {status['unique_candidate_count']} accepted candidates, "
+        f"{status.get('evaluation_count', 0)} evaluations"
+    )
+    ranked = status.get("ranked_candidates")
     if status.get("best_program_id"):
         lines.append(
-            f"Best: {status['best_program_id']}, primary metric {status['best_primary_metric']}"
+            f"Winner: {status['best_program_id']}, primary metric "
+            f"{status['best_primary_metric']}"
         )
-    lines.append(f"Usage: {status['provider_turns']} model turns, {status['total_tokens']} tokens")
+        if status.get("winner_source"):
+            lines.append(f"Winner code: {status['winner_source']}")
+    elif int(status.get("unique_candidate_count", 0)) == 0:
+        lines.append("Winner: none — no candidate was accepted")
+    elif int(status.get("evaluation_count", 0)) == 0:
+        lines.append("Winner: none — accepted candidates have not been evaluated")
+    else:
+        lines.append("Winner: none — no evaluated winner is available")
+    if isinstance(ranked, list) and ranked:
+        lines.append("Best mutations:")
+        for index, candidate in enumerate(ranked[:5], start=1):
+            metric = candidate.get("metric")
+            lines.append(
+                f"  {index}. {candidate.get('candidate_id')} "
+                f"score={metric if metric is not None else 'not evaluated'} "
+                f"generation={candidate.get('generation')} "
+                f"code={candidate.get('source_path') or '-'}"
+            )
+    usage = status.get("token_usage")
+    if isinstance(usage, Mapping):
+        lines.append(
+            "Tokens: "
+            f"input {usage.get('inputTokens', 0)}, "
+            f"cached {usage.get('cachedInputTokens', 0)}, "
+            f"output {usage.get('outputTokens', 0)}, "
+            f"reasoning {usage.get('reasoningOutputTokens', 0)}, "
+            f"total {usage.get('totalTokens', status['total_tokens'])} "
+            f"({usage.get('quality', 'unknown')}); "
+            f"charged failed turns {usage.get('chargedFailedTurns', 0)}"
+        )
+    else:
+        lines.append(
+            f"Usage: {status['provider_turns']} model turns, "
+            f"{status['total_tokens']} tokens"
+        )
+    lines.append(f"Model turns: {status['provider_turns']}")
+    artifacts = status.get("artifacts")
+    if isinstance(artifacts, Mapping) and artifacts:
+        lines.append("Artifacts:")
+        for label, path in artifacts.items():
+            lines.append(f"  {str(label).replace('_', ' ')}: {path}")
     if status.get("ir") is not None:
         lines.append(f"IR: {status['ir']}")
     if status.get("last_stop_reason"):

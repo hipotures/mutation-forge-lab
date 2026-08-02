@@ -294,17 +294,18 @@ def _experiment_run(
     finally:
         for sink in reversed(sinks):
             sink.close()
+    summary = experiment_status(config_path)
     if machine_output:
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    else:
-        Console().print(
-            f"Experiment: {result.get('exp_id', '-')}\n"
-            f"State: {result.get('state', result.get('status', '-'))}\n"
-            f"Workspace: {result.get('workspace', '-')}\n"
-            f"Session: {result.get('session_id', '-')}\n"
-            f"Stop reason: {result.get('stop_reason', '-')}\n"
-            f"Checkpoint: {result.get('checkpoint', '-')}"
+        print(
+            json.dumps(
+                {**result, "summary": summary},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         )
+    else:
+        Console().print(render_status(summary))
     return 0 if result.get("status") != "failed" else 1
 
 

@@ -214,9 +214,11 @@ checkpoints, numbered session logs, and expanded per-turn App Server evidence.
 Later `run` invocations continue the same `exp_id` from its latest durable
 checkpoint; `run.wall_seconds` is a per-invocation budget. All other scientific
 configuration is locked, so changing it requires a new `exp_id`. A completed
-experiment performs no additional provider or evaluation work. The generated
-program contract remains the bounded `priority(ctx, proposal)` ranker, not a
-full graph mutation operator.
+generation batch leaves the experiment idle and resumable; a later invocation
+starts the next batch instead of declaring the experiment finished. The
+operator decides when to stop invoking the experiment. The generated program
+contract remains the bounded `priority(ctx, proposal)` ranker, not a full graph
+mutation operator.
 
 ## Legacy Stage 1 harness
 

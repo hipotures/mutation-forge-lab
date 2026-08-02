@@ -1183,19 +1183,22 @@ class NativeExperimentAdapter:
                 generation_result = coordinator.run(resume=True)
                 result = {
                     "status": generation_result.status,
-                    "generation": generation_result.summary.get("generation_count", 0),
+                    "generation": generation_result.summary.get(
+                        "completed_generation_count",
+                        generation_result.summary.get("generation_count", 0),
+                    ),
                     "summary": dict(generation_result.summary),
                 }
         finally:
             wrapped.close()
         if not isinstance(result, Mapping):
             raise NativeExperimentError("native generation engine returned a non-object result")
-        state_value = (
-            "completed" if str(result.get("status", "completed")) == "completed" else "idle"
-        )
+        batch_completed = str(result.get("status", "completed")) == "completed"
         outcome: dict[str, Any] = {
-            "state": state_value,
-            "stop_reason": "generation_limit" if state_value == "completed" else "budget_exhausted",
+            "state": "idle",
+            "stop_reason": (
+                "generation_batch_completed" if batch_completed else "budget_exhausted"
+            ),
             "generation": int(result.get("generation", 0) or 0),
             "provider_turns": session.provider_turns_completed,
             "evaluations": [],

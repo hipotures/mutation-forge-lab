@@ -244,7 +244,7 @@ def test_public_experiment_sources_have_no_historical_stage4_references() -> Non
             assert forbidden.search(path.read_text(encoding="utf-8")) is None, path
 
 
-def test_fresh_native_experiment_creates_native_workspace_and_noop_is_idempotent(
+def test_fresh_native_experiment_creates_workspace_and_next_run_starts_next_batch(
     tmp_path: Path,
 ) -> None:
     config_path = _write_config(tmp_path / "experiment.toml", workspace=tmp_path / "workspace")
@@ -252,12 +252,23 @@ def test_fresh_native_experiment_creates_native_workspace_and_noop_is_idempotent
     service = _service(provider)
 
     first = service.run(config_path)
-    second = service.run(config_path)
     root = tmp_path / "workspace" / "native-test"
+    state = ExperimentStateStore(root / "state.sqlite3")
+    try:
+        checkpoint = state.checkpoint()
+        state.set_state(
+            "completed",
+            stop_reason="generation_limit",
+            checkpoint=str(checkpoint["checkpoint_id"]) if checkpoint is not None else None,
+        )
+    finally:
+        state.close()
+    second = service.run(config_path)
 
-    assert first["state"] == "completed"
-    assert second["stop_reason"] == "already_completed"
-    assert len(provider.calls) == 1
+    assert first["state"] == "idle"
+    assert second["state"] == "idle"
+    assert second["stop_reason"] == "generation_batch_completed"
+    assert [request["generation"] for request in provider.calls] == [0, 1]
     assert (root / "experiment.toml").is_file()
     assert (root / "experiment.lock.json").is_file()
     assert (root / "state.sqlite3").is_file()
@@ -271,8 +282,8 @@ def test_fresh_native_experiment_creates_native_workspace_and_noop_is_idempotent
     assert "search-freeze" not in lock_text
     assert "stage4" not in lock_text
     status = experiment_status(config_path)
-    assert status["state"] == "completed"
-    assert status["provider_turns"] == 1
+    assert status["state"] == "idle"
+    assert status["provider_turns"] == 2
     assert status["unique_candidate_count"] == 1
     assert status["best_program_id"] == "g0000-slot-00"
 
@@ -329,7 +340,7 @@ def test_native_live_progress_is_visible_before_blocked_provider_finishes(
         sink.close()
     assert not worker.is_alive()
     assert not errors
-    assert result["state"] == "completed"
+    assert result["state"] == "idle"
 
 
 def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> None:
@@ -348,7 +359,7 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     root = ExperimentLayout.from_config(config).root
     lock = json.loads((root / "experiment.lock.json").read_text(encoding="utf-8"))
 
-    assert result["state"] == "completed"
+    assert result["state"] == "idle"
     assert len(provider.calls) == 2
     assert provider.max_active == 1
     assert {request["model"] for request in provider.calls} == {"gpt-5.6-luna"}
@@ -390,7 +401,7 @@ def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path
     initial = root / "artifacts" / "generations" / "generation-0000" / "slot-00" / "initial"
     repair = initial.parent / "repair-01"
 
-    assert result["state"] == "completed"
+    assert result["state"] == "idle"
     assert [request["phase"] for request in provider.calls] == ["initial", "repair"]
     assert json.loads((initial / "validation.json").read_text(encoding="utf-8"))["valid"] is False
     assert json.loads((repair / "validation.json").read_text(encoding="utf-8"))["valid"] is True
@@ -430,14 +441,14 @@ def test_invalid_final_repair_is_terminal_and_not_repeated_on_resume(
     slot_states = list(checkpoint["slots"].values())
     state = ExperimentStateStore(root / "state.sqlite3")
     try:
-        assert state.counts()["provider_turns"] == 2
-        assert state.cumulative()["total_tokens"] == 4
+        assert state.counts()["provider_turns"] == 4
+        assert state.cumulative()["total_tokens"] == 8
     finally:
         state.close()
 
-    assert first["state"] == "completed"
-    assert second["stop_reason"] == "already_completed"
-    assert len(provider.calls) == 2
+    assert first["state"] == "idle"
+    assert second["stop_reason"] == "generation_batch_completed"
+    assert [request["generation"] for request in provider.calls] == [0, 0, 1, 1]
     assert {item["status"] for item in slot_states} == {"invalid"}
     assert {item["repairs"] for item in slot_states} == {1}
     assert {item["remaining_repairs"] for item in slot_states} == {0}
@@ -571,7 +582,7 @@ def test_resume_reuses_durable_failed_repair_evidence(tmp_path: Path) -> None:
         )
     )
 
-    assert resumed["state"] == "completed"
+    assert resumed["state"] == "idle"
     assert len(provider.calls) == 2
     assert {item["status"] for item in checkpoint["slots"].values()} == {"invalid"}
 
@@ -711,8 +722,8 @@ def test_interrupt_resume_reuses_durable_turn_and_evaluation(tmp_path: Path) -> 
 
     resumed = service.run(config_path)
     status = experiment_status(config_path)
-    assert resumed["state"] == "completed"
-    assert status["state"] == "completed"
+    assert resumed["state"] == "idle"
+    assert status["state"] == "idle"
     assert len(provider.calls) == 1
     assert status["provider_turns"] == 1
     assert status["unique_candidate_count"] == 1
@@ -740,9 +751,9 @@ def test_charged_failed_turn_is_retained_without_replacement_call(tmp_path: Path
         assert row["state"] == "failed"
         assert usage["quality"] == "partial"
         assert usage["totalTokens"] == 12_000
-        assert state.cumulative()["total_tokens"] == 12_000
+        assert state.cumulative()["total_tokens"] == 24_000
     finally:
         state.close()
-    assert first["state"] == "completed"
-    assert second["stop_reason"] == "already_completed"
-    assert provider.calls == 1
+    assert first["state"] == "idle"
+    assert second["stop_reason"] == "generation_batch_completed"
+    assert provider.calls == 2

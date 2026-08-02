@@ -555,11 +555,14 @@ thread_count = 1
     monkeypatch.setattr(cli, "run_experiment", fake_run)
     assert cli._experiment_run(config, json_output=True) == 0
 
+    assert len(stdout.getvalue().splitlines()) == 1
     final = json.loads(stdout.getvalue())
-    assert final == {
-        "exp_id": "json-progress",
-        "state": "completed",
-        "status": "completed",
-    }
+    assert final["exp_id"] == "json-progress"
+    assert final["state"] == "completed"
+    assert final["status"] == "completed"
+    assert final["summary"]["exp_id"] == "json-progress"
+    assert final["summary"]["state"] == "not_created"
+    assert final["summary"]["ranked_candidates"] == []
+    assert final["summary"]["token_usage"]["totalTokens"] == 0
     progress = json.loads(stderr.getvalue())
     assert progress["event_type"] == "evaluation_progress"

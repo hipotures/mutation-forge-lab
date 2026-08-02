@@ -1311,11 +1311,37 @@ class GenerationCoordinator:
         repairs = 0
         recovered = 0
         stopped = False
-        for generation in range(self.config.generations):
+        stored_next_generation = state.get("next_generation")
+        if isinstance(stored_next_generation, int) and stored_next_generation >= 0:
+            first_generation = stored_next_generation
+        else:
+            previous_summary = state.get("summary")
+            previous_generation = state.get("generation")
+            first_generation = (
+                int(previous_generation) + 1
+                if isinstance(previous_summary, Mapping)
+                and previous_summary.get("status") == "completed"
+                and isinstance(previous_generation, int)
+                and previous_generation >= 0
+                else 0
+            )
+        generation_limit = first_generation + self.config.generations
+        previous_selection = state.get("selection")
+        if (
+            self.parent_assignments is None
+            and first_generation > 0
+            and isinstance(previous_selection, Mapping)
+        ):
+            selected = previous_selection.get(str(first_generation - 1))
+            if isinstance(selected, Mapping):
+                self.parent_assignments = {first_generation: dict(selected)}
+            elif isinstance(selected, Sequence) and not isinstance(selected, (str, bytes)):
+                self.parent_assignments = {first_generation: list(selected)}
+        for generation in range(first_generation, generation_limit):
             self._emit(
                 "generation_started",
                 generation=generation,
-                generation_limit=self.config.generations,
+                generation_limit=generation_limit,
                 population_size=self.config.slots,
                 configured_concurrency=self.config.max_workers,
                 effective_concurrency=self.config.max_workers,
@@ -1341,7 +1367,7 @@ class GenerationCoordinator:
                     self._emit(
                         "slot_queued",
                         generation=generation,
-                        generation_limit=self.config.generations,
+                        generation_limit=generation_limit,
                         slot=slot,
                         parent_id=parents[slot],
                         parent_status=("root" if parents[slot].startswith("parent-") else "parent"),
@@ -1710,7 +1736,7 @@ class GenerationCoordinator:
                     # A selector may directly provide the next parent vector.
                     # Preserve it as an in-memory assignment while retaining
                     # the callback result in the checkpoint for auditability.
-                    if generation + 1 < self.config.generations:
+                    if generation + 1 < generation_limit:
                         if isinstance(selected, Mapping):
                             self.parent_assignments = {generation + 1: dict(selected)}
                         elif isinstance(selected, Sequence) and not isinstance(
@@ -1738,10 +1764,13 @@ class GenerationCoordinator:
                     )
                 callbacks[str(generation)] = {"status": "completed"}
                 self._save(state)
+            if not stopped:
+                state["next_generation"] = generation + 1
+                self._save(state)
             self._emit(
                 "generation_completed",
                 generation=generation,
-                generation_limit=self.config.generations,
+                generation_limit=generation_limit,
                 completed_slots=len(ordered),
                 population_size=self.config.slots,
                 accepted_candidates=sum(
@@ -1772,6 +1801,11 @@ class GenerationCoordinator:
         summary = {
             "status": status,
             "generation_count": len(generations),
+            "completed_generation_count": int(
+                state.get("next_generation", first_generation)
+            ),
+            "first_generation": first_generation,
+            "generation_limit": generation_limit,
             "slots_per_generation": self.config.slots,
             "initial_turn_count": turns - repairs,
             "repair_turn_count": repairs,
