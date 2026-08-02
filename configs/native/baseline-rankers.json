@@ -1,0 +1,20 @@
+{
+  "schema_version": "mforge.native.baseline_rankers.v1",
+  "rankers": [
+    {
+      "policy_id": "native_random",
+      "kind": "deterministic_hash",
+      "description": "Stable ordering by SHA-256 of the canonical proposal payload.",
+      "signals": ["canonical_proposal_hash"],
+      "oracle_access": false
+    },
+    {
+      "policy_id": "native_structural",
+      "kind": "bounded_linear",
+      "description": "Prefer broken witnesses and new-edge distance while penalising local risk.",
+      "signals": ["broken_witnesses", "new_edge_distance", "local_risk"],
+      "weights": {"broken_witnesses": 1.0, "new_edge_distance": 0.25, "local_risk": -0.5},
+      "oracle_access": false
+    }
+  ]
+}
