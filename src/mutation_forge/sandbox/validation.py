@@ -31,6 +31,34 @@ SAFE_BUILTINS = frozenset(
 )
 PARAMETERS = ("ctx", "proposal")
 
+
+def render_policy_validator_contract(limits: SandboxLimits | None = None) -> str:
+    """Render the model-facing contract from the executable validator rules."""
+
+    configured = limits or SandboxLimits()
+    allowed_calls = ", ".join(f"`{name}`" for name in sorted(SAFE_BUILTINS))
+    return "\n".join(
+        (
+            f"## Sandbox contract ({VALIDATOR_VERSION})",
+            "",
+            "- The source must contain exactly one top-level function "
+            "`priority(ctx, proposal)`.",
+            "- Do not define helper or nested functions.",
+            "- Do not use imports.",
+            "- Do not use names beginning with `_`.",
+            "- Do not use attribute access or method calls.",
+            "- Read `ctx` and `proposal` only with subscription syntax such as "
+            '`ctx["field"]` and `proposal["field"]`; nested subscriptions are allowed.',
+            "- The function must contain exactly one `return`, and it must be the final "
+            "top-level statement.",
+            f"- The complete allowed-call whitelist is: {allowed_calls}.",
+            "- Do not call any other built-in, function, callable value, or method.",
+            f"- Source size must not exceed {configured.max_source_bytes} UTF-8 bytes.",
+            f"- The parsed program must not exceed {configured.max_ast_nodes} AST nodes.",
+        )
+    )
+
+
 _ALLOWED_NODE_TYPES = (
     ast.Module,
     ast.FunctionDef,

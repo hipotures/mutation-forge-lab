@@ -199,7 +199,8 @@ class _NativeProvider:
     @staticmethod
     def _phase(request: Mapping[str, Any]) -> str:
         if str(request.get("phase", "initial")) == "repair":
-            return "repair-01"
+            attempt = int(request.get("repair_attempt", 1))
+            return f"repair-{attempt:02d}"
         return str(request.get("phase", "initial"))
 
     def _payload(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -880,12 +881,18 @@ class NativeExperimentAdapter:
             if phase == "repair":
                 diagnostics = values.get("diagnostics", ())
                 repair_source = str(values.get("repair_source", ""))
+                repair_attempt = int(values.get("repair_attempt", 1))
+                max_repairs = int(values.get("max_repairs", config.model.max_repairs))
+                remaining_repairs = int(values.get("remaining_repairs", 0))
                 sections.extend(
                     [
                         "",
                         "## Repair instructions",
                         "",
                         repair_prompt.strip(),
+                        "",
+                        f"Repair attempt {repair_attempt} of {max_repairs}; "
+                        f"{remaining_repairs} repairs remain after this attempt.",
                         "",
                         "## Previous response/source",
                         "",

@@ -406,7 +406,6 @@ class LocalCodexAppServerProvider:
         )
         self._retained: dict[str, Mapping[str, Any]] = {}
         self._lock = threading.RLock()
-        self._repair_counts: dict[str, int] = {}
 
     def _key(self, request: Mapping[str, Any], phase: str) -> str:
         value = request.get("idempotency_key", request.get("request_idempotency_key"))
@@ -532,7 +531,7 @@ class LocalCodexAppServerProvider:
         with self._lock:
             retained = self._retained.get(key)
         if retained is not None:
-            return retained
+            return {**dict(retained), "retained": True}
         result = self._transport.generate(request)
         if not isinstance(result, Mapping):
             result = {"status": "completed", "accepted": True, "response": result}
@@ -542,7 +541,7 @@ class LocalCodexAppServerProvider:
         with self._lock:
             retained = self._retained.get(key)
             if retained is not None:
-                return retained
+                return {**dict(retained), "retained": True}
             if self.persist_artifacts:
                 self._persist(request, value, "initial")
             self._retained[key] = value
@@ -555,24 +554,25 @@ class LocalCodexAppServerProvider:
     ) -> Mapping[str, Any]:
         if len(diagnostics) > 64:
             raise ValueError("repair diagnostics exceed bound")
-        base = str(request.get("idempotency_key", request.get("request_idempotency_key", "repair")))
-        with self._lock:
-            count = self._repair_counts.get(base, 0)
-            if count >= self.max_repairs:
-                raise NativeProviderError("maximum native provider repairs exceeded")
-            diagnostic_hash = hashlib.sha256(
-                json.dumps(
-                    list(diagnostics), sort_keys=True, separators=(",", ":"), default=str
-                ).encode()
-            ).hexdigest()
-            key = self._key(
-                {**dict(request), "repair_diagnostics_sha256": diagnostic_hash},
-                "repair",
+        repair_attempt = int(request.get("repair_attempt", 1))
+        max_repairs = int(request.get("max_repairs", self.max_repairs))
+        if repair_attempt < 1 or repair_attempt > max_repairs:
+            raise NativeProviderError(
+                f"repair attempt {repair_attempt} exceeds configured maximum {max_repairs}"
             )
+        diagnostic_hash = hashlib.sha256(
+            json.dumps(
+                list(diagnostics), sort_keys=True, separators=(",", ":"), default=str
+            ).encode()
+        ).hexdigest()
+        key = self._key(
+            {**dict(request), "repair_diagnostics_sha256": diagnostic_hash},
+            "repair",
+        )
+        with self._lock:
             retained = self._retained.get(key)
             if retained is not None:
-                return retained
-            self._repair_counts[base] = count + 1
+                return {**dict(retained), "retained": True}
         result = self._transport.repair(request, diagnostics)
         value = (
             dict(result)
@@ -584,9 +584,9 @@ class LocalCodexAppServerProvider:
         with self._lock:
             retained = self._retained.get(key)
             if retained is not None:
-                return retained
+                return {**dict(retained), "retained": True}
             if self.persist_artifacts:
-                self._persist(request, value, f"repair-{count + 1:02d}")
+                self._persist(request, value, f"repair-{repair_attempt:02d}")
             self._retained[key] = value
             return value
 

@@ -315,6 +315,140 @@ def test_native_profile_is_compact_and_conditional() -> None:
         sink.close()
 
 
+def test_native_validation_and_repair_states_are_distinct() -> None:
+    sink = RichLiveSink(
+        console=Console(file=io.StringIO(), width=120, height=30, force_terminal=False),
+        native=True,
+    )
+    try:
+        sink.write(
+            _event(
+                "repair_started",
+                generation=0,
+                slot="slot-00",
+                phase="repair",
+                repair_attempt=1,
+                remaining_repairs=0,
+            )
+        )
+        assert sink.state["slot_states"]["slot-00"] == "repair_running"
+        sink.write(
+            _event(
+                "validation_completed",
+                generation=0,
+                slot="slot-00",
+                phase="repair",
+                valid=False,
+                validation_codes=["forbidden_call", "private_name"],
+                error="forbidden_call, private_name",
+            )
+        )
+        assert sink.state["slot_states"]["slot-00"] == "validation_failed"
+        sink.write(
+            _event(
+                "repair_completed",
+                generation=0,
+                slot="slot-00",
+                phase="repair",
+                status="invalid",
+                repair_state="repair_failed",
+                repairs=1,
+                remaining_repairs=0,
+                validation_codes=["forbidden_call", "private_name"],
+            )
+        )
+        assert sink.state["slot_states"]["slot-00"] == "invalid"
+        sink.write(
+            _event(
+                "slot_queued",
+                generation=0,
+                slot="slot-00",
+                status="recovered",
+                recovered=True,
+                recovered_status="invalid",
+                validation_codes=["forbidden_call", "private_name"],
+            )
+        )
+        assert sink.state["slot_states"]["slot-00"] == "invalid"
+
+        output = io.StringIO()
+        Console(file=output, width=120, height=30, force_terminal=False).print(
+            sink._render()
+        )
+        rendered = output.getvalue()
+        assert "invalid" in rendered
+        assert "forbidden_call" in rendered
+    finally:
+        sink.close()
+
+
+def test_native_usage_counts_each_repair_once_and_skips_retained_turns() -> None:
+    sink = RichLiveSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        native=True,
+    )
+    try:
+        sink.write(
+            _event(
+                "session_started",
+                usage={"totalTokens": 10},
+                session_usage={"totalTokens": 0},
+            )
+        )
+        for attempt, tokens in ((1, 2), (2, 3)):
+            key = f"repair-{attempt}"
+            sink.write(
+                _event(
+                    "provider_turn_started",
+                    generation=0,
+                    slot="slot-00",
+                    phase="repair",
+                    repair_attempt=attempt,
+                    idempotency_key=key,
+                )
+            )
+            sink.write(
+                _event(
+                    "provider_turn_completed",
+                    generation=0,
+                    slot="slot-00",
+                    phase="repair",
+                    repair_attempt=attempt,
+                    idempotency_key=key,
+                    usage={"totalTokens": tokens},
+                )
+            )
+        sink.write(
+            _event(
+                "provider_turn_started",
+                generation=0,
+                slot="slot-00",
+                phase="repair",
+                repair_attempt=2,
+                idempotency_key="repair-2",
+            )
+        )
+        sink.write(
+            _event(
+                "provider_turn_completed",
+                generation=0,
+                slot="slot-00",
+                phase="repair",
+                repair_attempt=2,
+                idempotency_key="repair-2",
+                retained=True,
+                usage={"totalTokens": 3},
+            )
+        )
+
+        assert sink.state["_usage_session"]["totalTokens"] == 5
+        assert sink.state["_usage_cumulative"]["totalTokens"] == 15
+        assert sink.state["provider_turns_attempted"] == 2
+        assert sink.state["provider_turns_completed"] == 2
+    finally:
+        sink.close()
+
+
 def test_pre_session_events_are_replayed_to_durable_session_observer() -> None:
     class Session:
         session_id = "session-000001"

@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 from mutation_forge.sandbox.contracts import SandboxLimits
-from mutation_forge.sandbox.validation import ValidationResult, validate_policy
+from mutation_forge.sandbox.validation import (
+    ValidationResult,
+    render_policy_validator_contract,
+    validate_policy,
+)
 
 PROVIDER_TURN_TIMEOUT_SECONDS = 120.0
 
@@ -132,6 +136,7 @@ class ProviderResult:
     provider_thread_id: str | None = None
     provider_turn_id: str | None = None
     error: str | None = None
+    retained: bool = False
 
     @classmethod
     def from_value(cls, value: Any) -> ProviderResult:
@@ -157,6 +162,7 @@ class ProviderResult:
                 provider_thread_id=value.get("provider_thread_id"),
                 provider_turn_id=value.get("provider_turn_id"),
                 error=str(value.get("error")) if value.get("error") is not None else None,
+                retained=value.get("retained") is True,
             )
         if all(hasattr(value, name) for name in ("response", "status", "usage")):
             return cls(
@@ -180,6 +186,7 @@ class ProviderResult:
                 provider_thread_id=getattr(value, "provider_thread_id", None),
                 provider_turn_id=getattr(value, "provider_turn_id", None),
                 error=getattr(value, "error", None),
+                retained=bool(getattr(value, "retained", False)),
             )
         return cls(response=value, charged=False, usage={})
 
@@ -201,6 +208,7 @@ class ProviderResult:
             "provider_thread_id": self.provider_thread_id,
             "provider_turn_id": self.provider_turn_id,
             "error": self.error,
+            "retained": self.retained,
         }
 
 
@@ -216,18 +224,20 @@ def request_idempotency_key(
     brief: str,
     prompt_hash: str,
     phase: str = "initial",
+    repair_attempt: int = 0,
 ) -> str:
-    return _hash(
-        {
-            "campaign": campaign,
-            "generation": generation,
-            "slot": slot,
-            "parent": parent,
-            "brief": brief,
-            "prompt_hash": prompt_hash,
-            "phase": phase,
-        }
-    )
+    identity = {
+        "campaign": campaign,
+        "generation": generation,
+        "slot": slot,
+        "parent": parent,
+        "brief": brief,
+        "prompt_hash": prompt_hash,
+        "phase": phase,
+    }
+    if repair_attempt:
+        identity["repair_attempt"] = repair_attempt
+    return _hash(identity)
 
 
 make_idempotency_key = request_idempotency_key
@@ -254,6 +264,9 @@ class GenerationRequest:
     system_prompt: str = "Return one generated policy JSON object."
     output_schema: Mapping[str, Any] = field(default_factory=lambda: {"type": "object"})
     repair_prompt: str = "Repair the generated policy using the diagnostics."
+    repair_attempt: int = 0
+    max_repairs: int = 0
+    remaining_repairs: int = 0
 
     @property
     def request_idempotency_key(self) -> str:
@@ -280,6 +293,9 @@ class GenerationRequest:
             "system_prompt": self.system_prompt,
             "output_schema": dict(self.output_schema),
             "repair_prompt": self.repair_prompt,
+            "repair_attempt": self.repair_attempt,
+            "max_repairs": self.max_repairs,
+            "remaining_repairs": self.remaining_repairs,
         }
         if self.phase == "repair":
             value["diagnostics"] = [dict(item) for item in self.diagnostics]
@@ -321,6 +337,9 @@ class GenerationRequest:
             repair_prompt=str(
                 value.get("repair_prompt", "Repair the generated policy using the diagnostics.")
             ),
+            repair_attempt=int(value.get("repair_attempt", 0)),
+            max_repairs=int(value.get("max_repairs", 0)),
+            remaining_repairs=int(value.get("remaining_repairs", 0)),
         )
 
 
@@ -381,6 +400,9 @@ class SlotResult:
     request: Mapping[str, Any] = field(default_factory=dict)
     raw_result: Mapping[str, Any] = field(default_factory=dict)
     duplicate_of: str | None = None
+    initial_request: Mapping[str, Any] = field(default_factory=dict)
+    repair_idempotency_keys: tuple[str, ...] = ()
+    remaining_repairs: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -396,6 +418,9 @@ class SlotResult:
             "request": _safe(dict(self.request)),
             "raw_result": _safe(dict(self.raw_result)),
             "duplicate_of": self.duplicate_of,
+            "initial_request": _safe(dict(self.initial_request)),
+            "repair_idempotency_keys": list(self.repair_idempotency_keys),
+            "remaining_repairs": self.remaining_repairs,
         }
 
 
@@ -680,6 +705,7 @@ class GenerationCoordinator:
         phase: str = "initial",
         diagnostics: Sequence[Mapping[str, Any]] = (),
         repair_source: str = "",
+        repair_attempt: int = 0,
     ) -> GenerationRequest:
         brief = self._brief(generation, slot)
         parent_source, parent_metadata = self._parent_source_metadata(parent)
@@ -700,6 +726,9 @@ class GenerationCoordinator:
             "diagnostics": tuple(diagnostics),
             "repair_source": repair_source,
             "repair_prompt": self.config.repair_prompt,
+            "repair_attempt": repair_attempt,
+            "max_repairs": self.config.max_repairs,
+            "remaining_repairs": max(0, self.config.max_repairs - repair_attempt),
         }
         if self.prompt_renderer is not None:
             try:
@@ -721,12 +750,24 @@ class GenerationCoordinator:
             )
             prompt = (
                 f"{self.config.repair_prompt.strip()}\n\n"
+                f"Repair attempt {repair_attempt} of {self.config.max_repairs}; "
+                f"{max(0, self.config.max_repairs - repair_attempt)} repairs remain "
+                "after this attempt.\n\n"
                 f"## Previous generated source\n\n```python\n{repair_source}\n```\n\n"
                 f"## Repair diagnostics\n\n```json\n{diagnostics_json}\n```"
             )
+        validator_contract = render_policy_validator_contract(self.config.sandbox_limits)
+        prompt = f"{prompt.rstrip()}\n\n{validator_contract}\n"
         prompt_hash, brief_id = _hash(prompt), _hash(brief)
         key = request_idempotency_key(
-            self.config.campaign_id, generation, slot, parent, brief_id, prompt_hash, phase
+            self.config.campaign_id,
+            generation,
+            slot,
+            parent,
+            brief_id,
+            prompt_hash,
+            phase,
+            repair_attempt,
         )
         return GenerationRequest(
             self.config.campaign_id,
@@ -748,6 +789,9 @@ class GenerationCoordinator:
             self.config.system_prompt,
             self.config.output_schema,
             self.config.repair_prompt,
+            repair_attempt,
+            self.config.max_repairs,
+            max(0, self.config.max_repairs - repair_attempt),
         )
 
     def _invoke(self, request: GenerationRequest) -> ProviderResult:
@@ -763,6 +807,7 @@ class GenerationCoordinator:
             model=request.model,
             effort=request.effort,
             idempotency_key=request.idempotency_key,
+            repair_attempt=request.repair_attempt,
             provider_turn_state="running",
             timeout_seconds=PROVIDER_TURN_TIMEOUT_SECONDS,
         )
@@ -775,6 +820,8 @@ class GenerationCoordinator:
                     slot=request.slot,
                     phase=request.phase,
                     parent_id=request.parent_id,
+                    idempotency_key=request.idempotency_key,
+                    repair_attempt=request.repair_attempt,
                     operation_elapsed_seconds=time.monotonic() - turn_started,
                     timeout_seconds=PROVIDER_TURN_TIMEOUT_SECONDS,
                     provider_turn_state="running",
@@ -813,6 +860,8 @@ class GenerationCoordinator:
                 provider_thread_id=result.provider_thread_id or result.thread_id,
                 provider_turn_id=result.provider_turn_id or result.turn_id,
                 error=result.error,
+                idempotency_key=request.idempotency_key,
+                repair_attempt=request.repair_attempt,
             )
             return result
         except KeyboardInterrupt:
@@ -824,6 +873,8 @@ class GenerationCoordinator:
                 parent_id=request.parent_id,
                 status="interrupted",
                 error="KeyboardInterrupt",
+                idempotency_key=request.idempotency_key,
+                repair_attempt=request.repair_attempt,
             )
             raise
         except BaseException as exc:
@@ -855,6 +906,8 @@ class GenerationCoordinator:
                 provider_thread_id=result.provider_thread_id or result.thread_id,
                 provider_turn_id=result.provider_turn_id or result.turn_id,
                 error=result.error,
+                idempotency_key=request.idempotency_key,
+                repair_attempt=request.repair_attempt,
             )
             return result
         finally:
@@ -901,6 +954,13 @@ class GenerationCoordinator:
                 parent_id=request.parent_id,
             )
             validation = validate_policy(source, self.config.sandbox_limits)
+            validation_diagnostics = [
+                item.as_dict()
+                for item in validation.errors[: self.config.max_repair_diagnostics]
+            ]
+            validation_codes = [
+                str(item["code"]) for item in validation_diagnostics
+            ]
             self._emit(
                 "validation_completed",
                 generation=request.generation,
@@ -913,6 +973,9 @@ class GenerationCoordinator:
                 schema_valid=True,
                 parse_outcome="valid",
                 schema_outcome="valid",
+                validation_codes=validation_codes,
+                diagnostics=validation_diagnostics,
+                error=", ".join(validation_codes) if validation_codes else None,
             )
             if not validation.valid:
                 errors.extend(
@@ -951,6 +1014,16 @@ class GenerationCoordinator:
                         error=str(exc)[:256],
                     )
         else:
+            validation_diagnostics = [
+                {
+                    "code": str(item.get("code", "")),
+                    "message": str(item.get("message", ""))[:256],
+                }
+                for item in errors[: self.config.max_repair_diagnostics]
+            ]
+            validation_codes = [
+                str(item["code"]) for item in validation_diagnostics
+            ]
             self._emit(
                 "validation_completed",
                 generation=request.generation,
@@ -963,6 +1036,9 @@ class GenerationCoordinator:
                 schema_valid=False,
                 parse_outcome="invalid",
                 schema_outcome="invalid",
+                validation_codes=validation_codes,
+                diagnostics=validation_diagnostics,
+                error=", ".join(validation_codes) if validation_codes else "validation failed",
             )
         diagnostics = tuple(
             {"code": str(item.get("code", "")), "message": str(item.get("message", ""))[:256]}
@@ -994,6 +1070,22 @@ class GenerationCoordinator:
         """Repair malformed content, never replace a terminal provider turn."""
 
         return raw.status.lower() == "completed" and raw.accepted and raw.content
+
+    def _slot_status(
+        self,
+        candidate: Candidate | None,
+        diagnostics: Sequence[Mapping[str, Any]],
+        raw: ProviderResult,
+        *,
+        repairs: int,
+    ) -> str:
+        if candidate is not None:
+            return "accepted"
+        if diagnostics and self._repair_allowed(raw):
+            return "repair_pending" if repairs < self.config.max_repairs else "invalid"
+        if raw.status.lower() == "completed" and raw.accepted and raw.content:
+            return "invalid"
+        return "failed"
 
     @staticmethod
     def _invalid_source(raw: Mapping[str, Any]) -> str:
@@ -1060,7 +1152,8 @@ class GenerationCoordinator:
                 1
                 for item in cast(Mapping[str, Any], payload.get("slots", {})).values()
                 if isinstance(item, Mapping)
-                and str(item.get("status", "")) in {"accepted", "duplicate", "failed"}
+                and str(item.get("status", ""))
+                in {"accepted", "duplicate", "failed", "invalid"}
             ),
             durable=True,
         )
@@ -1099,6 +1192,13 @@ class GenerationCoordinator:
             cast(Mapping[str, Any], value.get("request", {})),
             cast(Mapping[str, Any], value.get("raw_result", {})),
             value.get("duplicate_of"),
+            cast(Mapping[str, Any], value.get("initial_request", {})),
+            tuple(
+                str(item)
+                for item in value.get("repair_idempotency_keys", ())
+                if isinstance(item, str) and item
+            ),
+            int(value.get("remaining_repairs", 0)),
         )
 
     def run_request(
@@ -1111,19 +1211,20 @@ class GenerationCoordinator:
         )
         candidate, diagnostics = self._assess(request, raw)
         result = SlotResult(
-            request.generation,
-            request.slot,
-            request.parent_id,
-            "accepted" if candidate else "failed",
-            candidate,
-            tuple(diagnostics if not candidate else ()),
-            0,
-            raw.as_dict(),
-            None,
-            request.as_dict(),
-            raw.as_dict(),
+            generation=request.generation,
+            slot=request.slot,
+            parent_id=request.parent_id,
+            status=self._slot_status(candidate, diagnostics, raw, repairs=0),
+            candidate=candidate,
+            errors=tuple(diagnostics if not candidate else ()),
+            repairs=0,
+            initial=raw.as_dict(),
+            request=request.as_dict(),
+            raw_result=raw.as_dict(),
+            initial_request=request.as_dict(),
+            remaining_repairs=self.config.max_repairs,
         )
-        if not (allow_repair and candidate is None and diagnostics and self._repair_allowed(raw)):
+        if not (allow_repair and result.status == "repair_pending"):
             return result
         repair_request = self.build_request(
             request.generation,
@@ -1132,6 +1233,7 @@ class GenerationCoordinator:
             phase="repair",
             diagnostics=diagnostics,
             repair_source=self._invalid_source(raw.as_dict()),
+            repair_attempt=1,
         )
         self._emit(
             "repair_started",
@@ -1140,30 +1242,49 @@ class GenerationCoordinator:
             parent_id=request.parent_id,
             phase="repair",
             diagnostics=list(diagnostics),
+            repair_attempt=1,
+            remaining_repairs=max(0, self.config.max_repairs - 1),
         )
         repair_raw = self._invoke(repair_request)
         repaired, repair_diagnostics = self._assess(repair_request, repair_raw, repair=True)
+        repaired_status = self._slot_status(
+            repaired, repair_diagnostics, repair_raw, repairs=1
+        )
         self._emit(
             "repair_completed",
             generation=request.generation,
             slot=request.slot,
             parent_id=request.parent_id,
             phase="repair",
-            status="accepted" if repaired else "failed",
+            status=repaired_status,
+            repair_state=(
+                "accepted"
+                if repaired_status == "accepted"
+                else "repair_pending"
+                if repaired_status == "repair_pending"
+                else "repair_failed"
+            ),
             repairs=1,
+            remaining_repairs=max(0, self.config.max_repairs - 1),
+            validation_codes=[
+                str(item.get("code", "")) for item in repair_diagnostics
+            ],
         )
         return SlotResult(
-            request.generation,
-            request.slot,
-            request.parent_id,
-            "accepted" if repaired else "failed",
-            repaired,
-            tuple(repair_diagnostics if not repaired else ()),
-            1,
-            raw.as_dict(),
-            repair_raw.as_dict(),
-            repair_request.as_dict(),
-            repair_raw.as_dict(),
+            generation=request.generation,
+            slot=request.slot,
+            parent_id=request.parent_id,
+            status=repaired_status,
+            candidate=repaired,
+            errors=tuple(repair_diagnostics if not repaired else ()),
+            repairs=1,
+            initial=raw.as_dict(),
+            repair=repair_raw.as_dict(),
+            request=repair_request.as_dict(),
+            raw_result=repair_raw.as_dict(),
+            initial_request=request.as_dict(),
+            repair_idempotency_keys=(repair_request.idempotency_key,),
+            remaining_repairs=max(0, self.config.max_repairs - 1),
         )
 
     def run(self, *, resume: bool = True) -> GenerationResult:
@@ -1206,6 +1327,7 @@ class GenerationCoordinator:
             parents = self._parents(generation)
             results: dict[str, SlotResult] = {}
             futures: dict[Any, tuple[str, GenerationRequest]] = {}
+            initial_keys: dict[str, str] = {}
             active_model_turns = 0
             close_provider = getattr(self.provider, "close", None)
             with _InterruptibleThreadPoolExecutor(
@@ -1215,6 +1337,7 @@ class GenerationCoordinator:
             ) as pool:
                 for slot in self.slots:
                     request = self.build_request(generation, slot, parents[slot])
+                    initial_keys[slot] = request.idempotency_key
                     self._emit(
                         "slot_queued",
                         generation=generation,
@@ -1242,6 +1365,13 @@ class GenerationCoordinator:
                             phase=request.phase,
                             status="recovered",
                             recovered=True,
+                            recovered_status=results[slot].status,
+                            repairs=results[slot].repairs,
+                            remaining_repairs=results[slot].remaining_repairs,
+                            validation_codes=[
+                                str(error.get("code", ""))
+                                for error in results[slot].errors
+                            ],
                             completed_slots=len(results),
                             population_size=self.config.slots,
                         )
@@ -1276,8 +1406,12 @@ class GenerationCoordinator:
                         raw = future.result()
                     finally:
                         active_model_turns = max(0, active_model_turns - 1)
+                    if raw.retained:
+                        turns = max(0, turns - 1)
+                        recovered += 1
                     if (
                         self.retry_infrastructure
+                        and not raw.retained
                         and infrastructure_retry_allowed(raw)
                         and (
                             self.config.max_model_turns is None
@@ -1287,21 +1421,21 @@ class GenerationCoordinator:
                         raw = self._invoke(request)
                         turns += 1
                     candidate, diagnostics = self._assess(request, raw)
-                    can_repair = self._repair_allowed(raw)
                     results[slot] = SlotResult(
-                        generation,
-                        slot,
-                        request.parent_id,
-                        "accepted"
-                        if candidate
-                        else ("repair_pending" if diagnostics and can_repair else "failed"),
-                        candidate,
-                        tuple(diagnostics if not candidate else ()),
-                        0,
-                        raw.as_dict(),
-                        None,
-                        request.as_dict(),
-                        raw.as_dict(),
+                        generation=generation,
+                        slot=slot,
+                        parent_id=request.parent_id,
+                        status=self._slot_status(
+                            candidate, diagnostics, raw, repairs=0
+                        ),
+                        candidate=candidate,
+                        errors=tuple(diagnostics if not candidate else ()),
+                        repairs=0,
+                        initial=raw.as_dict(),
+                        request=request.as_dict(),
+                        raw_result=raw.as_dict(),
+                        initial_request=request.as_dict(),
+                        remaining_repairs=self.config.max_repairs,
                     )
                     slots_state[request.idempotency_key] = results[slot].as_dict()
                     self._save(state)
@@ -1323,7 +1457,35 @@ class GenerationCoordinator:
                     )
             for slot in self.slots:
                 item = results.get(slot)
-                repair_attempt = 0
+                initial_key = initial_keys[slot]
+                if (
+                    item is not None
+                    and item.status == "repair_pending"
+                    and item.repairs >= self.config.max_repairs
+                ):
+                    item = replace(
+                        item,
+                        status="invalid",
+                        remaining_repairs=0,
+                    )
+                    results[slot] = item
+                    slots_state[initial_key] = item.as_dict()
+                    self._save(state)
+                    self._emit(
+                        "repair_completed",
+                        generation=generation,
+                        slot=slot,
+                        parent_id=item.parent_id,
+                        phase="repair",
+                        status="invalid",
+                        repair_state="repair_failed",
+                        repairs=item.repairs,
+                        remaining_repairs=0,
+                        retained=True,
+                        validation_codes=[
+                            str(error.get("code", "")) for error in item.errors
+                        ],
+                    )
                 if (
                     item is not None
                     and item.status == "repair_pending"
@@ -1333,19 +1495,53 @@ class GenerationCoordinator:
                     stopped = True
                 while (
                     item is not None
-                    and item.status == "repair_pending"
+                    and item.status in {"repair_pending", "repair_running"}
                     and item.errors
-                    and repair_attempt < self.config.max_repairs
                     and (self.config.max_model_turns is None or turns < self.config.max_model_turns)
                 ):
-                    req = self.build_request(
-                        generation,
-                        slot,
-                        item.parent_id,
-                        phase="repair",
-                        diagnostics=item.errors,
-                        repair_source=self._invalid_source(item.raw_result),
-                    )
+                    resuming_repair = item.status == "repair_running"
+                    if resuming_repair:
+                        req = GenerationRequest.from_value(item.request)
+                        repair_attempt = item.repairs
+                        repair_keys = item.repair_idempotency_keys or (
+                            req.idempotency_key,
+                        )
+                    else:
+                        if item.repairs >= self.config.max_repairs:
+                            item = replace(
+                                item,
+                                status="invalid",
+                                remaining_repairs=0,
+                            )
+                            results[slot] = item
+                            slots_state[initial_key] = item.as_dict()
+                            self._save(state)
+                            break
+                        repair_attempt = item.repairs + 1
+                        req = self.build_request(
+                            generation,
+                            slot,
+                            item.parent_id,
+                            phase="repair",
+                            diagnostics=item.errors,
+                            repair_source=self._invalid_source(item.raw_result),
+                            repair_attempt=repair_attempt,
+                        )
+                        repair_keys = (*item.repair_idempotency_keys, req.idempotency_key)
+                        item = replace(
+                            item,
+                            status="repair_running",
+                            repairs=repair_attempt,
+                            request=req.as_dict(),
+                            repair_idempotency_keys=repair_keys,
+                            remaining_repairs=max(
+                                0, self.config.max_repairs - repair_attempt
+                            ),
+                        )
+                        results[slot] = item
+                        slots_state[initial_key] = item.as_dict()
+                        slots_state[req.idempotency_key] = item.as_dict()
+                        self._save(state)
                     self._emit(
                         "repair_started",
                         generation=generation,
@@ -1353,40 +1549,57 @@ class GenerationCoordinator:
                         parent_id=item.parent_id,
                         phase="repair",
                         diagnostics=list(item.errors),
-                        repair_attempt=repair_attempt + 1,
+                        repair_attempt=repair_attempt,
+                        max_repairs=self.config.max_repairs,
+                        remaining_repairs=max(
+                            0, self.config.max_repairs - repair_attempt
+                        ),
+                        retained=resuming_repair,
                     )
                     cached = slots_state.get(req.idempotency_key)
                     if isinstance(cached, Mapping) and cached.get("status") not in {
                         "pending",
                         "repair_pending",
+                        "repair_running",
                     }:
                         repaired = self._from_slot(cached)
                         recovered += 1
+                        repaired_retained = True
                     else:
                         raw = self._invoke(req)
-                        turns += 1
-                        repairs += 1
+                        repaired_retained = raw.retained
+                        if raw.retained:
+                            recovered += 1
+                        else:
+                            turns += 1
+                            repairs += 1
                         candidate, diagnostics = self._assess(req, raw, repair=True)
-                        can_repair = self._repair_allowed(raw)
-                        repaired = SlotResult(
-                            generation,
-                            slot,
-                            item.parent_id,
-                            "accepted"
-                            if candidate
-                            else ("repair_pending" if diagnostics and can_repair else "failed"),
+                        status = self._slot_status(
                             candidate,
-                            tuple(diagnostics if not candidate else ()),
-                            item.repairs + 1,
-                            item.initial,
-                            raw.as_dict(),
-                            req.as_dict(),
-                            raw.as_dict(),
+                            diagnostics,
+                            raw,
+                            repairs=repair_attempt,
+                        )
+                        repaired = SlotResult(
+                            generation=generation,
+                            slot=slot,
+                            parent_id=item.parent_id,
+                            status=status,
+                            candidate=candidate,
+                            errors=tuple(diagnostics if not candidate else ()),
+                            repairs=repair_attempt,
+                            initial=item.initial,
+                            repair=raw.as_dict(),
+                            request=req.as_dict(),
+                            raw_result=raw.as_dict(),
+                            initial_request=item.initial_request,
+                            repair_idempotency_keys=repair_keys,
+                            remaining_repairs=max(
+                                0, self.config.max_repairs - repair_attempt
+                            ),
                         )
                         slots_state[req.idempotency_key] = repaired.as_dict()
-                        slots_state[str(item.request.get("idempotency_key", ""))] = (
-                            repaired.as_dict()
-                        )
+                        slots_state[initial_key] = repaired.as_dict()
                         self._save(state)
                     self._emit(
                         "repair_completed",
@@ -1395,12 +1608,22 @@ class GenerationCoordinator:
                         parent_id=item.parent_id,
                         phase="repair",
                         status=repaired.status,
+                        repair_state=(
+                            "accepted"
+                            if repaired.status == "accepted"
+                            else "repair_pending"
+                            if repaired.status == "repair_pending"
+                            else "repair_failed"
+                        ),
                         repairs=repaired.repairs,
-                        retained=recovered > 0,
+                        remaining_repairs=repaired.remaining_repairs,
+                        retained=repaired_retained,
+                        validation_codes=[
+                            str(error.get("code", "")) for error in repaired.errors
+                        ],
                     )
                     results[slot] = repaired
                     item = repaired
-                    repair_attempt += 1
             ordered: list[SlotResult] = []
             generation_candidates: list[Candidate] = []
             for slot in self.slots:
@@ -1457,13 +1680,17 @@ class GenerationCoordinator:
                             source_lines=len(candidate.source.splitlines()),
                             archive_size=len(seen),
                         )
-                elif item.status in {"failed", "budget_exhausted"}:
+                elif item.status in {"failed", "invalid", "budget_exhausted"}:
                     self._emit(
                         "candidate_archived",
                         generation=generation,
                         slot=slot,
                         parent_id=item.parent_id,
-                        status="invalid" if item.status == "failed" else item.status,
+                        status=(
+                            "invalid"
+                            if item.status in {"failed", "invalid"}
+                            else item.status
+                        ),
                         errors=list(item.errors),
                         archive_size=len(seen),
                     )
@@ -1527,7 +1754,7 @@ class GenerationCoordinator:
                     1
                     for group in generations
                     for item in group
-                    if item.status == "failed"
+                    if item.status in {"failed", "invalid"}
                 ),
                 duplicate_candidates=sum(
                     1

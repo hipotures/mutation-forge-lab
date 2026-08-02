@@ -372,7 +372,7 @@ class RichLiveSink:
             if event.event_type == "provider_turn_failed" and payload.get("charged") is True:
                 add("charged_failed_turns")
             usage = payload.get("usage")
-            if isinstance(usage, dict):
+            if isinstance(usage, dict) and payload.get("retained") is not True:
                 current = self.state.get("_usage_cumulative")
                 cumulative = dict(current) if isinstance(current, dict) else {}
                 session_current = self.state.get("_usage_session")
@@ -380,7 +380,16 @@ class RichLiveSink:
                 usage_key = (
                     str(payload.get("generation", "")),
                     str(payload.get("slot", "")),
-                    str(payload.get("phase", "initial")),
+                    str(
+                        payload.get(
+                            "idempotency_key",
+                            payload.get(
+                                "provider_turn_id",
+                                f"{payload.get('phase', 'initial')}:"
+                                f"{payload.get('repair_attempt', 0)}",
+                            ),
+                        )
+                    ),
                 )
                 duplicate_usage = usage_key in self._usage_seen
                 self._usage_seen.add(usage_key)
@@ -555,25 +564,48 @@ class RichLiveSink:
         phase = payload.get("phase")
         state = payload.get("status")
         if event_type == "provider_turn_started":
-            state = "repair" if phase == "repair" else "model"
+            state = "repair_running" if phase == "repair" else "model"
             detail["_started_at"] = time.monotonic()
         elif event_type == "provider_turn_completed":
-            state = "accepted" if payload.get("accepted") is True else "failed"
+            state = (
+                "repair_running"
+                if phase == "repair"
+                else "validating"
+                if payload.get("accepted") is True
+                else "failed"
+            )
         elif event_type == "provider_turn_failed":
-            state = "failed"
+            state = "repair_failed" if phase == "repair" else "failed"
         elif event_type == "repair_started":
-            state = "repair"
+            state = "repair_running"
             detail["_started_at"] = time.monotonic()
+        elif event_type == "repair_completed":
+            repair_state = payload.get("repair_state")
+            final_state = payload.get("status")
+            state = (
+                final_state
+                if final_state in {"accepted", "repair_pending", "invalid"}
+                else repair_state
+                if isinstance(repair_state, str)
+                else "repair_failed"
+            )
         elif event_type == "validation_started":
             state = "validating"
         elif event_type == "validation_completed":
-            state = "validating" if payload.get("valid") is True else "invalid"
+            state = "validating" if payload.get("valid") is True else "validation_failed"
         elif event_type == "behavior_probe_started":
             state = "probing"
         elif event_type == "behavior_probe_completed":
             state = "probing" if payload.get("valid") is True else "failed"
         elif event_type == "evaluation_started":
             state = "evaluating"
+        elif event_type == "slot_queued" and payload.get("status") == "recovered":
+            recovered_status = payload.get("recovered_status")
+            state = (
+                recovered_status
+                if isinstance(recovered_status, str) and recovered_status
+                else "recovered"
+            )
         elif event_type == "candidate_archived":
             state = payload.get("status")
             source_lines = payload.get("source_lines")
@@ -586,6 +618,15 @@ class RichLiveSink:
                 slots = {}
                 self.state["slot_states"] = slots
             slots[slot] = state
+        validation_codes = payload.get("validation_codes")
+        if isinstance(validation_codes, list):
+            codes = [
+                str(code)
+                for code in validation_codes
+                if isinstance(code, str) and code
+            ]
+            if codes:
+                detail["error"] = ",".join(codes)
         if event_type in {
             "provider_turn_completed",
             "provider_turn_failed",
@@ -1221,8 +1262,6 @@ class RichLiveSink:
     @staticmethod
     def _compact_state(value: object) -> str:
         return {
-            "repair_pending": "repair",
-            "validating": "validate",
             "probing": "probe",
             "evaluating": "eval",
             "accepted": "accepted",

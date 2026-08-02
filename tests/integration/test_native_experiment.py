@@ -15,13 +15,22 @@ from rich.console import Console
 
 from mutation_forge.backends.toy import ToyBackend
 from mutation_forge.experiment.config import load_experiment_config
-from mutation_forge.experiment.generation import GenerationConfig, GenerationCoordinator
+from mutation_forge.experiment.generation import (
+    GenerationConfig,
+    GenerationCoordinator,
+    ProviderResult,
+)
 from mutation_forge.experiment.layout import ExperimentLayout
 from mutation_forge.experiment.native import NativeExperimentAdapter
 from mutation_forge.experiment.service import ExperimentService
 from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.experiment.status import experiment_status
 from mutation_forge.output.rich_live import RichLiveSink
+from mutation_forge.sandbox.contracts import VALIDATOR_VERSION, SandboxLimits
+from mutation_forge.sandbox.validation import (
+    SAFE_BUILTINS,
+    render_policy_validator_contract,
+)
 
 VALID_SOURCE = "def priority(ctx, proposal):\n    return 0\n"
 INVALID_SOURCE = "def priority(ctx, proposal)\n    return 0\n"
@@ -143,6 +152,17 @@ class RepairProvider(RecordingProvider):
     ) -> Mapping[str, Any]:
         assert diagnostics
         self.source = VALID_SOURCE
+        return self.generate(request)
+
+
+class InvalidRepairProvider(RecordingProvider):
+    def __init__(self, source: str = INVALID_SOURCE) -> None:
+        super().__init__(source)
+
+    def repair(
+        self, request: Mapping[str, Any], diagnostics: tuple[Mapping[str, Any], ...]
+    ) -> Mapping[str, Any]:
+        assert diagnostics
         return self.generate(request)
 
 
@@ -377,6 +397,260 @@ def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path
     assert (initial / "turn-manifest.json").is_file()
     assert (repair / "turn-manifest.json").is_file()
     assert (repair / "behavior.json").is_file()
+    assert list((root / "artifacts" / "archive" / "programs").glob("*.json"))
+    assert list((root / "artifacts" / "evaluations" / "development").glob("*.json"))
+
+
+def test_invalid_final_repair_is_terminal_and_not_repeated_on_resume(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        max_turns=2,
+        max_repairs=1,
+    )
+    provider = InvalidRepairProvider()
+    service = _service(provider)
+
+    first = service.run(config_path)
+    second = service.run(config_path)
+    root = tmp_path / "workspace" / "native-test"
+    checkpoint = json.loads(
+        (root / "artifacts" / "native-generation-checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    events = [
+        json.loads(line)
+        for line in (
+            root / "artifacts" / "sessions" / "session-000001" / "events.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    slot_states = list(checkpoint["slots"].values())
+    state = ExperimentStateStore(root / "state.sqlite3")
+    try:
+        assert state.counts()["provider_turns"] == 2
+        assert state.cumulative()["total_tokens"] == 4
+    finally:
+        state.close()
+
+    assert first["state"] == "completed"
+    assert second["stop_reason"] == "already_completed"
+    assert len(provider.calls) == 2
+    assert {item["status"] for item in slot_states} == {"invalid"}
+    assert {item["repairs"] for item in slot_states} == {1}
+    assert {item["remaining_repairs"] for item in slot_states} == {0}
+    assert all(len(item["repair_idempotency_keys"]) == 1 for item in slot_states)
+    assert any(
+        event["event_type"] == "validation_completed"
+        and "syntax_error" in event["validation_codes"]
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "repair_completed"
+        and event["status"] == "invalid"
+        and event["repair_state"] == "repair_failed"
+        for event in events
+    )
+
+
+def test_multiple_repairs_use_distinct_durable_attempts(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        max_turns=3,
+        max_repairs=2,
+    )
+    provider = InvalidRepairProvider()
+    _service(provider).run(config_path)
+    root = tmp_path / "workspace" / "native-test"
+    checkpoint = json.loads(
+        (root / "artifacts" / "native-generation-checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    slot = next(iter(checkpoint["slots"].values()))
+    phases = (
+        root
+        / "artifacts"
+        / "generations"
+        / "generation-0000"
+        / "slot-00"
+    )
+
+    assert len(provider.calls) == 3
+    assert slot["status"] == "invalid"
+    assert slot["repairs"] == 2
+    assert slot["remaining_repairs"] == 0
+    assert len(slot["repair_idempotency_keys"]) == 2
+    assert (phases / "repair-01" / "turn-manifest.json").is_file()
+    assert (phases / "repair-02" / "turn-manifest.json").is_file()
+
+
+class _CrashAfterRepairAssessmentCoordinator(GenerationCoordinator):
+    def _assess(
+        self,
+        request: Any,
+        raw: ProviderResult,
+        *,
+        repair: bool = False,
+    ) -> Any:
+        result = super()._assess(request, raw, repair=repair)
+        if repair:
+            raise KeyboardInterrupt
+        return result
+
+
+class CrashAfterFailedRepairEvidenceEngine:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(
+        self,
+        provider: Any,
+        *,
+        config: Any,
+        layout: Any,
+        **_: Any,
+    ) -> Mapping[str, Any]:
+        self.calls += 1
+        coordinator_type = (
+            _CrashAfterRepairAssessmentCoordinator
+            if self.calls == 1
+            else GenerationCoordinator
+        )
+        generation = coordinator_type(
+            provider,
+            config=GenerationConfig(
+                campaign_id=config.exp_id,
+                generations=config.search.max_generations,
+                population_size=config.search.population_size,
+                concurrency=config.model.concurrency,
+                max_model_turns=config.search.max_model_turns,
+                max_repairs=config.model.max_repairs,
+                model=config.model.name,
+                effort=config.model.effort,
+                checkpoint_path=layout.artifacts / "native-generation-checkpoint.json",
+            ),
+        ).run(resume=True)
+        return {"status": generation.status, "generation": len(generation.generations)}
+
+
+def test_resume_reuses_durable_failed_repair_evidence(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        max_turns=2,
+        max_repairs=1,
+    )
+    provider = InvalidRepairProvider()
+    engine = CrashAfterFailedRepairEvidenceEngine()
+    service = _service(provider, engine=engine)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.run(config_path)
+    root = tmp_path / "workspace" / "native-test"
+    interrupted_state = ExperimentStateStore(root / "state.sqlite3")
+    try:
+        assert interrupted_state.counts()["provider_turns"] == 2
+        assert interrupted_state.cumulative()["total_tokens"] == 4
+    finally:
+        interrupted_state.close()
+
+    resumed = service.run(config_path)
+    final_state = ExperimentStateStore(root / "state.sqlite3")
+    try:
+        assert final_state.counts()["provider_turns"] == 2
+        assert final_state.cumulative()["total_tokens"] == 4
+    finally:
+        final_state.close()
+    checkpoint = json.loads(
+        (root / "artifacts" / "native-generation-checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert resumed["state"] == "completed"
+    assert len(provider.calls) == 2
+    assert {item["status"] for item in checkpoint["slots"].values()} == {"invalid"}
+
+
+def test_native_prompts_embed_exact_validator_contract_and_repair_budget(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        max_turns=2,
+        max_repairs=1,
+    )
+    provider = RepairProvider()
+    _service(provider).run(config_path)
+
+    contract = render_policy_validator_contract(SandboxLimits())
+    assert len(provider.calls) == 2
+    assert all(contract in request["prompt"] for request in provider.calls)
+    assert VALIDATOR_VERSION in contract
+    assert ", ".join(f"`{name}`" for name in sorted(SAFE_BUILTINS)) in contract
+    repair = provider.calls[1]
+    assert repair["repair_attempt"] == 1
+    assert repair["remaining_repairs"] == 0
+    assert "Repair attempt 1 of 1; 0 repairs remain after this attempt." in repair["prompt"]
+    assert INVALID_SOURCE.strip() in repair["prompt"]
+    assert "syntax_error" in repair["prompt"]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_code"),
+    [
+        (
+            "def helper():\n    return 1\n\n"
+            "def priority(ctx, proposal):\n    return helper()\n",
+            "top_level_contract",
+        ),
+        (
+            "def priority(ctx, proposal):\n    _score = 1\n    return _score\n",
+            "private_name",
+        ),
+        (
+            "def priority(ctx, proposal):\n    return proposal.get('k')\n",
+            "forbidden_call",
+        ),
+        (
+            "def priority(ctx, proposal):\n    return sorted(proposal['k'])\n",
+            "forbidden_call",
+        ),
+    ],
+)
+def test_validator_contract_failures_use_at_most_configured_repairs(
+    tmp_path: Path,
+    source: str,
+    expected_code: str,
+) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        max_turns=2,
+        max_repairs=1,
+    )
+    provider = InvalidRepairProvider(source)
+    _service(provider).run(config_path)
+    checkpoint = json.loads(
+        (
+            tmp_path
+            / "workspace"
+            / "native-test"
+            / "artifacts"
+            / "native-generation-checkpoint.json"
+        ).read_text(encoding="utf-8")
+    )
+    slot = next(iter(checkpoint["slots"].values()))
+    codes = {item["code"] for item in slot["errors"]}
+
+    assert len(provider.calls) == 2
+    assert slot["status"] == "invalid"
+    assert expected_code in codes
 
 
 class InterruptingEngine:
