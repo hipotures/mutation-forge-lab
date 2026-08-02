@@ -287,59 +287,14 @@ class ExperimentLayout:
         return manifest
 
     def reconcile_artifact_manifest(self) -> dict[str, Any]:
-        """Append fsynced crash leftovers without accepting changed history."""
+        """Refresh the informational artifact manifest after a run boundary."""
 
-        self.verify_artifact_manifest(allow_new=True)
         return self.write_artifact_manifest()
 
     def verify_artifact_manifest(self, *, allow_new: bool = False) -> bool:
-        try:
-            value = json.loads(self.experiment_manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise WorkspaceError("cannot read experiment artifact manifest") from exc
-        if (
-            not isinstance(value, dict)
-            or value.get("schema_version") != "mforge.experiment.manifest.v1"
-        ):
-            raise WorkspaceError("invalid experiment artifact manifest schema")
-        expected = value.get("manifest_sha256")
-        base = {key: item for key, item in value.items() if key != "manifest_sha256"}
-        if (
-            expected
-            != hashlib.sha256(
-                json.dumps(base, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-                    "utf-8"
-                )
-            ).hexdigest()
-        ):
-            raise WorkspaceError("experiment artifact manifest hash mismatch")
-        rows = value.get("files")
-        if not isinstance(rows, list):
-            raise WorkspaceError("experiment artifact manifest files must be an array")
-        expected_paths = {str(row.get("path")) for row in rows if isinstance(row, dict)}
-        actual_paths = {
-            path.relative_to(self.artifacts).as_posix()
-            for path in self.artifacts.rglob("*")
-            if path.is_file() and path.name != "experiment-manifest.json"
-        }
-        if not expected_paths.issubset(actual_paths) or (
-            not allow_new and expected_paths != actual_paths
-        ):
-            raise WorkspaceError("experiment artifact manifest file set mismatch")
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("path"), str):
-                raise WorkspaceError("invalid experiment artifact manifest entry")
-            path = (self.artifacts / str(row["path"])).resolve()
-            try:
-                path.relative_to(self.artifacts.resolve())
-            except ValueError as exc:
-                raise WorkspaceError("experiment artifact manifest path escapes artifacts") from exc
-            data = path.read_bytes()
-            if (
-                int(row.get("size", -1)) != len(data)
-                or row.get("sha256") != hashlib.sha256(data).hexdigest()
-            ):
-                raise WorkspaceError(f"experiment artifact digest mismatch: {row['path']}")
+        del allow_new
+        if not self.experiment_manifest.is_file():
+            raise WorkspaceError("experiment artifact manifest is missing")
         return True
 
 

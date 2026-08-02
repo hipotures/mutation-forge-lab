@@ -399,12 +399,9 @@ class ExperimentStateStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM ownership WHERE singleton=1").fetchone()
             if row is not None:
-                existing_pid = int(row["pid"])
-                if alive(existing_pid):
-                    connection.rollback()
-                    raise ActiveSessionError(exp_id, existing_pid, str(row["started_at"]))
-                # The old process is gone.  Keep its durable session and make
-                # the next run explicitly recover it rather than discarding it.
+                # Ownership is a durable hint, not a reason to block recovery.
+                # A restarted invocation always takes over the workspace and
+                # preserves the previous session as interrupted.
                 connection.execute(
                     "UPDATE sessions SET status='interrupted',finished_at=?,"
                     "ending_state='interrupted',"

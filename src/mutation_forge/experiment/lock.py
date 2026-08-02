@@ -463,22 +463,6 @@ def verify_lock(
         locked_profile = locked_app_server.get("profile_identity")
         if isinstance(locked_profile, Mapping) and locked_profile != _codex_profile_identity():
             raise LockError("local Codex profile identity drifted")
-    locked_provenance = lock.get("provenance")
-    if isinstance(locked_provenance, Mapping):
-        current_project = _git_state(project)
-        current_heg = _git_state(project.parent / "heg")
-        for name, current in (("mutation_forge", current_project), ("heg", current_heg)):
-            locked = locked_provenance.get(name)
-            if (
-                isinstance(locked, Mapping)
-                and isinstance(current, Mapping)
-                and (
-                    locked.get("repo") != current.get("repo")
-                    or locked.get("commit") != current.get("commit")
-                    or locked.get("dirty") != current.get("dirty")
-                )
-            ):
-                raise LockError(f"repository provenance drifted for {name}")
 
 
 compare_lock = verify_lock

@@ -451,6 +451,11 @@ class _NativeProvider:
                 result=value,
             )
             self.turns.verify_turn(directory)
+        # The transport logger may flush stream files after the session
+        # observer has indexed the workspace. Refresh the experiment manifest
+        # after the complete turn artifact is durable so continuation does not
+        # reject a valid turn for a stale stream digest.
+        self.layout.write_artifact_manifest()
         with self._lock:
             recorded = self.state.record_provider_turn(
                 idempotency_key=self._key(request),
