@@ -17,7 +17,8 @@ from mutation_forge.experiment.config import (
     load_experiment_config,
     validate_experiment_id,
 )
-from mutation_forge.experiment.layout import WorkspaceError
+from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
+from mutation_forge.experiment.provider import NativeProviderConfig, _CodexTransport
 from mutation_forge.experiment.service import ExperimentService, NullExperimentAdapter
 from mutation_forge.experiment.state import ActiveSessionError, ExperimentStateStore
 from mutation_forge.experiment.status import (
@@ -526,3 +527,65 @@ def test_incomplete_turn_fails_closed_but_retains_manifest(tmp_path: Path) -> No
         (store.turn_directory(0, 0) / "turn-manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["artifact_complete"] is False
+
+
+def test_retry_archives_incomplete_turn_manifest(tmp_path: Path) -> None:
+    store = TurnArtifactStore(tmp_path / "artifacts", max_bytes=4)
+    with pytest.raises(ArtifactIncompleteError):
+        store.write_turn(generation=0, slot=0, request_text="too long")
+    directory = store.turn_directory(0, 0)
+
+    archived = store.archive_retryable_manifest(directory)
+
+    assert archived.name == "turn-manifest.attempt-01.json"
+    assert json.loads(archived.read_text(encoding="utf-8"))["artifact_complete"] is False
+    assert not (directory / "turn-manifest.json").exists()
+    assert (
+        store.artifact_prefix(
+            directory,
+            {"artifact_refs": ["slot-00.retry-01.request.md"]},
+            "slot-00",
+        )
+        == "slot-00.retry-01"
+    )
+
+
+def test_native_transport_uses_per_turn_limit_and_retry_prefix(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "all-artifacts"
+    turn = artifact_root / "generations" / "generation-0000" / "slot-00" / "initial"
+    turn.mkdir(parents=True)
+    (turn / "slot-00.request.md").write_text("partial", encoding="utf-8")
+    transport = _CodexTransport(
+        NativeProviderConfig(),
+        auth_json=None,
+        process_factory=None,
+        auth_checker=lambda _capsule: True,
+        sandbox_mode="danger-full-access",
+        approval_policy="never",
+    )
+
+    adapter = transport._adapter(
+        {
+            "artifact_dir": str(turn),
+            "artifact_root": str(artifact_root),
+            "artifact_prefix": "slot-00",
+            "system_prompt": "Return one generated policy object.",
+        }
+    )
+    try:
+        assert adapter.logger is not None
+        assert adapter.logger.prefix == "slot-00.retry-01"
+        assert adapter.logger.aggregate_root == turn.resolve()
+    finally:
+        adapter.close(force=True)
+
+
+def test_artifact_manifest_ignores_atomic_write_temporary_files(tmp_path: Path) -> None:
+    layout = ExperimentLayout(tmp_path, "manifest-temporary-files")
+    layout.artifacts.mkdir(parents=True)
+    (layout.artifacts / "result.json").write_text("{}", encoding="utf-8")
+    (layout.artifacts / ".log.interrupted").write_text("partial", encoding="utf-8")
+
+    manifest = layout.write_artifact_manifest()
+
+    assert [entry["path"] for entry in manifest["files"]] == ["result.json"]

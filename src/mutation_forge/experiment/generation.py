@@ -424,6 +424,28 @@ class SlotResult:
         }
 
 
+def _slot_failure_is_retryable(value: Mapping[str, Any]) -> bool:
+    if str(value.get("status", "")) != "failed":
+        return False
+    raw = value.get("raw_result")
+    if not isinstance(raw, Mapping):
+        raw = (
+            value.get("repair")
+            if isinstance(value.get("repair"), Mapping)
+            else value.get("initial")
+        )
+    if not isinstance(raw, Mapping):
+        return True
+    usage = raw.get("usage")
+    total_tokens = usage.get("totalTokens") if isinstance(usage, Mapping) else None
+    charged = raw.get("charged") is True or (
+        isinstance(total_tokens, int)
+        and not isinstance(total_tokens, bool)
+        and total_tokens > 0
+    )
+    return not charged
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationResult:
     status: str
@@ -556,6 +578,7 @@ class GenerationCoordinator:
         search_feedback: Any = "",
         archive_context: Any = "",
         retry_infrastructure: bool = False,
+        budget_exhausted: Callable[[], bool] | None = None,
         behavior_evaluator: Any = None,
         observer: Any = None,
         event_callback: Any = None,
@@ -590,6 +613,7 @@ class GenerationCoordinator:
             retry_infrastructure,
             behavior_evaluator,
         )
+        self.budget_exhausted = budget_exhausted
         self.observer = observer if observer is not None else event_callback
         self._checkpoint_file = self.config.checkpoint_path
 
@@ -885,7 +909,7 @@ class GenerationCoordinator:
                     "accepted": False,
                     "charged": False,
                     "content": False,
-                    "uncharged": False,
+                    "uncharged": True,
                     **(dict(evidence) if isinstance(evidence, Mapping) else {}),
                     "error": str(exc),
                 }
@@ -1311,6 +1335,18 @@ class GenerationCoordinator:
         repairs = 0
         recovered = 0
         stopped = False
+        infrastructure_failed = False
+
+        def budget_reason() -> str | None:
+            if (
+                self.config.max_model_turns is not None
+                and turns >= self.config.max_model_turns
+            ):
+                return "max_model_turns"
+            if self.budget_exhausted is not None and self.budget_exhausted():
+                return "wall_seconds"
+            return None
+
         stored_next_generation = state.get("next_generation")
         if isinstance(stored_next_generation, int) and stored_next_generation >= 0:
             first_generation = stored_next_generation
@@ -1325,6 +1361,24 @@ class GenerationCoordinator:
                 and previous_generation >= 0
                 else 0
             )
+        retry_generations = {
+            int(value.get("generation", 0))
+            for value in slots_state.values()
+            if isinstance(value, Mapping)
+            and isinstance(value.get("generation"), int)
+            and _slot_failure_is_retryable(value)
+        }
+        if retry_generations and min(retry_generations) < first_generation:
+            first_generation = min(retry_generations)
+            state["next_generation"] = first_generation
+            for collection_name in ("callbacks", "selection"):
+                collection = state.get(collection_name)
+                if isinstance(collection, dict):
+                    for key in tuple(collection):
+                        if str(key).isdigit() and int(key) >= first_generation:
+                            collection.pop(key, None)
+            self._save(state)
+        state.setdefault("next_generation", first_generation)
         generation_limit = first_generation + self.config.generations
         previous_selection = state.get("selection")
         if (
@@ -1377,10 +1431,11 @@ class GenerationCoordinator:
                         population_size=self.config.slots,
                     )
                     cached = slots_state.get(request.idempotency_key)
-                    if isinstance(cached, Mapping) and cached.get("status") not in {
-                        "pending",
-                        "budget_exhausted",
-                    }:
+                    if (
+                        isinstance(cached, Mapping)
+                        and cached.get("status") not in {"pending", "budget_exhausted"}
+                        and not _slot_failure_is_retryable(cached)
+                    ):
                         results[slot] = self._from_slot(cached)
                         recovered += 1
                         self._emit(
@@ -1402,10 +1457,8 @@ class GenerationCoordinator:
                             population_size=self.config.slots,
                         )
                         continue
-                    if (
-                        self.config.max_model_turns is not None
-                        and turns >= self.config.max_model_turns
-                    ):
+                    exhausted_reason = budget_reason()
+                    if exhausted_reason is not None:
                         results[slot] = SlotResult(
                             generation,
                             slot,
@@ -1418,7 +1471,7 @@ class GenerationCoordinator:
                             "budget_boundary_reached",
                             generation=generation,
                             slot=slot,
-                            reason="max_model_turns",
+                            reason=exhausted_reason,
                             max_model_turns=self.config.max_model_turns,
                             completed_turns=turns,
                         )
@@ -1426,8 +1479,9 @@ class GenerationCoordinator:
                     futures[pool.submit(self._invoke, request)] = (slot, request)
                     turns += 1
                     active_model_turns += 1
-                for future in as_completed(futures):
-                    slot, request = futures[future]
+                while futures:
+                    future = next(as_completed(tuple(futures)))
+                    slot, request = futures.pop(future)
                     try:
                         raw = future.result()
                     finally:
@@ -1435,15 +1489,63 @@ class GenerationCoordinator:
                     if raw.retained:
                         turns = max(0, turns - 1)
                         recovered += 1
-                    if (
+                    retryable_infrastructure = (
                         self.retry_infrastructure
                         and not raw.retained
                         and infrastructure_retry_allowed(raw)
-                        and (
-                            self.config.max_model_turns is None
-                            or turns < self.config.max_model_turns
+                    )
+                    continuously_retry = (
+                        self.config.max_model_turns is not None
+                        or self.budget_exhausted is not None
+                    )
+                    if retryable_infrastructure and continuously_retry:
+                        exhausted_reason = budget_reason()
+                        if exhausted_reason is None:
+                            futures[pool.submit(self._invoke, request)] = (
+                                slot,
+                                request,
+                            )
+                            turns += 1
+                            active_model_turns += 1
+                            self._emit(
+                                "slot_queued",
+                                generation=generation,
+                                slot=slot,
+                                parent_id=request.parent_id,
+                                phase=request.phase,
+                                status="retrying",
+                                active_model_turns=active_model_turns,
+                                remaining_model_turns=(
+                                    self.config.max_model_turns - turns
+                                    if self.config.max_model_turns is not None
+                                    else None
+                                ),
+                            )
+                            continue
+                        results[slot] = SlotResult(
+                            generation=generation,
+                            slot=slot,
+                            parent_id=request.parent_id,
+                            status="budget_exhausted",
+                            initial=raw.as_dict(),
+                            request=request.as_dict(),
+                            raw_result=raw.as_dict(),
+                            initial_request=request.as_dict(),
+                            remaining_repairs=self.config.max_repairs,
                         )
-                    ):
+                        slots_state[request.idempotency_key] = results[slot].as_dict()
+                        self._save(state)
+                        stopped = True
+                        self._emit(
+                            "budget_boundary_reached",
+                            generation=generation,
+                            slot=slot,
+                            reason=exhausted_reason,
+                            max_model_turns=self.config.max_model_turns,
+                            completed_turns=turns,
+                        )
+                        continue
+                    if retryable_infrastructure and budget_reason() is None:
                         raw = self._invoke(request)
                         turns += 1
                     candidate, diagnostics = self._assess(request, raw)
@@ -1724,7 +1826,14 @@ class GenerationCoordinator:
             generations.append(tuple(ordered))
             state["generation"] = generation
             self._save(state)
-            if self.selection_callback is not None and str(generation) not in callbacks:
+            generation_retryable = any(
+                _slot_failure_is_retryable(item.as_dict()) for item in ordered
+            )
+            if (
+                not generation_retryable
+                and self.selection_callback is not None
+                and str(generation) not in callbacks
+            ):
                 try:
                     selected = self.selection_callback(
                         generation, tuple(generation_candidates), tuple(ordered)
@@ -1764,9 +1873,11 @@ class GenerationCoordinator:
                     )
                 callbacks[str(generation)] = {"status": "completed"}
                 self._save(state)
-            if not stopped:
+            if not stopped and not generation_retryable:
                 state["next_generation"] = generation + 1
                 self._save(state)
+            if generation_retryable:
+                infrastructure_failed = True
             self._emit(
                 "generation_completed",
                 generation=generation,
@@ -1792,12 +1903,18 @@ class GenerationCoordinator:
                     if item.status == "duplicate"
                 ),
                 recovered_work=recovered,
-                stopped=stopped,
+                stopped=stopped or infrastructure_failed,
             )
-            if stopped:
+            if stopped or infrastructure_failed:
                 break
         flat = tuple(item for group in generations for item in group)
-        status = "budget_exhausted" if stopped else "completed"
+        status = (
+            "infrastructure_failed"
+            if infrastructure_failed
+            else "budget_exhausted"
+            if stopped
+            else "completed"
+        )
         summary = {
             "status": status,
             "generation_count": len(generations),

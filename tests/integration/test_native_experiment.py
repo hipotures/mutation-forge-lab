@@ -757,3 +757,61 @@ def test_charged_failed_turn_is_retained_without_replacement_call(tmp_path: Path
     assert first["state"] == "idle"
     assert second["stop_reason"] == "generation_batch_completed"
     assert provider.calls == 2
+
+
+def test_uncharged_infrastructure_failure_retries_same_generation(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "native-checkpoint.json"
+
+    class InfrastructureFailureProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, _request: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.calls += 1
+            return {
+                "status": "infrastructure",
+                "accepted": False,
+                "charged": False,
+                "uncharged": True,
+                "content": False,
+                "usage": {"totalTokens": 0},
+                "error": "pre-request failure",
+            }
+
+    failed_provider = InfrastructureFailureProvider()
+    first = GenerationCoordinator(
+        failed_provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=1,
+            max_repairs=0,
+            checkpoint_path=checkpoint,
+        ),
+    ).run()
+    retained = json.loads(checkpoint.read_text(encoding="utf-8"))
+
+    assert first.status == "infrastructure_failed"
+    assert first.summary["completed_generation_count"] == 0
+    assert retained["next_generation"] == 0
+
+    successful_provider = RecordingProvider()
+    second = GenerationCoordinator(
+        successful_provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=1,
+            max_repairs=0,
+            checkpoint_path=checkpoint,
+        ),
+    ).run()
+
+    assert second.status == "completed"
+    assert second.summary["first_generation"] == 0
+    assert second.summary["completed_generation_count"] == 1
+    assert len(successful_provider.calls) == 1

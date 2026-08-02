@@ -105,6 +105,20 @@ class _CodexTransport:
 
         artifact_dir = request.get("artifact_dir")
         prefix = str(request.get("artifact_prefix", "slot-00"))
+        if isinstance(artifact_dir, (str, Path)):
+            directory = Path(artifact_dir)
+            if directory.is_dir() and any(
+                path.name == prefix or path.name.startswith(f"{prefix}.")
+                for path in directory.iterdir()
+            ):
+                attempt = 1
+                while any(
+                    path.name == f"{prefix}.retry-{attempt:02d}"
+                    or path.name.startswith(f"{prefix}.retry-{attempt:02d}.")
+                    for path in directory.iterdir()
+                ):
+                    attempt += 1
+                prefix = f"{prefix}.retry-{attempt:02d}"
         adapter = CodexAppServerAdapter(
             process_factory=self.process_factory,
             auth_checker=self.auth_checker,
@@ -113,9 +127,9 @@ class _CodexTransport:
             base_instructions=str(request.get("system_prompt", "")),
             artifact_dir=artifact_dir,
             artifact_prefix=prefix,
-            artifact_root=request.get("artifact_root")
-            if isinstance(request.get("artifact_root"), (str, Path))
-            else None,
+            # The transport bound applies to one turn.  A long-running
+            # experiment legitimately grows beyond one turn's byte limit.
+            artifact_root=None,
             sandbox_mode=self.sandbox_mode,
             approval_policy=self.approval_policy,
         )
@@ -277,6 +291,12 @@ class _CodexTransport:
                     "request_id": result.request_id,
                     "diagnostics": list(result.diagnostics),
                 },
+            )
+            value["artifact_refs"] = sorted(
+                path.name
+                for path in Path(adapter.logger.directory).iterdir()
+                if path.name == adapter.logger.prefix
+                or path.name.startswith(f"{adapter.logger.prefix}.")
             )
         return value
 

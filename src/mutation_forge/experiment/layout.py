@@ -342,7 +342,7 @@ def _fsync_tree(root: Path) -> None:
 def _artifact_manifest(root: Path) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        if path.name == "experiment-manifest.json":
+        if path.name == "experiment-manifest.json" or path.name.startswith("."):
             continue
         data = path.read_bytes()
         files.append(

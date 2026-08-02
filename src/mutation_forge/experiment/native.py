@@ -244,7 +244,6 @@ class _NativeProvider:
             return None
         if not manifest_path.is_file():
             return None
-        self.turns.verify_turn(directory)
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             slot = str(request.get("slot", "slot-00"))
@@ -278,6 +277,22 @@ class _NativeProvider:
             ) from exc
         if not isinstance(manifest, Mapping):
             return None
+        usage_total = (
+            usage.get("totalTokens") if isinstance(usage, Mapping) else None
+        )
+        retryable = manifest.get("artifact_complete") is not True or (
+            str(manifest.get("terminal_status", "completed")) != "completed"
+            and manifest.get("charged") is not True
+            and not (
+                isinstance(usage_total, int)
+                and not isinstance(usage_total, bool)
+                and usage_total > 0
+            )
+        )
+        if retryable:
+            self.turns.archive_retryable_manifest(directory)
+            return None
+        self.turns.verify_turn(directory)
         status = str(manifest.get("terminal_status", "completed"))
         return {
             "status": status,
@@ -370,6 +385,28 @@ class _NativeProvider:
         directory = self.layout.generation_slot_phase(generation, slot, phase)
         usage = value.get("usage") if isinstance(value.get("usage"), Mapping) else {}
         status = str(value.get("status", "completed"))
+        manifest_path = directory / "turn-manifest.json"
+        retained_manifest: Any = None
+        if manifest_path.is_file():
+            retained_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if directory.exists() and (
+            not isinstance(retained_manifest, Mapping)
+            or retained_manifest.get("artifact_complete") is not True
+        ):
+            artifact_prefix = self.turns.artifact_prefix(directory, value, slot)
+            usage_path = directory / f"{artifact_prefix}.usage.json"
+            if not usage_path.is_file() and usage:
+                descriptor = os.open(
+                    usage_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                try:
+                    payload = _canonical(usage) + b"\n"
+                    os.write(descriptor, payload)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
         if not directory.exists():
             self.turns.write_turn(
                 generation=generation,
@@ -426,23 +463,22 @@ class _NativeProvider:
                 validation_completed=bool(value.get("validation_completed", False)),
                 error=str(value.get("error")) if value.get("error") else None,
             )
-        elif (directory / "turn-manifest.json").is_file():
-            self.turns.verify_turn(directory)
-        else:
-            usage_path = directory / f"{slot}.usage.json"
-            if not usage_path.is_file() and usage:
-                directory.mkdir(parents=True, exist_ok=True)
-                descriptor = os.open(
-                    usage_path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
+        elif isinstance(retained_manifest, Mapping):
+            if (
+                retained_manifest.get("artifact_complete") is True
+            ):
+                self.turns.verify_turn(directory)
+            else:
+                self.turns.record_existing_turn(
+                    directory,
+                    generation=generation,
+                    slot=slot,
+                    phase=phase,
+                    request=request,
+                    result=value,
                 )
-                try:
-                    payload = _canonical(usage) + b"\n"
-                    os.write(descriptor, payload)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                self.turns.verify_turn(directory)
+        else:
             self.turns.record_existing_turn(
                 directory,
                 generation=generation,
@@ -497,7 +533,10 @@ class _NativeProvider:
             }
             if isinstance(evidence, Mapping):
                 failure_result.update(cast(Mapping[str, Any], evidence))
-            self._record(request, failure_result)
+            try:
+                self._record(request, failure_result)
+            except ArtifactIncompleteError as artifact_error:
+                error.add_note(f"artifact retention also failed: {artifact_error}")
             raise
 
     def repair(
@@ -526,7 +565,10 @@ class _NativeProvider:
             result = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
             if isinstance(evidence, Mapping):
                 result.update(dict(evidence))
-            self._record(request, result)
+            try:
+                self._record(request, result)
+            except ArtifactIncompleteError as artifact_error:
+                error.add_note(f"artifact retention also failed: {artifact_error}")
             raise
 
     def close(self) -> None:
@@ -1178,6 +1220,8 @@ class NativeExperimentAdapter:
                     prompt_renderer=render_prompt,
                     selection_callback=on_generation,
                     behavior_evaluator=_native_behavior,
+                    retry_infrastructure=True,
+                    budget_exhausted=session.budget_exhausted,
                     observer=callback,
                 )
                 generation_result = coordinator.run(resume=True)
@@ -1197,13 +1241,21 @@ class NativeExperimentAdapter:
         outcome: dict[str, Any] = {
             "state": "idle",
             "stop_reason": (
-                "generation_batch_completed" if batch_completed else "budget_exhausted"
+                "generation_batch_completed"
+                if batch_completed
+                else "infrastructure_failed"
+                if str(result.get("status")) == "infrastructure_failed"
+                else "budget_exhausted"
             ),
             "generation": int(result.get("generation", 0) or 0),
             "provider_turns": session.provider_turns_completed,
             "evaluations": [],
             "result": dict(result),
         }
+        if str(result.get("status")) == "infrastructure_failed":
+            outcome["last_error"] = (
+                "native generation paused after an uncharged provider infrastructure failure"
+            )
         if last_timing_profile is not None:
             outcome["timing_profile"] = last_timing_profile
         if last_ir is not None:

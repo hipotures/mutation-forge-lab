@@ -1112,6 +1112,9 @@ class ExperimentService:
                     session,
                     state=outcome["state"],
                     stop_reason=str(outcome.get("stop_reason", "budget_exhausted")),
+                    exit_status=(
+                        1 if outcome.get("stop_reason") == "infrastructure_failed" else 0
+                    ),
                     summary={**outcome, "result": outcome.get("result")},
                 )
                 hub.emit(
@@ -1353,7 +1356,13 @@ class ExperimentService:
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "schema_version": "mforge.experiment.run.v1",
-            "status": "completed" if outcome.get("state") in {"idle", "completed"} else "failed",
+            "status": (
+                "failed"
+                if outcome.get("stop_reason") == "infrastructure_failed"
+                else "completed"
+                if outcome.get("state") in {"idle", "completed"}
+                else "failed"
+            ),
             "exp_id": config.exp_id,
             "state": outcome.get("state"),
             "workspace": str(layout.root),

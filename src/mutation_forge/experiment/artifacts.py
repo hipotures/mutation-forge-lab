@@ -580,7 +580,13 @@ class TurnArtifactStore:
             raise ArtifactIncompleteError(f"turn artifact directory is missing: {root}")
         manifest_path = root / ARTIFACT_MANIFEST
         if manifest_path.exists():
-            return cast(dict[str, Any], json.loads(manifest_path.read_text(encoding="utf-8")))
+            retained_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(retained_manifest, Mapping)
+                and retained_manifest.get("artifact_complete") is True
+            ):
+                return cast(dict[str, Any], retained_manifest)
+            self.archive_retryable_manifest(root)
         slot_text = str(slot) if str(slot).startswith("slot-") else f"slot-{int(slot):02d}"
         files = sorted(
             path for path in root.rglob("*") if path.is_file() and not path.name.startswith(".log.")
@@ -641,24 +647,7 @@ class TurnArtifactStore:
                 )
                 blocking.add(relative)
         names = {path.name for path in files}
-        request_names = sorted(
-            path.name.removesuffix(".request.md")
-            for path in files
-            if path.name.endswith(".request.md")
-        )
-        # The provider may allocate a retry suffix after a host interruption.
-        # Prefer the provider's explicit artifact references, then the newest
-        # flushed request namespace, rather than assuming the original slot
-        # name.  This keeps a retry's response paired with its own transport.
-        artifact_prefix: str | None = None
-        refs = result.get("artifact_refs")
-        if isinstance(refs, Sequence) and not isinstance(refs, (str, bytes, bytearray)):
-            for reference in refs:
-                if isinstance(reference, str) and reference.endswith(".request.md"):
-                    artifact_prefix = reference.removesuffix(".request.md").split("/")[-1]
-                    break
-        if artifact_prefix is None:
-            artifact_prefix = request_names[-1] if request_names else slot_text
+        artifact_prefix = self.artifact_prefix(root, result, slot_text)
         request_name = f"{artifact_prefix}.request.md"
         if request_name not in names:
             missing[request_name] = "request construction did not produce request.md"
@@ -784,6 +773,43 @@ class TurnArtifactStore:
                 + "; ".join(f"{key}: {missing[key]}" for key in sorted(blocking))
             )
         return manifest
+
+    @staticmethod
+    def artifact_prefix(
+        directory: str | Path,
+        result: Mapping[str, Any],
+        slot: str,
+    ) -> str:
+        """Return the exact transport namespace used by one provider attempt."""
+
+        refs = result.get("artifact_refs")
+        if isinstance(refs, Sequence) and not isinstance(refs, (str, bytes, bytearray)):
+            for reference in refs:
+                if isinstance(reference, str) and reference.endswith(".request.md"):
+                    return reference.removesuffix(".request.md").split("/")[-1]
+        request_names = sorted(
+            path.name.removesuffix(".request.md")
+            for path in Path(directory).iterdir()
+            if path.is_file() and path.name.endswith(".request.md")
+        )
+        return request_names[-1] if request_names else slot
+
+    def archive_retryable_manifest(self, directory: str | Path) -> Path:
+        """Preserve a nonterminal attempt before another provider try."""
+
+        root = Path(directory)
+        manifest_path = root / ARTIFACT_MANIFEST
+        if not manifest_path.is_file():
+            raise ArtifactIncompleteError(f"turn manifest is missing: {manifest_path}")
+        attempt = 1
+        while True:
+            archived = root / f"turn-manifest.attempt-{attempt:02d}.json"
+            if not archived.exists():
+                break
+            attempt += 1
+        _atomic_write(archived, manifest_path.read_bytes(), exclusive=True)
+        manifest_path.unlink()
+        return archived
 
     def verify_turn(self, directory: str | Path) -> bool:
         root = Path(directory)
