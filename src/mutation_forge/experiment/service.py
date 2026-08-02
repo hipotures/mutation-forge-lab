@@ -64,12 +64,11 @@ class NullExperimentAdapter:
 
 
 class LegacyStage4Adapter:
-    """Optional adapter for a configured legacy Stage 4 campaign.
+    """Compatibility placeholder for a future legacy-engine adapter.
 
-    The generic experiment layer never invents a stage path.  A caller may
-    provide ``legacy_stage4_config`` in the TOML for an explicit migration
-    bridge; normal experiment configurations use ``NullExperimentAdapter`` or
-    a real adapter supplied by the application.
+    Stage 1 deliberately does not execute generated code, call a model, or
+    start evolutionary search.  Keeping this named boundary lets a later
+    milestone supply a real adapter without changing workspace semantics.
     """
 
     def __init__(self, *, provider: Any | None = None) -> None:
@@ -82,29 +81,8 @@ class LegacyStage4Adapter:
         state: ExperimentStateStore,
         session: SessionContext,
     ) -> Mapping[str, Any]:
-        legacy = config.raw.get("legacy_stage4_config")
-        if not isinstance(legacy, str) or not legacy:
-            return NullExperimentAdapter().run(config, layout, state, session)
-        from mutation_forge.stage4.commands import evolve
-
-        def observe(event: Mapping[str, Any]) -> None:
-            state.write_event(
-                str(event.get("event", "adapter_event")), event, session_id=session.session_id
-            )
-
-        result = evolve(
-            (config.source_dir / legacy).resolve(),
-            provider=self.provider,
-            concurrency=config.model.concurrency,
-            resume=True,
-            observer=observe,
-        )
-        status = "completed" if result.get("status") == "completed" else "idle"
-        return {
-            "state": status,
-            "stop_reason": str(result.get("stop_reason", "adapter_complete")),
-            "result": result,
-        }
+        del config, layout, state, session
+        return {"state": "idle", "stop_reason": "adapter_not_enabled"}
 
 
 class ExperimentService:

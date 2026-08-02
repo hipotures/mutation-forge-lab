@@ -137,6 +137,10 @@ class SessionManager:
         )
         for filename in ("events.jsonl", "stdout.log", "stderr.log"):
             (directory / filename).touch()
+        # Make the append-only session destination visible in the experiment
+        # manifest before any adapter/provider work can begin.  This keeps a
+        # process interruption immediately after session creation recoverable.
+        self.layout.write_artifact_manifest()
         return SessionContext(
             number,
             session_id,
@@ -154,6 +158,7 @@ class SessionManager:
             handle.flush()
             os.fsync(handle.fileno())
         self.state.write_event(event_type, payload, session_id=session.session_id)
+        self.layout.write_artifact_manifest()
 
     def log(self, session: SessionContext, stream: str, text: str) -> None:
         if stream not in {"stdout", "stderr"}:
@@ -162,6 +167,7 @@ class SessionManager:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        self.layout.write_artifact_manifest()
 
     def finish(
         self,
@@ -204,6 +210,7 @@ class SessionManager:
             exit_status=exit_status,
             summary=result,
         )
+        self.layout.write_artifact_manifest()
         return result
 
 
