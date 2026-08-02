@@ -360,7 +360,13 @@ class RichLiveSink:
             add("provider_turns_attempted")
         elif event.event_type in {"provider_turn_completed", "provider_turn_failed"}:
             self.state["active_model_turns"] = max(0, integer("active_model_turns") - 1)
-            if event.event_type == "provider_turn_completed":
+            if payload.get("retained") is True:
+                # A recovered terminal turn is observed by the coordinator
+                # but does not represent new provider work in this session.
+                self.state["provider_turns_attempted"] = max(
+                    0, integer("provider_turns_attempted") - 1
+                )
+            elif event.event_type == "provider_turn_completed":
                 add("provider_turns_completed")
                 add("responses_received")
             if event.event_type == "provider_turn_failed" and payload.get("charged") is True:

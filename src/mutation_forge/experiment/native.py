@@ -457,7 +457,7 @@ class _NativeProvider:
         # reject a valid turn for a stale stream digest.
         self.layout.write_artifact_manifest()
         with self._lock:
-            recorded = self.state.record_provider_turn(
+            self.state.record_provider_turn(
                 idempotency_key=self._key(request),
                 generation=generation,
                 slot=slot,
@@ -473,13 +473,6 @@ class _NativeProvider:
                 else None,
                 error=str(value.get("error")) if value.get("error") else None,
             )
-            if recorded:
-                self.session.provider_turns_attempted += 1
-                if status == "completed":
-                    self.session.provider_turns_completed += 1
-                total = usage.get("totalTokens") if isinstance(usage, Mapping) else None
-                if isinstance(total, int) and not isinstance(total, bool):
-                    self.session.token_usage_delta += total
         return value
 
     def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:

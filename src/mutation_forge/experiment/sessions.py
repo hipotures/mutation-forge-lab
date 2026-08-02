@@ -152,6 +152,21 @@ class SessionManager:
         )
 
     def event(self, session: SessionContext, event_type: str, **payload: Any) -> None:
+        # Count provider work at the event boundary as well as in the durable
+        # provider-turn ledger.  A Ctrl-C can arrive while the provider is
+        # blocked, before a terminal turn artifact exists; recording the start
+        # here keeps the finished session honest about that attempted work.
+        # Retained turns are replayed for resume bookkeeping and must not be
+        # charged to the new session.
+        if event_type == "provider_turn_started":
+            session.provider_turns_attempted += 1
+        elif event_type in {"provider_turn_completed", "provider_turn_failed"}:
+            if payload.get("retained") is True:
+                session.provider_turns_attempted = max(
+                    0, session.provider_turns_attempted - 1
+                )
+            elif event_type == "provider_turn_completed":
+                session.provider_turns_completed += 1
         event = {
             "schema_version": "1.0",
             "run_id": session.session_id,
