@@ -36,6 +36,18 @@ class NativeExperimentError(RuntimeError):
     """A native experiment could not complete its current safe boundary."""
 
 
+class _BehaviorProbeError(ValueError):
+    def __init__(
+        self,
+        error_type: str,
+        message: str,
+        telemetry: Mapping[str, Any],
+    ) -> None:
+        self.error_type = error_type
+        self.telemetry = dict(telemetry)
+        super().__init__(f"{error_type}: {message}" if message else error_type)
+
+
 def _canonical(value: object) -> bytes:
     return json.dumps(
         value,
@@ -106,7 +118,20 @@ def _native_behavior(
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     result = probe_policy(source, limits)
     if result.get("status") != "completed":
-        raise ValueError(str(result.get("status", "behavior probe failed")))
+        telemetry = result.get("worker_telemetry")
+        retained_telemetry = dict(telemetry) if isinstance(telemetry, Mapping) else {}
+        startup_error = retained_telemetry.get("startup_error")
+        if isinstance(startup_error, Mapping):
+            error_type = str(startup_error.get("error_type", "BehaviorProbeError"))
+            message = str(startup_error.get("message", ""))
+        else:
+            error_type = "BehaviorProbeError"
+            message = str(result.get("status", "behavior probe failed"))
+        raise _BehaviorProbeError(
+            error_type,
+            message,
+            retained_telemetry,
+        )
     signature = result.get("behavior_signature")
     telemetry = result.get("worker_telemetry")
     if not isinstance(signature, Mapping):
@@ -359,8 +384,17 @@ class _NativeProvider:
                 try:
                     behavior, telemetry = _native_behavior(source, self.sandbox_limits)
                 except Exception as error:
-                    value["behavior"] = {"status": "failed", "error": str(error)}
-                    value["worker_telemetry"] = {}
+                    value["behavior"] = {
+                        "status": "failed",
+                        "error_type": getattr(error, "error_type", type(error).__name__),
+                        "error": str(error),
+                    }
+                    retained_telemetry = getattr(error, "telemetry", {})
+                    value["worker_telemetry"] = (
+                        dict(retained_telemetry)
+                        if isinstance(retained_telemetry, Mapping)
+                        else {}
+                    )
                 else:
                     value["behavior"] = behavior
                     value["worker_telemetry"] = telemetry
