@@ -146,12 +146,25 @@ class _CodexTransport:
         prompt = request.get("prompt")
         system = request.get("system_prompt")
         schema = request.get("output_schema")
+        if not isinstance(system, str) or not system:
+            system_path = Path(__file__).resolve().parents[3] / "prompts" / "native" / "system.md"
+            try:
+                system = system_path.read_text(encoding="utf-8")
+            except OSError:
+                system = "Return one generated policy JSON object."
+        if not isinstance(schema, Mapping):
+            schema_path = (
+                Path(__file__).resolve().parents[3]
+                / "configs"
+                / "native"
+                / "generated-policy.schema.json"
+            )
+            try:
+                schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                schema = {"type": "object"}
         if not isinstance(prompt, str) or not prompt:
             raise ValueError("native provider prompt must be non-empty")
-        if not isinstance(system, str) or not system:
-            raise ValueError("native provider system_prompt must be non-empty")
-        if not isinstance(schema, Mapping):
-            raise ValueError("native provider output_schema must be an object")
         from mutation_forge.stage3.app_server import ModelProfile
 
         adapter = self._adapter(request)
