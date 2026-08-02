@@ -151,7 +151,9 @@ def _sandbox_limits(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _preset_metadata(config: ExperimentConfig, project: Path) -> dict[str, Any]:
+def _preset_metadata(
+    config: ExperimentConfig, project: Path, *, require_freeze: bool = False
+) -> dict[str, Any]:
     """Resolve the scientific assets named by the experiment preset."""
 
     if config.preset != "heg-ranker-evolution-v1":
@@ -204,13 +206,25 @@ def _preset_metadata(config: ExperimentConfig, project: Path) -> dict[str, Any]:
                 "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
                 "normalized_ast_sha256": identity.normalized_ast_sha256,
             }
-        freeze_identity: dict[str, Any] = {}
         try:
             from mutation_forge.stage4.commands import campaign_root
 
             freeze_path = campaign_root(stage4) / "search-freeze.json"
             if not freeze_path.is_file():
-                raise LockError(f"Stage 4 search freeze is missing: {freeze_path}")
+                if require_freeze:
+                    raise LockError(f"Stage 4 search freeze is missing: {freeze_path}")
+                return {
+                    "name": config.preset,
+                    "resolved": True,
+                    "stage4_config": str(stage4_path.resolve()),
+                    "stage4_config_sha256": sha256_file(stage4_path),
+                    "resolved_config": stage4.resolved_dict(),
+                    "identity": asdict(stage4.identity),
+                    "assets": identities,
+                    "baseline_identities": baseline_identities,
+                    "search_freeze": {"missing": True},
+                    "selection": stage4.model.max_accepted_turns,
+                }
             freeze_value = json.loads(freeze_path.read_text(encoding="utf-8"))
             if not isinstance(freeze_value, Mapping):
                 raise LockError("Stage 4 search freeze must be a JSON object")
@@ -219,8 +233,10 @@ def _preset_metadata(config: ExperimentConfig, project: Path) -> dict[str, Any]:
                 "sha256": sha256_file(freeze_path),
                 "doctor_sha256": freeze_value.get("doctor_sha256"),
             }
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
-            freeze_identity = {}
+        except LockError:
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise LockError("cannot read Stage 4 search freeze") from exc
         return {
             "name": config.preset,
             "resolved": True,
@@ -275,9 +291,10 @@ def build_lock(
         # omits an explicit repositories table.
         heg_path = project.parent / "heg"
     uv_lock = project / "uv.lock"
-    preset_metadata = _preset_metadata(config, project)
-    doctor_sha = raw.get("app_server_doctor_sha256")
     preflight_doctor = preflight.get("doctor") if isinstance(preflight, Mapping) else None
+    require_freeze = isinstance(preflight_doctor, Mapping)
+    preset_metadata = _preset_metadata(config, project, require_freeze=require_freeze)
+    doctor_sha = raw.get("app_server_doctor_sha256")
     if isinstance(preflight_doctor, Mapping):
         doctor_sha = sha256_bytes(canonical_bytes(preflight_doctor))
     if doctor_sha is not None and (

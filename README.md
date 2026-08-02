@@ -173,7 +173,10 @@ selection = "elite-diversity"
 [evaluation]
 orders = [10, 12]
 graph_seeds = [401, 402, 403, 404]
-policy_seeds = [4001, 4002, 4003, 4004]
+policy_seeds = [
+  4001, 4002, 4003, 4004, 4005, 4006, 4007, 4008,
+  4009, 4010, 4011, 4012, 4013, 4014, 4015, 4016,
+]
 horizon = 32
 proposal_pool_size = 12
 baselines = ["random", "structural"]

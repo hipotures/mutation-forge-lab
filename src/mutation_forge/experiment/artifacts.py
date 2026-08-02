@@ -421,6 +421,8 @@ class TurnArtifactStore:
             ("identity.json", "identity"),
             ("behavior.json", "behavior"),
             ("worker_telemetry.json", "worker_telemetry"),
+            ("provenance.json", "provenance"),
+            ("canonical_response.json", "canonical_response"),
         ):
             value = result.get(key)
             path = root / name
@@ -490,13 +492,18 @@ class TurnArtifactStore:
             blocking.add("usage.json")
         if not usage_complete(usage):
             missing.setdefault("usage.json", "not final exact usage for this failure boundary")
+        validation_is_valid = bool(
+            isinstance(validation_value, Mapping) and validation_value.get("valid") is True
+        )
         if source_path.is_file() and request_accepted and not failure_boundary:
-            for name in (
-                "validation.json",
-                "identity.json",
-                "behavior.json",
-                "worker_telemetry.json",
-            ):
+            required_finalization = ["validation.json", "identity.json"]
+            if validation_is_valid:
+                required_finalization.extend(["behavior.json", "worker_telemetry.json"])
+            for name in required_finalization:
+                if name not in names:
+                    missing[name] = "turn finalization did not retain this evidence"
+                    blocking.add(name)
+            for name in ("provenance.json", "canonical_response.json"):
                 if name not in names:
                     missing[name] = "turn finalization did not retain this evidence"
                     blocking.add(name)

@@ -46,7 +46,7 @@ policy_seeds = [
   4009, 4010, 4011, 4012, 4013, 4014, 4015, 4016,
 ]
 horizon = 32
-proposal_pool_size = 8
+proposal_pool_size = 12
 baselines = [\"random\", \"structural\"]
 replay = true
 

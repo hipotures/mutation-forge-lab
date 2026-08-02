@@ -155,9 +155,14 @@ class LegacyStage4Adapter:
                 engine_kwargs["run_override"] = run_override
             result = engine(stage4_config, **engine_kwargs)
         except _SessionBudgetExpired:
+            indexed = _index_legacy_run(run_override, state)
+            session.candidates_created += indexed["candidates"]
+            session.evaluations_completed += indexed["evaluations"]
+            generation = _stage4_generation(run_override)
             return {
                 "state": "idle",
                 "stop_reason": "budget_exhausted",
+                "generation": generation,
                 "provider_turns": session.provider_turns_completed,
             }
         finally:
@@ -219,6 +224,8 @@ def _require_stage4_compatibility(config: ExperimentConfig, stage4: Any) -> None
     """Fail closed when public config would not be executed by frozen Stage 4."""
 
     expected: dict[str, object] = {
+        "kind": "ranker-search",
+        "preset": "heg-ranker-evolution-v1",
         "model.provider": "codex",
         "model.name": stage4.model.name,
         "model.effort": stage4.model.effort,
@@ -232,13 +239,15 @@ def _require_stage4_compatibility(config: ExperimentConfig, stage4: Any) -> None
         "evaluation.graph_seeds": stage4.experiment.graph_seeds,
         "evaluation.policy_seeds": stage4.experiment.policy_seeds,
         "evaluation.horizon": stage4.experiment.horizon,
-        "evaluation.proposal_pool_size": stage4.model.slots,
+        "evaluation.proposal_pool_size": stage4.stage2b.pool.pool_size,
         "evaluation.baselines": ("random", "structural"),
         "evaluation.replay": True,
         "resources.workers": stage4.limits.max_evaluation_workers,
         "resources.thread_count": stage4.limits.thread_count,
     }
     actual: dict[str, object] = {
+        "kind": config.kind,
+        "preset": config.preset,
         "model.provider": config.model.provider,
         "model.name": config.model.name,
         "model.effort": config.model.effort,
@@ -268,6 +277,21 @@ def _require_stage4_compatibility(config: ExperimentConfig, stage4: Any) -> None
             "experiment.toml is incompatible with preset heg-ranker-evolution-v1: "
             + "; ".join(mismatches)
         )
+
+
+def _stage4_generation(run: Path) -> int:
+    try:
+        value = json.loads((run / "generation-checkpoint.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(value, Mapping):
+        return 0
+    generations = [
+        int(slot.get("generation", 0))
+        for slot in value.get("slots", {}).values()
+        if isinstance(slot, Mapping) and isinstance(slot.get("generation"), int)
+    ] if isinstance(value.get("slots"), Mapping) else []
+    return max(generations, default=0)
 
 
 def _prepare_stage4_workspace(config_path: Path, destination: Path) -> None:
@@ -437,6 +461,19 @@ class _WorkspaceStage4Provider:
         from mutation_forge.stage4.generation import _behavior
 
         value = dict(result)
+        value["canonical_response"] = dict(cast(Mapping[str, Any], response))
+        value["provenance"] = {
+            key: value.get(key)
+            for key in (
+                "provider_request_id",
+                "provider_thread_id",
+                "provider_turn_id",
+                "model",
+                "effort",
+                "prompt_hashes",
+                "appserver_doctor_sha256",
+            )
+        }
         validation = validate_policy(source, self.sandbox_limits)
         value["validation"] = validation.as_dict()
         value["identity"] = validation.identity.as_dict()
@@ -492,9 +529,10 @@ class _WorkspaceStage4Provider:
             str(request.get("slot", "slot-00")),
             self._phase(request),
         )
-        if existing is None:
+        manifest_path = directory / "turn-manifest.json"
+        if existing is None and not manifest_path.is_file():
             return None
-        if existing.get("state") != "completed":
+        if existing is not None and existing.get("state") != "completed":
             return None
         self.turns.verify_turn(directory)
         try:
@@ -555,6 +593,26 @@ class _WorkspaceStage4Provider:
                 "provider_turn_id": raw.get("provider_turn_id", raw.get("turn_id")),
                 "retained": True,
             }
+            if existing is None:
+                self.state.record_provider_turn(
+                    idempotency_key=key,
+                    generation=int(request.get("generation", 0)),
+                    slot=str(request.get("slot", "slot-00")),
+                    phase=self._phase(request),
+                    state="completed",
+                    artifact_path=str(directory),
+                    usage=usage,
+                    provider_thread_id=(
+                        str(result["provider_thread_id"])
+                        if result.get("provider_thread_id") is not None
+                        else None
+                    ),
+                    provider_turn_id=(
+                        str(result["provider_turn_id"])
+                        if result.get("provider_turn_id") is not None
+                        else None
+                    ),
+                )
             return result
         return None
 
@@ -623,6 +681,12 @@ def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
     """
 
     counts = {"candidates": 0, "evaluations": 0, "generation": 0}
+    known_candidates = {
+        str(row[0]) for row in state.connection.execute("SELECT candidate_id FROM candidates")
+    }
+    known_evaluations = {
+        str(row[0]) for row in state.connection.execute("SELECT identity FROM evaluations")
+    }
     archive_root = run / "archive"
     if archive_root.is_dir():
         try:
@@ -654,7 +718,9 @@ def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
                 status=("duplicate" if record.duplicate_of else "created"),
                 metadata=metadata,
             )
-            counts["candidates"] += 1
+            if record.program_id not in known_candidates:
+                counts["candidates"] += 1
+                known_candidates.add(record.program_id)
             counts["generation"] = max(counts["generation"], record.generation)
 
     for summary_path in sorted(run.rglob("*-summary.json")):
@@ -684,7 +750,9 @@ def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
             state="completed",
             result=compact,
         )
-        counts["evaluations"] += 1
+        if identity not in known_evaluations:
+            counts["evaluations"] += 1
+            known_evaluations.add(identity)
     return counts
 
 
