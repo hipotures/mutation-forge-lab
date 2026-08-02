@@ -41,6 +41,7 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_EFFORT = "high"
 DEFAULT_CONCURRENCY = 1
 DEFAULT_MAX_REPAIRS = 2
+DEFAULT_TURN_TIMEOUT_BASE_SECONDS = 120.0
 
 
 class NativeTransport(Protocol):
@@ -63,6 +64,7 @@ class NativeProviderConfig:
     effort: str = DEFAULT_EFFORT
     concurrency: int = DEFAULT_CONCURRENCY
     max_repairs: int = DEFAULT_MAX_REPAIRS
+    turn_timeout_base_seconds: float = DEFAULT_TURN_TIMEOUT_BASE_SECONDS
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -73,6 +75,16 @@ class NativeProviderConfig:
             raise ValueError("concurrency must be positive")
         if self.max_repairs < 0:
             raise ValueError("max_repairs must be non-negative")
+        if (
+            isinstance(self.turn_timeout_base_seconds, bool)
+            or not isinstance(self.turn_timeout_base_seconds, int | float)
+            or self.turn_timeout_base_seconds <= 0
+        ):
+            raise ValueError("turn_timeout_base_seconds must be positive")
+
+    @property
+    def turn_timeout_seconds(self) -> float:
+        return self.turn_timeout_base_seconds * (self.concurrency + 1)
 
 
 class _CodexTransport:
@@ -123,7 +135,11 @@ class _CodexTransport:
             process_factory=self.process_factory,
             auth_checker=self.auth_checker,
             auth_json=self.auth_json,
-            limits=AppServerLimits(max_turns=1, max_campaigns=1),
+            limits=AppServerLimits(
+                max_turns=1,
+                max_campaigns=1,
+                turn_timeout=self.config.turn_timeout_seconds,
+            ),
             base_instructions=str(request.get("system_prompt", "")),
             artifact_dir=artifact_dir,
             artifact_prefix=prefix,
@@ -386,6 +402,7 @@ class LocalCodexAppServerProvider:
         effort: str | None = None,
         concurrency: int | None = None,
         max_repairs: int | None = None,
+        turn_timeout_base_seconds: float | None = None,
         transport: NativeTransport | None = None,
         auth_json: str | Path | None = None,
         process_factory: Any | None = None,
@@ -401,19 +418,39 @@ class LocalCodexAppServerProvider:
                 effort=effort if effort is not None else DEFAULT_EFFORT,
                 concurrency=(concurrency if concurrency is not None else DEFAULT_CONCURRENCY),
                 max_repairs=(max_repairs if max_repairs is not None else DEFAULT_MAX_REPAIRS),
+                turn_timeout_base_seconds=(
+                    turn_timeout_base_seconds
+                    if turn_timeout_base_seconds is not None
+                    else DEFAULT_TURN_TIMEOUT_BASE_SECONDS
+                ),
             )
-        elif any(value is not None for value in (model, effort, concurrency, max_repairs)):
+        elif any(
+            value is not None
+            for value in (
+                model,
+                effort,
+                concurrency,
+                max_repairs,
+                turn_timeout_base_seconds,
+            )
+        ):
             config = NativeProviderConfig(
                 model=model if model is not None else config.model,
                 effort=effort if effort is not None else config.effort,
                 concurrency=concurrency if concurrency is not None else config.concurrency,
                 max_repairs=max_repairs if max_repairs is not None else config.max_repairs,
+                turn_timeout_base_seconds=(
+                    turn_timeout_base_seconds
+                    if turn_timeout_base_seconds is not None
+                    else config.turn_timeout_base_seconds
+                ),
             )
         self.config = config
         self.model = self.config.model
         self.effort = self.config.effort
         self.concurrency = self.config.concurrency
         self.max_repairs = self.config.max_repairs
+        self.turn_timeout_seconds = self.config.turn_timeout_seconds
         self.artifact_store = artifact_store
         self.persist_artifacts = persist_artifacts
         self._transport = transport or _CodexTransport(

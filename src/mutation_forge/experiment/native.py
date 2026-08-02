@@ -760,6 +760,7 @@ class NativeExperimentAdapter:
             effort=config.model.effort,
             concurrency=config.model.concurrency,
             max_repairs=config.model.max_repairs,
+            turn_timeout_base_seconds=config.run.turn_timeout_base_seconds,
             auth_json=auth_path if auth_path.is_file() else None,
             persist_artifacts=False,
         )
@@ -1210,6 +1211,7 @@ class NativeExperimentAdapter:
                     repair_prompt=repair_prompt,
                     sandbox_limits=SandboxLimits(),
                     checkpoint_path=layout.artifacts / "native-generation-checkpoint.json",
+                    turn_timeout_seconds=config.turn_timeout_seconds,
                 )
                 coordinator = GenerationCoordinator(
                     wrapped,

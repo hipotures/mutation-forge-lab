@@ -29,8 +29,6 @@ from mutation_forge.sandbox.validation import (
     validate_policy,
 )
 
-PROVIDER_TURN_TIMEOUT_SECONDS = 120.0
-
 
 class _InterruptibleThreadPoolExecutor(ThreadPoolExecutor):
     """Stop provider work before waiting for workers during Ctrl-C cleanup.
@@ -474,6 +472,7 @@ class GenerationConfig:
     max_repair_diagnostics: int = 8
     checkpoint_path: Path | None = None
     require_usage: bool = False
+    turn_timeout_seconds: float = 120.0
 
     def __post_init__(self) -> None:
         population = self.population_size if self.population_size is not None else self.slots
@@ -498,6 +497,12 @@ class GenerationConfig:
             isinstance(self.max_model_turns, bool) or self.max_model_turns < 0
         ):
             raise ValueError("max_model_turns must be non-negative")
+        if (
+            isinstance(self.turn_timeout_seconds, bool)
+            or not isinstance(self.turn_timeout_seconds, int | float)
+            or self.turn_timeout_seconds <= 0
+        ):
+            raise ValueError("turn_timeout_seconds must be positive")
         object.__setattr__(self, "slots", population)
         object.__setattr__(self, "max_workers", workers)
 
@@ -833,7 +838,7 @@ class GenerationCoordinator:
             idempotency_key=request.idempotency_key,
             repair_attempt=request.repair_attempt,
             provider_turn_state="running",
-            timeout_seconds=PROVIDER_TURN_TIMEOUT_SECONDS,
+            timeout_seconds=self.config.turn_timeout_seconds,
         )
 
         def heartbeat() -> None:
@@ -847,7 +852,7 @@ class GenerationCoordinator:
                     idempotency_key=request.idempotency_key,
                     repair_attempt=request.repair_attempt,
                     operation_elapsed_seconds=time.monotonic() - turn_started,
-                    timeout_seconds=PROVIDER_TURN_TIMEOUT_SECONDS,
+                    timeout_seconds=self.config.turn_timeout_seconds,
                     provider_turn_state="running",
                 )
 

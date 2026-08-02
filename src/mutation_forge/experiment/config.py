@@ -107,6 +107,7 @@ class ExperimentRunConfig:
     output: str = "rich"
     profiling_enabled: bool = False
     deep_profiling_enabled: bool = False
+    turn_timeout_base_seconds: float = 120.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,10 @@ class ExperimentConfig:
     @property
     def source_sha256(self) -> str:
         return hashlib.sha256(self.source_bytes).hexdigest()
+
+    @property
+    def turn_timeout_seconds(self) -> float:
+        return self.run.turn_timeout_base_seconds * (self.model.concurrency + 1)
 
     def immutable_projection(self) -> dict[str, Any]:
         """Return the canonical projection used by ``experiment.lock.json``."""
@@ -306,6 +311,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
             "deep_profiling_enabled",
             "profiling",
             "profile",
+            "turn_timeout_base_seconds",
         },
     )
     output = run_raw.get("output", "rich")
@@ -325,6 +331,10 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         output,
         profile_value,
         deep_profile_value,
+        _positive_number(
+            run_raw.get("turn_timeout_base_seconds", 120.0),
+            "run.turn_timeout_base_seconds",
+        ),
     )
 
     model_raw = _table(raw, "model")

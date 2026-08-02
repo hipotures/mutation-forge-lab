@@ -566,6 +566,7 @@ class RichLiveSink:
         if event_type == "provider_turn_started":
             state = "repair_running" if phase == "repair" else "model"
             detail["_started_at"] = time.monotonic()
+            detail.pop("error", None)
         elif event_type == "provider_turn_completed":
             state = (
                 "repair_running"
@@ -606,6 +607,9 @@ class RichLiveSink:
                 if isinstance(recovered_status, str) and recovered_status
                 else "recovered"
             )
+        elif event_type == "slot_queued" and payload.get("status") == "retrying":
+            state = "retrying"
+            detail.pop("error", None)
         elif event_type == "candidate_archived":
             state = payload.get("status")
             source_lines = payload.get("source_lines")
