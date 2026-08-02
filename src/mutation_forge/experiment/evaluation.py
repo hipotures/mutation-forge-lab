@@ -452,6 +452,7 @@ def evaluate_candidate(
     ranker_source: Any | None = None,
     artifact_root: str | Path | None = None,
     output_root: str | Path | None = None,
+    layout: Any | None = None,
     backend: GraphBackend | None = None,
     backend_factory: Callable[[Path], GraphBackend] | None = None,
     heg_repo: str | Path | None = None,
@@ -472,7 +473,7 @@ def evaluate_candidate(
     if source is None:
         raise ValueError("ranker source is required")
     if artifact_root is None:
-        artifact_root = output_root
+        artifact_root = output_root or _get(layout, "artifacts")
     settings = _settings(config)
     root = _artifact_root(config, artifact_root)
     limits = sandbox_limits or SandboxLimits()
@@ -559,6 +560,7 @@ def evaluate_population(
     *,
     population: Mapping[str, Any] | None = None,
     artifact_root: str | Path | None = None,
+    layout: Any | None = None,
     backend: GraphBackend | None = None,
     backend_factory: Callable[[Path], GraphBackend] | None = None,
     heg_repo: str | Path | None = None,
@@ -576,6 +578,7 @@ def evaluate_population(
             candidate_id,
             candidates[candidate_id],
             artifact_root=artifact_root,
+            layout=layout,
             backend=backend,
             backend_factory=backend_factory,
             heg_repo=heg_repo,
