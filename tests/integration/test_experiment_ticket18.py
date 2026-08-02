@@ -5,8 +5,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from mutation_forge import cli
 from mutation_forge.experiment.artifacts import TurnArtifactStore
+from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.experiment.service import ExperimentService, LegacyStage4Adapter
 from mutation_forge.experiment.status import experiment_status
 
@@ -26,26 +29,29 @@ wall_seconds = 30
 provider = \"codex\"
 name = \"gpt-5.6-luna\"
 effort = \"high\"
-concurrency = 1
-max_repairs = 0
+concurrency = 8
+max_repairs = 1
 
 [search]
-population_size = 2
-max_generations = 2
-max_model_turns = 4
+population_size = 8
+max_generations = 4
+max_model_turns = 64
 selection = \"elite-diversity\"
 
 [evaluation]
-orders = [10]
-graph_seeds = [401]
-policy_seeds = [4001]
-horizon = 4
-proposal_pool_size = 2
+orders = [10, 12]
+graph_seeds = [401, 402, 403, 404]
+policy_seeds = [
+  4001, 4002, 4003, 4004, 4005, 4006, 4007, 4008,
+  4009, 4010, 4011, 4012, 4013, 4014, 4015, 4016,
+]
+horizon = 32
+proposal_pool_size = 8
 baselines = [\"random\", \"structural\"]
 replay = true
 
 [resources]
-workers = 1
+workers = 8
 thread_count = 1
 """,
         encoding="utf-8",
@@ -173,6 +179,26 @@ def test_forced_interrupt_resumes_without_repeating_provider_turn(tmp_path: Path
         / "turn-manifest.json"
     )
     assert manifest.is_file()
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    assert value["artifact_complete"] is True
+    assert value["validation_completed"] is True
+    assert (manifest.parent / "identity.json").is_file()
+    assert (manifest.parent / "behavior.json").is_file()
+    assert (manifest.parent / "worker_telemetry.json").is_file()
+
+
+def test_incompatible_stage4_config_fails_before_workspace_creation(tmp_path: Path) -> None:
+    config = _config(tmp_path / "experiment.toml")
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("concurrency = 8", "concurrency = 1"),
+        encoding="utf-8",
+    )
+    service = ExperimentService(adapter=LegacyStage4Adapter(provider=_Provider(), engine=object()))
+
+    with pytest.raises(WorkspaceError, match="incompatible"):
+        service.run(config)
+
+    assert not (tmp_path / "workspace" / "continuation").exists()
 
 
 def test_failed_pre_response_is_complete_and_text_is_redacted(tmp_path: Path) -> None:

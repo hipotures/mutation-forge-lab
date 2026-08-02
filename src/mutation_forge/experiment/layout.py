@@ -286,7 +286,13 @@ class ExperimentLayout:
         )
         return manifest
 
-    def verify_artifact_manifest(self) -> bool:
+    def reconcile_artifact_manifest(self) -> dict[str, Any]:
+        """Append fsynced crash leftovers without accepting changed history."""
+
+        self.verify_artifact_manifest(allow_new=True)
+        return self.write_artifact_manifest()
+
+    def verify_artifact_manifest(self, *, allow_new: bool = False) -> bool:
         try:
             value = json.loads(self.experiment_manifest.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -316,7 +322,9 @@ class ExperimentLayout:
             for path in self.artifacts.rglob("*")
             if path.is_file() and path.name != "experiment-manifest.json"
         }
-        if expected_paths != actual_paths:
+        if not expected_paths.issubset(actual_paths) or (
+            not allow_new and expected_paths != actual_paths
+        ):
             raise WorkspaceError("experiment artifact manifest file set mismatch")
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("path"), str):

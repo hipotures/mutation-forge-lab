@@ -209,14 +209,16 @@ def _preset_metadata(config: ExperimentConfig, project: Path) -> dict[str, Any]:
             from mutation_forge.stage4.commands import campaign_root
 
             freeze_path = campaign_root(stage4) / "search-freeze.json"
-            if freeze_path.is_file():
-                freeze_value = json.loads(freeze_path.read_text(encoding="utf-8"))
-                if isinstance(freeze_value, Mapping):
-                    freeze_identity = {
-                        "path": str(freeze_path.resolve()),
-                        "sha256": sha256_file(freeze_path),
-                        "doctor_sha256": freeze_value.get("doctor_sha256"),
-                    }
+            if not freeze_path.is_file():
+                raise LockError(f"Stage 4 search freeze is missing: {freeze_path}")
+            freeze_value = json.loads(freeze_path.read_text(encoding="utf-8"))
+            if not isinstance(freeze_value, Mapping):
+                raise LockError("Stage 4 search freeze must be a JSON object")
+            freeze_identity = {
+                "path": str(freeze_path.resolve()),
+                "sha256": sha256_file(freeze_path),
+                "doctor_sha256": freeze_value.get("doctor_sha256"),
+            }
         except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
             freeze_identity = {}
         return {
@@ -249,7 +251,12 @@ def _redact(value: object, key: str = "") -> object:
     return value
 
 
-def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, Any]:
+def build_lock(
+    config: ExperimentConfig,
+    layout: ExperimentLayout,
+    *,
+    preflight: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build the authoritative lock without reading credentials."""
 
     project = _project_root()
@@ -270,6 +277,9 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
     uv_lock = project / "uv.lock"
     preset_metadata = _preset_metadata(config, project)
     doctor_sha = raw.get("app_server_doctor_sha256")
+    preflight_doctor = preflight.get("doctor") if isinstance(preflight, Mapping) else None
+    if isinstance(preflight_doctor, Mapping):
+        doctor_sha = sha256_bytes(canonical_bytes(preflight_doctor))
     if doctor_sha is not None and (
         not isinstance(doctor_sha, str)
         or len(doctor_sha) != 64
@@ -374,6 +384,7 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
             "binary_version": binary_version,
             "auth_mode": "local-profile",
             "doctor_sha256": str(doctor_sha) if isinstance(doctor_sha, str) else None,
+            "preflight": _redact(dict(preflight)) if isinstance(preflight, Mapping) else None,
             "profile_identity": profile_identity,
             "strict_config": True,
             "resolved": (

@@ -68,6 +68,15 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             "last_error": str(error),
         }
     try:
+        layout.verify_artifact_manifest(allow_new=True)
+    except WorkspaceError as error:
+        return {
+            **_not_created(config, layout),
+            "state": "failed",
+            "resumable": False,
+            "last_error": str(error),
+        }
+    try:
         state = ExperimentStateStore(layout.state)
     except StateError as error:
         return {
@@ -160,7 +169,12 @@ def _best_candidate(state: ExperimentStateStore) -> tuple[str | None, float | in
             continue
         if not isinstance(metadata, Mapping):
             continue
-        metric = metadata.get("best_primary_metric", metadata.get("pooled_auc"))
+        search_metrics = metadata.get("search_metrics")
+        nested = search_metrics if isinstance(search_metrics, Mapping) else {}
+        nested_metric = nested.get("best_primary_metric", nested.get("pooled_auc"))
+        if nested_metric is None:
+            nested_metric = nested.get("pooled_median_auc")
+        metric = metadata.get("best_primary_metric", metadata.get("pooled_auc", nested_metric))
         if not isinstance(metric, int | float) or isinstance(metric, bool):
             continue
         if best_value is None or float(metric) > float(best_value):

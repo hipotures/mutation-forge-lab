@@ -17,6 +17,7 @@ from mutation_forge.experiment.config import (
     load_experiment_config,
     validate_experiment_id,
 )
+from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.experiment.service import ExperimentService, NullExperimentAdapter
 from mutation_forge.experiment.state import ActiveSessionError, ExperimentStateStore
 from mutation_forge.experiment.status import STATUS_SCHEMA_VERSION, experiment_status
@@ -176,6 +177,53 @@ def test_status_is_versioned_and_read_only(tmp_path: Path) -> None:
     after = experiment_status(path)
     assert after["state"] == "idle"
     assert after["provider_turns"] == 0
+
+
+def test_manifest_reconciliation_rejects_modified_committed_artifact(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    service = ExperimentService(adapter=NullExperimentAdapter())
+    service.run(path)
+    artifact = (
+        tmp_path
+        / "configs"
+        / "workspace"
+        / "demo"
+        / "artifacts"
+        / "sessions"
+        / "session-000001"
+        / "input-config.toml"
+    )
+    artifact.write_text("tampered", encoding="utf-8")
+
+    status = experiment_status(path)
+    assert status["state"] == "failed"
+    assert "digest mismatch" in str(status["last_error"])
+    with pytest.raises(WorkspaceError, match="digest mismatch"):
+        service.run(path)
+
+
+def test_status_reads_nested_stage4_search_metrics(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+
+    class CandidateAdapter:
+        def run(
+            self,
+            _config: object,
+            _layout: object,
+            state: ExperimentStateStore,
+            _session: object,
+        ) -> dict[str, str]:
+            state.record_candidate(
+                "program-1",
+                status="created",
+                metadata={"search_metrics": {"pooled_median_auc": 0.75}},
+            )
+            return {"state": "idle"}
+
+    ExperimentService(adapter=CandidateAdapter()).run(path)
+    status = experiment_status(path)
+    assert status["best_program_id"] == "program-1"
+    assert status["best_primary_metric"] == 0.75
 
 
 def test_cli_public_help_is_stage_free() -> None:

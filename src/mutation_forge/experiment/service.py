@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from .artifacts import TurnArtifactStore
+from .artifacts import ArtifactIncompleteError, TurnArtifactStore
 from .checkpoints import CheckpointStore
 from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
@@ -74,6 +74,42 @@ class LegacyStage4Adapter:
         self.provider = provider
         self.engine = engine
 
+    def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
+        """Reject an unrunnable or semantically different Stage 4 invocation.
+
+        The public experiment schema currently exposes a wider search surface
+        than the frozen Stage 4 engine implements.  Until there is a native
+        adapter, accepting different values would make the lock misleading.
+        """
+
+        from mutation_forge.stage4.commands import campaign_root, doctor
+        from mutation_forge.stage4.config import load_stage4_config
+
+        stage4_path = _resolve_stage4_config(config)
+        stage4 = load_stage4_config(stage4_path)
+        _require_stage4_compatibility(config, stage4)
+        if self.engine is not None:
+            return {"stage4_config": str(stage4_path), "injected_engine": True}
+        freeze = campaign_root(stage4) / "search-freeze.json"
+        if not freeze.is_file():
+            raise WorkspaceError(
+                "Stage 4 preset is not runnable: its frozen search metadata is missing at "
+                f"{freeze}; run the private Stage 4 freeze workflow first"
+            )
+        auth_json = Path.home() / ".codex" / "auth.json"
+        result = doctor(
+            stage4_path,
+            auth_json=auth_json if auth_json.is_file() else None,
+            check_auth=True,
+            write=False,
+        )
+        if (
+            result.get("status") != "completed"
+            or cast(Mapping[str, Any], result.get("auth", {})).get("authenticated") is not True
+        ):
+            raise WorkspaceError("Stage 4 App Server doctor did not authenticate a READY profile")
+        return {"stage4_config": str(stage4_path), "doctor": dict(result)}
+
     def run(
         self,
         config: ExperimentConfig,
@@ -88,30 +124,12 @@ class LegacyStage4Adapter:
         frozen_stage4 = load_stage4_config(stage4_config)
         engine = self.engine or evolve
         provider = self.provider or _build_local_stage4_provider(layout)
-        run_override = layout.artifacts / "legacy-stage4"
+        run_override = layout.artifacts
         if self.engine is None:
             _prepare_stage4_workspace(stage4_config, run_override)
-            from mutation_forge.stage4.commands import doctor
-
-            auth_json = Path.home() / ".codex" / "auth.json"
-            doctor_result = doctor(
-                stage4_config,
-                auth_json=auth_json if auth_json.is_file() else None,
-                check_auth=True,
-                write=True,
-                run_override=run_override,
-            )
-            if (
-                doctor_result.get("status") != "completed"
-                or cast(Mapping[str, Any], doctor_result.get("auth", {})).get(
-                    "authenticated"
-                )
-                is not True
-            ):
-                raise WorkspaceError(
-                    "Stage 4 App Server doctor did not authenticate a READY profile"
-                )
-        adapter_provider = _WorkspaceStage4Provider(provider, layout, state, session)
+        adapter_provider = _WorkspaceStage4Provider(
+            provider, layout, state, session, sandbox_limits=frozen_stage4.sandbox
+        )
 
         def observe(event: Mapping[str, Any]) -> None:
             event_type = str(event.get("event", "adapter_event"))
@@ -121,10 +139,8 @@ class LegacyStage4Adapter:
 
         engine_kwargs: dict[str, Any] = {
             "provider": adapter_provider,
-            # The experiment model table describes the caller's requested
-            # policy.  The named preset still owns the frozen Stage 4 worker
-            # budget, so never pass a mutable experiment concurrency into the
-            # legacy engine.
+            # Compatibility was checked before workspace creation; both
+            # values are now the same frozen scientific identity.
             "concurrency": frozen_stage4.model.concurrency,
             "resume": True,
             "observer": observe,
@@ -153,7 +169,7 @@ class LegacyStage4Adapter:
             raise RuntimeError("Stage 4 adapter returned a non-object result")
         run_path = result.get("run")
         if isinstance(run_path, str) and Path(run_path).is_dir():
-            destination = layout.artifacts / "legacy-stage4"
+            destination = layout.artifacts
             if Path(run_path).resolve() != destination.resolve():
                 destination.mkdir(parents=True, exist_ok=True)
                 for source in Path(run_path).iterdir():
@@ -197,6 +213,61 @@ def _resolve_stage4_config(config: ExperimentConfig) -> Path:
         "experiment preset has no Stage 4 adapter configuration; "
         "set legacy_stage4_config or use a supported preset"
     )
+
+
+def _require_stage4_compatibility(config: ExperimentConfig, stage4: Any) -> None:
+    """Fail closed when public config would not be executed by frozen Stage 4."""
+
+    expected: dict[str, object] = {
+        "model.provider": "codex",
+        "model.name": stage4.model.name,
+        "model.effort": stage4.model.effort,
+        "model.concurrency": stage4.model.concurrency,
+        "model.max_repairs": stage4.model.max_repairs,
+        "search.population_size": stage4.model.slots,
+        "search.max_generations": stage4.model.generations,
+        "search.max_model_turns": stage4.model.max_accepted_turns,
+        "search.selection": "elite-diversity",
+        "evaluation.orders": stage4.experiment.orders,
+        "evaluation.graph_seeds": stage4.experiment.graph_seeds,
+        "evaluation.policy_seeds": stage4.experiment.policy_seeds,
+        "evaluation.horizon": stage4.experiment.horizon,
+        "evaluation.proposal_pool_size": stage4.model.slots,
+        "evaluation.baselines": ("random", "structural"),
+        "evaluation.replay": True,
+        "resources.workers": stage4.limits.max_evaluation_workers,
+        "resources.thread_count": stage4.limits.thread_count,
+    }
+    actual: dict[str, object] = {
+        "model.provider": config.model.provider,
+        "model.name": config.model.name,
+        "model.effort": config.model.effort,
+        "model.concurrency": config.model.concurrency,
+        "model.max_repairs": config.model.max_repairs,
+        "search.population_size": config.search.population_size,
+        "search.max_generations": config.search.max_generations,
+        "search.max_model_turns": config.search.max_model_turns,
+        "search.selection": config.search.selection,
+        "evaluation.orders": config.evaluation.orders,
+        "evaluation.graph_seeds": config.evaluation.graph_seeds,
+        "evaluation.policy_seeds": config.evaluation.policy_seeds,
+        "evaluation.horizon": config.evaluation.horizon,
+        "evaluation.proposal_pool_size": config.evaluation.proposal_pool_size,
+        "evaluation.baselines": config.evaluation.baselines,
+        "evaluation.replay": config.evaluation.replay,
+        "resources.workers": config.resources.workers,
+        "resources.thread_count": config.resources.thread_count,
+    }
+    mismatches = [
+        f"{name}={actual[name]!r} (frozen Stage 4 requires {expected[name]!r})"
+        for name in expected
+        if actual[name] != expected[name]
+    ]
+    if mismatches:
+        raise WorkspaceError(
+            "experiment.toml is incompatible with preset heg-ranker-evolution-v1: "
+            + "; ".join(mismatches)
+        )
 
 
 def _prepare_stage4_workspace(config_path: Path, destination: Path) -> None:
@@ -256,12 +327,15 @@ class _WorkspaceStage4Provider:
         layout: ExperimentLayout,
         state: ExperimentStateStore,
         session: SessionContext,
+        *,
+        sandbox_limits: Any,
     ) -> None:
         self.provider = provider
         self.layout = layout
         self.state = state
         self.session = session
-        self.turns = TurnArtifactStore(layout.artifacts / "generations")
+        self.sandbox_limits = sandbox_limits
+        self.turns = TurnArtifactStore(layout.artifacts)
 
     @staticmethod
     def _phase(request: Mapping[str, Any]) -> str:
@@ -300,9 +374,30 @@ class _WorkspaceStage4Provider:
             slot,
             phase,
         )
+        result = self._with_validation_evidence(result)
         status = str(result.get("status", "completed"))
         usage = result.get("usage") if isinstance(result.get("usage"), Mapping) else None
         key = self._key(request)
+        if not directory.is_dir():
+            if status == "completed":
+                raise ArtifactIncompleteError(
+                    f"completed provider turn has no artifact directory: {directory}"
+                )
+        elif (directory / "turn-manifest.json").exists():
+            self.turns.verify_turn(directory)
+        else:
+            self.turns.record_existing_turn(
+                directory,
+                generation=generation,
+                slot=slot,
+                phase=phase,
+                request=request,
+                result=result,
+            )
+            self.turns.verify_turn(directory)
+
+        # Commit logical completion only after the durable evidence package
+        # has been assembled and its exact hashes have been verified.
         self.state.record_provider_turn(
             idempotency_key=key,
             generation=generation,
@@ -330,15 +425,33 @@ class _WorkspaceStage4Provider:
             total = usage.get("totalTokens")
             if isinstance(total, int) and not isinstance(total, bool):
                 self.session.token_usage_delta += total
-        if directory.is_dir() and not (directory / "turn-manifest.json").exists():
-            self.turns.record_existing_turn(
-                directory,
-                generation=generation,
-                slot=slot,
-                phase=phase,
-                request=request,
-                result=result,
-            )
+
+    def _with_validation_evidence(self, result: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Persist the same validation/probe boundary before accepting a turn."""
+
+        response = result.get("response")
+        source = response.get("source") if isinstance(response, Mapping) else None
+        if not isinstance(source, str):
+            return result
+        from mutation_forge.sandbox.validation import validate_policy
+        from mutation_forge.stage4.generation import _behavior
+
+        value = dict(result)
+        validation = validate_policy(source, self.sandbox_limits)
+        value["validation"] = validation.as_dict()
+        value["identity"] = validation.identity.as_dict()
+        value["validation_completed"] = True
+        if validation.valid:
+            try:
+                behavior, telemetry = _behavior(source, self.sandbox_limits, 10_000)
+            except Exception as error:
+                behavior, telemetry = (
+                    {"status": "failed", "error": f"{type(error).__name__}: {error}"},
+                    {},
+                )
+            value["behavior"] = behavior
+            value["worker_telemetry"] = telemetry
+        return value
 
     @staticmethod
     def _key(request: Mapping[str, Any]) -> str:
@@ -379,6 +492,23 @@ class _WorkspaceStage4Provider:
             str(request.get("slot", "slot-00")),
             self._phase(request),
         )
+        if existing is None:
+            return None
+        if existing.get("state") != "completed":
+            return None
+        self.turns.verify_turn(directory)
+        try:
+            manifest = json.loads((directory / "turn-manifest.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ArtifactIncompleteError(
+                "completed provider turn has no readable manifest"
+            ) from exc
+        if not isinstance(manifest, Mapping) or manifest.get("request_idempotency_key") != key:
+            raise ArtifactIncompleteError(
+                "completed provider turn idempotency key does not match request"
+            )
+        if manifest.get("usage_final_exact") is not True:
+            raise ArtifactIncompleteError("completed provider turn has non-exact usage")
         response_paths = sorted(directory.glob("*.response.json")) if directory.is_dir() else []
         for response_path in reversed(response_paths):
             try:
@@ -425,8 +555,6 @@ class _WorkspaceStage4Provider:
                 "provider_turn_id": raw.get("provider_turn_id", raw.get("turn_id")),
                 "retained": True,
             }
-            if existing is None or existing.get("state") != "completed":
-                self._record(request, result)
             return result
         return None
 
@@ -440,17 +568,7 @@ class _WorkspaceStage4Provider:
         try:
             value = self.provider.generate(payload)
         except BaseException as error:
-            self.session.provider_turns_attempted += 1
             self._record_failure(request, error)
-            self.state.record_provider_turn(
-                idempotency_key=self._key(request),
-                generation=int(request.get("generation", 0)),
-                slot=str(request.get("slot", "slot-00")),
-                phase=self._phase(request),
-                state="failed",
-                artifact_path=str(payload["artifact_dir"]),
-                error=f"{type(error).__name__}: {error}",
-            )
             raise
         result = value if isinstance(value, Mapping) else {"response": value}
         self._record(request, cast(Mapping[str, Any], result))
@@ -471,7 +589,6 @@ class _WorkspaceStage4Provider:
             else:
                 value = self.provider.generate(payload)
         except BaseException as error:
-            self.session.provider_turns_attempted += 1
             self._record_failure(request, error)
             raise
         result = value if isinstance(value, Mapping) else {"response": value}
@@ -580,7 +697,8 @@ class ExperimentService:
         layout = ExperimentLayout.from_config(config)
         created = not layout.root.exists()
         if created:
-            lock = build_lock(config, layout)
+            preflight = self._preflight(config)
+            lock = build_lock(config, layout, preflight=preflight)
             lock_hash = str(lock["immutable_config_sha256"])
             layout.initialize_atomic(
                 config,
@@ -603,11 +721,10 @@ class ExperimentService:
         try:
             checkpoints.verify()
             self._verify_state_checkpoint(state, checkpoints)
-            # The global manifest is an index, not the recovery gate.  A
-            # process can be interrupted after fsyncing a session/transport
-            # file and before refreshing that index; reconcile it only after
-            # the checkpoint chain and SQLite state are known to be valid.
-            layout.write_artifact_manifest()
+            # A crash may leave new, fsynced files outside the last manifest.
+            # Reconciliation accepts only those append-only additions; it
+            # first verifies every previously committed digest.
+            layout.reconcile_artifact_manifest()
             current_state = state.state()
             if current_state == "completed":
                 return self._record_completed_session(config, layout, state)
@@ -678,7 +795,7 @@ class ExperimentService:
                     stop_reason=str(outcome.get("stop_reason", "budget_exhausted")),
                     summary={**outcome, "result": outcome.get("result")},
                 )
-                layout.write_artifact_manifest()
+                layout.reconcile_artifact_manifest()
                 return self._run_result(config, layout, state, session_summary, outcome)
             except BaseException as error:
                 if session is not None:
@@ -696,7 +813,7 @@ class ExperimentService:
                             summary={"last_error": f"{type(error).__name__}: {error}"},
                         )
                     with suppress(Exception):
-                        layout.write_artifact_manifest()
+                        layout.reconcile_artifact_manifest()
                 state.set_state(
                     "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
                     error=f"{type(error).__name__}: {error}",
@@ -766,6 +883,17 @@ class ExperimentService:
                 budget=SessionBudget(config.run.wall_seconds, session.monotonic_started),
             )  # type: ignore[call-arg]
         return run(config, layout, state, session)
+
+    def _preflight(self, config: ExperimentConfig) -> Mapping[str, Any] | None:
+        preflight = getattr(self.adapter, "preflight", None)
+        if not callable(preflight):
+            return None
+        value = preflight(config)
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise WorkspaceError("experiment adapter preflight returned a non-object result")
+        return value
 
     @staticmethod
     def _normalize_outcome(

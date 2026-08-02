@@ -417,6 +417,15 @@ class TurnArtifactStore:
                 _canonical(redact(validation_value)) + b"\n",
                 exclusive=True,
             )
+        for name, key in (
+            ("identity.json", "identity"),
+            ("behavior.json", "behavior"),
+            ("worker_telemetry.json", "worker_telemetry"),
+        ):
+            value = result.get(key)
+            path = root / name
+            if isinstance(value, Mapping) and not path.exists():
+                _atomic_write(path, _canonical(redact(value)) + b"\n", exclusive=True)
         files = sorted(path for path in root.rglob("*") if path.is_file())
         for path in files:
             if path.stat().st_size > self.max_bytes:
@@ -455,6 +464,9 @@ class TurnArtifactStore:
         failure_boundary = terminal_status != "completed" or bool(result.get("error"))
         content_received = bool(result.get("content", result.get("response_text")))
         expected_transport = (
+            f"{artifact_prefix}.request.json",
+            f"{artifact_prefix}.response.json",
+            f"{artifact_prefix}.provider-raw.json",
             f"{artifact_prefix}.wire.jsonl",
             f"{artifact_prefix}.codex-rpc.jsonl",
             f"{artifact_prefix}.events.jsonl",
@@ -462,6 +474,7 @@ class TurnArtifactStore:
             f"{artifact_prefix}.stderr.txt",
             f"{artifact_prefix}.transcript.sha256",
             f"{artifact_prefix}.usage.json",
+            f"{artifact_prefix}.codex-profile.json",
         )
         for name in expected_transport:
             if name not in names:
@@ -477,6 +490,16 @@ class TurnArtifactStore:
             blocking.add("usage.json")
         if not usage_complete(usage):
             missing.setdefault("usage.json", "not final exact usage for this failure boundary")
+        if source_path.is_file() and request_accepted and not failure_boundary:
+            for name in (
+                "validation.json",
+                "identity.json",
+                "behavior.json",
+                "worker_telemetry.json",
+            ):
+                if name not in names:
+                    missing[name] = "turn finalization did not retain this evidence"
+                    blocking.add(name)
         manifest: dict[str, Any] = {
             "schema_version": "mforge.experiment.turn-manifest.v1",
             "generation": generation,
@@ -492,7 +515,8 @@ class TurnArtifactStore:
             "usage_final_exact": usage_complete(usage),
             "content_received": content_received,
             "source_extraction": (root / "source.py").is_file(),
-            "validation_completed": (root / "validation.json").is_file(),
+            "validation_completed": bool(result.get("validation_completed"))
+            and (root / "validation.json").is_file(),
             "artifact_complete": not blocking,
             "files": [
                 {
