@@ -82,7 +82,11 @@ class LegacyStage4Adapter:
         adapter, accepting different values would make the lock misleading.
         """
 
-        from mutation_forge.stage4.commands import campaign_root, doctor
+        from mutation_forge.stage4.commands import (
+            _load_search_freeze,
+            campaign_root,
+            doctor,
+        )
         from mutation_forge.stage4.config import load_stage4_config
 
         stage4_path = _resolve_stage4_config(config)
@@ -96,6 +100,12 @@ class LegacyStage4Adapter:
                 "Stage 4 preset is not runnable: its frozen search metadata is missing at "
                 f"{freeze}; run the private Stage 4 freeze workflow first"
             )
+        try:
+            _load_search_freeze(stage4)
+        except (OSError, UnicodeError, ValueError, RuntimeError) as error:
+            raise WorkspaceError(
+                "Stage 4 preset is not runnable: its frozen search metadata is invalid"
+            ) from error
         auth_json = Path.home() / ".codex" / "auth.json"
         result = doctor(
             stage4_path,
@@ -594,7 +604,7 @@ class _WorkspaceStage4Provider:
                 "retained": True,
             }
             if existing is None:
-                self.state.record_provider_turn(
+                recovered = self.state.record_provider_turn(
                     idempotency_key=key,
                     generation=int(request.get("generation", 0)),
                     slot=str(request.get("slot", "slot-00")),
@@ -613,6 +623,12 @@ class _WorkspaceStage4Provider:
                         else None
                     ),
                 )
+                if recovered:
+                    self.session.provider_turns_attempted += 1
+                    self.session.provider_turns_completed += 1
+                    total = usage.get("totalTokens")
+                    if isinstance(total, int) and not isinstance(total, bool):
+                        self.session.token_usage_delta += total
             return result
         return None
 
