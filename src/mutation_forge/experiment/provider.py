@@ -19,7 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from .artifacts import TurnArtifactStore, redact
+from .artifacts import (
+    TurnArtifactStore,
+    generated_policy_diagnostics,
+    is_generated_policy,
+    redact,
+    render_generated_policy_markdown,
+)
 
 
 class NativeProviderError(RuntimeError):
@@ -170,10 +176,14 @@ class _CodexTransport:
         adapter = self._adapter(request)
         profile = ModelProfile("codex", model, effort)
         if adapter.logger:
-            adapter.logger.text("request.md", prompt)
+            # request.md is the exact final prompt.  The structured request
+            # envelope, system prompt, and output schema are retained beside
+            # it instead of being injected into Markdown.
+            adapter.logger.raw_text("request.md", prompt)
             adapter.logger.document(
                 "request.json",
                 {
+                    **dict(request),
                     "model": model,
                     "reasoning_effort": effort,
                     "prompt": prompt,
@@ -181,6 +191,8 @@ class _CodexTransport:
                     "output_schema": dict(schema),
                 },
             )
+            adapter.logger.raw_text("system-prompt.md", system)
+            adapter.logger.document("output-schema.json", dict(schema))
         try:
             result = adapter.generate(prompt, profile, output_schema=schema)
         except Exception as error:
@@ -189,8 +201,9 @@ class _CodexTransport:
             if "auth" in name or "authenticated" in message.lower() or "login" in message.lower():
                 raise AuthenticationError(str(redact(message))) from error
             if adapter.logger:
+                adapter.logger.raw_text("request.md", prompt)
                 adapter.logger.document(
-                    "response.json",
+                    "provider-raw.json",
                     {"status": "failed", "error": str(redact(message))},
                 )
             raise
@@ -203,6 +216,10 @@ class _CodexTransport:
         else:
             if isinstance(decoded, Mapping):
                 response = dict(decoded)
+        response_diagnostics = generated_policy_diagnostics(response)
+        response_projection_valid = is_generated_policy(response)
+        if response_projection_valid:
+            response_diagnostics = ()
         usage = self._usage({"usage": self._usage_from_result(result)})
         value = {
             "status": "completed",
@@ -211,6 +228,10 @@ class _CodexTransport:
             "content": bool(response_text),
             "response": response,
             "response_text": response_text,
+            "response_projection_valid": response_projection_valid,
+            "response_diagnostics": [dict(item) for item in response_diagnostics]
+            if response_diagnostics
+            else [dict(item) for item in result.diagnostics],
             "usage": usage,
             "provider_thread_id": result.thread_id,
             "provider_turn_id": result.turn_id,
@@ -220,11 +241,28 @@ class _CodexTransport:
             "transport_sha256": adapter.logger.transcript_sha256 if adapter.logger else None,
         }
         if adapter.logger:
-            adapter.logger.text("response.md", response_text)
-            adapter.logger.document("response.json", value)
+            # CodexAppServerAdapter also records the final message as a
+            # transport-level response.md.  Replace that provisional text
+            # with the native semantic projection, or remove it entirely for
+            # malformed/schema-invalid responses.
+            adapter.logger.raw_text("request.md", prompt)
+            adapter.logger.raw_text("response.raw.txt", response_text)
+            if response_projection_valid and isinstance(response, Mapping):
+                adapter.logger.raw_text("response.md", render_generated_policy_markdown(response))
+            else:
+                adapter.logger.remove("response.md")
+            if isinstance(response, Mapping):
+                adapter.logger.document("response.json", response)
+            if response_diagnostics or result.diagnostics:
+                adapter.logger.document(
+                    "response-diagnostics.json",
+                    [dict(item) for item in (response_diagnostics or result.diagnostics)],
+                )
             adapter.logger.document(
                 "provider-raw.json",
                 {
+                    "response_text": response_text,
+                    "response_projection_valid": response_projection_valid,
                     "usage": usage,
                     "thread_id": result.thread_id,
                     "turn_id": result.turn_id,
@@ -255,13 +293,26 @@ class _CodexTransport:
         if not diagnostics:
             raise ValueError("repair requires bounded diagnostics")
         value = dict(request)
-        value["prompt"] = (
-            str(request.get("repair_prompt", "Repair the generated policy using the diagnostics."))
-            + "\n\n"
-            + str(request.get("prompt", ""))
-            + "\n\nDiagnostics:\n"
-            + json.dumps(list(diagnostics), sort_keys=True, separators=(",", ":"))
-        )
+        prompt = str(request.get("prompt", ""))
+        # Native GenerationCoordinator requests already contain a readable
+        # repair section.  Keep that exact prompt.  The fallback is retained
+        # for direct callers that still provide only an initial prompt.
+        if "diagnostic" not in prompt.lower():
+            pretty = json.dumps(list(diagnostics), ensure_ascii=False, sort_keys=True, indent=2)
+            value["prompt"] = (
+                str(
+                    request.get(
+                        "repair_prompt", "Repair the generated policy using the diagnostics."
+                    )
+                )
+                + "\n\n"
+                + prompt
+                + "\n\n## Repair diagnostics\n\n```json\n"
+                + pretty
+                + "\n```"
+            )
+        else:
+            value["prompt"] = prompt
         return self.generate(value)
 
     def close(self) -> None:
@@ -373,11 +424,11 @@ class LocalCodexAppServerProvider:
         # Native adapters normally validate generated Python immediately
         # after this call.  Do not create a terminal manifest before that
         # finalisation step; doing so would falsely claim validation evidence.
-        if (
-            isinstance(response, Mapping)
-            and isinstance(response.get("source"), str)
-            and result.get("validation_completed") is not True
-        ):
+        # The native adapter adds validation/projection evidence after the
+        # transport returns.  Leave the already-flushed logger directory for
+        # that finalization step, including malformed responses that have no
+        # ``source`` field.
+        if path.is_dir() and result.get("validation_completed") is not True:
             return
         if path.is_dir() and any(path.glob(f"{prefix}.wire.jsonl")):
             # The local transport has already flushed immutable streams.
@@ -397,6 +448,7 @@ class LocalCodexAppServerProvider:
             phase=phase,
             request=request,
             request_text=str(request.get("prompt", "")),
+            request_text_redact=False,
             response=response,
             response_text=response_text,
             usage=cast(Mapping[str, Any], usage),

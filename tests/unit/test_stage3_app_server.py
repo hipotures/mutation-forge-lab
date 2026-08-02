@@ -151,7 +151,7 @@ def test_not_loaded_completed_items_accepts_already_persisted_final(
     assert (tmp_path / "logs" / "slot-00.response.md").read_text() == "fixture answer"
 
 
-def test_json_transport_text_is_pretty_markdown(tmp_path: Path) -> None:
+def test_json_transport_text_is_retained_without_markdown_wrapper(tmp_path: Path) -> None:
     adapter, _ = _adapter(
         tmp_path,
         FakeScenario(final_text='{"z":1,"a":{"b":2}}'),
@@ -162,8 +162,7 @@ def test_json_transport_text_is_pretty_markdown(tmp_path: Path) -> None:
     response_markdown = (tmp_path / "logs" / "slot-00.response.md").read_text(
         encoding="utf-8"
     )
-    assert response_markdown.startswith("# Provider response\n\n```json\n")
-    assert '"a": {\n    "b": 2\n  },\n  "z": 1' in response_markdown
+    assert response_markdown == '{"z":1,"a":{"b":2}}'
 
 
 @pytest.mark.parametrize("shape", ["top-level", "nested"])

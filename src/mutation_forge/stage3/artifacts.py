@@ -279,22 +279,25 @@ class TransportLogger:
         self._write_lines("events.jsonl", self.notifications)
 
     def text(self, name: str, value: str) -> None:
+        # Markdown artifacts are text projections, not a second JSON
+        # serialization.  In particular, a prompt that happens to contain a
+        # JSON fragment must remain the exact prompt text here; structured
+        # envelopes belong in their separate ``*.json`` files.
         value = cast(str, safe_value(value))
-        if name.endswith(".md"):
-            try:
-                parsed: object = json.loads(value)
-            except (TypeError, ValueError):
-                pass
-            else:
-                pretty = json.dumps(
-                    safe_value(parsed), ensure_ascii=False, sort_keys=True, indent=2
-                )
-                value = (
-                    f"# {'Provider request' if 'request' in name else 'Provider response'}\n\n"
-                    "```json\n"
-                    f"{pretty}\n"
-                    "```\n"
-                )
+        self._bounded_text(name, value)
+
+    def raw_text(self, name: str, value: str | bytes) -> None:
+        """Persist an exact text payload without redaction or JSON wrapping.
+
+        Native response retention uses this for the byte-faithful assistant
+        payload.  Callers must opt in explicitly because ordinary transport
+        logs continue to redact credentials and private paths.
+        """
+
+        text = value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+        self._bounded_text(name, text)
+
+    def _bounded_text(self, name: str, value: str) -> None:
         if len(value.encode()) > self.max_bytes:
             original = len(value.encode())
             marker = f"\n[TRUNCATED original_bytes={original}]\n"
@@ -308,6 +311,13 @@ class TransportLogger:
             value = retained + marker
             self.telemetry["truncations"] += 1
         self._write_lines(name, [value])
+
+    def remove(self, name: str) -> None:
+        """Remove one known logger file when a later semantic projection supersedes it."""
+
+        target = _contained_path(self.directory, self._name(name))
+        with _ARTIFACT_LOCK:
+            target.unlink(missing_ok=True)
 
     def profile(self, value: Mapping[str, Any]) -> None:
         self._write_lines("codex-profile.json", [canonical_json(safe_value(value)) + "\n"])

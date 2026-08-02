@@ -598,33 +598,48 @@ class GenerationCoordinator:
         repair_source: str = "",
     ) -> GenerationRequest:
         brief = self._brief(generation, slot)
-        if self.prompt_renderer is not None:
-            try:
-                rendered = self.prompt_renderer(
-                    brief=brief, parent_id=parent, generation=generation, slot=slot
-                )
-            except TypeError:
-                rendered = self.prompt_renderer(brief)
-        else:
-            rendered = brief
         parent_source, parent_metadata = self._parent_source_metadata(parent)
         feedback, archive_context = (
             self._context(self.search_feedback, generation, slot),
             self._context(self.archive_context, generation, slot),
         )
-        payload: dict[str, Any]
-        if phase == "repair":
-            payload = {"source": repair_source, "diagnostics": [dict(item) for item in diagnostics]}
+        render_values = {
+            "brief": brief,
+            "parent_id": parent,
+            "parent_source": parent_source,
+            "parent_metadata": parent_metadata,
+            "search_feedback": feedback,
+            "archive_context": archive_context,
+            "generation": generation,
+            "slot": slot,
+            "phase": phase,
+            "diagnostics": tuple(diagnostics),
+            "repair_source": repair_source,
+            "repair_prompt": self.config.repair_prompt,
+        }
+        if self.prompt_renderer is not None:
+            try:
+                rendered = self.prompt_renderer(**render_values)
+            except TypeError:
+                rendered = self.prompt_renderer(brief)
         else:
-            payload = {
-                "brief": rendered,
-                "parent_id": parent,
-                "parent_source": parent_source,
-                "parent_metadata": parent_metadata,
-                "search_feedback": feedback,
-                "archive_context": archive_context,
-            }
-        prompt = json.dumps(_safe(payload), sort_keys=True, separators=(",", ":"))
+            rendered = brief
+        # ``prompt`` is the final model-facing string.  Metadata remains in
+        # GenerationRequest.as_dict()/request.json and is never substituted
+        # with a compact JSON envelope in the prompt itself.
+        prompt = str(rendered)
+        if phase == "repair" and self.prompt_renderer is None:
+            diagnostics_json = json.dumps(
+                [dict(item) for item in diagnostics],
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+            prompt = (
+                f"{self.config.repair_prompt.strip()}\n\n"
+                f"## Previous generated source\n\n```python\n{repair_source}\n```\n\n"
+                f"## Repair diagnostics\n\n```json\n{diagnostics_json}\n```"
+            )
         prompt_hash, brief_id = _hash(prompt), _hash(brief)
         key = request_idempotency_key(
             self.config.campaign_id, generation, slot, parent, brief_id, prompt_hash, phase

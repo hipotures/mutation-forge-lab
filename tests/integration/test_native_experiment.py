@@ -93,7 +93,15 @@ class RecordingProvider:
             self.max_active = max(self.max_active, self._active)
             self.calls.append(dict(request))
         try:
-            response = {"source": self.source}
+            response = {
+                "schema_version": "mforge.native.generated_policy.v1",
+                "source": self.source,
+                "design_summary": "A deterministic test policy.",
+                "hypothesis": "A bounded structural score is reproducible.",
+                "used_fields": ["proposal.k"],
+                "assumptions": ["The host supplies legal proposals."],
+                "expected_failure_modes": ["The simple ranker may underperform."],
+            }
             usage = {
                 "inputTokens": 1,
                 "cachedInputTokens": 0,
@@ -269,6 +277,12 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     assert {request["effort"] for request in provider.calls} == {"high"}
     assert all(request["system_prompt"] for request in provider.calls)
     assert all(request["output_schema"]["type"] == "object" for request in provider.calls)
+    prompt = provider.calls[0]["prompt"]
+    assert prompt.startswith("# Mutation Forge native ranker task\n")
+    assert "## Context contract" in prompt
+    assert "## Proposal contract" in prompt
+    assert "## Experiment configuration" in prompt
+    assert '"parent_id"' not in prompt
     assert lock["model"]["concurrency"] == 1
     assert lock["search"]["population_size"] == 2
     assert lock["search"]["max_generations"] == 1
@@ -277,6 +291,12 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     payload = json.loads(evaluation.read_text(encoding="utf-8"))
     assert payload["settings"]["workers"] == 1
     assert payload["settings"]["thread_count"] == 1
+    turn = root / "artifacts" / "generations" / "generation-0000" / "slot-00" / "initial"
+    assert (turn / "slot-00.request.md").read_text(encoding="utf-8") == prompt
+    request_envelope = json.loads((turn / "slot-00.request.json").read_text(encoding="utf-8"))
+    assert request_envelope["prompt"] == prompt
+    assert (turn / "slot-00.system-prompt.md").is_file()
+    assert (turn / "slot-00.output-schema.json").is_file()
 
 
 def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path) -> None:

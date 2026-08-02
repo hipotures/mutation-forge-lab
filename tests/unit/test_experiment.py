@@ -331,10 +331,20 @@ def test_cli_rejects_experiment_positional_id() -> None:
 
 
 def _full_turn_kwargs() -> dict[str, object]:
+    response = {
+        "schema_version": "mforge.native.generated_policy.v1",
+        "source": "def priority(ctx, proposal):\n    return 0\n",
+        "design_summary": "A bounded deterministic ranker.",
+        "hypothesis": "Structural proposal signals improve selection.",
+        "used_fields": ["proposal.k"],
+        "assumptions": ["The host supplies legal proposals."],
+        "expected_failure_modes": ["Constant ranking may underperform."],
+    }
     return {
         "request_text": "rendered prompt",
-        "response_text": '{"source": "ok"}',
-        "source": "def priority(ctx, proposal):\n    return 0\n",
+        "response_text": json.dumps(response, ensure_ascii=False, sort_keys=True),
+        "response": response,
+        "source": response["source"],
         "usage": {
             "inputTokens": 1,
             "cachedInputTokens": 0,
@@ -349,7 +359,7 @@ def _full_turn_kwargs() -> dict[str, object]:
         "provenance": {"provider": "codex"},
         "validation": {"status": "valid"},
         "worker_telemetry": {"runtime_seconds": 0.1},
-        "canonical_response": {"source": "ok"},
+        "canonical_response": response,
         "provider_raw": {"content": "ok"},
         "codex_profile": {"model": "gpt-5.6-luna"},
         "rpc": [{"method": "turn/start"}],
@@ -388,25 +398,62 @@ def test_full_turn_artifacts_and_canonical_source(tmp_path: Path) -> None:
     ).read_bytes()
 
 
-def test_structured_turn_text_is_rendered_as_markdown(tmp_path: Path) -> None:
+def test_turn_prompt_is_exact_and_response_is_semantic_projection(tmp_path: Path) -> None:
     store = TurnArtifactStore(tmp_path / "artifacts")
+    response = {
+        "schema_version": "mforge.native.generated_policy.v1",
+        "source": "def priority(ctx, proposal):\n    return 0\n",
+        "design_summary": "A bounded deterministic ranker.",
+        "hypothesis": "Structural proposal signals improve selection.",
+        "used_fields": ["proposal.k"],
+        "assumptions": ["The host supplies legal proposals."],
+        "expected_failure_modes": ["Constant ranking may underperform."],
+    }
+    request_text = '{"brief":"native context"}'
+    response_text = json.dumps(response, ensure_ascii=False, sort_keys=True)
     store.write_turn(
         generation=0,
         slot=0,
         request={"brief": "native context"},
-        request_text='{"brief":"native context"}',
-        response={"source": "def priority(ctx, proposal):\n    return 0\n"},
-        response_text='{"source":"def priority(ctx, proposal):\\n    return 0\\n"}',
+        request_text=request_text,
+        response=response,
+        response_text=response_text,
     )
     directory = store.turn_directory(0, 0)
     request_markdown = (directory / "slot-00.request.md").read_text(encoding="utf-8")
     response_markdown = (directory / "slot-00.response.md").read_text(encoding="utf-8")
-    assert request_markdown.startswith("# Provider request\n\n```json\n")
-    assert response_markdown.startswith("# Provider response\n\n```json\n")
+    assert request_markdown == request_text
+    assert response_markdown.startswith("# Generated policy\n\n")
+    assert "## Design summary" in response_markdown
+    assert "```python\ndef priority(ctx, proposal):" in response_markdown
+    assert (directory / "slot-00.response.raw.txt").read_text() == response_text
+    assert json.loads((directory / "slot-00.response.json").read_text()) == response
     request_json = json.loads(
         (directory / "slot-00.request.json").read_text(encoding="utf-8")
     )
     assert request_json["brief"] == "native context"
+
+
+def test_invalid_response_retains_raw_text_and_diagnostics_without_projection(
+    tmp_path: Path,
+) -> None:
+    store = TurnArtifactStore(tmp_path / "artifacts")
+    raw = '{"source": "unterminated"'
+    store.write_turn(
+        generation=0,
+        slot=0,
+        request_text="# Native task\n",
+        response_text=raw,
+        response=raw,
+        response_diagnostics=({"code": "invalid_json", "message": "unterminated"},),
+        content_received=True,
+    )
+    directory = store.turn_directory(0, 0)
+    assert not (directory / "slot-00.response.md").exists()
+    assert (directory / "slot-00.response.raw.txt").read_text() == raw
+    diagnostics = json.loads((directory / "slot-00.response-diagnostics.json").read_text())
+    assert diagnostics[0]["code"] == "invalid_json"
+    assert store.verify_turn(directory)
 
 
 def test_incomplete_turn_fails_closed_but_retains_manifest(tmp_path: Path) -> None:

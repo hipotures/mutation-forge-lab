@@ -15,7 +15,12 @@ from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.policy import probe_policy
 from mutation_forge.sandbox.validation import validate_policy
 
-from .artifacts import ArtifactIncompleteError, TurnArtifactStore
+from .artifacts import (
+    ArtifactIncompleteError,
+    TurnArtifactStore,
+    generated_policy_diagnostics,
+    is_generated_policy,
+)
 from .config import ExperimentConfig
 from .evaluation import evaluate_candidate
 from .generation import Candidate, GenerationConfig, GenerationCoordinator, SlotResult
@@ -61,16 +66,37 @@ def _asset_path(name: str) -> Path:
         raise NativeExperimentError(f"unknown native asset {name!r}") from exc
 
 
-def _load_assets() -> tuple[str, dict[str, Any], str, str]:
+def _load_assets() -> tuple[
+    str,
+    dict[str, Any],
+    str,
+    str,
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+]:
     system = _asset_path("system").read_text(encoding="utf-8")
     request = _asset_path("request").read_text(encoding="utf-8")
     repair = _asset_path("repair").read_text(encoding="utf-8")
-    schema = json.loads(_asset_path("schema").read_text(encoding="utf-8"))
-    if not isinstance(schema, Mapping):
-        raise NativeExperimentError("native generated-policy schema must be an object")
+    parsed: dict[str, dict[str, Any]] = {}
+    for name in ("schema", "context", "proposal", "semantic", "baseline"):
+        value = json.loads(_asset_path(name).read_text(encoding="utf-8"))
+        if not isinstance(value, Mapping):
+            raise NativeExperimentError(f"native {name} asset must be an object")
+        parsed[name] = dict(value)
     if not request.strip() or not repair.strip():
         raise NativeExperimentError("native request and repair prompts must be non-empty")
-    return system, cast(dict[str, Any], dict(schema)), request, repair
+    return (
+        system,
+        parsed["schema"],
+        request,
+        repair,
+        parsed["context"],
+        parsed["proposal"],
+        parsed["semantic"],
+        parsed["baseline"],
+    )
 
 
 def _native_behavior(
@@ -223,6 +249,10 @@ class _NativeProvider:
             if not response_path.is_file():
                 responses = sorted(directory.glob("*.response.json"))
                 response_path = responses[-1] if responses else response_path
+            raw_response_path = directory / f"{slot}.response.raw.txt"
+            if not raw_response_path.is_file():
+                raw_responses = sorted(directory.glob("*.response.raw.txt"))
+                raw_response_path = raw_responses[-1] if raw_responses else raw_response_path
             usage_path = directory / "usage.json"
             if not usage_path.is_file():
                 usages = sorted(directory.glob("*.usage.json"))
@@ -230,7 +260,11 @@ class _NativeProvider:
             response = (
                 json.loads(response_path.read_text(encoding="utf-8"))
                 if response_path.is_file()
-                else {}
+                else (
+                    raw_response_path.read_text(encoding="utf-8")
+                    if raw_response_path.is_file()
+                    else {}
+                )
             )
             usage = (
                 json.loads(usage_path.read_text(encoding="utf-8")) if usage_path.is_file() else {}
@@ -249,6 +283,13 @@ class _NativeProvider:
             "charged": manifest.get("charged"),
             "uncharged": manifest.get("uncharged"),
             "response": response,
+            "response_text": (
+                raw_response_path.read_text(encoding="utf-8")
+                if raw_response_path.is_file()
+                else None
+            ),
+            "response_projection_valid": isinstance(response, Mapping)
+            and is_generated_policy(response),
             "usage": usage if isinstance(usage, Mapping) else {},
             "provider_thread_id": manifest.get("provider_thread_id"),
             "provider_turn_id": manifest.get("provider_turn_id"),
@@ -259,6 +300,7 @@ class _NativeProvider:
     def _evidence(self, result: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(result)
         response = value.get("response")
+        response_text = value.get("response_text")
         if isinstance(response, (str, bytes, bytearray)):
             try:
                 decoded = json.loads(
@@ -271,6 +313,18 @@ class _NativeProvider:
             if isinstance(decoded, Mapping):
                 response = dict(decoded)
                 value["response"] = response
+        projection_value = response if response is not None else response_text
+        projection_diagnostics = generated_policy_diagnostics(projection_value)
+        value["response_projection_valid"] = is_generated_policy(projection_value)
+        existing_diagnostics = value.get("response_diagnostics")
+        if isinstance(existing_diagnostics, Sequence) and not isinstance(
+            existing_diagnostics, (str, bytes, bytearray)
+        ):
+            projection_diagnostics = tuple(
+                [dict(item) for item in existing_diagnostics if isinstance(item, Mapping)]
+                or projection_diagnostics
+            )
+        value["response_diagnostics"] = [dict(item) for item in projection_diagnostics]
         source = response.get("source") if isinstance(response, Mapping) else None
         if not isinstance(value.get("response_text"), str) and response is not None:
             value["response_text"] = (
@@ -320,6 +374,7 @@ class _NativeProvider:
                 phase=phase,
                 request=request,
                 request_text=str(request.get("prompt", "")),
+                request_text_redact=False,
                 response=value.get("response"),
                 response_text=value.get("response_text"),
                 source=(value.get("response") or {}).get("source")
@@ -333,6 +388,18 @@ class _NativeProvider:
                 worker_telemetry=cast(Mapping[str, Any] | None, value.get("worker_telemetry")),
                 canonical_response=cast(Mapping[str, Any] | None, value.get("canonical_response")),
                 provider_raw=value,
+                system_prompt=str(request.get("system_prompt", ""))
+                if request.get("system_prompt") is not None
+                else None,
+                output_schema=cast(Mapping[str, Any] | None, request.get("output_schema")),
+                response_projection_valid=(
+                    bool(value.get("response_projection_valid"))
+                    if isinstance(value.get("response_projection_valid"), bool)
+                    else None
+                ),
+                response_diagnostics=cast(
+                    Sequence[Mapping[str, Any]] | None, value.get("response_diagnostics")
+                ),
                 codex_profile={"model": request.get("model"), "effort": request.get("effort")},
                 rpc=value.get("rpc", []),
                 events=value.get("events", []),
@@ -484,7 +551,7 @@ class NativeExperimentAdapter:
         self.backend = backend
 
     def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
-        system, schema, request, repair = _load_assets()
+        system, schema, request, repair, context, proposal, semantic, baseline = _load_assets()
         if config.kind != "ranker-search":
             raise WorkspaceError(f"unsupported experiment kind {config.kind!r}")
         if config.preset != "heg-ranker-evolution-v1":
@@ -504,7 +571,14 @@ class NativeExperimentAdapter:
             raise WorkspaceError(
                 f"unsupported native baseline policies: {sorted(unsupported_baselines)!r}"
             )
-        if not system.strip() or not schema:
+        if (
+            not system.strip()
+            or not schema
+            or not context
+            or not proposal
+            or not semantic
+            or not baseline
+        ):
             raise WorkspaceError("native preset assets are empty")
         heg = Path(__file__).resolve().parents[4] / "heg"
         if not (heg / "src").is_dir():
@@ -522,6 +596,10 @@ class NativeExperimentAdapter:
                 "request_prompt_sha256": hashlib.sha256(request.encode()).hexdigest(),
                 "repair_prompt_sha256": hashlib.sha256(repair.encode()).hexdigest(),
                 "output_schema_sha256": _sha256(schema),
+                "context_schema_sha256": _sha256(context),
+                "proposal_schema_sha256": _sha256(proposal),
+                "semantic_descriptions_sha256": _sha256(semantic),
+                "baseline_rankers_sha256": _sha256(baseline),
             },
             "heg": {"repo": str(heg), "backend": "generic"},
         }
@@ -619,7 +697,16 @@ class NativeExperimentAdapter:
         state: ExperimentStateStore,
         session: SessionContext,
     ) -> Mapping[str, Any]:
-        system_prompt, output_schema, request_prompt, repair_prompt = _load_assets()
+        (
+            system_prompt,
+            output_schema,
+            request_prompt,
+            repair_prompt,
+            context_schema,
+            proposal_schema,
+            semantic_descriptions,
+            baseline_rankers,
+        ) = _load_assets()
         auth_path = Path.home() / ".codex" / "auth.json"
         provider = self.provider or LocalCodexAppServerProvider(
             model=config.model.name,
@@ -640,9 +727,155 @@ class NativeExperimentAdapter:
         parent_sources, parent_records = self._parent_data(state, layout)
         baseline_sources = archive.existing_sources()
 
+        def pretty(value: object) -> str:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
+
+        def fenced(value: object, language: str = "json") -> str:
+            rendered = pretty(value) if not isinstance(value, str) else value.rstrip()
+            return f"```{language}\n{rendered}\n```"
+
         def render_prompt(**values: Any) -> str:
-            brief = str(values.get("brief", ""))
-            return f"{request_prompt.strip()}\n\nNative context:\n{brief}"
+            generation = int(values.get("generation", 0))
+            slot = str(values.get("slot", "slot-00"))
+            phase = str(values.get("phase", "initial"))
+            brief = str(values.get("brief", "")).strip()
+            if not brief or brief.startswith("mutation brief generation"):
+                brief = (
+                    "Generate one deterministic ranker for this native mutation search. "
+                    "The host supplies legal proposals and performs authoritative scoring; "
+                    "the policy only ranks the supplied objects."
+                )
+            parent_source = str(values.get("parent_source", "")).strip()
+            parent_metadata = values.get("parent_metadata", {})
+            parent_metadata_view = (
+                {
+                    str(key): item
+                    for key, item in parent_metadata.items()
+                    if key not in {"source", "parent_id", "program_id", "candidate_id"}
+                }
+                if isinstance(parent_metadata, Mapping)
+                else {}
+            )
+            feedback = str(values.get("search_feedback", "")).strip()
+            archive_context = str(values.get("archive_context", "")).strip()
+            config_view = {
+                "experiment_id": config.exp_id,
+                "generation": generation,
+                "slot": slot,
+                "search": {
+                    "population_size": config.search.population_size,
+                    "max_generations": config.search.max_generations,
+                    "max_model_turns": config.search.max_model_turns,
+                    "selection": config.search.selection,
+                },
+                "evaluation": {
+                    "orders": list(config.evaluation.orders),
+                    "graph_seeds": list(config.evaluation.graph_seeds),
+                    "policy_seeds": list(config.evaluation.policy_seeds),
+                    "horizon": config.evaluation.horizon,
+                    "proposal_pool_size": config.evaluation.proposal_pool_size,
+                    "baselines": list(config.evaluation.baselines),
+                    "replay": config.evaluation.replay,
+                },
+                "resources": {
+                    "workers": config.resources.workers,
+                    "thread_count": config.resources.thread_count,
+                },
+            }
+            sections = [
+                "# Mutation Forge native ranker task",
+                "",
+                "## Objective",
+                "",
+                request_prompt.strip(),
+                "",
+                "## Mutation brief",
+                "",
+                brief,
+                "",
+                "## Host boundary",
+                "",
+                "The host supplies the concrete `ctx` and legal `proposal` objects at evaluation "
+                "time. It owns legality, authoritative scoring, and verification. Do not invent "
+                "proposals, post-rewrite scores, proposal IDs, hidden state, or unavailable "
+                "fields.",
+                "",
+                "## Parent policy",
+                "",
+                (
+                    fenced(parent_source, "python")
+                    if parent_source
+                    else "This is root generation; no parent policy is available."
+                ),
+                "",
+                "## Parent evaluation metadata",
+                "",
+                (
+                    fenced(parent_metadata_view)
+                    if parent_metadata_view
+                    else "No parent evaluation metadata is available."
+                ),
+                "",
+                "## Search feedback",
+                "",
+                feedback or "No prior search feedback is available.",
+                "",
+                "## Archive context",
+                "",
+                archive_context or "No prior archive context is available.",
+                "",
+                "## Experiment configuration",
+                "",
+                fenced(config_view),
+                "",
+                "## Context contract",
+                "",
+                "The host context follows this schema:",
+                "",
+                fenced(context_schema),
+                "",
+                "## Proposal contract",
+                "",
+                "The host proposal follows this schema; all proposals reaching the ranker are "
+                "legal:",
+                "",
+                fenced(proposal_schema),
+                "",
+                "## Field semantics",
+                "",
+                fenced(semantic_descriptions),
+                "",
+                "## Baseline rankers",
+                "",
+                fenced(baseline_rankers),
+                "",
+                "## Output contract",
+                "",
+                "Return exactly one JSON object and no prose outside it. "
+                "The object must match this schema:",
+                "",
+                fenced(output_schema),
+            ]
+            if phase == "repair":
+                diagnostics = values.get("diagnostics", ())
+                repair_source = str(values.get("repair_source", ""))
+                sections.extend(
+                    [
+                        "",
+                        "## Repair instructions",
+                        "",
+                        repair_prompt.strip(),
+                        "",
+                        "## Previous response/source",
+                        "",
+                        fenced(repair_source, "python"),
+                        "",
+                        "## Validation diagnostics",
+                        "",
+                        fenced([dict(item) for item in diagnostics], "json"),
+                    ]
+                )
+            return "\n".join(sections).rstrip() + "\n"
 
         def on_generation(
             generation: int, candidates: Sequence[Candidate], results: Sequence[SlotResult]

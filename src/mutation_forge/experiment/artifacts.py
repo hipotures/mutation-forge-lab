@@ -109,33 +109,141 @@ def _text(value: object, *, redact_value: bool = True) -> bytes:
     return data
 
 
-def _markdown_text(value: object, *, title: str) -> bytes:
-    """Render human-readable turn text without mislabeling JSON as Markdown.
+_GENERATED_POLICY_FIELDS = (
+    "schema_version",
+    "source",
+    "design_summary",
+    "hypothesis",
+    "used_fields",
+    "assumptions",
+    "expected_failure_modes",
+)
 
-    Provider prompts and responses are often JSON strings because the native
-    generation envelope carries structured context.  The machine-readable
-    copy belongs in ``*.request.json``/``*.response.json``; the corresponding
-    Markdown artifact is rendered as a fenced JSON block so its extension and
-    contents agree.
+
+def _decoded_mapping(value: object) -> Mapping[str, Any] | None:
+    """Decode a response only when it is an object, without changing raw text."""
+
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            decoded = json.loads(
+                value.decode("utf-8") if isinstance(value, (bytes, bytearray)) else value
+            )
+        except (UnicodeDecodeError, TypeError, ValueError):
+            return None
+        return decoded if isinstance(decoded, Mapping) else None
+    return None
+
+
+def generated_policy_diagnostics(value: object) -> tuple[dict[str, str], ...]:
+    """Return bounded, human-readable projection diagnostics for a response."""
+
+    decoded = _decoded_mapping(value)
+    if decoded is None:
+        return ({"code": "invalid_json", "message": "response is not a JSON object"},)
+    diagnostics: list[dict[str, str]] = []
+    expected = set(_GENERATED_POLICY_FIELDS)
+    missing = sorted(expected.difference(decoded))
+    if missing:
+        diagnostics.append(
+            {
+                "code": "invalid_schema",
+                "message": f"missing required field(s): {', '.join(missing)}",
+            }
+        )
+    unknown = sorted(set(str(key) for key in decoded).difference(expected))
+    if unknown:
+        diagnostics.append(
+            {"code": "invalid_schema", "message": f"unknown field(s): {', '.join(unknown)}"}
+        )
+    if decoded.get("schema_version") != "mforge.native.generated_policy.v1":
+        diagnostics.append(
+            {
+                "code": "invalid_schema_version",
+                "message": "schema_version is not the native v1 value",
+            }
+        )
+    for name in ("source", "design_summary", "hypothesis"):
+        if name in decoded and (not isinstance(decoded[name], str) or not decoded[name].strip()):
+            diagnostics.append(
+                {"code": "invalid_string", "message": f"{name} must be a non-empty string"}
+            )
+        limits = {"source": 12_288, "design_summary": 2_048, "hypothesis": 2_048}
+        if name in decoded and isinstance(decoded[name], str) and len(decoded[name]) > limits[name]:
+            diagnostics.append(
+                {
+                    "code": "invalid_string",
+                    "message": f"{name} exceeds the {limits[name]} character limit",
+                }
+            )
+    for name in ("used_fields", "assumptions", "expected_failure_modes"):
+        if name in decoded and (
+            not isinstance(decoded[name], list)
+            or not all(isinstance(item, str) for item in decoded[name])
+        ):
+            diagnostics.append(
+                {"code": "invalid_array", "message": f"{name} must be an array of strings"}
+            )
+        limits = {"used_fields": 32, "assumptions": 16, "expected_failure_modes": 16}
+        if (
+            name in decoded
+            and isinstance(decoded[name], list)
+            and len(decoded[name]) > limits[name]
+        ):
+            diagnostics.append(
+                {
+                    "code": "invalid_array",
+                    "message": f"{name} exceeds the {limits[name]} item limit",
+                }
+            )
+    fields = decoded.get("used_fields")
+    if isinstance(fields, list) and any(isinstance(item, str) and not item for item in fields):
+        diagnostics.append(
+            {"code": "invalid_string", "message": "used_fields items must be non-empty"}
+        )
+    return tuple(diagnostics)
+
+
+def is_generated_policy(value: object) -> bool:
+    """Whether ``value`` is complete enough for a semantic response projection."""
+
+    return not generated_policy_diagnostics(value)
+
+
+def render_generated_policy_markdown(value: Mapping[str, Any]) -> bytes:
+    """Render the generated-policy object as a concise, readable Markdown view.
+
+    The original assistant bytes are retained separately.  This projection is
+    deliberately not a serialization of the provider envelope.
     """
 
-    if isinstance(value, bytes):
-        try:
-            value = value.decode("utf-8")
-        except UnicodeDecodeError:
-            return _text(value)
-    if isinstance(value, str):
-        text = value
-        try:
-            parsed: object = json.loads(text)
-        except (TypeError, ValueError):
-            return _text(text)
-    else:
-        parsed = value
-    rendered = json.dumps(
-        redact(parsed), ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
-    )
-    return f"# {title}\n\n```json\n{rendered}\n```\n".encode()
+    def scalar(name: str) -> str:
+        item = value.get(name, "")
+        return str(item).strip()
+
+    def bullets(name: str) -> str:
+        items = value.get(name, [])
+        if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
+            return "- (invalid value)"
+        return "\n".join(f"- {str(item)}" for item in items) or "- (none)"
+
+    source = scalar("source")
+    return (
+        "# Generated policy\n\n"
+        "## Design summary\n\n"
+        f"{scalar('design_summary')}\n\n"
+        "## Hypothesis\n\n"
+        f"{scalar('hypothesis')}\n\n"
+        "## Used fields\n\n"
+        f"{bullets('used_fields')}\n\n"
+        "## Assumptions\n\n"
+        f"{bullets('assumptions')}\n\n"
+        "## Expected failure modes\n\n"
+        f"{bullets('expected_failure_modes')}\n\n"
+        "## Source\n\n"
+        f"```python\n{source}\n```\n"
+    ).encode()
 
 
 def usage_complete(value: Mapping[str, Any] | None) -> bool:
@@ -215,6 +323,11 @@ class TurnArtifactStore:
         worker_telemetry: Mapping[str, Any] | None = None,
         canonical_response: Mapping[str, Any] | None = None,
         provider_raw: object | None = None,
+        system_prompt: str | bytes | None = None,
+        output_schema: Mapping[str, Any] | None = None,
+        response_projection_valid: bool | None = None,
+        response_diagnostics: Sequence[Mapping[str, Any]] | None = None,
+        request_text_redact: bool = True,
         codex_profile: object | None = None,
         rpc: object | None = None,
         events: object | None = None,
@@ -265,47 +378,65 @@ class TurnArtifactStore:
         if request_text is not None:
             put(
                 f"{slot_text}.request.md",
-                _markdown_text(request_text, title="Provider request"),
+                _text(request_text, redact_value=request_text_redact),
+                required=True,
+            )
+        elif isinstance(request, Mapping) and isinstance(request.get("prompt"), str):
+            put(
+                f"{slot_text}.request.md",
+                _text(request["prompt"], redact_value=request_text_redact),
                 required=True,
             )
         elif request is not None:
-            put(
-                f"{slot_text}.request.md",
-                _markdown_text(request, title="Provider request"),
-                required=True,
-            )
+            put(f"{slot_text}.request.md", _text(request), required=True)
         else:
             missing[f"{slot_text}.request.md"] = "request construction did not occur"
             complete = False
             blocking_missing.add(f"{slot_text}.request.md")
+
+        if system_prompt is not None:
+            put(f"{slot_text}.system-prompt.md", _text(system_prompt), required=True)
+        if output_schema is not None:
+            put_json(f"{slot_text}.output-schema.json", output_schema)
+
         effective_content = (
             content_received
             if content_received is not None
-            else isinstance(response, str | bytes) or response_text is not None
+            else response is not None or response_text is not None
         )
-        if response_text is not None:
-            put(
-                f"{slot_text}.response.md",
-                _markdown_text(response_text, title="Provider response"),
-                required=True,
+
+        decoded_response = _decoded_mapping(response if response is not None else response_text)
+        if response_projection_valid is None:
+            response_projection_valid = decoded_response is not None and is_generated_policy(
+                decoded_response
             )
-        elif isinstance(response, str | bytes):
+        diagnostics = tuple(response_diagnostics or ())
+        if not response_projection_valid and effective_content and not diagnostics:
+            diagnostics = generated_policy_diagnostics(response)
+        if response_text is not None:
+            # This is the exact assistant payload.  It is intentionally not
+            # parsed, redacted, fenced, or otherwise rewritten.
+            put(f"{slot_text}.response.raw.txt", _text(response_text, redact_value=False))
+        if response_projection_valid and decoded_response is not None:
             put(
                 f"{slot_text}.response.md",
-                _markdown_text(response, title="Provider response"),
+                render_generated_policy_markdown(decoded_response),
                 required=True,
             )
         elif effective_content:
             missing[f"{slot_text}.response.md"] = (
-                "textual response was marked received but not supplied"
+                "not written: response is not a valid generated-policy object"
             )
-            complete = False
-            blocking_missing.add(f"{slot_text}.response.md")
         else:
             missing[f"{slot_text}.response.md"] = "not applicable: no textual content received"
+        if diagnostics:
+            put_json(f"{slot_text}.response-diagnostics.json", diagnostics)
 
         put_json(f"{slot_text}.request.json", request)
-        put_json(f"{slot_text}.response.json", response)
+        # Keep a parsed object for syntactically valid responses, even when
+        # schema validation failed.  Malformed/non-object text lives only in
+        # response.raw.txt plus diagnostics, never in a misleading JSON view.
+        put_json(f"{slot_text}.response.json", decoded_response)
         put_json("canonical_response.json", canonical_response)
         put_json("usage.json", usage)
         put_json("identity.json", identity)
@@ -398,6 +529,7 @@ class TurnArtifactStore:
             "charged": charged,
             "uncharged": uncharged,
             "content_received": bool(effective_content),
+            "response_projection_valid": bool(response_projection_valid),
             "source_extraction": source_extracted,
             "validation_completed": validation_completed,
             "artifact_complete": complete and not blocking_missing,
@@ -533,9 +665,9 @@ class TurnArtifactStore:
         terminal_status = str(result.get("status", "completed"))
         failure_boundary = terminal_status != "completed" or bool(result.get("error"))
         content_received = bool(result.get("content", result.get("response_text")))
-        expected_transport = (
+        native_envelope = "system_prompt" in request or "output_schema" in request
+        expected_transport: tuple[str, ...] = (
             f"{artifact_prefix}.request.json",
-            f"{artifact_prefix}.response.json",
             f"{artifact_prefix}.provider-raw.json",
             f"{artifact_prefix}.wire.jsonl",
             f"{artifact_prefix}.codex-rpc.jsonl",
@@ -546,15 +678,41 @@ class TurnArtifactStore:
             f"{artifact_prefix}.usage.json",
             f"{artifact_prefix}.codex-profile.json",
         )
+        if native_envelope:
+            expected_transport = (
+                *expected_transport,
+                f"{artifact_prefix}.response.raw.txt",
+                f"{artifact_prefix}.system-prompt.md",
+                f"{artifact_prefix}.output-schema.json",
+            )
+        response_value = result.get("response")
+        if isinstance(response_value, Mapping):
+            expected_transport = (*expected_transport, f"{artifact_prefix}.response.json")
         for name in expected_transport:
             if name not in names:
                 missing[name] = "provider did not retain this transport stream"
                 if request_accepted and not failure_boundary:
                     blocking.add(name)
+        projection_valid = result.get("response_projection_valid")
+        if not isinstance(projection_valid, bool):
+            projection_valid = isinstance(response_value, Mapping) and is_generated_policy(
+                response_value
+            )
         response_name = f"{artifact_prefix}.response.md"
-        if content_received and response_name not in names:
-            missing[response_name] = "content was received without response.md"
+        if projection_valid and response_name not in names:
+            missing[response_name] = (
+                "valid generated-policy response was received without response.md"
+            )
             blocking.add(response_name)
+        if (
+            native_envelope
+            and content_received
+            and f"{artifact_prefix}.response.raw.txt" not in names
+        ):
+            missing[f"{artifact_prefix}.response.raw.txt"] = (
+                "content was received without byte-faithful response.raw.txt"
+            )
+            blocking.add(f"{artifact_prefix}.response.raw.txt")
         if request_accepted and not usage_complete(usage) and not failure_boundary:
             missing["usage.json"] = "usage is not final exact usage"
             blocking.add("usage.json")
@@ -598,6 +756,7 @@ class TurnArtifactStore:
                 else None
             ),
             "content_received": content_received,
+            "response_projection_valid": bool(projection_valid),
             "source_extraction": (root / "source.py").is_file(),
             "validation_completed": bool(result.get("validation_completed"))
             and (root / "validation.json").is_file(),
@@ -700,6 +859,9 @@ __all__ = [
     "MAX_ARTIFACT_BYTES",
     "TurnArtifactStore",
     "copy_canonical_source",
+    "generated_policy_diagnostics",
+    "is_generated_policy",
     "redact",
+    "render_generated_policy_markdown",
     "usage_complete",
 ]
