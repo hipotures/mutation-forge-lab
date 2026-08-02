@@ -30,6 +30,12 @@ class AuthenticationError(NativeProviderError):
     """The local Codex profile is absent or did not authenticate."""
 
 
+DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_EFFORT = "high"
+DEFAULT_CONCURRENCY = 1
+DEFAULT_MAX_REPAIRS = 2
+
+
 class NativeTransport(Protocol):
     """Minimal transport contract, deliberately easy to fake in tests."""
 
@@ -46,10 +52,10 @@ class NativeTransport(Protocol):
 class NativeProviderConfig:
     """Scientific/provider identity exposed in run metadata."""
 
-    model: str = "gpt-5.6-luna"
-    effort: str = "high"
-    concurrency: int = 1
-    max_repairs: int = 2
+    model: str = DEFAULT_MODEL
+    effort: str = DEFAULT_EFFORT
+    concurrency: int = DEFAULT_CONCURRENCY
+    max_repairs: int = DEFAULT_MAX_REPAIRS
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -159,7 +165,7 @@ class _CodexTransport:
             name = type(error).__name__.lower()
             message = str(error)
             if "auth" in name or "authenticated" in message.lower() or "login" in message.lower():
-                raise AuthenticationError(message) from error
+                raise AuthenticationError(str(redact(message))) from error
             raise
         text = str(result.text)
         response: Any = text
@@ -225,20 +231,46 @@ class LocalCodexAppServerProvider:
         self,
         *,
         config: NativeProviderConfig | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        concurrency: int | None = None,
+        max_repairs: int | None = None,
         transport: NativeTransport | None = None,
         auth_json: str | Path | None = None,
         process_factory: Any | None = None,
         auth_checker: Any | None = None,
         artifact_store: TurnArtifactStore | None = None,
+        persist_artifacts: bool = True,
         sandbox_mode: str = "danger-full-access",
         approval_policy: str = "never",
     ) -> None:
-        self.config = config or NativeProviderConfig()
+        if config is None:
+            config = NativeProviderConfig(
+                model=model if model is not None else DEFAULT_MODEL,
+                effort=effort if effort is not None else DEFAULT_EFFORT,
+                concurrency=(
+                    concurrency if concurrency is not None else DEFAULT_CONCURRENCY
+                ),
+                max_repairs=(
+                    max_repairs
+                    if max_repairs is not None
+                    else DEFAULT_MAX_REPAIRS
+                ),
+            )
+        elif any(value is not None for value in (model, effort, concurrency, max_repairs)):
+            config = NativeProviderConfig(
+                model=model if model is not None else config.model,
+                effort=effort if effort is not None else config.effort,
+                concurrency=concurrency if concurrency is not None else config.concurrency,
+                max_repairs=max_repairs if max_repairs is not None else config.max_repairs,
+            )
+        self.config = config
         self.model = self.config.model
         self.effort = self.config.effort
         self.concurrency = self.config.concurrency
         self.max_repairs = self.config.max_repairs
         self.artifact_store = artifact_store
+        self.persist_artifacts = persist_artifacts
         self._transport = transport or _CodexTransport(
             self.config,
             auth_json=auth_json,
@@ -381,7 +413,8 @@ class LocalCodexAppServerProvider:
             value = dict(result)
             value.setdefault("status", "completed")
             value.setdefault("accepted", value.get("status") == "completed")
-            self._persist(request, value, "initial")
+            if self.persist_artifacts:
+                self._persist(request, value, "initial")
             self._retained[key] = value
             return value
 
@@ -418,7 +451,8 @@ class LocalCodexAppServerProvider:
             )
             value.setdefault("status", "completed")
             value.setdefault("accepted", value.get("status") == "completed")
-            self._persist(request, value, f"repair-{count + 1:02d}")
+            if self.persist_artifacts:
+                self._persist(request, value, f"repair-{count + 1:02d}")
             self._retained[key] = value
             return value
 
