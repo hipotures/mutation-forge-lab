@@ -139,10 +139,7 @@ def _write_json(path: Path, value: object) -> None:
 def _artifact_root(config: object, artifact_root: str | Path | None) -> Path:
     if artifact_root is not None:
         root = Path(artifact_root)
-        needs_artifacts = root.name != "artifacts" and (
-            (root / "artifacts").is_dir() or _get(config, "exp_id")
-        )
-        if needs_artifacts:
+        if root.name != "artifacts":
             root = root / "artifacts"
         return root
     workspace = _get(config, "workspace")
