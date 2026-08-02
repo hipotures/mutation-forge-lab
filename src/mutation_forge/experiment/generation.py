@@ -13,6 +13,8 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
@@ -22,6 +24,8 @@ from typing import Any, Literal, Protocol, cast
 
 from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.validation import ValidationResult, validate_policy
+
+PROVIDER_TURN_TIMEOUT_SECONDS = 120.0
 
 
 class _InterruptibleThreadPoolExecutor(ThreadPoolExecutor):
@@ -748,6 +752,8 @@ class GenerationCoordinator:
 
     def _invoke(self, request: GenerationRequest) -> ProviderResult:
         payload = request.as_dict()
+        heartbeat_stop = threading.Event()
+        turn_started = time.monotonic()
         self._emit(
             "provider_turn_started",
             generation=request.generation,
@@ -758,7 +764,28 @@ class GenerationCoordinator:
             effort=request.effort,
             idempotency_key=request.idempotency_key,
             provider_turn_state="running",
+            timeout_seconds=PROVIDER_TURN_TIMEOUT_SECONDS,
         )
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(1.0):
+                self._emit(
+                    "repair_activity" if request.phase == "repair" else "provider_turn_activity",
+                    generation=request.generation,
+                    slot=request.slot,
+                    phase=request.phase,
+                    parent_id=request.parent_id,
+                    operation_elapsed_seconds=time.monotonic() - turn_started,
+                    timeout_seconds=PROVIDER_TURN_TIMEOUT_SECONDS,
+                    provider_turn_state="running",
+                )
+
+        heartbeat_thread = threading.Thread(
+            target=heartbeat,
+            name=f"native-heartbeat-{request.slot}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             if request.phase == "repair" and callable(getattr(self.provider, "repair", None)):
                 value = self.provider.repair(payload, tuple(request.diagnostics))  # type: ignore[attr-defined]
@@ -782,6 +809,9 @@ class GenerationCoordinator:
                     isinstance(value, Mapping) and value.get("retained") is True
                 ),
                 **self._usage_payload(result),
+                provider_request_id=result.provider_request_id,
+                provider_thread_id=result.provider_thread_id or result.thread_id,
+                provider_turn_id=result.provider_turn_id or result.turn_id,
                 error=result.error,
             )
             return result
@@ -821,9 +851,16 @@ class GenerationCoordinator:
                 charged=result.charged,
                 uncharged=result.uncharged,
                 **self._usage_payload(result),
+                provider_request_id=result.provider_request_id,
+                provider_thread_id=result.provider_thread_id or result.thread_id,
+                provider_turn_id=result.provider_turn_id or result.turn_id,
                 error=result.error,
             )
             return result
+        finally:
+            heartbeat_stop.set()
+            if heartbeat_thread is not threading.current_thread():
+                heartbeat_thread.join(timeout=0.2)
 
     def _assess(
         self, request: GenerationRequest, raw: ProviderResult, *, repair: bool = False
@@ -1417,6 +1454,7 @@ class GenerationCoordinator:
                             status="accepted",
                             source_sha256=candidate.source_sha256,
                             normalized_ast_sha256=candidate.normalized_ast_sha256,
+                            source_lines=len(candidate.source.splitlines()),
                             archive_size=len(seen),
                         )
                 elif item.status in {"failed", "budget_exhausted"}:

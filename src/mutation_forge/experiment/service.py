@@ -1044,6 +1044,14 @@ class ExperimentService:
                     archive_size=counts.get("candidate_count", 0),
                     cumulative_tokens=cumulative.get("total_tokens", 0),
                     usage={"totalTokens": cumulative.get("total_tokens", 0)},
+                    session_usage={
+                        "inputTokens": 0,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 0,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 0,
+                        "quality": "unknown",
+                    },
                 )
                 adapter_result = self._invoke_adapter(
                     config,
@@ -1351,6 +1359,7 @@ class ExperimentService:
             "deep_operator_profile",
             "deep_score_profile",
             "recovered_work",
+            "ir",
         ):
             if field in outcome:
                 result[field] = outcome[field]

@@ -907,12 +907,13 @@ class NativeExperimentAdapter:
 
         best_objective: float | None = None
         best_candidate_id: str | None = None
+        last_ir: float | None = None
         last_timing_profile: Mapping[str, Any] | None = None
 
         def on_generation(
             generation: int, candidates: Sequence[Candidate], results: Sequence[SlotResult]
         ) -> Mapping[str, str]:
-            nonlocal best_objective, best_candidate_id, last_timing_profile
+            nonlocal best_objective, best_candidate_id, last_ir, last_timing_profile
             if session.budget_exhausted():
                 raise KeyboardInterrupt
             selection_candidates: list[Candidate] = []
@@ -953,6 +954,7 @@ class NativeExperimentAdapter:
                     archive_size=len(archive.records()),
                     source_sha256=candidate.source_sha256,
                     normalized_ast_sha256=candidate.normalized_ast_sha256,
+                    source_lines=len(candidate.source.splitlines()),
                 )
                 identity = f"{program_id}:development"
                 if state.evaluation(identity) is None:
@@ -965,6 +967,11 @@ class NativeExperimentAdapter:
                         phase="development",
                         evaluation_id=identity,
                         evaluations_queued=state.counts().get("evaluation_count", 0) + 1,
+                        evaluation_total=(
+                            len(config.evaluation.orders)
+                            * len(config.evaluation.graph_seeds)
+                            * len(config.evaluation.policy_seeds)
+                        ),
                         development_progress=0.0,
                         replay_progress=0.0,
                         worker_count=config.resources.workers,
@@ -1046,6 +1053,15 @@ class NativeExperimentAdapter:
                     )
                     if isinstance(timing_profile, Mapping):
                         last_timing_profile = dict(timing_profile)
+                    raw_ir = (
+                        result.get("ir")
+                        if isinstance(result, Mapping)
+                        else None
+                    )
+                    if raw_ir is None and isinstance(summary, Mapping):
+                        raw_ir = summary.get("ir", summary.get("improvement_rate"))
+                    if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
+                        last_ir = float(raw_ir)
                     replay = result.get("replay") if isinstance(result, Mapping) else None
                     baseline_comparison = (
                         summary.get("baseline_auc") if isinstance(summary, Mapping) else None
@@ -1078,6 +1094,7 @@ class NativeExperimentAdapter:
                         best_candidate_id=best_candidate_id,
                         best_score=best_objective,
                         baseline_comparison=baseline_comparison,
+                        ir=last_ir,
                         worker_count=config.resources.workers,
                         active_workers=0,
                     )
@@ -1186,6 +1203,8 @@ class NativeExperimentAdapter:
         }
         if last_timing_profile is not None:
             outcome["timing_profile"] = last_timing_profile
+        if last_ir is not None:
+            outcome["ir"] = last_ir
         for field in ("deep_operator_profile", "deep_score_profile"):
             if field in result:
                 outcome[field] = result[field]

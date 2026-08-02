@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import resource
 import threading
 import time
 from typing import TextIO
@@ -38,6 +39,7 @@ class RichLiveSink:
             "evaluations_completed": 0,
             "recovered_work": 0,
             "_usage_cumulative": {},
+            "_usage_session": {},
             "_archive_seen": {},
         }
         self._native_mode = native
@@ -45,6 +47,12 @@ class RichLiveSink:
         self._slot_details: dict[str, dict[str, JsonValue]] = {}
         self._recent_events: list[str] = []
         self._session_started_monotonic: float | None = None
+        self._session_cpu_start: tuple[float, float] | None = None
+        self._active_operation: dict[str, object] | None = None
+        self._last_activity_monotonic: float | None = None
+        self._last_activity_label = "waiting"
+        self._usage_seen: set[tuple[str, str, str]] = set()
+        self._source_lines = 0
         self.live = Live(
             self._render(),
             console=self.console,
@@ -75,6 +83,19 @@ class RichLiveSink:
         self.state.update(event.payload)
         self.state["latest_event"] = event.event_type
         self.state["run_id"] = event.run_id
+        if event.event_type in {"provider_turn_started", "provider_turn_activity"}:
+            self.state["phase"] = (
+                "repair" if event.payload.get("phase") == "repair" else "provider"
+            )
+        elif event.event_type == "repair_started":
+            self.state["phase"] = "repair"
+        elif event.event_type in {
+            "validation_started",
+            "behavior_probe_started",
+            "evaluation_started",
+            "selection_started",
+        }:
+            self.state["phase"] = event.event_type.removesuffix("_started")
         if event.event_type == "session_started":
             self._session_started_monotonic = time.monotonic()
         native_event = event.event_type in {
@@ -87,9 +108,11 @@ class RichLiveSink:
             "generation_completed",
             "slot_queued",
             "provider_turn_started",
+            "provider_turn_activity",
             "provider_turn_completed",
             "provider_turn_failed",
             "repair_started",
+            "repair_activity",
             "repair_completed",
             "validation_started",
             "validation_completed",
@@ -100,6 +123,7 @@ class RichLiveSink:
             "evaluation_progress",
             "evaluation_completed",
             "evaluation_failed",
+            "selection_started",
             "selection_completed",
             "budget_boundary_reached",
             "experiment_completed",
@@ -111,6 +135,7 @@ class RichLiveSink:
             self._update_native_counters(event)
             self._update_native_slot(event)
             self._record_recent_event(event)
+            self._track_native_activity(event)
         if event.event_type == "session_started":
             self.state["state"] = "running"
         elif event.event_type == "experiment_completed":
@@ -179,6 +204,106 @@ class RichLiveSink:
         completed = self.state.get("evaluations_completed")
         if isinstance(completed, int) and not isinstance(completed, bool) and elapsed > 0:
             self.state["evaluations_per_second"] = completed / elapsed
+        episodes = self.state.get("episodes_completed")
+        if isinstance(episodes, int) and not isinstance(episodes, bool) and elapsed > 0:
+            self.state["episodes_per_second"] = episodes / elapsed
+        turns = self.state.get("provider_turns_completed")
+        if isinstance(turns, int) and not isinstance(turns, bool) and elapsed > 0:
+            self.state["turns_per_minute"] = turns * 60.0 / elapsed
+        if elapsed > 0:
+            self.state["source_lines_per_second"] = self._source_lines / elapsed
+        try:
+            user, system = resource.getrusage(resource.RUSAGE_SELF)[:2]
+        except (AttributeError, OSError):
+            user, system = 0.0, 0.0
+        if self._session_cpu_start is not None:
+            self.state["user_seconds"] = max(0.0, float(user) - self._session_cpu_start[0])
+            self.state["system_seconds"] = max(0.0, float(system) - self._session_cpu_start[1])
+        if self._last_activity_monotonic is not None:
+            self.state["last_activity_age_seconds"] = max(
+                0.0, time.monotonic() - self._last_activity_monotonic
+            )
+
+    def _track_native_activity(self, event: Event) -> None:
+        """Keep heartbeat state independent of domain-event arrival rate."""
+
+        payload = event.payload
+        event_type = event.event_type
+        now = time.monotonic()
+        if event_type == "session_started":
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            self._session_cpu_start = (float(usage.ru_utime), float(usage.ru_stime))
+            self._last_activity_monotonic = now
+            self._last_activity_label = "session"
+        if event_type in {"provider_turn_started", "repair_started"}:
+            slot = payload.get("slot")
+            phase = "repair" if event_type == "repair_started" else "provider"
+            self._active_operation = {
+                "phase": phase,
+                "slot": slot if isinstance(slot, str) else "?",
+                "generation": payload.get("generation"),
+                "started": now,
+                "timeout": payload.get("timeout_seconds", 120.0),
+                "thread": payload.get("provider_thread_id"),
+                "turn": payload.get("provider_turn_id"),
+            }
+            self._last_activity_monotonic = now
+            self._last_activity_label = event_type.removesuffix("_started")
+        elif event_type in {"provider_turn_activity", "repair_activity"}:
+            elapsed_value = payload.get("operation_elapsed_seconds")
+            operation_elapsed = (
+                float(elapsed_value)
+                if isinstance(elapsed_value, (int, float)) and not isinstance(elapsed_value, bool)
+                else 0.0
+            )
+            if self._active_operation is None:
+                self._active_operation = {
+                    "phase": "repair" if event_type == "repair_activity" else "provider",
+                    "slot": payload.get("slot", "?"),
+                    "generation": payload.get("generation"),
+                    "started": now - operation_elapsed,
+                    "timeout": payload.get("timeout_seconds", 120.0),
+                }
+            self._last_activity_monotonic = now
+            self._last_activity_label = event_type.removesuffix("_activity")
+            for key in ("provider_thread_id", "provider_turn_id"):
+                value = payload.get(key)
+                if value not in (None, "") and self._active_operation is not None:
+                    self._active_operation[key.removeprefix("provider_")] = value
+        elif event_type in {
+            "provider_turn_completed",
+            "provider_turn_failed",
+            "repair_completed",
+        }:
+            self._last_activity_monotonic = now
+            self._last_activity_label = event_type.removesuffix("_completed").removesuffix(
+                "_failed"
+            )
+            if event_type != "repair_completed":
+                self._active_operation = None
+        elif event_type in {
+            "validation_started",
+            "behavior_probe_started",
+            "evaluation_started",
+        }:
+            phase = str(payload.get("phase", event_type.removesuffix("_started")))
+            self._active_operation = {
+                "phase": phase,
+                "slot": payload.get("slot", "?"),
+                "generation": payload.get("generation"),
+                "started": now,
+                "timeout": payload.get("timeout_seconds"),
+            }
+            self._last_activity_monotonic = now
+            self._last_activity_label = phase
+        elif event_type in {
+            "validation_completed",
+            "behavior_probe_completed",
+            "evaluation_completed",
+            "evaluation_failed",
+        }:
+            self._last_activity_monotonic = now
+            self._active_operation = None
 
     def _live_elapsed_seconds(self) -> float:
         value = self.state.get("elapsed_seconds")
@@ -207,6 +332,18 @@ class RichLiveSink:
             usage = payload.get("usage")
             if isinstance(usage, dict):
                 self.state["_usage_cumulative"] = dict(usage)
+            session_usage = payload.get("session_usage")
+            self.state["_usage_session"] = (
+                dict(session_usage) if isinstance(session_usage, dict) else {}
+            )
+            for key in (
+                "cumulative_provider_turns",
+                "cumulative_evaluations",
+                "cumulative_candidates",
+                "cumulative_tokens",
+            ):
+                if key in payload:
+                    self.state[key] = payload[key]
         elif event.event_type == "slot_queued":
             slot = payload.get("slot")
             status = payload.get("status")
@@ -232,6 +369,15 @@ class RichLiveSink:
             if isinstance(usage, dict):
                 current = self.state.get("_usage_cumulative")
                 cumulative = dict(current) if isinstance(current, dict) else {}
+                session_current = self.state.get("_usage_session")
+                session_usage = dict(session_current) if isinstance(session_current, dict) else {}
+                usage_key = (
+                    str(payload.get("generation", "")),
+                    str(payload.get("slot", "")),
+                    str(payload.get("phase", "initial")),
+                )
+                duplicate_usage = usage_key in self._usage_seen
+                self._usage_seen.add(usage_key)
                 for key in (
                     "inputTokens",
                     "cachedInputTokens",
@@ -240,17 +386,34 @@ class RichLiveSink:
                     "totalTokens",
                 ):
                     value = usage.get(key)
-                    if isinstance(value, int) and not isinstance(value, bool):
+                    if (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and not duplicate_usage
+                    ):
                         prior = cumulative.get(key, 0)
                         cumulative[key] = (
                             prior + value
                             if isinstance(prior, int) and not isinstance(prior, bool)
                             else value
                         )
+                        session_prior = session_usage.get(key, 0)
+                        session_usage[key] = (
+                            session_prior + value
+                            if (
+                                isinstance(session_prior, int)
+                                and not isinstance(session_prior, bool)
+                            )
+                            else value
+                        )
                 cumulative["quality"] = payload.get(
                     "usage_quality", cumulative.get("quality", "unknown")
                 )
+                session_usage["quality"] = payload.get(
+                    "usage_quality", session_usage.get("quality", "unknown")
+                )
                 self.state["_usage_cumulative"] = cumulative
+                self.state["_usage_session"] = session_usage
                 self.state["usage"] = cumulative
         elif event.event_type == "repair_completed":
             if payload.get("retained") is not True:
@@ -285,6 +448,10 @@ class RichLiveSink:
             archive_size = payload.get("archive_size")
             if isinstance(archive_size, int) and not isinstance(archive_size, bool):
                 self.state["archive_size"] = max(integer("archive_size"), archive_size)
+            source_lines = payload.get("source_lines")
+            if isinstance(source_lines, int) and not isinstance(source_lines, bool):
+                self._source_lines += max(0, source_lines)
+                self.state["source_lines"] = self._source_lines
         elif event.event_type == "evaluation_started":
             queued = payload.get("evaluations_queued")
             if isinstance(queued, int) and not isinstance(queued, bool):
@@ -292,6 +459,10 @@ class RichLiveSink:
             else:
                 add("evaluations_queued")
             self.state["evaluations_active"] = integer("evaluations_active") + 1
+            total = payload.get("evaluation_total")
+            if isinstance(total, int) and not isinstance(total, bool):
+                self.state["episodes_total"] = total
+                self.state["episodes_completed"] = 0
         elif event.event_type == "evaluation_progress":
             active = payload.get("evaluations_active")
             self.state["evaluations_active"] = max(
@@ -308,9 +479,25 @@ class RichLiveSink:
                 "replay_progress",
                 "active_workers",
                 "worker_count",
+                "completed",
+                "total",
+                "evaluation_total",
+                "pass",
+                "pass_progress",
             ):
                 if key in payload:
-                    self.state[key] = payload[key]
+                    if key == "evaluations_per_second":
+                        self.state["episodes_per_second"] = payload[key]
+                    else:
+                        self.state[key] = payload[key]
+            completed = payload.get("completed")
+            if isinstance(completed, int) and not isinstance(completed, bool):
+                self.state["episodes_completed"] = max(
+                    integer("episodes_completed"), completed
+                )
+            total = payload.get("total")
+            if isinstance(total, int) and not isinstance(total, bool):
+                self.state["episodes_total"] = total
         elif event.event_type in {"evaluation_completed", "evaluation_failed"}:
             self.state["evaluations_active"] = max(0, integer("evaluations_active") - 1)
             completed = payload.get("evaluations_completed")
@@ -331,6 +518,16 @@ class RichLiveSink:
                 self.state["baseline_comparison"] = payload["baseline_comparison"]
             if event.event_type == "evaluation_failed":
                 self.state["error_summary"] = payload.get("error", "evaluation failed")
+        for key in (
+            "ir",
+            "improvement_rate",
+            "acceptance_rate",
+            "proposal_evaluations_per_second",
+            "timeout_seconds",
+            "worker_utilization",
+        ):
+            if key in payload:
+                self.state[key] = payload[key]
         if event.event_type == "provider_turn_failed":
             self.state["error_summary"] = payload.get("error", "provider turn failed")
         elif event.event_type == "validation_completed" and payload.get("valid") is False:
@@ -353,12 +550,14 @@ class RichLiveSink:
         state = payload.get("status")
         if event_type == "provider_turn_started":
             state = "repair" if phase == "repair" else "model"
+            detail["_started_at"] = time.monotonic()
         elif event_type == "provider_turn_completed":
             state = "accepted" if payload.get("accepted") is True else "failed"
         elif event_type == "provider_turn_failed":
             state = "failed"
         elif event_type == "repair_started":
             state = "repair"
+            detail["_started_at"] = time.monotonic()
         elif event_type == "validation_started":
             state = "validating"
         elif event_type == "validation_completed":
@@ -371,6 +570,9 @@ class RichLiveSink:
             state = "evaluating"
         elif event_type == "candidate_archived":
             state = payload.get("status")
+            source_lines = payload.get("source_lines")
+            if isinstance(source_lines, int) and not isinstance(source_lines, bool):
+                detail["source_lines"] = source_lines
         if isinstance(state, str) and state:
             detail["state"] = state
             slots = self.state.get("slot_states")
@@ -378,6 +580,18 @@ class RichLiveSink:
                 slots = {}
                 self.state["slot_states"] = slots
             slots[slot] = state
+        if event_type in {
+            "provider_turn_completed",
+            "provider_turn_failed",
+            "repair_completed",
+            "validation_completed",
+            "behavior_probe_completed",
+            "evaluation_completed",
+            "evaluation_failed",
+        }:
+            started = detail.get("_started_at")
+            if isinstance(started, (int, float)):
+                detail["elapsed_seconds"] = max(0.0, time.monotonic() - started)
         usage = payload.get("usage")
         tokens = payload.get("totalTokens")
         if isinstance(usage, dict):
@@ -404,9 +618,11 @@ class RichLiveSink:
             "generation_started",
             "slot_queued",
             "provider_turn_started",
+            "provider_turn_activity",
             "provider_turn_completed",
             "provider_turn_failed",
             "repair_started",
+            "repair_activity",
             "repair_completed",
             "validation_completed",
             "behavior_probe_completed",
@@ -439,6 +655,13 @@ class RichLiveSink:
             label += f": {error}"
         timestamp = event.timestamp[11:19] if len(event.timestamp) >= 19 else ""
         entry = f"{timestamp} {label}".strip()
+        if event.event_type in {"provider_turn_activity", "repair_activity"}:
+            # Heartbeats should keep the tail current without consuming all
+            # six rows during a long model turn.
+            if self._recent_events and "heartbeat" in self._recent_events[-1]:
+                self._recent_events[-1] = f"{timestamp} heartbeat {slot or 'work'}".strip()
+                return
+            entry = f"{timestamp} heartbeat {slot or 'work'}".strip()
         self._recent_events.append(entry)
         del self._recent_events[:-6]
 
@@ -456,10 +679,24 @@ class RichLiveSink:
         height = max(8, self.console.size.height)
         profile_line = self._native_profile_line()
         metrics = self._native_metrics_line(width - 4)
+        progress_lines = self._native_progress_lines(width - 4)
+        token_line = self._native_token_line(width - 4)
+        heartbeat = self._native_heartbeat_line(width - 4)
         show_metrics = bool(metrics) and height >= 12
-        show_profile = profile_line is not None and height >= 16
+        show_tokens = bool(token_line) and height >= 14
+        show_heartbeat = bool(heartbeat) and height >= 12
+        show_profile = profile_line is not None and height >= 18
         activity_limit = 3 if height >= 16 else 1
-        fixed = 1 + 1 + (1 if show_metrics else 0) + 1 + activity_limit
+        fixed = (
+            1
+            + 1
+            + len(progress_lines)
+            + (1 if show_metrics else 0)
+            + (1 if show_tokens else 0)
+            + (1 if show_heartbeat else 0)
+            + 1
+            + activity_limit
+        )
         if show_profile:
             fixed += 1
         details = self._native_slot_rows()
@@ -468,8 +705,13 @@ class RichLiveSink:
         summary = self._native_summary_line()
         if summary:
             parts.append(Text(summary))
+        parts.extend(Text(line) for line in progress_lines)
         if show_metrics:
             parts.append(Text(metrics))
+        if show_tokens:
+            parts.append(Text(token_line))
+        if show_heartbeat:
+            parts.append(Text(heartbeat))
         if details and max_rows:
             parts.append(self._native_slot_table(width, details[:max_rows]))
         else:
@@ -513,6 +755,7 @@ class RichLiveSink:
         if concurrency is not None:
             add("workers", concurrency)
         add("phase", state.get("phase"))
+        add("checkpoint", state.get("checkpoint"))
         base_values = list(values)
         optional: list[str] = []
         mode = state.get("run_mode")
@@ -568,6 +811,150 @@ class RichLiveSink:
                 compact.append(phase_item)
         return self._fit_header(" · ".join(compact), available)
 
+    def _native_progress_lines(self, width: int) -> list[str]:
+        """Render bounded progress bars from durable/native counters."""
+
+        state = self.state
+
+        def integer(name: str) -> int | None:
+            value = state.get(name)
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+        def pair(current: int | None, total: object) -> tuple[int, int] | None:
+            if current is None or not isinstance(total, int) or isinstance(total, bool):
+                return None
+            return max(0, current), max(0, total)
+
+        generation = pair(integer("generation"), state.get("generation_limit"))
+        slots = pair(integer("completed_slots"), state.get("population_size"))
+        turns_current = max(
+            integer("provider_turns_attempted") or 0,
+            integer("provider_turns_completed") or 0,
+        )
+        turns_total = state.get("max_model_turns")
+        turns = pair(turns_current, turns_total)
+        episodes = pair(integer("episodes_completed"), state.get("episodes_total"))
+        elapsed = self._live_elapsed_seconds()
+        wall_total = state.get("configured_wall_seconds")
+        wall = (
+            (int(elapsed), max(0, int(float(wall_total))))
+            if isinstance(wall_total, int | float)
+            and not isinstance(wall_total, bool)
+            and float(wall_total) > 0
+            else None
+        )
+
+        def segment(label: str, values: tuple[int, int] | None, *, bar_width: int) -> str:
+            if values is None:
+                return ""
+            current, total = values
+            filled = (
+                bar_width
+                if total <= 0 and current > 0
+                else min(bar_width, max(0, round(bar_width * current / max(total, 1))))
+            )
+            bar = "#" * filled + "-" * (bar_width - filled)
+            return f"{label} [{bar}] {current}/{total}"
+
+        available = max(36, width)
+        bar_width = 10 if available >= 130 else 7 if available >= 90 else 5
+        segments = [
+            segment("Gen", generation, bar_width=bar_width),
+            segment("Slots", slots, bar_width=bar_width),
+            segment("Turns", turns, bar_width=bar_width),
+            segment("Eval", episodes, bar_width=bar_width),
+            segment("Time", wall, bar_width=bar_width),
+        ]
+        segments = [item for item in segments if item]
+        if not segments:
+            return []
+        if available >= 120:
+            return [self._fit(" · ".join(segments), available)]
+        # Keep every known bar visible on normal terminals, but split them
+        # before Rich can wrap the row unpredictably.
+        lines: list[str] = []
+        current: list[str] = []
+        for item in segments:
+            proposed = " · ".join([*current, item])
+            if current and len(proposed) > available:
+                lines.append(" · ".join(current))
+                current = [item]
+            else:
+                current.append(item)
+        if current:
+            lines.append(" · ".join(current))
+        return [self._fit(line, available) for line in lines]
+
+    def _native_token_line(self, width: int) -> str:
+        usage = self.state.get("usage")
+        cumulative = usage if isinstance(usage, dict) else self.state.get("_usage_cumulative")
+        session = self.state.get("_usage_session")
+        cumulative = cumulative if isinstance(cumulative, dict) else {}
+        session = session if isinstance(session, dict) else {}
+        total = cumulative.get("totalTokens")
+        session_total = session.get("totalTokens")
+        if not any(
+            isinstance(value, int) and not isinstance(value, bool) and value > 0
+            for value in (total, session_total)
+        ):
+            return ""
+
+        def value(source: dict[str, JsonValue], name: str) -> str:
+            current = source.get(name)
+            return (
+                str(current)
+                if isinstance(current, int) and not isinstance(current, bool)
+                else "?"
+            )
+
+        quality = cumulative.get("quality", "unknown")
+        text = (
+            "tokens "
+            f"in {value(cumulative, 'inputTokens')} "
+            f"cached {value(cumulative, 'cachedInputTokens')} "
+            f"out {value(cumulative, 'outputTokens')} "
+            f"reason {value(cumulative, 'reasoningOutputTokens')} "
+            f"total {value(cumulative, 'totalTokens')} "
+            f"session {value(session, 'totalTokens')} · quality {quality}"
+        )
+        return self._fit(text, width)
+
+    def _native_heartbeat_line(self, width: int) -> str:
+        operation = self._active_operation
+        if operation is None:
+            return ""
+        now = time.monotonic()
+        started = operation.get("started")
+        elapsed = max(0.0, now - started) if isinstance(started, (int, float)) else 0.0
+        timeout = operation.get("timeout")
+        timeout_text = ""
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+            timeout_text = f" · timeout in {max(0.0, float(timeout) - elapsed):.1f}s"
+        age = self.state.get("last_activity_age_seconds")
+        age_text = (
+            f" · activity age {float(age):.1f}s"
+            if isinstance(age, (int, float)) and not isinstance(age, bool)
+            else ""
+        )
+        warning = ""
+        if (
+            isinstance(age, (int, float))
+            and isinstance(timeout, (int, float))
+            and not isinstance(age, bool)
+            and not isinstance(timeout, bool)
+            and age >= max(5.0, float(timeout) * 0.5)
+        ):
+            warning = "WARNING stale activity · "
+        thread = operation.get("thread") or operation.get("turn")
+        thread_text = f" · id {thread}" if isinstance(thread, str) and thread else ""
+        text = (
+            warning
+            + f"{str(operation.get('phase', 'work')).upper()} "
+            f"{operation.get('slot', '?')} · {elapsed:.1f}s elapsed"
+            f"{timeout_text}{age_text}{thread_text}"
+        )
+        return self._fit(text, width)
+
     def _native_summary_line(self) -> str:
         state = self.state
         values: list[str] = []
@@ -590,6 +977,12 @@ class RichLiveSink:
         repairs = number("repair_turns")
         if repairs:
             values.append(f"repairs {repairs}")
+        operation = self._active_operation
+        if operation is not None:
+            slot = operation.get("slot")
+            if isinstance(slot, str):
+                parent = self._slot_details.get(slot, {}).get("parent_id")
+                values.append(f"work {slot}/{self._compact_parent(parent)}")
         accepted = number("accepted_candidates")
         invalid = number("invalid_candidates")
         duplicate = number("duplicate_candidates")
@@ -630,6 +1023,9 @@ class RichLiveSink:
                 rate = f"{completed_evaluations / elapsed:.2f}"
         if rate is not None or session not in (None, ""):
             values.append(f"eval/s {rate if rate is not None else '0.00'}")
+        episode_rate = self._rate_value(state.get("episodes_per_second"))
+        if episode_rate is not None:
+            values.append(f"eps/s {episode_rate}")
         completed_turns = state.get("provider_turns_completed")
         if (
             isinstance(completed_turns, int)
@@ -639,6 +1035,31 @@ class RichLiveSink:
             elapsed = self._live_elapsed_seconds()
             if elapsed > 0:
                 values.append(f"turn/s {completed_turns / elapsed:.2f}")
+                values.append(f"turn/min {completed_turns * 60 / elapsed:.1f}")
+        lines_rate = self._rate_value(state.get("source_lines_per_second"))
+        if lines_rate is None and self._source_lines:
+            elapsed = self._live_elapsed_seconds()
+            if elapsed > 0:
+                lines_rate = f"{self._source_lines / elapsed:.2f}"
+        if self._source_lines:
+            values.append(
+                f"lines {self._source_lines}"
+                + (f" · lines/s {lines_rate}" if lines_rate is not None else "")
+            )
+        ir = state.get("ir", state.get("improvement_rate"))
+        if isinstance(ir, int | float) and not isinstance(ir, bool):
+            values.append(f"IR {float(ir):.3f}")
+        active = state.get("active_model_turns")
+        configured = state.get("effective_concurrency", state.get("configured_concurrency"))
+        if isinstance(active, int) and isinstance(configured, int) and configured > 0:
+            values.append(f"workers {active}/{configured}")
+        charged_failed = state.get("charged_failed_turns")
+        if isinstance(charged_failed, int) and charged_failed:
+            values.append(f"charged-failed {charged_failed}")
+        user = state.get("user_seconds")
+        system = state.get("system_seconds")
+        if isinstance(user, (int, float)) and isinstance(system, (int, float)):
+            values.append(f"cpu {float(user):.1f}/{float(system):.1f}s")
         recovered = state.get("recovered_work")
         if isinstance(recovered, int) and recovered:
             values.append(f"recovered {recovered}")
@@ -655,6 +1076,15 @@ class RichLiveSink:
                 rows = [{"slot": slot, "state": value} for slot, value in slots.items()]
         for row in rows:
             row.setdefault("slot", "?")
+            started = row.get("_started_at")
+            if isinstance(started, (int, float)) and row.get("state") in {
+                "model",
+                "repair",
+                "validating",
+                "probing",
+                "evaluating",
+            }:
+                row["elapsed_seconds"] = max(0.0, time.monotonic() - started)
         return sorted(rows, key=lambda row: str(row.get("slot", "")))
 
     def _native_slot_table(self, width: int, rows: list[dict[str, JsonValue]]) -> Table:
@@ -664,15 +1094,19 @@ class RichLiveSink:
             table.add_column("parent", no_wrap=True)
             table.add_column("phase", no_wrap=True)
             table.add_column("state", no_wrap=True)
+            table.add_column("elapsed", justify="right", no_wrap=True)
             table.add_column("tokens", justify="right", no_wrap=True)
+            table.add_column("lines", justify="right", no_wrap=True)
             table.add_column("candidate / error", no_wrap=True, overflow="ellipsis")
         elif width >= 100:
             table.add_column("parent", no_wrap=True)
             table.add_column("state", no_wrap=True)
+            table.add_column("elapsed", justify="right", no_wrap=True)
             table.add_column("tokens", justify="right", no_wrap=True)
             table.add_column("result", no_wrap=True, overflow="ellipsis")
         else:
             table.add_column("state", no_wrap=True)
+            table.add_column("elapsed", justify="right", no_wrap=True)
             table.add_column("tokens", justify="right", no_wrap=True)
             table.add_column("result", no_wrap=True, overflow="ellipsis")
         for row in rows:
@@ -681,15 +1115,22 @@ class RichLiveSink:
             phase = str(row.get("phase", ""))
             state = self._compact_state(row.get("state", "queued"))
             tokens = str(row.get("tokens", ""))
+            elapsed_value = row.get("elapsed_seconds")
+            elapsed = (
+                f"{float(elapsed_value):.1f}s"
+                if isinstance(elapsed_value, (int, float)) and not isinstance(elapsed_value, bool)
+                else ""
+            )
+            lines = str(row.get("source_lines", ""))
             result = self._compact_text(
                 str(row.get("error", row.get("candidate", row.get("score", "")))), 96
             )
             if width >= 120:
-                table.add_row(slot, parent, phase, state, tokens, result)
+                table.add_row(slot, parent, phase, state, elapsed, tokens, lines, result)
             elif width >= 100:
-                table.add_row(slot, parent, state, tokens, result)
+                table.add_row(slot, parent, state, elapsed, tokens, result)
             else:
-                table.add_row(slot, state, tokens, result)
+                table.add_row(slot, state, elapsed, tokens, result)
         return table
 
     def _native_profile_line(self) -> str | None:
@@ -710,10 +1151,18 @@ class RichLiveSink:
         )[:3]
         if not top:
             return None
-        parts = [f"{name} {float(seconds):.2f}s" for name, seconds in top]
+        calls = profile.get("phase_calls")
+        parts = []
+        for name, seconds in top:
+            call_count = calls.get(name) if isinstance(calls, dict) else None
+            suffix = f" x{call_count}" if isinstance(call_count, int) else ""
+            parts.append(f"{name} {float(seconds):.2f}s{suffix}")
         unattributed = profile.get("unattributed_fraction")
         if isinstance(unattributed, int | float) and not isinstance(unattributed, bool):
             parts.append(f"unattributed {float(unattributed) * 100:.1f}%")
+        throughput = profile.get("throughput", profile.get("evaluations_per_second"))
+        if isinstance(throughput, int | float) and not isinstance(throughput, bool):
+            parts.append(f"{float(throughput):.2f}/s")
         return "Profile  " + " · ".join(parts)
 
     @staticmethod
@@ -1496,6 +1945,19 @@ class ProgressLineSink:
             "status",
             "completed_slots",
             "evaluations_completed",
+            "evaluations_per_second",
+            "episodes_per_second",
+            "turns_per_minute",
+            "source_lines",
+            "source_lines_per_second",
+            "ir",
+            "operation_elapsed_seconds",
+            "timeout_seconds",
+            "last_activity_age_seconds",
+            "inputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens",
             "best_score",
             "stop_reason",
             "error",

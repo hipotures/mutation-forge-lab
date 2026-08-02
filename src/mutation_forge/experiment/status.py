@@ -34,6 +34,7 @@ def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str
         "best_primary_metric": None,
         "provider_turns": 0,
         "total_tokens": 0,
+        "ir": None,
         "compute_seconds": 0,
         "last_checkpoint": None,
         "last_stop_reason": None,
@@ -126,6 +127,14 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             completed_slots = len(completed_slots) if isinstance(completed_slots, list) else 0
         best_id, best_metric = _best_candidate(state)
         last_error = checkpoint_error or state.latest_error()
+        session_metrics: dict[str, Any] = {}
+        if session is not None:
+            try:
+                parsed = json.loads(str(session.get("summary_json", "{}")))
+            except (TypeError, json.JSONDecodeError):
+                parsed = {}
+            if isinstance(parsed, Mapping):
+                session_metrics = dict(parsed)
         return {
             "schema_version": STATUS_SCHEMA_VERSION,
             "exp_id": config.exp_id,
@@ -143,6 +152,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             "best_primary_metric": best_metric,
             "provider_turns": counts["provider_turns"],
             "total_tokens": int(current["total_tokens"]),
+            "ir": session_metrics.get("ir"),
             "compute_seconds": float(current["compute_seconds"]),
             "last_checkpoint": checkpoint.get("checkpoint_id")
             if checkpoint
@@ -206,6 +216,8 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
             f"Best: {status['best_program_id']}, primary metric {status['best_primary_metric']}"
         )
     lines.append(f"Usage: {status['provider_turns']} model turns, {status['total_tokens']} tokens")
+    if status.get("ir") is not None:
+        lines.append(f"IR: {status['ir']}")
     if status.get("last_stop_reason"):
         lines.append(f"Last stop: {status['last_stop_reason']}")
     if status.get("last_error"):
