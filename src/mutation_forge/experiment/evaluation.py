@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -403,29 +404,80 @@ def _run_once(
     *,
     backend: GraphBackend,
     limits: SandboxLimits,
+    progress: Callable[[Mapping[str, JsonValue]], None] | None = None,
+    profiling_enabled: bool = False,
+    pass_name: str = "development",
 ) -> dict[str, JsonValue]:
     source_text, ranker, owned_ranker = _source_and_ranker(candidate_id, source, limits)
+    started = time.monotonic()
+    phase_seconds: dict[str, float] = {}
+    phase_calls: dict[str, int] = {}
     try:
-        episodes = [
-            _trajectory(
-                backend,
-                ranker,
-                settings,
-                order=order,
-                graph_seed=graph_seed,
-                policy_seed=policy_seed,
-                candidate_id=candidate_id,
+        episodes: list[dict[str, JsonValue]] = []
+        total = len(settings["orders"]) * len(settings["graph_seeds"]) * len(
+            settings["policy_seeds"]
+        )
+        completed = 0
+        for order in settings["orders"]:
+            order_started = time.monotonic()
+            for graph_seed in settings["graph_seeds"]:
+                for policy_seed in settings["policy_seeds"]:
+                    episode = _trajectory(
+                        backend,
+                        ranker,
+                        settings,
+                        order=order,
+                        graph_seed=graph_seed,
+                        policy_seed=policy_seed,
+                        candidate_id=candidate_id,
+                    )
+                    episodes.append(episode)
+                    completed += 1
+                    if progress is not None:
+                        elapsed = max(time.monotonic() - started, 1e-9)
+                        progress_fields: dict[str, JsonValue] = {
+                            "candidate_id": candidate_id,
+                            "order": order,
+                            "graph_seed": graph_seed,
+                            "policy_seed": policy_seed,
+                            "completed": completed,
+                            "total": total,
+                            "evaluations": completed,
+                            "evaluations_per_second": completed / elapsed,
+                            "pass": pass_name,
+                            "pass_progress": completed / max(total, 1),
+                            "development_progress": (
+                                completed / max(total, 1)
+                                if pass_name == "development"
+                                else 0.0
+                            ),
+                            "replay_progress": (
+                                completed / max(total, 1)
+                                if pass_name == "replay"
+                                else 0.0
+                            ),
+                        }
+                        progress(
+                            progress_fields
+                        )
+            phase_seconds[f"order_{order}"] = time.monotonic() - order_started
+            phase_calls[f"order_{order}"] = len(settings["graph_seeds"]) * len(
+                settings["policy_seeds"]
             )
-            for order in settings["orders"]
-            for graph_seed in settings["graph_seeds"]
-            for policy_seed in settings["policy_seeds"]
-        ]
     finally:
         if owned_ranker:
             ranker.close()
     candidate_rows = [cast(Mapping[str, Any], row["policies"])[candidate_id] for row in episodes]
     aucs = [float(_get(row, "auc", 0.0)) for row in candidate_rows]
-    return {
+    baseline_names = tuple(str(name) for name in settings["baselines"])
+    baseline_auc: dict[str, JsonValue] = {}
+    for baseline in baseline_names:
+        values = [
+            float(_get(cast(Mapping[str, Any], row["policies"]).get(baseline), "auc", 0.0))
+            for row in episodes
+        ]
+        baseline_auc[baseline] = sum(values) / len(values) if values else 0.0
+    result: dict[str, JsonValue] = {
         "schema_version": SCHEMA_VERSION,
         "status": "completed",
         "candidate_id": candidate_id,
@@ -439,11 +491,44 @@ def _run_once(
             "episode_count": len(episodes),
             "mean_auc": sum(aucs) / len(aucs) if aucs else 0.0,
             "best_auc": max(aucs, default=0.0),
+            "baseline_auc": baseline_auc,
         },
         "provider_calls": 0,
         "model_calls": 0,
         "network_calls": 0,
     }
+    if profiling_enabled:
+        measured = max(time.monotonic() - started, 1e-9)
+        accounted = sum(phase_seconds.values())
+        result["timing_profile"] = {
+            "enabled": True,
+            "phase_seconds": cast(JsonValue, phase_seconds),
+            "phase_calls": cast(JsonValue, phase_calls),
+            "phase_children_seconds": {},
+            "phase_children_calls": {},
+            "measured_total_seconds": measured,
+            "accounted_seconds": accounted,
+            "unattributed_seconds": max(0.0, measured - accounted),
+            "unattributed_fraction": max(0.0, measured - accounted) / measured,
+            "dominant_phase": max(
+                phase_seconds.items(), key=lambda item: item[1], default=("evaluation", measured)
+            )[0],
+            "dominant_seconds": max(phase_seconds.values(), default=measured),
+            "profiled_episodes": len(episodes),
+            "throughput": len(episodes) / measured,
+            "evaluations_per_second": len(episodes) / measured,
+            "hotspots": [
+                {
+                    "phase": name,
+                    "seconds": seconds,
+                    "percent": seconds / measured * 100,
+                }
+                for name, seconds in sorted(
+                    phase_seconds.items(), key=lambda item: item[1], reverse=True
+                )
+            ],
+        }
+    return result
 
 
 def evaluate_candidate(
@@ -459,6 +544,8 @@ def evaluate_candidate(
     backend_factory: Callable[[Path], GraphBackend] | None = None,
     heg_repo: str | Path | None = None,
     sandbox_limits: SandboxLimits | None = None,
+    progress: Callable[[Mapping[str, JsonValue]], None] | None = None,
+    profiling_enabled: bool = False,
 ) -> dict[str, JsonValue]:
     """Evaluate one validated ranker source and persist development/replay evidence."""
     if (
@@ -500,7 +587,15 @@ def evaluate_candidate(
     primary_backend = make_backend()
     try:
         primary = _run_once(
-            config, candidate_id, source, settings, backend=primary_backend, limits=limits
+            config,
+            candidate_id,
+            source,
+            settings,
+            backend=primary_backend,
+            limits=limits,
+            progress=progress,
+            profiling_enabled=profiling_enabled,
+            pass_name="development",
         )
         backend_repo = getattr(primary_backend, "repo", None)
         observed_repo = (
@@ -534,7 +629,15 @@ def evaluate_candidate(
             replay_backend = make_backend()
             try:
                 replay = _run_once(
-                    config, candidate_id, source, settings, backend=replay_backend, limits=limits
+                    config,
+                    candidate_id,
+                    source,
+                    settings,
+                    backend=replay_backend,
+                    limits=limits,
+                    progress=progress,
+                    profiling_enabled=profiling_enabled,
+                    pass_name="replay",
                 )
             finally:
                 if replay_backend is not primary_backend and backend is None:
@@ -567,6 +670,8 @@ def evaluate_population(
     backend_factory: Callable[[Path], GraphBackend] | None = None,
     heg_repo: str | Path | None = None,
     sandbox_limits: SandboxLimits | None = None,
+    progress: Callable[[Mapping[str, JsonValue]], None] | None = None,
+    profiling_enabled: bool = False,
 ) -> dict[str, JsonValue]:
     """Evaluate a deterministic candidate roster using the native evaluator."""
     if candidates is None:
@@ -585,6 +690,8 @@ def evaluate_population(
             backend_factory=backend_factory,
             heg_repo=heg_repo,
             sandbox_limits=sandbox_limits,
+            progress=progress,
+            profiling_enabled=profiling_enabled,
         )
     return {
         "schema_version": SCHEMA_VERSION,

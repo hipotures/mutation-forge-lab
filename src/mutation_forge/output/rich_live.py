@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import TextIO
 
 from rich import box
 from rich.console import Console, Group
@@ -23,6 +24,20 @@ class RichLiveSink:
             "latest_event": "none",
             "evaluations": 0,
             "episodes_completed": 0,
+            "native": False,
+            "state": "starting",
+            "slot_states": {},
+            "active_model_turns": 0,
+            "archive_size": 0,
+            "accepted_candidates": 0,
+            "invalid_candidates": 0,
+            "duplicate_candidates": 0,
+            "evaluations_queued": 0,
+            "evaluations_active": 0,
+            "evaluations_completed": 0,
+            "recovered_work": 0,
+            "_usage_cumulative": {},
+            "_archive_seen": {},
         }
         self.live = Live(
             self._render(),
@@ -32,22 +47,238 @@ class RichLiveSink:
         )
         self.live.start()
         self._last_refresh = time.monotonic()
+        self._native_first_refresh = True
 
     def write(self, event: Event) -> None:
         self.state.update(event.payload)
         self.state["latest_event"] = event.event_type
         self.state["run_id"] = event.run_id
+        native_event = event.event_type in {
+            "preflight_started",
+            "preflight_completed",
+            "workspace_initialized",
+            "workspace_resumed",
+            "session_started",
+            "generation_started",
+            "generation_completed",
+            "slot_queued",
+            "provider_turn_started",
+            "provider_turn_completed",
+            "provider_turn_failed",
+            "repair_started",
+            "repair_completed",
+            "validation_started",
+            "validation_completed",
+            "behavior_probe_started",
+            "behavior_probe_completed",
+            "candidate_archived",
+            "evaluation_started",
+            "evaluation_progress",
+            "evaluation_completed",
+            "evaluation_failed",
+            "selection_completed",
+            "budget_boundary_reached",
+            "experiment_completed",
+            "experiment_interrupted",
+            "experiment_failed",
+        }
+        if native_event:
+            self.state["native"] = True
+            self._update_native_counters(event)
+        if event.event_type == "session_started":
+            self.state["state"] = "running"
+        elif event.event_type == "experiment_completed":
+            self.state["state"] = "completed"
+        elif event.event_type == "experiment_interrupted":
+            self.state["state"] = "interrupted"
+        elif event.event_type == "experiment_failed":
+            self.state["state"] = "failed"
+        elif event.event_type == "budget_boundary_reached" and event.payload.get(
+            "state"
+        ) in {"idle", "budget_exhausted"}:
+            self.state["state"] = "idle"
         if event.event_type == "baseline_started":
             self.state["stage"] = "baseline"
-        elif event.event_type == "run_completed":
+        elif event.event_type in {"run_completed", "experiment_completed"}:
             self.state["stage"] = "completed"
-        elif event.event_type == "run_failed":
+        elif event.event_type in {"run_failed", "experiment_failed"}:
             self.state["stage"] = "failed"
         now = time.monotonic()
-        terminal = event.event_type in {"run_completed", "run_failed"}
-        if terminal or now - self._last_refresh >= REFRESH_INTERVAL_SECONDS:
+        terminal = event.event_type in {
+            "run_completed",
+            "run_failed",
+            "experiment_completed",
+            "experiment_interrupted",
+            "experiment_failed",
+        } or (
+            event.event_type == "budget_boundary_reached"
+            and event.payload.get("state") in {"idle", "budget_exhausted"}
+        )
+        immediate_native = native_event and (
+            self._native_first_refresh
+            or event.event_type
+            in {
+                "session_started",
+                "generation_started",
+                "provider_turn_started",
+                "repair_started",
+                "validation_started",
+                "behavior_probe_started",
+                "evaluation_started",
+            }
+        )
+        if terminal or immediate_native or now - self._last_refresh >= REFRESH_INTERVAL_SECONDS:
             self.live.update(self._render(), refresh=True)
             self._last_refresh = now
+            if native_event:
+                self._native_first_refresh = False
+
+    def _update_native_counters(self, event: Event) -> None:
+        """Accumulate counters when an event carries only a local delta."""
+
+        payload = event.payload
+
+        def integer(name: str, default: int = 0) -> int:
+            value = self.state.get(name, default)
+            return int(value) if isinstance(value, int) and not isinstance(value, bool) else default
+
+        def add(name: str, amount: int = 1) -> None:
+            self.state[name] = integer(name) + amount
+
+        if event.event_type == "session_started":
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                self.state["_usage_cumulative"] = dict(usage)
+        elif event.event_type == "slot_queued":
+            slot = payload.get("slot")
+            status = payload.get("status")
+            slots = self.state.get("slot_states")
+            if isinstance(slot, str) and isinstance(status, str) and isinstance(slots, dict):
+                slots[slot] = status
+            completed = payload.get("completed_slots")
+            if isinstance(completed, int) and not isinstance(completed, bool):
+                self.state["completed_slots"] = max(integer("completed_slots"), completed)
+            if payload.get("recovered") is True:
+                add("recovered_work")
+        elif event.event_type == "provider_turn_started":
+            self.state["active_model_turns"] = integer("active_model_turns") + 1
+            add("provider_turns_attempted")
+        elif event.event_type in {"provider_turn_completed", "provider_turn_failed"}:
+            self.state["active_model_turns"] = max(0, integer("active_model_turns") - 1)
+            if event.event_type == "provider_turn_completed":
+                add("provider_turns_completed")
+                add("responses_received")
+            if event.event_type == "provider_turn_failed" and payload.get("charged") is True:
+                add("charged_failed_turns")
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                current = self.state.get("_usage_cumulative")
+                cumulative = dict(current) if isinstance(current, dict) else {}
+                for key in (
+                    "inputTokens",
+                    "cachedInputTokens",
+                    "outputTokens",
+                    "reasoningOutputTokens",
+                    "totalTokens",
+                ):
+                    value = usage.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        prior = cumulative.get(key, 0)
+                        cumulative[key] = (
+                            prior + value
+                            if isinstance(prior, int) and not isinstance(prior, bool)
+                            else value
+                        )
+                cumulative["quality"] = payload.get(
+                    "usage_quality", cumulative.get("quality", "unknown")
+                )
+                self.state["_usage_cumulative"] = cumulative
+                self.state["usage"] = cumulative
+        elif event.event_type == "repair_completed":
+            if payload.get("retained") is not True:
+                add("repair_turns")
+        elif event.event_type == "validation_completed":
+            add("validation_outcomes")
+            if payload.get("parse_outcome") in {"valid", "invalid"}:
+                add("parse_outcomes")
+            if payload.get("schema_outcome") in {"valid", "invalid"}:
+                add("schema_outcomes")
+        elif event.event_type == "behavior_probe_completed":
+            add("behavior_probe_outcomes")
+        elif event.event_type == "candidate_archived":
+            status = payload.get("status")
+            candidate_id = payload.get("candidate_id")
+            seen = self.state.get("_archive_seen")
+            duplicate_event = (
+                isinstance(candidate_id, str)
+                and isinstance(seen, dict)
+                and candidate_id in seen
+                and seen[candidate_id] == status
+            )
+            if isinstance(candidate_id, str) and isinstance(seen, dict):
+                seen[candidate_id] = status
+            if not duplicate_event:
+                if status == "accepted":
+                    add("accepted_candidates")
+                elif status == "duplicate":
+                    add("duplicate_candidates")
+                elif status == "invalid":
+                    add("invalid_candidates")
+            archive_size = payload.get("archive_size")
+            if isinstance(archive_size, int) and not isinstance(archive_size, bool):
+                self.state["archive_size"] = max(integer("archive_size"), archive_size)
+        elif event.event_type == "evaluation_started":
+            queued = payload.get("evaluations_queued")
+            if isinstance(queued, int) and not isinstance(queued, bool):
+                self.state["evaluations_queued"] = max(integer("evaluations_queued"), queued)
+            else:
+                add("evaluations_queued")
+            self.state["evaluations_active"] = integer("evaluations_active") + 1
+        elif event.event_type == "evaluation_progress":
+            active = payload.get("evaluations_active")
+            self.state["evaluations_active"] = max(
+                integer("evaluations_active"),
+                active if isinstance(active, int) and not isinstance(active, bool) else 0,
+            )
+            for key in (
+                "order",
+                "graph_seed",
+                "policy_seed",
+                "evaluations",
+                "evaluations_per_second",
+                "development_progress",
+                "replay_progress",
+                "active_workers",
+                "worker_count",
+            ):
+                if key in payload:
+                    self.state[key] = payload[key]
+        elif event.event_type in {"evaluation_completed", "evaluation_failed"}:
+            self.state["evaluations_active"] = max(0, integer("evaluations_active") - 1)
+            completed = payload.get("evaluations_completed")
+            if isinstance(completed, int) and not isinstance(completed, bool):
+                self.state["evaluations_completed"] = max(
+                    integer("evaluations_completed"), completed
+                )
+            else:
+                add("evaluations_completed")
+            for key in ("mean_auc", "best_auc", "current_objective", "best_objective"):
+                if key in payload:
+                    self.state[key] = payload[key]
+            if "best_candidate_id" in payload:
+                self.state["best_candidate_id"] = payload["best_candidate_id"]
+            if "best_score" in payload:
+                self.state["best_score"] = payload["best_score"]
+            if "baseline_comparison" in payload:
+                self.state["baseline_comparison"] = payload["baseline_comparison"]
+            if event.event_type == "evaluation_failed":
+                self.state["error_summary"] = payload.get("error", "evaluation failed")
+        if event.event_type == "provider_turn_failed":
+            self.state["error_summary"] = payload.get("error", "provider turn failed")
+        elif event.event_type == "validation_completed" and payload.get("valid") is False:
+            self.state["error_summary"] = payload.get("error", "validation failed")
+        elif event.event_type == "behavior_probe_completed" and payload.get("valid") is False:
+            self.state["error_summary"] = payload.get("error", "behavior probe failed")
 
     def _render(self) -> Group:
         profile_table = self._profile_table()
@@ -80,6 +311,8 @@ class RichLiveSink:
             ("Profile top / unattributed", self._profile_summary()),
             ("Latest event", self.state.get("latest_event", "none")),
         ]
+        if self.state.get("native") is True:
+            rows.extend(self._native_rows())
         if profile_table is None:
             rows.append(
                 (
@@ -89,7 +322,14 @@ class RichLiveSink:
             )
         for label, value in rows:
             overview.add_row(str(label), str(value))
-        overview_panel = Panel(overview, title="Mutation Forge Lab · Stage 1")
+        overview_panel = Panel(
+            overview,
+            title=(
+                "Mutation Forge Lab · Native experiment"
+                if self.state.get("native") is True
+                else "Mutation Forge Lab · Stage 1"
+            ),
+        )
         panels: list[Panel] = [overview_panel]
         if profile_table is not None:
             profile = self.state["timing_profile"]
@@ -141,6 +381,111 @@ class RichLiveSink:
                 )
             )
         return Group(*panels)
+
+    def _native_rows(self) -> list[tuple[str, JsonValue]]:
+        """Return the stage-independent native operational dashboard rows."""
+
+        state = self.state
+        slot_states = state.get("slot_states")
+        if isinstance(slot_states, dict):
+            slot_summary = ", ".join(
+                f"{slot}={value}"
+                for slot, value in sorted(slot_states.items())
+            ) or "-"
+        else:
+            slot_summary = "-"
+        usage = state.get("usage")
+        usage_map = usage if isinstance(usage, dict) else state
+
+        def value(name: str, fallback: JsonValue = "-") -> JsonValue:
+            current = state.get(name, fallback)
+            return fallback if current is None else current
+
+        def usage_value(name: str) -> JsonValue:
+            current = usage_map.get(name, "-") if isinstance(usage_map, dict) else "-"
+            return "-" if current is None else current
+
+        return [
+            ("Experiment ID", value("experiment_id", state.get("run_id", "-"))),
+            ("Workspace", value("workspace")),
+            ("Session", value("session_id")),
+            ("Mode", value("run_mode", "fresh")),
+            ("Experiment state", value("state")),
+            ("Elapsed session", self._seconds(value("elapsed_seconds"))),
+            ("Invocation budget", self._seconds(value("configured_wall_seconds"))),
+            ("Remaining time", self._seconds(value("remaining_seconds"))),
+            ("Stop reason", value("stop_reason")),
+            ("Latest checkpoint", value("checkpoint")),
+            (
+                "Generation",
+                f"{value('generation', 0)} / {value('generation_limit', value('max_generations'))}",
+            ),
+            (
+                "Slots completed",
+                f"{value('completed_slots', 0)} / {value('population_size', value('slot_count'))}",
+            ),
+            ("Slot states", slot_summary),
+            ("Parent / root", value("parent_id", value("parent_status"))),
+            ("Turn phase", value("phase")),
+            ("Active model turns", value("active_model_turns", 0)),
+            (
+                "Concurrency",
+                f"{value('effective_concurrency')} / {value('configured_concurrency')}",
+            ),
+            (
+                "Provider turns",
+                f"{value('provider_turns_completed', 0)} / "
+                f"{value('provider_turns_attempted', 0)}",
+            ),
+            (
+                "Cumulative provider turns / evaluations",
+                f"{value('cumulative_provider_turns', 0)} / "
+                f"{value('cumulative_evaluations', 0)}",
+            ),
+            ("Repair turns", value("repair_turns", 0)),
+            ("Remaining max_model_turns", value("remaining_model_turns")),
+            ("Model / effort", f"{value('model')} / {value('effort')}"),
+            ("Input tokens", usage_value("inputTokens")),
+            ("Cached input tokens", usage_value("cachedInputTokens")),
+            ("Output tokens", usage_value("outputTokens")),
+            ("Reasoning tokens", usage_value("reasoningOutputTokens")),
+            ("Total tokens", usage_value("totalTokens")),
+            ("Session tokens", value("token_usage_delta")),
+            ("Cumulative tokens", value("cumulative_tokens")),
+            ("Usage quality", usage_value("quality")),
+            ("Charged failed turns", value("charged_failed_turns", 0)),
+            ("Responses received", value("responses_received", 0)),
+            ("JSON/schema outcomes", value("parse_outcomes", value("schema_outcomes", 0))),
+            ("AST validation outcomes", value("validation_outcomes", 0)),
+            ("Behavior probes", value("behavior_probe_outcomes", 0)),
+            ("Candidates accepted", value("accepted_candidates", 0)),
+            ("Candidates invalid", value("invalid_candidates", 0)),
+            ("Candidates duplicate", value("duplicate_candidates", 0)),
+            ("Archive size", value("archive_size", 0)),
+            ("Selected parents / elite", value("selected_parents")),
+            ("Evaluations queued", value("evaluations_queued", 0)),
+            ("Evaluations active", value("evaluations_active", 0)),
+            ("Evaluations completed", value("evaluations_completed", 0)),
+            (
+                "Evaluation coordinates",
+                f"order={value('order')} graph={value('graph_seed')} policy={value('policy_seed')}",
+            ),
+            (
+                "Development / replay",
+                f"{value('development_progress')} / {value('replay_progress')}",
+            ),
+            ("Evaluation count", value("evaluation_count", value("evaluations", 0))),
+            ("Evaluation throughput", self._rate(value("evaluations_per_second"))),
+            (
+                "Current / best objective",
+                f"{value('current_objective')} / {value('best_objective')}",
+            ),
+            ("Baseline comparison", value("baseline_comparison")),
+            ("Best candidate", f"{value('best_candidate_id')} · {value('best_score')}"),
+            ("Workers", f"{value('active_workers')} / {value('worker_count')}"),
+            ("Provider / validation error", value("error_summary")),
+            ("Recovered work", value("recovered_work")),
+        ]
 
     @staticmethod
     def _seconds(value: JsonValue) -> str:
@@ -360,6 +705,27 @@ class RichLiveSink:
             "100.0%",
             style="bright_cyan",
         )
+        hotspots = profile.get("hotspots")
+        if isinstance(hotspots, list) and hotspots:
+            table.add_section()
+            table.add_row("Top hotspots", "", "", "", "")
+            for item in hotspots[:5]:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("phase", item.get("name", "-"))
+                seconds_value = item.get("seconds", "-")
+                percent_value = item.get("percent", "-")
+                seconds_text = (
+                    f"{seconds_value:.3f}"
+                    if isinstance(seconds_value, int | float)
+                    else str(seconds_value)
+                )
+                percent_text = (
+                    f"{percent_value:.1f}%"
+                    if isinstance(percent_value, int | float)
+                    else str(percent_value)
+                )
+                table.add_row(f"  {name}", "", seconds_text, "", percent_text)
         return table
 
     def _deep_profile_table(self) -> Table | None:
@@ -616,3 +982,38 @@ class RichLiveSink:
 
     def close(self) -> None:
         self.live.stop()
+
+
+class ProgressLineSink:
+    """Flushed, readable event lines for redirected human output."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+
+    def write(self, event: Event) -> None:
+        payload = event.payload
+        details = []
+        for key in (
+            "generation",
+            "slot",
+            "phase",
+            "status",
+            "completed_slots",
+            "evaluations_completed",
+            "best_score",
+            "stop_reason",
+            "error",
+        ):
+            value = payload.get(key)
+            if value not in (None, ""):
+                details.append(f"{key}={value}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        line = f"[{event.timestamp}] {event.event_type}{suffix}\n"
+        self.stream.write(line)
+        self.stream.flush()
+
+    def close(self) -> None:
+        return None
+
+
+NonTTYProgressSink = ProgressLineSink

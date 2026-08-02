@@ -152,7 +152,13 @@ class SessionManager:
         )
 
     def event(self, session: SessionContext, event_type: str, **payload: Any) -> None:
-        event = {"timestamp": _now(), "event_type": event_type, **payload}
+        event = {
+            "schema_version": "1.0",
+            "run_id": session.session_id,
+            "timestamp": _now(),
+            "event_type": event_type,
+            **payload,
+        }
         with (session.directory / "events.jsonl").open("ab") as handle:
             handle.write(_canonical(event) + b"\n")
             handle.flush()

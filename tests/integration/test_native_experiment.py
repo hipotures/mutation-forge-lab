@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import re
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from mutation_forge.backends.toy import ToyBackend
 from mutation_forge.experiment.config import load_experiment_config
@@ -19,6 +21,7 @@ from mutation_forge.experiment.native import NativeExperimentAdapter
 from mutation_forge.experiment.service import ExperimentService
 from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.experiment.status import experiment_status
+from mutation_forge.output.rich_live import RichLiveSink
 
 VALID_SOURCE = "def priority(ctx, proposal):\n    return 0\n"
 INVALID_SOURCE = "def priority(ctx, proposal)\n    return 0\n"
@@ -252,6 +255,61 @@ def test_fresh_native_experiment_creates_native_workspace_and_noop_is_idempotent
     assert status["provider_turns"] == 1
     assert status["unique_candidate_count"] == 1
     assert status["best_program_id"] == "g0000-slot-00"
+
+
+def test_native_live_progress_is_visible_before_blocked_provider_finishes(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        exp_id="native-blocked",
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingProvider(RecordingProvider):
+        def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+            started.set()
+            assert release.wait(5)
+            return super().generate(request)
+
+    sink = RichLiveSink(console=Console(file=io.StringIO(), force_terminal=False))
+    service = ExperimentService(
+        adapter=NativeExperimentAdapter(
+            provider=BlockingProvider(),
+            backend=ToyBackend(),
+        ),
+        event_sinks=[sink],
+    )
+    result: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.update(service.run(config_path))
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert started.wait(5)
+        snapshot = io.StringIO()
+        Console(file=snapshot, force_terminal=False, width=180).print(sink._render())
+        rendered = snapshot.getvalue()
+        assert not errors
+        assert sink.state["latest_event"] == "provider_turn_started"
+        assert "Active model turns" in rendered
+        assert "Provider turns" in rendered
+        assert "native-blocked" in rendered
+    finally:
+        release.set()
+        worker.join(timeout=10)
+        sink.close()
+    assert not worker.is_alive()
+    assert not errors
+    assert result["state"] == "completed"
 
 
 def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> None:

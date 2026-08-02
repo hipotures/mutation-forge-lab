@@ -27,6 +27,37 @@ EVENT_TYPES = frozenset(
         "checkpoint_written",
         "run_completed",
         "run_failed",
+        # Stage-independent native experiment lifecycle.  These names are
+        # deliberately kept in the shared registry so the same Event object
+        # can drive Rich, JSONL, and durable session observers.
+        "preflight_started",
+        "preflight_completed",
+        "workspace_initialized",
+        "workspace_resumed",
+        "session_started",
+        "generation_started",
+        "generation_completed",
+        "slot_queued",
+        "provider_turn_started",
+        "provider_turn_completed",
+        "provider_turn_failed",
+        "repair_started",
+        "repair_completed",
+        "validation_started",
+        "validation_completed",
+        "behavior_probe_started",
+        "behavior_probe_completed",
+        "candidate_archived",
+        "evaluation_started",
+        "evaluation_progress",
+        "evaluation_completed",
+        "evaluation_failed",
+        "selection_started",
+        "selection_completed",
+        "budget_boundary_reached",
+        "experiment_completed",
+        "experiment_interrupted",
+        "experiment_failed",
     }
 )
 

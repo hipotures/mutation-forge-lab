@@ -22,9 +22,12 @@ from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
 from mutation_forge.evaluation.benchmark import load_summary
 from mutation_forge.evaluation.dataset import build_dataset
+from mutation_forge.events import EventSink, JsonlSink
+from mutation_forge.experiment.config import load_experiment_config
 from mutation_forge.experiment.service import run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
+from mutation_forge.output.rich_live import ProgressLineSink, RichLiveSink
 from mutation_forge.sandbox.config import load_policy_config
 from mutation_forge.sandbox.policy import evaluate_policy, probe_policy
 from mutation_forge.sandbox.validation import validate_policy
@@ -261,9 +264,31 @@ def _emit_policy_result(result: object, *, json_output: bool) -> None:
         Console().print_json(canonical)
 
 
-def _experiment_run(config_path: Path, *, json_output: bool) -> int:
-    result = run_experiment(config_path)
-    if json_output:
+def _experiment_run(
+    config_path: Path,
+    *,
+    json_output: bool,
+    profiling: bool | None = None,
+) -> int:
+    config = load_experiment_config(config_path)
+    machine_output = json_output or config.run.output == "json"
+    sinks: list[EventSink]
+    if machine_output:
+        sinks = [JsonlSink(sys.stderr)]
+    elif sys.stdout.isatty():
+        sinks = [RichLiveSink(console=Console(file=sys.stdout))]
+    else:
+        sinks = [ProgressLineSink(sys.stdout)]
+    try:
+        result = run_experiment(
+            config_path,
+            event_sinks=sinks,
+            profiling=profiling,
+        )
+    finally:
+        for sink in reversed(sinks):
+            sink.close()
+    if machine_output:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     else:
         Console().print(
@@ -271,7 +296,8 @@ def _experiment_run(config_path: Path, *, json_output: bool) -> int:
             f"State: {result.get('state', result.get('status', '-'))}\n"
             f"Workspace: {result.get('workspace', '-')}\n"
             f"Session: {result.get('session_id', '-')}\n"
-            f"Stop reason: {result.get('stop_reason', '-')}"
+            f"Stop reason: {result.get('stop_reason', '-')}\n"
+            f"Checkpoint: {result.get('checkpoint', '-')}"
         )
     return 0 if result.get("status") != "failed" else 1
 
@@ -697,6 +723,22 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     )
     experiment_run.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_run.add_argument("--json", action="store_true")
+    experiment_run.add_argument(
+        "--profile",
+        "--profiling",
+        dest="profiling",
+        action="store_true",
+        default=None,
+        help="enable native runtime profiling for this invocation",
+    )
+    experiment_run.add_argument(
+        "--no-profile",
+        "--no-profiling",
+        dest="profiling",
+        action="store_false",
+        default=None,
+        help="disable native runtime profiling for this invocation",
+    )
     experiment_status = experiment_commands.add_parser(
         "status",
         help="show read-only operational status",
@@ -1101,6 +1143,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment_run.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_run.add_argument("--json", action="store_true")
+    experiment_run.add_argument(
+        "--profile",
+        "--profiling",
+        dest="profiling",
+        action="store_true",
+        default=None,
+        help="enable native runtime profiling for this invocation",
+    )
+    experiment_run.add_argument(
+        "--no-profile",
+        "--no-profiling",
+        dest="profiling",
+        action="store_false",
+        default=None,
+        help="disable native runtime profiling for this invocation",
+    )
     experiment_status = experiment_commands.add_parser(
         "status",
         help="show read-only operational status",
@@ -1124,7 +1182,11 @@ def legacy_main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return _doctor(args.heg_repo, args.run_root)
         if args.command == "experiment" and args.experiment_command == "run":
-            return _experiment_run(args.config, json_output=args.json)
+            return _experiment_run(
+                args.config,
+                json_output=args.json,
+                profiling=getattr(args, "profiling", None),
+            )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)
         if args.command == "dataset" and args.dataset_command == "build":
@@ -1212,7 +1274,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return _doctor(args.heg_repo, args.run_root)
         if args.command == "experiment" and args.experiment_command == "run":
-            return _experiment_run(args.config, json_output=args.json)
+            return _experiment_run(
+                args.config,
+                json_output=args.json,
+                profiling=getattr(args, "profiling", None),
+            )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)
     except Exception as error:

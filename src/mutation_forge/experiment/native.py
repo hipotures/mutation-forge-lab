@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -696,6 +698,10 @@ class NativeExperimentAdapter:
         layout: ExperimentLayout,
         state: ExperimentStateStore,
         session: SessionContext,
+        *,
+        observer: Any | None = None,
+        event_callback: Any | None = None,
+        profiling: bool | None = None,
     ) -> Mapping[str, Any]:
         (
             system_prompt,
@@ -726,6 +732,23 @@ class NativeExperimentAdapter:
         archive = _NativeArchive(layout.archive)
         parent_sources, parent_records = self._parent_data(state, layout)
         baseline_sources = archive.existing_sources()
+        callback = observer if observer is not None else event_callback
+        profiling_enabled = (
+            config.run.profiling_enabled if profiling is None else bool(profiling)
+        )
+
+        def emit(event_type: str, **payload: Any) -> None:
+            if not callable(callback):
+                return
+            try:
+                callback(event_type, payload)
+            except TypeError:
+                try:
+                    callback(event_type, **payload)
+                except Exception:
+                    return
+            except Exception:
+                return
 
         def pretty(value: object) -> str:
             return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
@@ -877,9 +900,14 @@ class NativeExperimentAdapter:
                 )
             return "\n".join(sections).rstrip() + "\n"
 
+        best_objective: float | None = None
+        best_candidate_id: str | None = None
+        last_timing_profile: Mapping[str, Any] | None = None
+
         def on_generation(
             generation: int, candidates: Sequence[Candidate], results: Sequence[SlotResult]
         ) -> Mapping[str, str]:
+            nonlocal best_objective, best_candidate_id, last_timing_profile
             if session.budget_exhausted():
                 raise KeyboardInterrupt
             selection_candidates: list[Candidate] = []
@@ -911,17 +939,86 @@ class NativeExperimentAdapter:
                     status="created",
                     metadata={"behavior": dict(candidate.behavior_signature), "search_metrics": {}},
                 )
+                emit(
+                    "candidate_archived",
+                    generation=generation,
+                    slot=candidate.slot,
+                    candidate_id=program_id,
+                    status="accepted",
+                    archive_size=len(archive.records()),
+                    source_sha256=candidate.source_sha256,
+                    normalized_ast_sha256=candidate.normalized_ast_sha256,
+                )
                 identity = f"{program_id}:development"
                 if state.evaluation(identity) is None:
                     evaluator = self.evaluator or evaluate_candidate
-                    result = evaluator(
-                        config,
-                        program_id,
-                        candidate.source,
-                        artifact_root=layout.artifacts,
-                        backend=self.backend,
-                        sandbox_limits=SandboxLimits(),
+                    emit(
+                        "evaluation_started",
+                        generation=generation,
+                        slot=candidate.slot,
+                        candidate_id=program_id,
+                        phase="development",
+                        evaluation_id=identity,
+                        evaluations_queued=state.counts().get("evaluation_count", 0) + 1,
+                        development_progress=0.0,
+                        replay_progress=0.0,
+                        worker_count=config.resources.workers,
+                        active_workers=1,
                     )
+                    evaluation_started = time.monotonic()
+
+                    def evaluation_progress(
+                        payload: Mapping[str, Any],
+                        *,
+                        _candidate_id: str = program_id,
+                        _generation: int = generation,
+                        _slot: str = candidate.slot,
+                        _identity: str = identity,
+                    ) -> None:
+                        progress_payload = dict(payload)
+                        progress_payload.setdefault("candidate_id", _candidate_id)
+                        progress_payload.setdefault("generation", _generation)
+                        progress_payload.setdefault("slot", _slot)
+                        pass_name = progress_payload.get("pass")
+                        progress_payload.setdefault(
+                            "phase", pass_name if isinstance(pass_name, str) else "development"
+                        )
+                        progress_payload.setdefault("evaluation_id", _identity)
+                        progress_payload.setdefault("evaluations_active", 1)
+                        emit(
+                            "evaluation_progress",
+                            **progress_payload,
+                        )
+
+                    evaluator_kwargs: dict[str, Any] = {
+                        "artifact_root": layout.artifacts,
+                        "backend": self.backend,
+                        "sandbox_limits": SandboxLimits(),
+                    }
+                    try:
+                        parameters = dict(inspect.signature(evaluator).parameters)
+                    except (TypeError, ValueError):
+                        parameters = {}
+                    if "progress" in parameters:
+                        evaluator_kwargs["progress"] = evaluation_progress
+                    if "profiling_enabled" in parameters:
+                        evaluator_kwargs["profiling_enabled"] = profiling_enabled
+                    try:
+                        result = evaluator(config, program_id, candidate.source, **evaluator_kwargs)
+                    except BaseException as error:
+                        emit(
+                            "evaluation_failed",
+                            generation=generation,
+                            slot=candidate.slot,
+                            candidate_id=program_id,
+                            phase="development",
+                            evaluation_id=identity,
+                            status="failed",
+                            evaluations_active=0,
+                            error=f"{type(error).__name__}: {error}",
+                            elapsed_seconds=time.monotonic() - evaluation_started,
+                        )
+                        raise
                     state.record_evaluation(
                         identity,
                         candidate_id=program_id,
@@ -932,6 +1029,53 @@ class NativeExperimentAdapter:
                     session.evaluations_completed += 1
                     summary = result.get("summary") if isinstance(result, Mapping) else None
                     metric = summary.get("mean_auc") if isinstance(summary, Mapping) else None
+                    if (
+                        isinstance(metric, (int, float))
+                        and not isinstance(metric, bool)
+                        and (best_objective is None or float(metric) > best_objective)
+                    ):
+                        best_objective = float(metric)
+                        best_candidate_id = program_id
+                    timing_profile = (
+                        result.get("timing_profile") if isinstance(result, Mapping) else None
+                    )
+                    if isinstance(timing_profile, Mapping):
+                        last_timing_profile = dict(timing_profile)
+                    replay = result.get("replay") if isinstance(result, Mapping) else None
+                    baseline_comparison = (
+                        summary.get("baseline_auc") if isinstance(summary, Mapping) else None
+                    )
+                    emit(
+                        "evaluation_completed",
+                        generation=generation,
+                        slot=candidate.slot,
+                        candidate_id=program_id,
+                        phase="development",
+                        evaluation_id=identity,
+                        status="completed",
+                        evaluations_active=0,
+                        evaluations_completed=session.evaluations_completed,
+                        evaluation_count=state.counts().get("evaluation_count", 0),
+                        mean_auc=metric,
+                        best_auc=(
+                            summary.get("best_auc") if isinstance(summary, Mapping) else None
+                        ),
+                        elapsed_seconds=time.monotonic() - evaluation_started,
+                        timing_profile=timing_profile,
+                        development_progress=1.0,
+                        replay_progress=(
+                            1.0
+                            if isinstance(replay, Mapping) and replay.get("enabled") is True
+                            else 0.0
+                        ),
+                        current_objective=metric,
+                        best_objective=best_objective,
+                        best_candidate_id=best_candidate_id,
+                        best_score=best_objective,
+                        baseline_comparison=baseline_comparison,
+                        worker_count=config.resources.workers,
+                        active_workers=0,
+                    )
                     metadata = {
                         "search_metrics": {"pooled_median_auc": metric}
                         if isinstance(metric, (int, float))
@@ -968,15 +1112,25 @@ class NativeExperimentAdapter:
         try:
             engine = self.engine
             if engine is not None:
-                result = engine(
-                    wrapped,
-                    config=config,
-                    archive=archive,
-                    on_generation=on_generation,
-                    layout=layout,
-                    state=state,
-                    session=session,
-                )
+                engine_kwargs: dict[str, Any] = {
+                    "config": config,
+                    "archive": archive,
+                    "on_generation": on_generation,
+                    "layout": layout,
+                    "state": state,
+                    "session": session,
+                }
+                try:
+                    engine_parameters = dict(inspect.signature(engine).parameters)
+                except (TypeError, ValueError):
+                    engine_parameters = {}
+                if "observer" in engine_parameters:
+                    engine_kwargs["observer"] = callback
+                elif "event_callback" in engine_parameters:
+                    engine_kwargs["event_callback"] = callback
+                if "profiling" in engine_parameters:
+                    engine_kwargs["profiling"] = profiling_enabled
+                result = engine(wrapped, **engine_kwargs)
             else:
                 generation_config = GenerationConfig(
                     campaign_id=config.exp_id,
@@ -1002,6 +1156,7 @@ class NativeExperimentAdapter:
                     prompt_renderer=render_prompt,
                     selection_callback=on_generation,
                     behavior_evaluator=_native_behavior,
+                    observer=callback,
                 )
                 generation_result = coordinator.run(resume=True)
                 result = {
@@ -1016,7 +1171,7 @@ class NativeExperimentAdapter:
         state_value = (
             "completed" if str(result.get("status", "completed")) == "completed" else "idle"
         )
-        return {
+        outcome: dict[str, Any] = {
             "state": state_value,
             "stop_reason": "generation_limit" if state_value == "completed" else "budget_exhausted",
             "generation": int(result.get("generation", 0) or 0),
@@ -1024,6 +1179,12 @@ class NativeExperimentAdapter:
             "evaluations": [],
             "result": dict(result),
         }
+        if last_timing_profile is not None:
+            outcome["timing_profile"] = last_timing_profile
+        for field in ("deep_operator_profile", "deep_score_profile"):
+            if field in result:
+                outcome[field] = result[field]
+        return outcome
 
 
 __all__ = ["NativeExperimentAdapter", "NativeExperimentError"]

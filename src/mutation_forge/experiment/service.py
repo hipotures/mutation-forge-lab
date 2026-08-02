@@ -6,7 +6,7 @@ import inspect
 import json
 import shutil
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +18,7 @@ from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import LockError, build_lock, load_lock, verify_lock
 from .native import NativeExperimentAdapter
+from .observer import CallbackEventSink, ExperimentEventHub
 from .sessions import SessionContext, SessionManager
 from .state import ExperimentStateStore, StateError
 
@@ -849,34 +850,116 @@ def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
 
 
 class ExperimentService:
-    def __init__(self, *, adapter: ExperimentAdapter | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        adapter: ExperimentAdapter | None = None,
+        event_sinks: Sequence[Any] = (),
+        observer: Any | None = None,
+        profiling: bool | None = None,
+    ) -> None:
         # The public experiment workflow is native.  Historical adapters remain
         # available only through the private compatibility surface below.
         self.adapter = adapter or NativeExperimentAdapter()
+        self.event_sinks = list(event_sinks)
+        if observer is not None:
+            self.event_sinks.append(CallbackEventSink(observer))
+        self.profiling = profiling
 
     def run(self, config_path: str | Path = "experiment.toml") -> dict[str, Any]:
         config = load_experiment_config(config_path)
         layout = ExperimentLayout.from_config(config)
+        profiling_enabled = (
+            config.run.profiling_enabled if self.profiling is None else bool(self.profiling)
+        )
+        hub = ExperimentEventHub(
+            config.exp_id,
+            self.event_sinks,
+            profiling_enabled=profiling_enabled,
+        )
+        hub.emit(
+            "preflight_started",
+            experiment_id=config.exp_id,
+            workspace=str(layout.root),
+            run_mode="fresh" if not layout.root.exists() else "continuation",
+            state="starting",
+            configured_wall_seconds=config.run.wall_seconds,
+            profiling_enabled=profiling_enabled,
+        )
+
+        def fail_before_session(error: BaseException) -> None:
+            with suppress(Exception):
+                hub.emit(
+                    "experiment_failed",
+                    experiment_id=config.exp_id,
+                    workspace=str(layout.root),
+                    state="failed",
+                    stop_reason="preflight_failed",
+                    error=f"{type(error).__name__}: {error}",
+                )
+            with suppress(Exception):
+                hub.close()
+
         created = not layout.root.exists()
         if created:
-            preflight = self._preflight(config)
-            lock = build_lock(config, layout, preflight=preflight)
-            lock_hash = str(lock["immutable_config_sha256"])
-            layout.initialize_atomic(
-                config,
-                lock_payload=lock,
-                state_initializer=lambda state_path: ExperimentStateStore.initialize(
-                    state_path,
-                    exp_id=config.exp_id,
-                    lock_hash=lock_hash,
-                    root=layout.root,
-                ),
+            try:
+                preflight = self._preflight(config)
+            except BaseException as error:
+                fail_before_session(error)
+                raise
+            hub.emit(
+                "preflight_completed",
+                experiment_id=config.exp_id,
+                workspace=str(layout.root),
+                status="completed",
+                preflight=preflight or {},
+            )
+            try:
+                lock = build_lock(config, layout, preflight=preflight)
+                lock_hash = str(lock["immutable_config_sha256"])
+                layout.initialize_atomic(
+                    config,
+                    lock_payload=lock,
+                    state_initializer=lambda state_path: ExperimentStateStore.initialize(
+                        state_path,
+                        exp_id=config.exp_id,
+                        lock_hash=lock_hash,
+                        root=layout.root,
+                    ),
+                )
+            except BaseException as error:
+                fail_before_session(error)
+                raise
+            hub.emit(
+                "workspace_initialized",
+                experiment_id=config.exp_id,
+                workspace=str(layout.root),
+                state="created",
+                run_mode="fresh",
             )
         else:
-            layout.verify_root()
-            lock = load_lock(layout.lock)
-            verify_lock(lock, config, layout)
-            self._verify_root_config(layout, config, lock)
+            try:
+                layout.verify_root()
+                lock = load_lock(layout.lock)
+                verify_lock(lock, config, layout)
+                self._verify_root_config(layout, config, lock)
+            except BaseException as error:
+                fail_before_session(error)
+                raise
+            hub.emit(
+                "preflight_completed",
+                experiment_id=config.exp_id,
+                workspace=str(layout.root),
+                status="completed",
+                resumed=True,
+            )
+            hub.emit(
+                "workspace_resumed",
+                experiment_id=config.exp_id,
+                workspace=str(layout.root),
+                state="resumable",
+                run_mode="continuation",
+            )
 
         state = ExperimentStateStore(layout.state)
         checkpoints = CheckpointStore(layout.checkpoints)
@@ -889,7 +972,17 @@ class ExperimentService:
             layout.reconcile_artifact_manifest()
             current_state = state.state()
             if current_state == "completed":
-                return self._record_completed_session(config, layout, state)
+                result = self._record_completed_session(config, layout, state, hub=hub)
+                hub.emit(
+                    "experiment_completed",
+                    experiment_id=config.exp_id,
+                    workspace=str(layout.root),
+                    state="completed",
+                    stop_reason="already_completed",
+                    checkpoint=result.get("checkpoint"),
+                )
+                hub.close()
+                return result
 
             number = state.next_session_number()
             session_id = f"session-{number:06d}"
@@ -898,7 +991,9 @@ class ExperimentService:
             session: SessionContext | None = None
             try:
                 session = manager.start(config)
+                hub.attach_session(manager, session)
                 starting_checkpoint = checkpoints.latest()
+                fresh_session = starting_checkpoint is None
                 if starting_checkpoint is None:
                     first = checkpoints.save(
                         {
@@ -921,9 +1016,44 @@ class ExperimentService:
                     session.starting_checkpoint = str(first["checkpoint_id"])
                 else:
                     session.starting_checkpoint = str(starting_checkpoint["checkpoint_id"])
-                manager.event(session, "session_started", checkpoint=session.starting_checkpoint)
-                result = self._invoke_adapter(config, layout, state, session)
-                outcome = self._normalize_outcome(result, session)
+                cumulative = state.cumulative()
+                counts = state.counts()
+                hub.emit(
+                    "session_started",
+                    experiment_id=config.exp_id,
+                    workspace=str(layout.root),
+                    session_id=session.session_id,
+                    session_number=session.number,
+                    run_mode=("fresh" if fresh_session else "continuation"),
+                    state="running",
+                    checkpoint=session.starting_checkpoint,
+                    elapsed_seconds=session.elapsed_seconds,
+                    configured_wall_seconds=session.wall_seconds,
+                    remaining_seconds=max(0.0, session.deadline - time.monotonic()),
+                    model=config.model.name,
+                    effort=config.model.effort,
+                    configured_concurrency=config.model.concurrency,
+                    effective_concurrency=config.model.concurrency,
+                    population_size=config.search.population_size,
+                    generation_limit=config.search.max_generations,
+                    max_model_turns=config.search.max_model_turns,
+                    remaining_model_turns=config.search.max_model_turns,
+                    cumulative_provider_turns=counts.get("provider_turns", 0),
+                    cumulative_evaluations=counts.get("evaluation_count", 0),
+                    cumulative_candidates=counts.get("candidate_count", 0),
+                    archive_size=counts.get("candidate_count", 0),
+                    cumulative_tokens=cumulative.get("total_tokens", 0),
+                    usage={"totalTokens": cumulative.get("total_tokens", 0)},
+                )
+                adapter_result = self._invoke_adapter(
+                    config,
+                    layout,
+                    state,
+                    session,
+                    observer=hub,
+                    profiling=profiling_enabled,
+                )
+                outcome = self._normalize_outcome(adapter_result, session)
                 final_checkpoint = checkpoints.save(
                     {
                         "experiment_id": config.exp_id,
@@ -944,7 +1074,14 @@ class ExperimentService:
                     completed_slots=len(cast(list[Any], outcome.get("completed_slots", []))),
                 )
                 session.ending_checkpoint = str(final_checkpoint["checkpoint_id"])
-                manager.event(session, "checkpoint_written", checkpoint=session.ending_checkpoint)
+                hub.emit(
+                    "checkpoint_written",
+                    checkpoint=session.ending_checkpoint,
+                    generation=outcome.get("generation", 0),
+                    completed_slots=len(cast(list[Any], outcome.get("completed_slots", []))),
+                    state=outcome["state"],
+                    durable=True,
+                )
                 state.set_state(
                     outcome["state"],
                     error=outcome.get("last_error"),
@@ -957,13 +1094,51 @@ class ExperimentService:
                     stop_reason=str(outcome.get("stop_reason", "budget_exhausted")),
                     summary={**outcome, "result": outcome.get("result")},
                 )
+                hub.emit(
+                    "budget_boundary_reached"
+                    if outcome["state"] == "idle"
+                    else "experiment_completed",
+                    experiment_id=config.exp_id,
+                    workspace=str(layout.root),
+                    session_id=session.session_id,
+                    state=outcome["state"],
+                    stop_reason=outcome.get("stop_reason"),
+                    checkpoint=session.ending_checkpoint,
+                    elapsed_seconds=session.elapsed_seconds,
+                    remaining_seconds=max(0.0, session.deadline - time.monotonic()),
+                    provider_turns_attempted=session.provider_turns_attempted,
+                    provider_turns_completed=session.provider_turns_completed,
+                    evaluations_completed=session.evaluations_completed,
+                    token_usage_delta=session_summary.get("token_usage_delta", 0),
+                    cumulative_tokens=session_summary.get("cumulative_tokens", 0),
+                    recovered_work=outcome.get("recovered_work"),
+                )
                 layout.reconcile_artifact_manifest()
-                return self._run_result(config, layout, state, session_summary, outcome)
+                final_result = self._run_result(config, layout, state, session_summary, outcome)
+                hub.close()
+                return final_result
             except BaseException as error:
                 if session is not None:
                     session.stop_reason = (
                         "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
                     )
+                    with suppress(Exception):
+                        hub.emit(
+                            "experiment_interrupted"
+                            if isinstance(error, KeyboardInterrupt)
+                            else "experiment_failed",
+                            experiment_id=config.exp_id,
+                            workspace=str(layout.root),
+                            session_id=session.session_id,
+                            state="interrupted"
+                            if isinstance(error, KeyboardInterrupt)
+                            else "failed",
+                            stop_reason="interrupted"
+                            if isinstance(error, KeyboardInterrupt)
+                            else "failed",
+                            error=f"{type(error).__name__}: {error}",
+                            elapsed_seconds=session.elapsed_seconds,
+                        )
                     with suppress(Exception):
                         manager.finish(
                             session,
@@ -980,11 +1155,14 @@ class ExperimentService:
                     "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
                     error=f"{type(error).__name__}: {error}",
                 )
+                hub.close()
                 raise
             finally:
                 state.release_owner(session_id)
         finally:
             state.close()
+            with suppress(Exception):
+                hub.close()
 
     @staticmethod
     def _verify_state_checkpoint(state: ExperimentStateStore, checkpoints: CheckpointStore) -> None:
@@ -1027,6 +1205,9 @@ class ExperimentService:
         layout: ExperimentLayout,
         state: ExperimentStateStore,
         session: SessionContext,
+        *,
+        observer: Any | None = None,
+        profiling: bool | None = None,
     ) -> Mapping[str, Any] | None:
         # Adapters from early experiments sometimes accepted an explicit
         # budget.  Support that additive form without changing the core API.
@@ -1036,15 +1217,23 @@ class ExperimentService:
             parameters = inspect.signature(run).parameters
         except (TypeError, ValueError):
             parameters = {}
+        kwargs: dict[str, Any] = {}
+        if "observer" in parameters:
+            kwargs["observer"] = observer
+        elif "event_callback" in parameters:
+            kwargs["event_callback"] = observer
+        if "profiling" in parameters:
+            kwargs["profiling"] = profiling
         if "budget" in parameters:
+            kwargs["budget"] = SessionBudget(config.run.wall_seconds, session.monotonic_started)
             return run(
                 config,
                 layout,
                 state,
                 session,
-                budget=SessionBudget(config.run.wall_seconds, session.monotonic_started),
-            )  # type: ignore[call-arg]
-        return run(config, layout, state, session)
+                **kwargs,
+            )
+        return run(config, layout, state, session, **kwargs)
 
     def _preflight(self, config: ExperimentConfig) -> Mapping[str, Any] | None:
         preflight = getattr(self.adapter, "preflight", None)
@@ -1082,7 +1271,11 @@ class ExperimentService:
 
     @staticmethod
     def _record_completed_session(
-        config: ExperimentConfig, layout: ExperimentLayout, state: ExperimentStateStore
+        config: ExperimentConfig,
+        layout: ExperimentLayout,
+        state: ExperimentStateStore,
+        *,
+        hub: ExperimentEventHub | None = None,
     ) -> dict[str, Any]:
         number = state.next_session_number()
         session_id = f"session-{number:06d}"
@@ -1090,6 +1283,19 @@ class ExperimentService:
         manager = SessionManager(layout, state)
         try:
             session = manager.start(config)
+            if hub is not None:
+                hub.attach_session(manager, session)
+                hub.emit(
+                    "session_started",
+                    experiment_id=config.exp_id,
+                    workspace=str(layout.root),
+                    session_id=session.session_id,
+                    session_number=session.number,
+                    run_mode="continuation",
+                    state="completed",
+                    checkpoint=session.starting_checkpoint,
+                    stop_reason="already_completed",
+                )
             latest_checkpoint = state.checkpoint()
             session.ending_checkpoint = (
                 str(latest_checkpoint["checkpoint_id"]) if latest_checkpoint is not None else None
@@ -1139,6 +1345,15 @@ class ExperimentService:
         }
         if "result" in outcome:
             result["result"] = outcome["result"]
+        result["session"] = dict(session)
+        for field in (
+            "timing_profile",
+            "deep_operator_profile",
+            "deep_score_profile",
+            "recovered_work",
+        ):
+            if field in outcome:
+                result[field] = outcome[field]
         if outcome.get("last_error"):
             result["last_error"] = outcome["last_error"]
         return result
@@ -1161,8 +1376,16 @@ def run_experiment(
     config_path: str | Path = "experiment.toml",
     *,
     adapter: ExperimentAdapter | None = None,
+    event_sinks: Sequence[Any] = (),
+    observer: Any | None = None,
+    profiling: bool | None = None,
 ) -> dict[str, Any]:
-    return ExperimentService(adapter=adapter).run(config_path)
+    return ExperimentService(
+        adapter=adapter,
+        event_sinks=event_sinks,
+        observer=observer,
+        profiling=profiling,
+    ).run(config_path)
 
 
 # Compatibility imports for archived tests are lazy and never touched by the

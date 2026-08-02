@@ -15,6 +15,13 @@ from .config import (
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import LOCK_SCHEMA_VERSION, LockError
 from .native import NativeExperimentAdapter, NativeExperimentError
+from .observer import (
+    CallbackEventSink,
+    ExperimentEventHub,
+    ExperimentEventObserver,
+    ExperimentObserver,
+    NativeEventBus,
+)
 from .service import (
     ExperimentAdapter,
     ExperimentService,
@@ -40,6 +47,11 @@ __all__ = [
     "LockError",
     "NativeExperimentAdapter",
     "NativeExperimentError",
+    "CallbackEventSink",
+    "ExperimentEventHub",
+    "ExperimentEventObserver",
+    "ExperimentObserver",
+    "NativeEventBus",
     "NullExperimentAdapter",
     "STATUS_SCHEMA_VERSION",
     "StateStore",

@@ -105,6 +105,8 @@ def validate_experiment_id(value: object) -> str:
 class ExperimentRunConfig:
     wall_seconds: float
     output: str = "rich"
+    profiling_enabled: bool = False
+    deep_profiling_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,12 +296,35 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         raise ValueError("preset must be a non-empty string")
 
     run_raw = _table(raw, "run")
-    _reject_unknown_fields(run_raw, "run", {"wall_seconds", "output"})
+    _reject_unknown_fields(
+        run_raw,
+        "run",
+        {
+            "wall_seconds",
+            "output",
+            "profiling_enabled",
+            "deep_profiling_enabled",
+            "profiling",
+            "profile",
+        },
+    )
     output = run_raw.get("output", "rich")
     if output not in {"rich", "json"}:
         raise ValueError("run.output must be 'rich' or 'json'")
+    profile_value = run_raw.get(
+        "profiling_enabled",
+        run_raw.get("profiling", run_raw.get("profile", False)),
+    )
+    if not isinstance(profile_value, bool):
+        raise ValueError("run.profiling_enabled must be a boolean")
+    deep_profile_value = run_raw.get("deep_profiling_enabled", False)
+    if not isinstance(deep_profile_value, bool):
+        raise ValueError("run.deep_profiling_enabled must be a boolean")
     run = ExperimentRunConfig(
-        _positive_number(run_raw.get("wall_seconds"), "run.wall_seconds"), output
+        _positive_number(run_raw.get("wall_seconds"), "run.wall_seconds"),
+        output,
+        profile_value,
+        deep_profile_value,
     )
 
     model_raw = _table(raw, "model")
