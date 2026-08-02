@@ -18,10 +18,46 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.validation import ValidationResult, validate_policy
+
+
+class _InterruptibleThreadPoolExecutor(ThreadPoolExecutor):
+    """Stop provider work before waiting for workers during Ctrl-C cleanup.
+
+    ``ThreadPoolExecutor``'s context manager always calls ``shutdown(wait=True)``
+    when leaving the ``with`` block.  That is normally useful, but it makes a
+    signal received while a provider turn is running wait indefinitely for the
+    provider process.  Native providers expose ``close`` specifically to stop
+    those processes; call it after cancelling queued futures and before joining
+    the worker threads.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        on_interrupt: Callable[[], Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_interrupt = on_interrupt
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> Literal[False]:
+        if exc_type is None:
+            self.shutdown(wait=True)
+            return False
+
+        # Do not wait for queued provider calls.  The callback closes active
+        # transports, after which joining the workers is bounded by their
+        # normal cleanup rather than by the provider's response timeout.
+        self.shutdown(wait=False, cancel_futures=True)
+        if self._on_interrupt is not None:
+            with suppress(Exception):
+                self._on_interrupt()
+        self.shutdown(wait=True)
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1134,8 +1170,11 @@ class GenerationCoordinator:
             results: dict[str, SlotResult] = {}
             futures: dict[Any, tuple[str, GenerationRequest]] = {}
             active_model_turns = 0
-            with ThreadPoolExecutor(
-                max_workers=self.config.max_workers, thread_name_prefix=f"native-g{generation}"
+            close_provider = getattr(self.provider, "close", None)
+            with _InterruptibleThreadPoolExecutor(
+                max_workers=self.config.max_workers,
+                thread_name_prefix=f"native-g{generation}",
+                on_interrupt=close_provider if callable(close_provider) else None,
             ) as pool:
                 for slot in self.slots:
                     request = self.build_request(generation, slot, parents[slot])
