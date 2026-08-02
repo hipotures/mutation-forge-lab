@@ -180,8 +180,6 @@ class GenerationRequest:
     archive_context: str = ""
     model: str = "gpt-5.6-luna"
     effort: str = "high"
-    system_prompt: str = "Return one generated policy JSON object."
-    output_schema: Mapping[str, Any] = field(default_factory=lambda: {"type": "object"})
 
     @property
     def request_idempotency_key(self) -> str:
@@ -196,7 +194,6 @@ class GenerationRequest:
             "parent_source": self.parent_source, "parent_metadata": dict(self.parent_metadata),
             "search_feedback": self.search_feedback, "archive_context": self.archive_context,
             "model": self.model, "effort": self.effort,
-            "system_prompt": self.system_prompt, "output_schema": _safe(dict(self.output_schema)),
         }
         if self.phase == "repair":
             value["diagnostics"] = [dict(item) for item in self.diagnostics]
@@ -216,8 +213,6 @@ class GenerationRequest:
             parent_metadata=dict(value.get("parent_metadata", {})) if isinstance(value.get("parent_metadata", {}), Mapping) else {},
             search_feedback=str(value.get("search_feedback", "")), archive_context=str(value.get("archive_context", "")),
             model=str(value.get("model", "gpt-5.6-luna")), effort=str(value.get("effort", "high")),
-            system_prompt=str(value.get("system_prompt", "Return one generated policy JSON object.")),
-            output_schema=dict(value.get("output_schema", {"type": "object"})) if isinstance(value.get("output_schema", {"type": "object"}), Mapping) else {"type": "object"},
         )
 
 
@@ -300,8 +295,6 @@ class GenerationConfig:
     max_repairs: int = 1
     model: str = "gpt-5.6-luna"
     effort: str = "high"
-    system_prompt: str = "Return one generated policy JSON object."
-    output_schema: Mapping[str, Any] = field(default_factory=lambda: {"type": "object"})
     sandbox_limits: SandboxLimits = field(default_factory=SandboxLimits)
     max_repair_diagnostics: int = 8
     checkpoint_path: Path | None = None
@@ -443,8 +436,7 @@ class GenerationCoordinator:
         key = request_idempotency_key(self.config.campaign_id, generation, slot, parent, brief_id, prompt_hash, phase)
         return GenerationRequest(self.config.campaign_id, generation, slot, parent, brief_id, prompt,
                                  prompt_hash, key, phase, tuple(diagnostics), parent_source, parent_metadata,
-                                 feedback, archive_context, self.config.model, self.config.effort,
-                                 self.config.system_prompt, self.config.output_schema)
+                                 feedback, archive_context, self.config.model, self.config.effort)
 
     def _invoke(self, request: GenerationRequest) -> ProviderResult:
         payload = request.as_dict()
