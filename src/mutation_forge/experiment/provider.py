@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -326,9 +327,32 @@ class _CodexTransport:
         with self._adapters_lock:
             self._closed = True
             adapters, self._adapters = self._adapters, []
-        for adapter in adapters:
+        if not adapters:
+            return
+
+        # A run can have one App Server per worker.  Closing these one by one
+        # made Ctrl-C wait for every pipe-drain timeout in sequence.  Kill and
+        # drain them concurrently, with a bounded wait for the coordinator;
+        # the close workers are daemon threads so a broken pipe cannot keep
+        # the CLI alive after an interrupt.
+        def close_one(adapter: Any) -> None:
             with suppress(Exception):
-                adapter.close()
+                adapter.close(force=True)
+
+        threads = [
+            threading.Thread(
+                target=close_one,
+                args=(adapter,),
+                name="mforge-provider-close",
+                daemon=True,
+            )
+            for adapter in adapters
+        ]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 5.0
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
 
 
 class LocalCodexAppServerProvider:
