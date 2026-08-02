@@ -17,7 +17,7 @@ from mutation_forge.experiment.config import (
     load_experiment_config,
     validate_experiment_id,
 )
-from mutation_forge.experiment.service import ExperimentService
+from mutation_forge.experiment.service import ExperimentService, NullExperimentAdapter
 from mutation_forge.experiment.state import ActiveSessionError, ExperimentStateStore
 from mutation_forge.experiment.status import STATUS_SCHEMA_VERSION, experiment_status
 
@@ -88,7 +88,7 @@ def test_exp_id_preserves_spelling_and_has_documented_limit() -> None:
 
 def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
-    result = ExperimentService().run(path)
+    result = ExperimentService(adapter=NullExperimentAdapter()).run(path)
     root = tmp_path / "configs" / "workspace" / "demo"
     assert result["state"] == "idle"
     assert (root / "experiment.toml").read_bytes() == path.read_bytes()
@@ -102,9 +102,9 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
 
 def test_second_run_continues_and_run_budget_is_mutable(tmp_path: Path) -> None:
     path = _write_config(tmp_path, wall=1)
-    ExperimentService().run(path)
+    ExperimentService(adapter=NullExperimentAdapter()).run(path)
     path.write_text(_config(wall=2), encoding="utf-8")
-    result = ExperimentService().run(path)
+    result = ExperimentService(adapter=NullExperimentAdapter()).run(path)
     assert result["session_id"] == "session-000002"
     assert (
         tmp_path / "configs" / "workspace" / "demo" / "artifacts" / "sessions" / "session-000002"
@@ -113,7 +113,7 @@ def test_second_run_continues_and_run_budget_is_mutable(tmp_path: Path) -> None:
 
 def test_immutable_change_fails_before_adapter(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
-    ExperimentService().run(path)
+    ExperimentService(adapter=NullExperimentAdapter()).run(path)
     path.write_text(_config().replace('selection = "elite-diversity"', 'selection = "other"'))
     calls: list[str] = []
 
@@ -148,7 +148,7 @@ def test_completed_experiment_makes_no_adapter_call(tmp_path: Path) -> None:
 
 def test_active_owner_and_stale_recovery(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
-    service = ExperimentService()
+    service = ExperimentService(adapter=NullExperimentAdapter())
     service.run(path)
     state_path = tmp_path / "configs" / "workspace" / "demo" / "state.sqlite3"
     with ExperimentStateStore(state_path) as state:
@@ -172,7 +172,7 @@ def test_status_is_versioned_and_read_only(tmp_path: Path) -> None:
     before = experiment_status(path)
     assert before["schema_version"] == STATUS_SCHEMA_VERSION
     assert before["state"] == "not_created"
-    ExperimentService().run(path)
+    ExperimentService(adapter=NullExperimentAdapter()).run(path)
     after = experiment_status(path)
     assert after["state"] == "idle"
     assert after["provider_turns"] == 0
@@ -204,7 +204,15 @@ def _full_turn_kwargs() -> dict[str, object]:
         "request_text": "rendered prompt",
         "response_text": '{"source": "ok"}',
         "source": "def priority(ctx, proposal):\n    return 0\n",
-        "usage": {"totalTokens": 3},
+        "usage": {
+            "inputTokens": 1,
+            "cachedInputTokens": 0,
+            "outputTokens": 1,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 3,
+            "final": True,
+            "partial": False,
+        },
         "identity": {"source_sha256": "a" * 64},
         "behavior": {"signature": "b" * 64},
         "provenance": {"provider": "codex"},

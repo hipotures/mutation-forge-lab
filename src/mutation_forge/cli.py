@@ -21,7 +21,7 @@ from mutation_forge import stage4r as stage4r_commands
 from mutation_forge import stage5 as stage5_commands
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
-from mutation_forge.evaluation.benchmark import load_summary, run_benchmark
+from mutation_forge.evaluation.benchmark import load_summary
 from mutation_forge.evaluation.dataset import build_dataset
 from mutation_forge.experiment.service import run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
@@ -57,9 +57,29 @@ from mutation_forge.stage6_independent.runner import run_shard as run_stage6_sha
 from mutation_forge.stage6_independent.runner import verify_replay as verify_stage6_replay
 from mutation_forge.stage7_heg_bridge import commands as stage7_commands
 
+_LEGACY_COMMANDS = frozenset(
+    {
+        "dataset",
+        "baseline",
+        "inspect",
+        "compare",
+        "proposals",
+        "policy",
+        "diagnostics",
+        "stage2d",
+        "stage3",
+        "stage4",
+        "stage4r",
+        "stage4e",
+        "stage5",
+        "stage6",
+        "stage7",
+    }
+)
+
 
 class _PublicArgumentParser(argparse.ArgumentParser):
-    """Keep legacy parser aliases usable without publishing them in help."""
+    """Parser for the supported, stage-free public CLI."""
 
     def format_help(self) -> str:
         rendered = super().format_help()
@@ -644,8 +664,10 @@ def _stage2c_diagnostic(
     return 0 if result["status"] == "completed" else 1
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = _PublicArgumentParser(prog="mforge")
+def _build_legacy_parser() -> argparse.ArgumentParser:
+    """Build the historical parser for internal regression tests only."""
+
+    parser = argparse.ArgumentParser(prog="mforge")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(
         dest="command",
@@ -1042,8 +1064,56 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+def build_parser() -> argparse.ArgumentParser:
+    """Build the stage-free public parser.
+
+    The historical stage and campaign parsers intentionally live in
+    ``_build_legacy_parser`` so they are not subparsers of the public CLI.
+    """
+
+    parser = _PublicArgumentParser(prog="mforge")
+    parser.add_argument("--version", action="version", version=__version__)
+    commands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{doctor,experiment}",
+    )
+    doctor = commands.add_parser("doctor", help="check local prerequisites")
+    doctor.add_argument("--heg-repo", type=Path, default=Path("../heg"))
+    doctor.add_argument("--run-root", type=Path, default=Path("./runs"))
+    experiment = commands.add_parser(
+        "experiment",
+        help="create, continue, and inspect an experiment workspace",
+    )
+    experiment_commands = experiment.add_subparsers(
+        dest="experiment_command",
+        required=True,
+        metavar="{run,status}",
+    )
+    experiment_run = experiment_commands.add_parser(
+        "run",
+        help="initialize or continue the experiment declared by the configuration",
+    )
+    experiment_run.add_argument("--config", type=Path, default=Path("experiment.toml"))
+    experiment_run.add_argument("--json", action="store_true")
+    experiment_status = experiment_commands.add_parser(
+        "status",
+        help="show read-only operational status",
+    )
+    experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
+    experiment_status.add_argument("--json", action="store_true")
+    return parser
+
+
+def legacy_main(argv: list[str] | None = None) -> int:
+    """Private compatibility entry point for historical stage workflows.
+
+    It is intentionally not wired to ``pyproject.toml``.  Keeping this
+    boundary lets archived Python integrations finish old analyses while the
+    installed ``mforge`` command remains the two-command experiment CLI.
+    """
+
+    parser = _build_legacy_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "doctor":
@@ -1056,6 +1126,8 @@ def main(argv: list[str] | None = None) -> int:
             return _build_dataset(load_config(args.config), json_output=args.json)
         if args.command == "baseline" and args.baseline_command == "run":
             config = load_config(args.config)
+            from mutation_forge.evaluation.benchmark import run_benchmark
+
             result = run_benchmark(config, output="json" if args.json else None)
             if not args.json:
                 Console().print(f"Run artifacts: {result.run_path}")
@@ -1071,11 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "policy" and args.policy_command == "probe":
             return _policy_probe(args.policy, json_output=args.json)
         if args.command == "policy" and args.policy_command == "evaluate":
-            return _policy_evaluate(
-                args.policy,
-                args.config,
-                force_json=args.json,
-            )
+            return _policy_evaluate(args.policy, args.config, force_json=args.json)
         if args.command == "policy" and args.policy_command == "compare":
             return _policy_compare(
                 args.random_policy,
@@ -1105,6 +1173,43 @@ def main(argv: list[str] | None = None) -> int:
             return _stage6(args)
         if args.command == "stage7":
             return _stage7(args)
+    except Exception as error:
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "event_type": "run_failed",
+                        "status": "failed",
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            Console(stderr=True).print(f"[red]{type(error).__name__}: {error}[/red]")
+        return 1
+    parser.error("unhandled legacy command")
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] in _LEGACY_COMMANDS:
+        parser.error(
+            f"legacy command {raw_argv[0]!r} is not part of the public CLI; "
+            "use 'mforge experiment run' or 'mforge experiment status'"
+        )
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "doctor":
+            return _doctor(args.heg_repo, args.run_root)
+        if args.command == "experiment" and args.experiment_command == "run":
+            return _experiment_run(args.config, json_output=args.json)
+        if args.command == "experiment" and args.experiment_command == "status":
+            return _experiment_status(args.config, json_output=args.json)
     except Exception as error:
         if getattr(args, "json", False):
             print(

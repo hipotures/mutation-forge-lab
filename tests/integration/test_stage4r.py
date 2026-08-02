@@ -82,7 +82,7 @@ def _doctor() -> dict[str, Any]:
 
 
 def test_stage4r_parser_exposes_bounded_commands() -> None:
-    parser = cli.build_parser()
+    parser = cli._build_legacy_parser()
     cases = (
         ["stage4r", "canary", "--auth-json", "/tmp/auth.json", "--attempt", "1"],
         ["stage4r", "freeze-search"],

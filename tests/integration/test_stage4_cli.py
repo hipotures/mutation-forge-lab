@@ -61,7 +61,7 @@ def test_stage4_parser_exposes_every_frozen_command(tmp_path: Path) -> None:
         ["stage4", "validate", str(run), "--workers", "8", "--json"],
         ["stage4", "verify-replay", str(run), "--json"],
     )
-    parser = cli.build_parser()
+    parser = cli._build_legacy_parser()
     for arguments in cases:
         parsed = parser.parse_args(arguments)
         assert parsed.command == "stage4"
@@ -84,7 +84,7 @@ def test_stage4_json_cli_is_jsonl_only(
 
     monkeypatch.setattr(commands, "doctor", fake_doctor)
     assert (
-        cli.main(
+        cli.legacy_main(
             [
                 "stage4",
                 "doctor",
@@ -113,7 +113,7 @@ def test_stage4_json_failure_is_one_json_object(
 
     monkeypatch.setattr(commands, "freeze", fail)
     assert (
-        cli.main(
+        cli.legacy_main(
             [
                 "stage4",
                 "freeze",

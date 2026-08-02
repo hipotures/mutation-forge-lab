@@ -7,7 +7,9 @@ import json
 import os
 import platform
 import subprocess
+import tomllib
 from collections.abc import Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -66,6 +68,48 @@ def _git_state(repo: Path) -> dict[str, Any]:
         return {"repo": str(repo.resolve()), "commit": None, "dirty": None, "branch": None}
 
 
+def _codex_version() -> str | None:
+    try:
+        result = subprocess.run(
+            ["codex", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _codex_profile_identity() -> dict[str, Any]:
+    """Describe the local non-secret Codex profile used by the adapter."""
+
+    path = Path.home() / ".codex" / "config.toml"
+    digest = sha256_file(path)
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        raw = {}
+    values: dict[str, Any] = {}
+    for key in (
+        "model",
+        "model_reasoning_effort",
+        "sandbox_mode",
+        "approval_policy",
+        "service_tier",
+    ):
+        value = raw.get(key)
+        if isinstance(value, str):
+            values[key] = value
+    return {
+        "path": str(path) if digest is not None else None,
+        "sha256": digest,
+        "values": values,
+    }
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
@@ -107,6 +151,90 @@ def _sandbox_limits(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _preset_metadata(config: ExperimentConfig, project: Path) -> dict[str, Any]:
+    """Resolve the scientific assets named by the experiment preset."""
+
+    if config.preset != "heg-ranker-evolution-v1":
+        return {"name": config.preset, "resolved": False, "assets": {}}
+    configured = config.raw.get("legacy_stage4_config")
+    stage4_path = (
+        (config.source_dir / configured).resolve()
+        if isinstance(configured, str) and configured and not Path(configured).is_absolute()
+        else Path(configured).resolve()
+        if isinstance(configured, str) and configured
+        else project / "configs" / "stage4-search.toml"
+    )
+    try:
+        from mutation_forge.sandbox.validation import validate_policy
+        from mutation_forge.stage4.config import load_stage4_config
+
+        stage4 = load_stage4_config(stage4_path)
+        asset_paths = {
+            name: getattr(stage4, name)
+            for name in (
+                "system_prompt_path",
+                "request_prompt_path",
+                "repair_prompt_path",
+                "output_schema_path",
+                "context_schema_path",
+                "proposal_schema_path",
+                "semantic_glossary_path",
+                "seed_manifest_path",
+                "manifest_path",
+                "validation_manifest_path",
+                "random_policy_path",
+                "structural_policy_path",
+            )
+        }
+        identities = {
+            name: {
+                "path": str(Path(path).resolve()),
+                "sha256": sha256_file(Path(path)),
+            }
+            for name, path in asset_paths.items()
+        }
+        baseline_identities: dict[str, Any] = {}
+        for name, path in (
+            ("random", stage4.random_policy_path),
+            ("structural", stage4.structural_policy_path),
+        ):
+            source = Path(path).read_text(encoding="utf-8")
+            identity = validate_policy(source, stage4.sandbox).identity
+            baseline_identities[name] = {
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "normalized_ast_sha256": identity.normalized_ast_sha256,
+            }
+        freeze_identity: dict[str, Any] = {}
+        try:
+            from mutation_forge.stage4.commands import campaign_root
+
+            freeze_path = campaign_root(stage4) / "search-freeze.json"
+            if freeze_path.is_file():
+                freeze_value = json.loads(freeze_path.read_text(encoding="utf-8"))
+                if isinstance(freeze_value, Mapping):
+                    freeze_identity = {
+                        "path": str(freeze_path.resolve()),
+                        "sha256": sha256_file(freeze_path),
+                        "doctor_sha256": freeze_value.get("doctor_sha256"),
+                    }
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            freeze_identity = {}
+        return {
+            "name": config.preset,
+            "resolved": True,
+            "stage4_config": str(stage4_path.resolve()),
+            "stage4_config_sha256": sha256_file(stage4_path),
+            "resolved_config": stage4.resolved_dict(),
+            "identity": asdict(stage4.identity),
+            "assets": identities,
+            "baseline_identities": baseline_identities,
+            "search_freeze": freeze_identity,
+            "selection": stage4.model.max_accepted_turns,
+        }
+    except Exception as exc:
+        raise LockError(f"cannot resolve experiment preset {config.preset!r}: {exc}") from exc
+
+
 def _redact(value: object, key: str = "") -> object:
     lowered = key.lower().replace("-", "_")
     if any(
@@ -140,14 +268,42 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
         # omits an explicit repositories table.
         heg_path = project.parent / "heg"
     uv_lock = project / "uv.lock"
+    preset_metadata = _preset_metadata(config, project)
+    doctor_sha = raw.get("app_server_doctor_sha256")
+    if doctor_sha is not None and (
+        not isinstance(doctor_sha, str)
+        or len(doctor_sha) != 64
+        or any(char not in "0123456789abcdef" for char in doctor_sha)
+    ):
+        raise LockError("app_server_doctor_sha256 must be a lowercase SHA-256")
+    freeze_doctor = preset_metadata.get("search_freeze", {}).get("doctor_sha256")
+    if doctor_sha is None and isinstance(freeze_doctor, str):
+        doctor_sha = freeze_doctor
     immutable = config.immutable_projection()
     source_hash = config.source_sha256
     prompt_identities = _path_identities(raw, config.source_dir)
-    manifest_identities = {
+    preset_assets = preset_metadata.get("assets", {})
+    resolved_prompt_identities = {
+        **prompt_identities,
+        **{
+            f"preset.{name}": value
+            for name, value in preset_assets.items()
+            if isinstance(value, Mapping)
+        },
+    }
+    resolved_manifest_identities = {
         name: value
-        for name, value in prompt_identities.items()
+        for name, value in resolved_prompt_identities.items()
         if "manifest" in name or "seed" in name
     }
+    profile_identity = _codex_profile_identity()
+    binary_version = _codex_version()
+    heg_state = _git_state(heg_path)
+    if heg_state.get("commit") is None or heg_state.get("dirty") is None:
+        raise LockError(f"required HEG/backend repository is unavailable: {heg_path}")
+    project_state = _git_state(project)
+    if project_state.get("commit") is None or project_state.get("dirty") is None:
+        raise LockError(f"mutation-forge repository is unavailable: {project}")
     return {
         "schema_version": LOCK_SCHEMA_VERSION,
         "lock_schema_version": LOCK_SCHEMA_VERSION,
@@ -160,8 +316,8 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
         "immutable_config_sha256": config.immutable_config_sha256(),
         "source_config_sha256": source_hash,
         "provenance": {
-            "mutation_forge": _git_state(project),
-            "heg": _git_state(heg_path),
+            "mutation_forge": project_state,
+            "heg": heg_state,
             "python": platform.python_version(),
             "python_implementation": platform.python_implementation(),
             "uv_lock_sha256": sha256_file(uv_lock),
@@ -173,15 +329,12 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
             "name": config.model.name,
             "effort": config.model.effort,
         },
-        "prompt_identities": prompt_identities,
+        "prompt_identities": resolved_prompt_identities,
         "response_schema_identities": {
-            key: value for key, value in prompt_identities.items() if "schema" in key
-        },
-        "context_schema_identities": {
-            key: value for key, value in prompt_identities.items() if "context" in key
+            key: value for key, value in resolved_prompt_identities.items() if "schema" in key
         },
         "sandbox_limits": _sandbox_limits(raw),
-        "evaluation_manifest_identities": manifest_identities,
+        "evaluation_manifest_identities": resolved_manifest_identities,
         "seed_lists": {
             "orders": list(config.evaluation.orders),
             "graph_seeds": list(config.evaluation.graph_seeds),
@@ -193,10 +346,41 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
             "max_model_turns": config.search.max_model_turns,
         },
         "selection": config.search.selection,
+        "preset_identity": preset_metadata,
+        "proposal_schema_identities": {
+            key: value
+            for key, value in preset_metadata.get("assets", {}).items()
+            if "proposal" in key
+        },
+        "context_schema_identities": {
+            **{
+                key: value
+                for key, value in prompt_identities.items()
+                if "context" in key
+            },
+            **{
+                key: value
+                for key, value in preset_metadata.get("assets", {}).items()
+                if "context" in key
+            },
+        },
+        "baseline_identities": preset_metadata.get("baseline_identities", {}),
         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
         "app_server": {
             "protocol": str(raw.get("app_server_protocol", "codex-app-server")),
             "profile": str(raw.get("app_server_profile", "default")),
+            "model": config.model.name,
+            "effort": config.model.effort,
+            "binary_version": binary_version,
+            "auth_mode": "local-profile",
+            "doctor_sha256": str(doctor_sha) if isinstance(doctor_sha, str) else None,
+            "profile_identity": profile_identity,
+            "strict_config": True,
+            "resolved": (
+                isinstance(doctor_sha, str)
+                and binary_version is not None
+                and profile_identity.get("sha256") is not None
+            ),
         },
         "created_at": datetime.now(UTC).isoformat(),
     }
@@ -277,8 +461,46 @@ def verify_lock(
     if Path(str(lock.get("experiment_root", ""))).resolve() != layout.root.resolve():
         raise LockError("experiment lock experiment_root does not match configuration")
     expected_hash = lock.get("immutable_config_sha256")
-    if expected_hash != config.immutable_config_sha256() or immutable_differences(lock, config):
-        raise LockError(format_differences(immutable_differences(lock, config)))
+    differences = immutable_differences(lock, config)
+    if expected_hash != config.immutable_config_sha256() or differences:
+        raise LockError(format_differences(differences))
+    project = _project_root()
+    locked_preset = lock.get("preset_identity")
+    if locked_preset is not None and locked_preset != _preset_metadata(config, project):
+        raise LockError("resolved preset assets differ from the locked experiment identity")
+    locked_app_server = lock.get("app_server")
+    if isinstance(locked_app_server, Mapping):
+        current_app_server = {
+            "protocol": str(config.raw.get("app_server_protocol", "codex-app-server")),
+            "profile": str(config.raw.get("app_server_profile", "default")),
+            "model": config.model.name,
+            "effort": config.model.effort,
+            "binary_version": _codex_version(),
+            "auth_mode": "local-profile",
+        }
+        for field in ("protocol", "profile", "model", "effort", "binary_version", "auth_mode"):
+            if locked_app_server.get(field) != current_app_server[field]:
+                raise LockError(f"App Server identity drifted for {field}")
+        locked_profile = locked_app_server.get("profile_identity")
+        if isinstance(locked_profile, Mapping) and locked_profile != _codex_profile_identity():
+            raise LockError("local Codex profile identity drifted")
+    locked_provenance = lock.get("provenance")
+    if isinstance(locked_provenance, Mapping):
+        current_project = _git_state(project)
+        current_heg = locked_provenance.get("heg")
+        heg_repo = current_heg.get("repo") if isinstance(current_heg, Mapping) else None
+        current_heg_state = _git_state(Path(str(heg_repo))) if heg_repo else None
+        for name, current in (("mutation_forge", current_project), ("heg", current_heg_state)):
+            locked = locked_provenance.get(name)
+            if (
+                isinstance(locked, Mapping)
+                and isinstance(current, Mapping)
+                and (
+                    locked.get("commit") != current.get("commit")
+                    or locked.get("dirty") != current.get("dirty")
+                )
+            ):
+                raise LockError(f"repository provenance drifted for {name}")
 
 
 compare_lock = verify_lock

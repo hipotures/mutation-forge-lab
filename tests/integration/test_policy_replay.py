@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mutation_forge.cli import main
+from mutation_forge.cli import legacy_main
 from mutation_forge.sandbox.config import (
     PolicyEvaluationConfig,
     load_policy_config,
@@ -104,8 +104,8 @@ def test_policy_config_and_cli_json_rich_have_same_canonical_payload(
     config = load_policy_config(project_root / "configs" / "stage2a-probe.toml")
     assert config.limits.address_space_bytes == 128 * 1024 * 1024
     policy = project_root / "fixtures" / "rankers" / "conditional.py"
-    assert main(["policy", "validate", str(policy), "--json"]) == 0
+    assert legacy_main(["policy", "validate", str(policy), "--json"]) == 0
     json_output = capsys.readouterr().out
-    assert main(["policy", "validate", str(policy)]) == 0
+    assert legacy_main(["policy", "validate", str(policy)]) == 0
     rich_output = capsys.readouterr().out
     assert json.loads(json_output) == json.loads(rich_output)

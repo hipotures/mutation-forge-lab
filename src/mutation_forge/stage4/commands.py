@@ -2215,8 +2215,11 @@ def freeze(
     return canonical_result({"status": "completed", "run": str(run), **payload})
 
 
-def _load_search_freeze(config: Stage4SearchConfig) -> dict[str, Any]:
-    run = campaign_root(config)
+def _load_search_freeze(
+    config: Stage4SearchConfig,
+    run_override: str | Path | None = None,
+) -> dict[str, Any]:
+    run = Path(run_override).resolve() if run_override is not None else campaign_root(config)
     value = _read_json(run / "search-freeze.json")
     if (
         value.get("schema_version") != SEARCH_FREEZE_SCHEMA
@@ -2593,6 +2596,7 @@ def evolve(
     resume: bool = True,
     auth_json: str | Path | None = None,
     observer: Observer | None = None,
+    run_override: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run or resume the exact four-generation Stage 4 search campaign."""
 
@@ -2617,8 +2621,13 @@ def evolve(
         ):
             raise RuntimeError("Stage 4 private-capsule App Server doctor is not READY")
         authenticated_preflight_sha256 = _sha_value(live_doctor)
-    freeze_value = _load_search_freeze(config)
-    run = campaign_root(config)
+    freeze_value = _load_search_freeze(config, run_override)
+    # The frozen config determines scientific identities; an orchestrator may
+    # supply an already-locked experiment root so continuation evidence stays
+    # inside that workspace instead of silently writing to a global campaign
+    # directory.  The default remains the historical campaign path for the
+    # stage-specific private entry point.
+    run = Path(run_override).resolve() if run_override is not None else campaign_root(config)
     auth_recovery: Mapping[str, Any] | None = None
     generation_doctor_sha256 = _generation_request_doctor_sha256(
         run,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import shutil
 import time
 from collections.abc import Mapping
 from contextlib import suppress
@@ -10,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from .artifacts import TurnArtifactStore
 from .checkpoints import CheckpointStore
 from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
@@ -45,12 +48,7 @@ class SessionBudget:
 
 
 class NullExperimentAdapter:
-    """Safe adapter used until a scientific engine is explicitly configured.
-
-    It writes a durable checkpoint and returns at the session boundary.  This
-    keeps workspace and continuation semantics testable without accidentally
-    issuing a model call from the generic layer.
-    """
+    """Explicit test adapter; never selected by the production service."""
 
     def run(
         self,
@@ -64,15 +62,17 @@ class NullExperimentAdapter:
 
 
 class LegacyStage4Adapter:
-    """Compatibility placeholder for a future legacy-engine adapter.
+    """Adapter around the existing Stage 4 generation/evaluation workflow.
 
-    Stage 1 deliberately does not execute generated code, call a model, or
-    start evolutionary search.  Keeping this named boundary lets a later
-    milestone supply a real adapter without changing workspace semantics.
+    The engine and provider are injectable so tests can exercise continuation
+    without a live account.  Normal runs resolve the frozen Stage 4 config
+    from the preset and use the installed local Codex profile; credentials are
+    never copied into the experiment workspace.
     """
 
-    def __init__(self, *, provider: Any | None = None) -> None:
+    def __init__(self, *, provider: Any | None = None, engine: Any | None = None) -> None:
         self.provider = provider
+        self.engine = engine
 
     def run(
         self,
@@ -81,8 +81,494 @@ class LegacyStage4Adapter:
         state: ExperimentStateStore,
         session: SessionContext,
     ) -> Mapping[str, Any]:
-        del config, layout, state, session
-        return {"state": "idle", "stop_reason": "adapter_not_enabled"}
+        from mutation_forge.stage4.commands import evolve
+        from mutation_forge.stage4.config import load_stage4_config
+
+        stage4_config = _resolve_stage4_config(config)
+        frozen_stage4 = load_stage4_config(stage4_config)
+        engine = self.engine or evolve
+        provider = self.provider or _build_local_stage4_provider(layout)
+        run_override = layout.artifacts / "legacy-stage4"
+        if self.engine is None:
+            _prepare_stage4_workspace(stage4_config, run_override)
+            from mutation_forge.stage4.commands import doctor
+
+            auth_json = Path.home() / ".codex" / "auth.json"
+            doctor_result = doctor(
+                stage4_config,
+                auth_json=auth_json if auth_json.is_file() else None,
+                check_auth=True,
+                write=True,
+                run_override=run_override,
+            )
+            if (
+                doctor_result.get("status") != "completed"
+                or cast(Mapping[str, Any], doctor_result.get("auth", {})).get(
+                    "authenticated"
+                )
+                is not True
+            ):
+                raise WorkspaceError(
+                    "Stage 4 App Server doctor did not authenticate a READY profile"
+                )
+        adapter_provider = _WorkspaceStage4Provider(provider, layout, state, session)
+
+        def observe(event: Mapping[str, Any]) -> None:
+            event_type = str(event.get("event", "adapter_event"))
+            state.write_event(event_type, event, session_id=session.session_id)
+            if session.budget_exhausted() and event_type == "generation_completed":
+                raise _SessionBudgetExpired
+
+        engine_kwargs: dict[str, Any] = {
+            "provider": adapter_provider,
+            # The experiment model table describes the caller's requested
+            # policy.  The named preset still owns the frozen Stage 4 worker
+            # budget, so never pass a mutable experiment concurrency into the
+            # legacy engine.
+            "concurrency": frozen_stage4.model.concurrency,
+            "resume": True,
+            "observer": observe,
+        }
+        try:
+            engine_parameters: Mapping[str, inspect.Parameter]
+            try:
+                engine_parameters = inspect.signature(engine).parameters
+            except (TypeError, ValueError):
+                engine_parameters = {}
+            if "run_override" in engine_parameters:
+                engine_kwargs["run_override"] = run_override
+            result = engine(stage4_config, **engine_kwargs)
+        except _SessionBudgetExpired:
+            return {
+                "state": "idle",
+                "stop_reason": "budget_exhausted",
+                "provider_turns": session.provider_turns_completed,
+            }
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()
+
+        if not isinstance(result, Mapping):
+            raise RuntimeError("Stage 4 adapter returned a non-object result")
+        run_path = result.get("run")
+        if isinstance(run_path, str) and Path(run_path).is_dir():
+            destination = layout.artifacts / "legacy-stage4"
+            if Path(run_path).resolve() != destination.resolve():
+                destination.mkdir(parents=True, exist_ok=True)
+                for source in Path(run_path).iterdir():
+                    target = destination / source.name
+                    if source.is_dir():
+                        shutil.copytree(source, target, dirs_exist_ok=True)
+                    elif source.is_file():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+            indexed = _index_legacy_run(destination, state)
+            session.candidates_created += indexed["candidates"]
+            session.evaluations_completed += indexed["evaluations"]
+        status = str(result.get("status", "completed"))
+        return {
+            "state": "completed" if status == "completed" else "idle",
+            "stop_reason": "engine_completed" if status == "completed" else "budget_exhausted",
+            "generation": int(
+                cast(Mapping[str, Any], result.get("generation", {})).get(
+                    "generation_count", 0
+                )
+            )
+            if isinstance(result.get("generation"), Mapping)
+            else 0,
+            "provider_turns": session.provider_turns_completed,
+            "result": dict(result),
+        }
+
+
+class _SessionBudgetExpired(Exception):
+    pass
+
+
+def _resolve_stage4_config(config: ExperimentConfig) -> Path:
+    configured = config.raw.get("legacy_stage4_config")
+    if isinstance(configured, str) and configured:
+        path = Path(configured)
+        return (config.source_dir / path).resolve() if not path.is_absolute() else path.resolve()
+    if config.preset == "heg-ranker-evolution-v1":
+        return Path(__file__).resolve().parents[3] / "configs" / "stage4-search.toml"
+    raise WorkspaceError(
+        "experiment preset has no Stage 4 adapter configuration; "
+        "set legacy_stage4_config or use a supported preset"
+    )
+
+
+def _prepare_stage4_workspace(config_path: Path, destination: Path) -> None:
+    """Bring only the immutable Stage 4 freeze into the experiment root.
+
+    Stage 4's scientific inputs remain owned by its frozen configuration.  The
+    experiment owns the mutable campaign/checkpoint/evidence directory.  If a
+    prior private Stage 4 campaign exists, copy its signed freeze metadata once
+    so the legacy engine can verify the same identities under the workspace.
+    Missing freeze metadata is a hard precondition failure, never an idle
+    success that pretends a search happened.
+    """
+
+    from mutation_forge.stage4.commands import campaign_root
+    from mutation_forge.stage4.config import load_stage4_config
+
+    stage4 = load_stage4_config(config_path)
+    destination.mkdir(parents=True, exist_ok=True)
+    target_freeze = destination / "search-freeze.json"
+    if target_freeze.is_file():
+        return
+    source_root = campaign_root(stage4)
+    source_freeze = source_root / "search-freeze.json"
+    if not source_freeze.is_file():
+        raise WorkspaceError(
+            "Stage 4 preset is not runnable: its frozen search metadata is missing at "
+            f"{source_freeze}; run the private Stage 4 freeze workflow first"
+        )
+    shutil.copy2(source_freeze, target_freeze)
+    # Technical/authentication amendments are part of the signed freeze chain.
+    # Copy them only when present; never copy mutable generations or provider
+    # artifacts from the historical campaign.
+    for path in source_root.glob("search-freeze-pre-amendment*.json"):
+        shutil.copy2(path, destination / path.name)
+    amendment = source_root / "post-live-amendment.json"
+    if amendment.is_file():
+        shutil.copy2(amendment, destination / amendment.name)
+
+
+def _build_local_stage4_provider(layout: ExperimentLayout) -> Any:
+    from mutation_forge.stage4.app_server import Stage4AppServerProvider
+
+    auth = Path.home() / ".codex" / "auth.json"
+    return Stage4AppServerProvider(
+        auth_json=auth if auth.is_file() else None,
+        artifact_dir=layout.artifacts / "generations",
+        artifact_root=layout.artifacts,
+    )
+
+
+class _WorkspaceStage4Provider:
+    """Route Stage 4 transport artifacts and idempotency into one workspace."""
+
+    def __init__(
+        self,
+        provider: Any,
+        layout: ExperimentLayout,
+        state: ExperimentStateStore,
+        session: SessionContext,
+    ) -> None:
+        self.provider = provider
+        self.layout = layout
+        self.state = state
+        self.session = session
+        self.turns = TurnArtifactStore(layout.artifacts / "generations")
+
+    @staticmethod
+    def _phase(request: Mapping[str, Any]) -> str:
+        phase = str(request.get("phase", "initial"))
+        if phase == "initial":
+            return phase
+        if phase == "repair":
+            return "repair-01"
+        return phase
+
+    def _payload(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        value = dict(request)
+        generation = int(request.get("generation", 0))
+        slot = str(request.get("slot", "slot-00"))
+        phase = self._phase(request)
+        directory = self.layout.generation_slot_phase(
+            generation,
+            slot,
+            phase,
+        )
+        value.update(
+            {
+                "artifact_dir": str(directory),
+                "artifact_root": str(self.layout.artifacts),
+                "artifact_prefix": slot,
+            }
+        )
+        return value
+
+    def _record(self, request: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+        generation = int(request.get("generation", 0))
+        slot = str(request.get("slot", "slot-00"))
+        phase = self._phase(request)
+        directory = self.layout.generation_slot_phase(
+            generation,
+            slot,
+            phase,
+        )
+        status = str(result.get("status", "completed"))
+        usage = result.get("usage") if isinstance(result.get("usage"), Mapping) else None
+        key = self._key(request)
+        self.state.record_provider_turn(
+            idempotency_key=key,
+            generation=generation,
+            slot=slot,
+            phase=phase,
+            state="completed" if status == "completed" else "failed",
+            artifact_path=str(directory),
+            usage=cast(Mapping[str, Any], usage or {}),
+            provider_thread_id=(
+                str(result["provider_thread_id"])
+                if result.get("provider_thread_id") is not None
+                else None
+            ),
+            provider_turn_id=(
+                str(result["provider_turn_id"])
+                if result.get("provider_turn_id") is not None
+                else None
+            ),
+            error=str(result.get("error")) if result.get("error") else None,
+        )
+        self.session.provider_turns_attempted += 1
+        if status == "completed":
+            self.session.provider_turns_completed += 1
+        if isinstance(usage, Mapping):
+            total = usage.get("totalTokens")
+            if isinstance(total, int) and not isinstance(total, bool):
+                self.session.token_usage_delta += total
+        if directory.is_dir() and not (directory / "turn-manifest.json").exists():
+            self.turns.record_existing_turn(
+                directory,
+                generation=generation,
+                slot=slot,
+                phase=phase,
+                request=request,
+                result=result,
+            )
+
+    @staticmethod
+    def _key(request: Mapping[str, Any]) -> str:
+        value = request.get("idempotency_key", request.get("request_idempotency_key"))
+        if isinstance(value, str) and value:
+            return value
+        # A provider failure can happen before the generation engine has
+        # assembled its normal request identity.  Keep that failure indexed
+        # under a deterministic, non-empty primary key rather than merging
+        # every pre-request failure into one SQLite row.
+        return "pre-request:" + ":".join(
+            (
+                str(request.get("campaign_id", "experiment")),
+                str(request.get("generation", 0)),
+                str(request.get("slot", "slot-00")),
+                str(request.get("phase", "initial")),
+            )
+        )
+
+    def _record_failure(self, request: Mapping[str, Any], error: BaseException) -> None:
+        evidence = getattr(error, "evidence", {})
+        result: dict[str, Any] = {
+            "status": "failed",
+            "error": f"{type(error).__name__}: {error}",
+        }
+        if isinstance(evidence, Mapping):
+            result.update(dict(evidence))
+        with suppress(Exception):
+            self._record(request, result)
+
+    def _retained_result(self, request: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        """Recover a completed provider envelope before issuing a duplicate call."""
+
+        key = self._key(request)
+        existing = self.state.provider_turn(key)
+        directory = self.layout.generation_slot_phase(
+            int(request.get("generation", 0)),
+            str(request.get("slot", "slot-00")),
+            self._phase(request),
+        )
+        response_paths = sorted(directory.glob("*.response.json")) if directory.is_dir() else []
+        for response_path in reversed(response_paths):
+            try:
+                raw = json.loads(response_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, Mapping):
+                continue
+            raw_status = raw.get("status")
+            if raw_status is not None and raw_status not in {"completed", "success"}:
+                continue
+            response = raw.get("response", raw)
+            response_text = raw.get("response_text")
+            if not isinstance(response_text, str):
+                text_path = response_path.with_name(
+                    response_path.name.removesuffix(".response.json") + ".response.md"
+                )
+                try:
+                    response_text = text_path.read_text(encoding="utf-8")
+                except OSError:
+                    response_text = None
+            usage: Mapping[str, Any] = {}
+            usage_path = response_path.with_name(
+                response_path.name.removesuffix(".response.json") + ".usage.json"
+            )
+            try:
+                value = json.loads(usage_path.read_text(encoding="utf-8"))
+                if isinstance(value, Mapping):
+                    usage = cast(Mapping[str, Any], value)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                value = raw.get("usage")
+                if isinstance(value, Mapping):
+                    usage = cast(Mapping[str, Any], value)
+            result: dict[str, Any] = {
+                "status": "completed",
+                "accepted": True,
+                "accepted_turn": True,
+                "content": bool(response_text),
+                "response": response,
+                "response_text": response_text,
+                "usage": dict(usage),
+                "provider_request_id": raw.get("provider_request_id", raw.get("request_id")),
+                "provider_thread_id": raw.get("provider_thread_id", raw.get("thread_id")),
+                "provider_turn_id": raw.get("provider_turn_id", raw.get("turn_id")),
+                "retained": True,
+            }
+            if existing is None or existing.get("state") != "completed":
+                self._record(request, result)
+            return result
+        return None
+
+    def generate(self, request: Mapping[str, Any]) -> Any:
+        retained = self._retained_result(request)
+        if retained is not None:
+            return retained
+        if self.session.budget_exhausted():
+            raise _SessionBudgetExpired
+        payload = self._payload(request)
+        try:
+            value = self.provider.generate(payload)
+        except BaseException as error:
+            self.session.provider_turns_attempted += 1
+            self._record_failure(request, error)
+            self.state.record_provider_turn(
+                idempotency_key=self._key(request),
+                generation=int(request.get("generation", 0)),
+                slot=str(request.get("slot", "slot-00")),
+                phase=self._phase(request),
+                state="failed",
+                artifact_path=str(payload["artifact_dir"]),
+                error=f"{type(error).__name__}: {error}",
+            )
+            raise
+        result = value if isinstance(value, Mapping) else {"response": value}
+        self._record(request, cast(Mapping[str, Any], result))
+        return value
+
+    def repair(self, request: Mapping[str, Any], diagnostics: Any) -> Any:
+        retained = self._retained_result(request)
+        if retained is not None:
+            return retained
+        if self.session.budget_exhausted():
+            raise _SessionBudgetExpired
+        payload = self._payload(request)
+        payload["diagnostics"] = list(diagnostics)
+        try:
+            method = getattr(self.provider, "repair", None)
+            if callable(method):
+                value = method(payload, diagnostics)
+            else:
+                value = self.provider.generate(payload)
+        except BaseException as error:
+            self.session.provider_turns_attempted += 1
+            self._record_failure(request, error)
+            raise
+        result = value if isinstance(value, Mapping) else {"response": value}
+        self._record(request, cast(Mapping[str, Any], result))
+        return value
+
+    def load_retained_result(self, request: Mapping[str, Any]) -> Any:
+        retained = self._retained_result(request)
+        if retained is not None:
+            return retained
+        method = getattr(self.provider, "load_retained_result", None)
+        if callable(method):
+            value = method(self._payload(request))
+            if isinstance(value, Mapping):
+                self._record(request, cast(Mapping[str, Any], value))
+            return value
+        return None
+
+    def close(self) -> None:
+        close = getattr(self.provider, "close", None)
+        if callable(close):
+            close()
+
+
+def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
+    """Project the legacy filesystem authorities into experiment SQLite.
+
+    Stage 4 deliberately keeps JSON archives and evaluation summaries as the
+    scientific source of truth.  The experiment database is an operational
+    index, so re-reading those immutable files after every resumed engine run
+    is safe and makes status useful without rerunning scoring.
+    """
+
+    counts = {"candidates": 0, "evaluations": 0, "generation": 0}
+    archive_root = run / "archive"
+    if archive_root.is_dir():
+        try:
+            from mutation_forge.stage4.archive import ProgramArchive
+
+            archive = ProgramArchive(archive_root)
+            records = archive.records()
+        except (OSError, ValueError, TypeError):
+            records = ()
+        for record in records:
+            metadata = {
+                "normalized_ast_sha256": record.normalized_ast_sha256,
+                "behavior_signature_sha256": record.behavior_signature_sha256,
+                "validation_status": record.validation_status,
+                "probe_status": record.probe_status,
+                "smoke_10k_status": record.smoke_10k_status,
+                "replay_status": record.replay_status,
+                "fitness_status": record.fitness_status,
+                "search_metrics": dict(record.search_metrics),
+                "usage": dict(record.usage),
+                "error": record.error,
+            }
+            state.record_candidate(
+                record.program_id,
+                source_sha256=record.source_sha256,
+                archive_path=str(run / record.source_path) if record.source_path else None,
+                generation=record.generation,
+                slot=record.slot,
+                status=("duplicate" if record.duplicate_of else "created"),
+                metadata=metadata,
+            )
+            counts["candidates"] += 1
+            counts["generation"] = max(counts["generation"], record.generation)
+
+    for summary_path in sorted(run.rglob("*-summary.json")):
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(summary, Mapping)
+            or summary.get("schema_version") != "stage4.evaluation.v1"
+        ):
+            continue
+        candidate_key = summary.get("candidate_cache_key")
+        pass_name = summary.get("pass")
+        if not isinstance(candidate_key, str) or not isinstance(pass_name, str):
+            continue
+        identity = f"{candidate_key}:{pass_name}"
+        compact = {
+            key: value
+            for key, value in summary.items()
+            if key not in {"shards", "manifest_shards", "manifest_episode_ids"}
+        }
+        state.record_evaluation(
+            identity,
+            candidate_id=str(summary.get("candidate_id", "roster")),
+            kind=pass_name,
+            state="completed",
+            result=compact,
+        )
+        counts["evaluations"] += 1
+    return counts
 
 
 class ExperimentService:
@@ -108,7 +594,6 @@ class ExperimentService:
             )
         else:
             layout.verify_root()
-            layout.verify_artifact_manifest()
             lock = load_lock(layout.lock)
             verify_lock(lock, config, layout)
             self._verify_root_config(layout, config, lock)
@@ -118,6 +603,11 @@ class ExperimentService:
         try:
             checkpoints.verify()
             self._verify_state_checkpoint(state, checkpoints)
+            # The global manifest is an index, not the recovery gate.  A
+            # process can be interrupted after fsyncing a session/transport
+            # file and before refreshing that index; reconcile it only after
+            # the checkpoint chain and SQLite state are known to be valid.
+            layout.write_artifact_manifest()
             current_state = state.state()
             if current_state == "completed":
                 return self._record_completed_session(config, layout, state)
@@ -291,6 +781,12 @@ class ExperimentService:
         if session.budget_exhausted() and state == "running":
             state = "idle"
         outcome["state"] = state
+        # Checkpoint fields are append-only identity lists.  Adapters may
+        # expose convenient numeric counters for their result envelope; do
+        # not let that presentation detail corrupt checkpoint serialization.
+        for field in ("completed_slots", "provider_turns", "evaluations"):
+            if not isinstance(outcome.get(field), list):
+                outcome[field] = []
         outcome.setdefault("stop_reason", "budget_exhausted" if state == "idle" else "completed")
         return outcome
 

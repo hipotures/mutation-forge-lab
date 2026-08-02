@@ -225,6 +225,7 @@ def _artifact_refs(
         "response.md",
         "response.json",
         "provider-raw.json",
+        "usage.json",
         "codex-rpc.jsonl",
         "events.jsonl",
         "wire.jsonl",
@@ -821,6 +822,7 @@ class Stage4AppServerProvider:
             if adapter.logger:
                 adapter.logger.text("response.md", result.text)
                 adapter.logger.document("response.json", payload)
+                adapter.logger.document("usage.json", usage)
                 adapter.logger.document(
                     "provider-raw.json",
                     {
@@ -901,6 +903,7 @@ class Stage4AppServerProvider:
                         **prompt_hashes,
                     },
                 )
+                adapter.logger.document("usage.json", partial_usage)
             raise Stage4ProviderError(
                 f"{type(error).__name__}: {str(error)[:512]}",
                 evidence=error_evidence,

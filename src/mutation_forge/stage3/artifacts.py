@@ -17,7 +17,7 @@ _SECRET = re.compile(
     r"(?i)(?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|password|secret|cookie|credential|installation[_-]?id|auth[_-]?token|jwt|private[_-]?key|client[_-]?secret)"
 )
 _SECRET_VALUE = re.compile(
-    r"(?ix)(bearer\s+\S+|sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|(?:auth(?:entication)?[_-]?token|access[_-]?token|refresh[_-]?token|api[_-]?key|jwt)\s*[:=]\s*[\"']?[^,\s\"']+)"
+    r"(?ix)(bearer\s+\S+|sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|(?:auth(?:entication)?[_-]?token|access[_-]?token|refresh[_-]?token|api[_-]?key|jwt|token|credential|secret)\s*[:=]\s*[\"']?[^,\s\"']+)"
 )
 _PRIVATE = re.compile(r"(?:/home/[^/]+|/Users/[^/]+|[A-Za-z]:\\Users\\[^\\]+)")
 _ARTIFACT_LOCK = threading.Lock()

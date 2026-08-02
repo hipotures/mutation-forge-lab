@@ -204,17 +204,21 @@ full graph mutation operator.
 
 ## Legacy Stage 1 harness
 
-The following stage-specific commands remain available to internal regression
-tests and historical evidence tooling. They are not part of the public
-experiment workflow; new work should use `mforge experiment run/status` above.
+The historical stage-specific commands are intentionally not registered by the
+installed `mforge` entry point. Internal regression tests and archived evidence
+tools may import the private `mutation_forge.cli.legacy_main` entry point; new
+work must use `mforge experiment run/status` above.
 
-```console
-uv run mforge dataset build --config configs/stage1-smoke.toml
-uv run mforge baseline run --config configs/stage1-smoke.toml
-uv run mforge baseline run --config configs/stage1-smoke.toml --json
-uv run mforge inspect RUN
-uv run mforge inspect RUN --json
-uv run mforge compare RUN_A RUN_B --json
+The command blocks in the historical sections below preserve old argument
+syntax for reproducibility; they are not accepted by the installed `mforge`
+shell entry point.
+
+```python
+from mutation_forge.cli import legacy_main
+
+raise SystemExit(
+    legacy_main(["dataset", "build", "--config", "configs/stage1-smoke.toml"])
+)
 ```
 
 `--json` baseline output is JSON Lines only. Durable artifacts are written

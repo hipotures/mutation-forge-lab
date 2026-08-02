@@ -7,13 +7,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from mutation_forge.cli import _emit_stage3, build_parser
+from mutation_forge.cli import _build_legacy_parser, _emit_stage3
 from mutation_forge.stage3 import commands as stage3_commands
 from mutation_forge.stage3.commands import verify_replay
 
 
 def test_stage3_parser_surfaces_the_offline_revalidation_command() -> None:
-    parser = build_parser()
+    parser = _build_legacy_parser()
     commands = (
         ["appserver-doctor", "--config", "config.toml", "--json"],
         ["freeze", "--config", "config.toml", "--json"],
@@ -50,7 +50,7 @@ def test_generation_and_evaluation_worker_values_are_strict() -> None:
 
 
 def test_stage3_auth_json_is_explicit_for_doctor_and_generation() -> None:
-    parser = build_parser()
+    parser = _build_legacy_parser()
     for command in ("appserver-doctor", "generate"):
         args = parser.parse_args(
             [

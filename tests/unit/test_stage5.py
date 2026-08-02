@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fractions import Fraction
 
+from mutation_forge import cli
 from mutation_forge.backends.toy import ToyBackend
-from mutation_forge.cli import build_parser
 from mutation_forge.stage5_config import (
     CHAMPION_ID,
     RANDOM_ID,
@@ -32,7 +32,7 @@ POLICIES = (CHAMPION_ID, STAGE3_COMPARATOR_ID, RANDOM_ID, STRUCTURAL_ID)
 
 
 def test_stage5_parser_exposes_frozen_commands() -> None:
-    parser = build_parser()
+    parser = cli._build_legacy_parser()
     for command in ("freeze", "generalize"):
         parsed = parser.parse_args(["stage5", command, "--json"])
         assert parsed.command == "stage5"

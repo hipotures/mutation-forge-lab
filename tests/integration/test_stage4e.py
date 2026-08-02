@@ -7,7 +7,7 @@ from mutation_forge.stage4e_config import load_manifest, load_stage4e_config
 
 
 def test_stage4e_parser_exposes_freeze_and_confirm() -> None:
-    parser = cli.build_parser()
+    parser = cli._build_legacy_parser()
     for command in ("freeze", "confirm"):
         parsed = parser.parse_args(["stage4e", command, "--json"])
         assert parsed.command == "stage4e"
@@ -15,7 +15,7 @@ def test_stage4e_parser_exposes_freeze_and_confirm() -> None:
 
 
 def test_stage4e_parser_exposes_retained_recovery() -> None:
-    parser = cli.build_parser()
+    parser = cli._build_legacy_parser()
     parsed = parser.parse_args(
         ["stage4e", "recover-retained", "--run", "/tmp/preserved-stage4e", "--json"]
     )
