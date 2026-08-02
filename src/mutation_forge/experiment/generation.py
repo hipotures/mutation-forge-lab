@@ -1225,6 +1225,45 @@ class GenerationCoordinator:
             int(value.get("remaining_repairs", 0)),
         )
 
+    @staticmethod
+    def _recovered_event_payload(result: SlotResult) -> dict[str, Any]:
+        evidence = (
+            result.repair
+            if isinstance(result.repair, Mapping) and result.repair
+            else result.initial
+            if result.initial
+            else result.raw_result
+        )
+        usage = evidence.get("usage") if isinstance(evidence, Mapping) else None
+        total_tokens = usage.get("totalTokens") if isinstance(usage, Mapping) else None
+        error: str | None = None
+        codes = [
+            str(item.get("code", ""))
+            for item in result.errors
+            if isinstance(item.get("code"), str) and item.get("code")
+        ]
+        if codes:
+            error = ", ".join(codes)
+        elif isinstance(evidence, Mapping):
+            behavior = evidence.get("behavior")
+            if isinstance(behavior, Mapping) and behavior.get("status") == "failed":
+                reason = behavior.get("error")
+                error = f"behavior probe: {reason or 'failed'}"
+            elif isinstance(evidence.get("error"), str) and evidence.get("error"):
+                error = str(evidence["error"])
+        if error is None and result.status == "invalid":
+            error = "invalid candidate"
+        return {
+            "error": error,
+            "totalTokens": total_tokens,
+            "content": (
+                evidence.get("content")
+                if isinstance(evidence, Mapping)
+                and isinstance(evidence.get("content"), bool)
+                else None
+            ),
+        }
+
     def run_request(
         self, request: GenerationRequest, *, allow_repair: bool = True, retained_result: Any = None
     ) -> SlotResult:
@@ -1453,6 +1492,7 @@ class GenerationCoordinator:
                                 str(error.get("code", ""))
                                 for error in results[slot].errors
                             ],
+                            **self._recovered_event_payload(results[slot]),
                             completed_slots=len(results),
                             population_size=self.config.slots,
                         )

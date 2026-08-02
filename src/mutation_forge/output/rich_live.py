@@ -690,25 +690,50 @@ class RichLiveSink:
             pass
         elif event.event_type == "slot_queued" and payload.get("status") != "recovered":
             return
-        label = event.event_type.removeprefix("experiment_").replace("_", " ")
         slot = payload.get("slot")
-        if isinstance(slot, str):
-            label += f" {slot}"
-        status = payload.get("status")
-        if isinstance(status, str) and status:
-            label += f" {status}"
-        error = payload.get("error")
-        if isinstance(error, str) and error:
-            label += f": {error}"
         timestamp = event.timestamp[11:19] if len(event.timestamp) >= 19 else ""
-        entry = f"{timestamp} {label}".strip()
+        slot_label = slot if isinstance(slot, str) else "work"
+        if event.event_type == "provider_turn_started":
+            phase = payload.get("phase")
+            phase_label = f" {phase}" if isinstance(phase, str) and phase else ""
+            entry = f"{timestamp} prompt sent {slot_label}{phase_label}".strip()
+        elif event.event_type == "provider_turn_completed":
+            tokens = payload.get("totalTokens")
+            token_label = (
+                f" {tokens:,} tok"
+                if isinstance(tokens, int) and not isinstance(tokens, bool)
+                else ""
+            )
+            entry = f"{timestamp} response received {slot_label}{token_label}".strip()
+        elif event.event_type == "provider_turn_failed":
+            error = payload.get("error")
+            error_label = f": {error}" if isinstance(error, str) and error else ""
+            entry = f"{timestamp} response failed {slot_label}{error_label}".strip()
+        else:
+            label = event.event_type.removeprefix("experiment_").replace("_", " ")
+            if isinstance(slot, str):
+                label += f" {slot}"
+            status = payload.get("status")
+            if isinstance(status, str) and status:
+                label += f" {status}"
+            error = payload.get("error")
+            if isinstance(error, str) and error:
+                label += f": {error}"
+            entry = f"{timestamp} {label}".strip()
         if event.event_type in {"provider_turn_activity", "repair_activity"}:
             # Heartbeats should keep the tail current without consuming all
             # six rows during a long model turn.
-            if self._recent_events and "heartbeat" in self._recent_events[-1]:
-                self._recent_events[-1] = f"{timestamp} heartbeat {slot or 'work'}".strip()
+            elapsed = payload.get("operation_elapsed_seconds")
+            elapsed_label = (
+                f" {float(elapsed):.0f}s"
+                if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+                else ""
+            )
+            waiting = f"{timestamp} response waiting {slot_label}{elapsed_label}".strip()
+            if self._recent_events and "response waiting" in self._recent_events[-1]:
+                self._recent_events[-1] = waiting
                 return
-            entry = f"{timestamp} heartbeat {slot or 'work'}".strip()
+            entry = waiting
         self._recent_events.append(entry)
         del self._recent_events[:-6]
 
