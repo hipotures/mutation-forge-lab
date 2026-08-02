@@ -58,6 +58,17 @@ relabel vertices, so labeled equality is sufficient for these transient sets.
 
 ## Later package boundaries
 
+`experiment/` is the public orchestration boundary introduced by issue #18.
+`config.py` resolves `mforge.experiment.v1` relative to its source file and
+separates invocation budgets from the immutable lock projection. `layout.py`,
+`lock.py`, `state.py`, and `sessions.py` provide the atomic workspace,
+configuration identity, SQLite ownership/idempotency state, checkpoints, and
+append-only session evidence. `service.py` is an adapter boundary: it can
+continue an existing generation/evaluation engine without exposing stage or
+run paths. `status.py` is read-only and never invokes scientific work.
+Expanded App Server turn evidence is retained below
+`artifacts/generations/generation-NNNN/slot-NN/{initial,repair-NN}/`.
+
 `sandbox` implements the Stage 2A validator, isolated worker, behavior
 signature, replay, and artifacts. Stage 2B reuses it for frozen plain-data
 scientific ranker payloads. `stage2b` generates bounded legal `k`-switch pools,

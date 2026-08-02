@@ -23,6 +23,8 @@ from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
 from mutation_forge.evaluation.benchmark import load_summary, run_benchmark
 from mutation_forge.evaluation.dataset import build_dataset
+from mutation_forge.experiment.service import run_experiment
+from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
 from mutation_forge.sandbox.config import load_policy_config
 from mutation_forge.sandbox.policy import evaluate_policy, probe_policy
@@ -56,13 +58,21 @@ from mutation_forge.stage6_independent.runner import verify_replay as verify_sta
 from mutation_forge.stage7_heg_bridge import commands as stage7_commands
 
 
+class _PublicArgumentParser(argparse.ArgumentParser):
+    """Keep legacy parser aliases usable without publishing them in help."""
+
+    def format_help(self) -> str:
+        rendered = super().format_help()
+        return (
+            "\n".join(line for line in rendered.splitlines() if "==SUPPRESS==" not in line) + "\n"
+        )
+
+
 def _doctor(heg_repo: Path, run_root: Path) -> int:
     checks: list[dict[str, JsonValue]] = []
 
     def check(name: str, ok: bool, detail: str, *, required: bool = True) -> None:
-        checks.append(
-            {"name": name, "ok": ok, "detail": detail, "required": required}
-        )
+        checks.append({"name": name, "ok": ok, "detail": detail, "required": required})
 
     check(
         "python",
@@ -131,9 +141,7 @@ def _doctor(heg_repo: Path, run_root: Path) -> int:
         str(skill_path) if skill_path.is_file() else "not discovered; informational in Stage 1",
         required=False,
     )
-    required_ok = all(
-        bool(item["ok"]) for item in checks if bool(item["required"])
-    )
+    required_ok = all(bool(item["ok"]) for item in checks if bool(item["required"]))
     console = Console()
     table = Table(title="Mutation Forge doctor")
     table.add_column("Check")
@@ -213,8 +221,7 @@ def _compare(left_path: Path, right_path: Path, *, json_output: bool) -> int:
         "status": "completed",
         "run_a": str(left_path),
         "run_b": str(right_path),
-        "same_dataset": left.get("dataset_manifest_hash")
-        == right.get("dataset_manifest_hash"),
+        "same_dataset": left.get("dataset_manifest_hash") == right.get("dataset_manifest_hash"),
         "same_summary_hash": left.get("summary_hash") == right.get("summary_hash"),
         "summary_hash_a": left.get("summary_hash"),
         "summary_hash_b": right.get("summary_hash"),
@@ -234,6 +241,27 @@ def _emit_policy_result(result: object, *, json_output: bool) -> None:
         print(canonical)
     else:
         Console().print_json(canonical)
+
+
+def _experiment_run(config_path: Path, *, json_output: bool) -> int:
+    result = run_experiment(config_path)
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    else:
+        Console().print(
+            f"Experiment: {result.get('exp_id', '-')}\n"
+            f"State: {result.get('state', result.get('status', '-'))}\n"
+            f"Workspace: {result.get('workspace', '-')}\n"
+            f"Session: {result.get('session_id', '-')}\n"
+            f"Stop reason: {result.get('stop_reason', '-')}"
+        )
+    return 0 if result.get("status") != "failed" else 1
+
+
+def _experiment_status(config_path: Path, *, json_output: bool) -> int:
+    result = experiment_status(config_path)
+    print(render_status(result, json_output=json_output))
+    return 0 if result.get("state") != "failed" else 1
 
 
 def _stage2d(args: argparse.Namespace) -> int:
@@ -317,9 +345,7 @@ def _stage4_observer(*, json_output: bool) -> Any:
             print(payload)
         else:
             label = event.get("event", "stage4")
-            detail = ", ".join(
-                f"{key}={value}" for key, value in event.items() if key != "event"
-            )
+            detail = ", ".join(f"{key}={value}" for key, value in event.items() if key != "event")
             Console().print(f"[cyan]{label}[/cyan] {detail}")
 
     return emit
@@ -601,13 +627,8 @@ def _stage2c_diagnostic(
             supplied_stage2b_control = True
             resolved_config_path = config_path.parent / "stage2c-diagnostic.toml"
     config = load_stage2c_config(resolved_config_path)
-    if (
-        supplied_stage2b_control
-        and config.control.stage2b_config != config_path.resolve()
-    ):
-        raise ValueError(
-            "Stage 2C control command must reference its frozen Stage 2B config"
-        )
+    if supplied_stage2b_control and config.control.stage2b_config != config_path.resolve():
+        raise ValueError("Stage 2C control command must reference its frozen Stage 2B config")
     if command == "stage2c-control":
         result = run_stage2c_control(config)
     elif command == "pool-oracle":
@@ -624,36 +645,62 @@ def _stage2c_diagnostic(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="mforge")
+    parser = _PublicArgumentParser(prog="mforge")
     parser.add_argument("--version", action="version", version=__version__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{doctor,experiment}",
+    )
 
-    doctor = commands.add_parser("doctor")
+    doctor = commands.add_parser("doctor", help="check local prerequisites")
     doctor.add_argument("--heg-repo", type=Path, default=Path("../heg"))
     doctor.add_argument("--run-root", type=Path, default=Path("./runs"))
 
-    dataset = commands.add_parser("dataset")
+    experiment = commands.add_parser(
+        "experiment",
+        help="create, continue, and inspect an experiment workspace",
+    )
+    experiment_commands = experiment.add_subparsers(
+        dest="experiment_command",
+        required=True,
+        metavar="{run,status}",
+    )
+    experiment_run = experiment_commands.add_parser(
+        "run",
+        help="initialize or continue the experiment declared by the configuration",
+    )
+    experiment_run.add_argument("--config", type=Path, default=Path("experiment.toml"))
+    experiment_run.add_argument("--json", action="store_true")
+    experiment_status = experiment_commands.add_parser(
+        "status",
+        help="show read-only operational status",
+    )
+    experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
+    experiment_status.add_argument("--json", action="store_true")
+
+    dataset = commands.add_parser("dataset", help=argparse.SUPPRESS)
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
     dataset_build = dataset_commands.add_parser("build")
     dataset_build.add_argument("--config", type=Path, required=True)
     dataset_build.add_argument("--json", action="store_true")
 
-    baseline = commands.add_parser("baseline")
+    baseline = commands.add_parser("baseline", help=argparse.SUPPRESS)
     baseline_commands = baseline.add_subparsers(dest="baseline_command", required=True)
     baseline_run = baseline_commands.add_parser("run")
     baseline_run.add_argument("--config", type=Path, required=True)
     baseline_run.add_argument("--json", action="store_true")
 
-    inspect_command = commands.add_parser("inspect")
+    inspect_command = commands.add_parser("inspect", help=argparse.SUPPRESS)
     inspect_command.add_argument("run", type=Path)
     inspect_command.add_argument("--json", action="store_true")
 
-    compare = commands.add_parser("compare")
+    compare = commands.add_parser("compare", help=argparse.SUPPRESS)
     compare.add_argument("run_a", type=Path)
     compare.add_argument("run_b", type=Path)
     compare.add_argument("--json", action="store_true")
 
-    proposals = commands.add_parser("proposals")
+    proposals = commands.add_parser("proposals", help=argparse.SUPPRESS)
     proposal_commands = proposals.add_subparsers(
         dest="proposals_command",
         required=True,
@@ -662,7 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     proposals_inspect.add_argument("--config", type=Path, required=True)
     proposals_inspect.add_argument("--json", action="store_true")
 
-    policy = commands.add_parser("policy")
+    policy = commands.add_parser("policy", help=argparse.SUPPRESS)
     policy_commands = policy.add_subparsers(dest="policy_command", required=True)
     policy_validate = policy_commands.add_parser("validate")
     policy_validate.add_argument("policy", type=Path)
@@ -680,7 +727,7 @@ def build_parser() -> argparse.ArgumentParser:
     policy_compare.add_argument("--config", type=Path, required=True)
     policy_compare.add_argument("--json", action="store_true")
 
-    diagnostics = commands.add_parser("diagnostics")
+    diagnostics = commands.add_parser("diagnostics", help=argparse.SUPPRESS)
     diagnostic_commands = diagnostics.add_subparsers(
         dest="diagnostics_command",
         required=True,
@@ -690,7 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
         diagnostic.add_argument("--config", type=Path, required=True)
         diagnostic.add_argument("--json", action="store_true")
 
-    stage2d = commands.add_parser("stage2d")
+    stage2d = commands.add_parser("stage2d", help=argparse.SUPPRESS)
     stage2d_commands = stage2d.add_subparsers(
         dest="stage2d_command",
         required=True,
@@ -715,7 +762,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage2d_replay.add_argument("--output", type=Path, required=True)
     stage2d_replay.add_argument("--json", action="store_true")
 
-    stage3 = commands.add_parser("stage3")
+    stage3 = commands.add_parser("stage3", help=argparse.SUPPRESS)
     stage3_commands_parser = stage3.add_subparsers(dest="stage3_command", required=True)
     stage3_doctor = stage3_commands_parser.add_parser("appserver-doctor")
     stage3_doctor.add_argument("--config", type=Path, required=True)
@@ -749,7 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage3_replay_generation.add_argument("run", type=Path)
     stage3_replay_generation.add_argument("--json", action="store_true")
 
-    stage4 = commands.add_parser("stage4")
+    stage4 = commands.add_parser("stage4", help=argparse.SUPPRESS)
     stage4_commands_parser = stage4.add_subparsers(dest="stage4_command", required=True)
     stage4_doctor = stage4_commands_parser.add_parser("doctor")
     stage4_doctor.add_argument("--config", type=Path, required=True)
@@ -815,7 +862,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage4_replay.add_argument("run", type=Path)
     stage4_replay.add_argument("--json", action="store_true")
 
-    stage4r = commands.add_parser("stage4r")
+    stage4r = commands.add_parser("stage4r", help=argparse.SUPPRESS)
     stage4r_commands_parser = stage4r.add_subparsers(
         dest="stage4r_command",
         required=True,
@@ -907,7 +954,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage4r_diagnose.add_argument("--run", type=Path, default=stage4r_defaults["run"])
     stage4r_diagnose.add_argument("--json", action="store_true")
 
-    stage4e = commands.add_parser("stage4e")
+    stage4e = commands.add_parser("stage4e", help=argparse.SUPPRESS)
     stage4e_commands_parser = stage4e.add_subparsers(
         dest="stage4e_command",
         required=True,
@@ -927,7 +974,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stage4e_recover.add_argument("--json", action="store_true")
 
-    stage5 = commands.add_parser("stage5")
+    stage5 = commands.add_parser("stage5", help=argparse.SUPPRESS)
     stage5_commands_parser = stage5.add_subparsers(
         dest="stage5_command",
         required=True,
@@ -948,7 +995,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stage5_finalize.add_argument("--json", action="store_true")
 
-    stage6 = commands.add_parser("stage6")
+    stage6 = commands.add_parser("stage6", help=argparse.SUPPRESS)
     stage6_commands_parser = stage6.add_subparsers(
         dest="stage6_command",
         required=True,
@@ -979,7 +1026,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage6_replay.add_argument("--replay", type=Path, required=True)
     stage6_replay.add_argument("--json", action="store_true")
 
-    stage7 = commands.add_parser("stage7")
+    stage7 = commands.add_parser("stage7", help=argparse.SUPPRESS)
     stage7_commands_parser = stage7.add_subparsers(
         dest="stage7_command",
         required=True,
@@ -1001,6 +1048,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return _doctor(args.heg_repo, args.run_root)
+        if args.command == "experiment" and args.experiment_command == "run":
+            return _experiment_run(args.config, json_output=args.json)
+        if args.command == "experiment" and args.experiment_command == "status":
+            return _experiment_status(args.config, json_output=args.json)
         if args.command == "dataset" and args.dataset_command == "build":
             return _build_dataset(load_config(args.config), json_output=args.json)
         if args.command == "baseline" and args.baseline_command == "run":

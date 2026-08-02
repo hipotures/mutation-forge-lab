@@ -142,7 +142,71 @@ uv run ruff check .
 uv run mypy
 ```
 
-## Stage 1 workflow
+## Experiment workspace workflow
+
+New experiments use one configuration file and two stage-free commands. The
+default file is `./experiment.toml`; `--config PATH` selects another file.
+
+```toml
+schema_version = "mforge.experiment.v1"
+exp_id = "test_bla_bla"
+workspace = "./workspace"
+kind = "ranker-search"
+preset = "heg-ranker-evolution-v1"
+
+[run]
+wall_seconds = 3600
+
+[model]
+provider = "codex"
+name = "gpt-5.6-luna"
+effort = "high"
+concurrency = 8
+max_repairs = 1
+
+[search]
+population_size = 8
+max_generations = 4
+max_model_turns = 64
+selection = "elite-diversity"
+
+[evaluation]
+orders = [10, 12]
+graph_seeds = [401, 402, 403, 404]
+policy_seeds = [4001, 4002, 4003, 4004]
+horizon = 32
+proposal_pool_size = 12
+baselines = ["random", "structural"]
+replay = true
+
+[resources]
+workers = 8
+thread_count = 1
+```
+
+Run and inspect the same experiment with:
+
+```console
+uv run mforge experiment run
+uv run mforge experiment status
+uv run mforge experiment run --config configs/large.toml --json
+```
+
+The first run creates `<workspace>/<exp_id>/` atomically, retaining the exact
+configuration, immutable lock, SQLite orchestration state, append-only
+checkpoints, numbered session logs, and expanded per-turn App Server evidence.
+Later `run` invocations continue the same `exp_id` from its latest durable
+checkpoint; `run.wall_seconds` is a per-invocation budget. All other scientific
+configuration is locked, so changing it requires a new `exp_id`. A completed
+experiment performs no additional provider or evaluation work. The generated
+program contract remains the bounded `priority(ctx, proposal)` ranker, not a
+full graph mutation operator.
+
+## Legacy Stage 1 harness
+
+The following stage-specific commands remain available to internal regression
+tests and historical evidence tooling. They are not part of the public
+experiment workflow; new work should use `mforge experiment run/status` above.
 
 ```console
 uv run mforge dataset build --config configs/stage1-smoke.toml
