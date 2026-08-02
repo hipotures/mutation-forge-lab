@@ -203,6 +203,8 @@ def _source_and_ranker(
     if isinstance(source, str):
         return source, SourceRanker(candidate_id, source, limits), True
     value = _get(source, "source")
+    if isinstance(value, str) and not callable(getattr(source, "rank", None)):
+        return value, SourceRanker(candidate_id, value, limits), True
     if isinstance(value, str) and callable(getattr(source, "rank", None)):
         return value, source, False
     if callable(getattr(source, "rank", None)):
