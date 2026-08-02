@@ -444,6 +444,32 @@ def _slot_failure_is_retryable(value: Mapping[str, Any]) -> bool:
     return not charged
 
 
+def _restore_pending_behavior_repair(
+    value: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if (
+        str(value.get("status", "")) != "invalid"
+        or int(value.get("remaining_repairs", 0)) <= 0
+    ):
+        return None
+    raw = value.get("raw_result")
+    if not isinstance(raw, Mapping):
+        raw = (
+            value.get("repair")
+            if isinstance(value.get("repair"), Mapping)
+            else value.get("initial")
+        )
+    behavior = raw.get("behavior") if isinstance(raw, Mapping) else None
+    if not isinstance(behavior, Mapping) or behavior.get("status") != "failed":
+        return None
+    error = str(behavior.get("error", "behavior probe failed"))
+    return {
+        **dict(value),
+        "status": "repair_pending",
+        "errors": [{"code": "behavior_error", "message": error[:256]}],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationResult:
     status: str
@@ -1369,6 +1395,16 @@ class GenerationCoordinator:
         )
         slots_state = cast(dict[str, Any], state.setdefault("slots", {}))
         callbacks = cast(dict[str, Any], state.setdefault("callbacks", {}))
+        restored_behavior_repairs = False
+        for key, cached in tuple(slots_state.items()):
+            if not isinstance(cached, Mapping):
+                continue
+            restored = _restore_pending_behavior_repair(cached)
+            if restored is not None:
+                slots_state[key] = restored
+                restored_behavior_repairs = True
+        if restored_behavior_repairs:
+            self._save(state)
         seen: dict[str, str] = {}
         for index, source in enumerate(self.existing_sources):
             identity = validate_policy(source, self.config.sandbox_limits).identity
@@ -1411,7 +1447,10 @@ class GenerationCoordinator:
             for value in slots_state.values()
             if isinstance(value, Mapping)
             and isinstance(value.get("generation"), int)
-            and _slot_failure_is_retryable(value)
+            and (
+                _slot_failure_is_retryable(value)
+                or str(value.get("status", "")) in {"repair_pending", "repair_running"}
+            )
         }
         if retry_generations and min(retry_generations) < first_generation:
             first_generation = min(retry_generations)
