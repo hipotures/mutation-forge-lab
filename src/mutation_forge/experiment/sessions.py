@@ -49,6 +49,7 @@ class SessionContext:
     wall_seconds: float
     started_at: str
     starting_checkpoint: str | None
+    starting_state: str = "running"
     monotonic_started: float = field(default_factory=time.monotonic)
     provider_turns_attempted: int = 0
     provider_turns_completed: int = 0
@@ -70,7 +71,11 @@ class SessionContext:
         return time.monotonic() >= self.deadline
 
     def as_dict(
-        self, *, ending_state: str | None = None, exit_status: int | None = None
+        self,
+        *,
+        ending_state: str | None = None,
+        exit_status: int | None = None,
+        cumulative_tokens: int = 0,
     ) -> dict[str, Any]:
         return {
             "schema_version": "mforge.experiment.session.v1",
@@ -81,13 +86,14 @@ class SessionContext:
             "wall_seconds": self.wall_seconds,
             "starting_checkpoint": self.starting_checkpoint,
             "ending_checkpoint": self.ending_checkpoint,
-            "starting_state": "running",
+            "starting_state": self.starting_state,
             "ending_state": ending_state,
             "provider_turns_attempted": self.provider_turns_attempted,
             "provider_turns_completed": self.provider_turns_completed,
             "candidates_created": self.candidates_created,
             "evaluations_completed": self.evaluations_completed,
             "token_usage_delta": self.token_usage_delta,
+            "cumulative_tokens": cumulative_tokens,
             "stop_reason": self.stop_reason,
             "exit_status": exit_status,
             "runtime_seconds": self.elapsed_seconds,
@@ -106,6 +112,7 @@ class SessionManager:
         directory.mkdir(parents=True, exist_ok=False)
         starting = self.state.checkpoint()
         starting_checkpoint = str(starting["checkpoint_id"]) if starting else None
+        starting_state = self.state.state()
         self.state.create_session(
             number=number,
             session_id=session_id,
@@ -123,7 +130,7 @@ class SessionManager:
                     "start_time": _now(),
                     "wall_seconds": config.run.wall_seconds,
                     "starting_checkpoint": starting_checkpoint,
-                    "starting_state": "running",
+                    "starting_state": starting_state,
                 }
             )
             + b"\n",
@@ -131,7 +138,13 @@ class SessionManager:
         for filename in ("events.jsonl", "stdout.log", "stderr.log"):
             (directory / filename).touch()
         return SessionContext(
-            number, session_id, directory, config.run.wall_seconds, _now(), starting_checkpoint
+            number,
+            session_id,
+            directory,
+            config.run.wall_seconds,
+            _now(),
+            starting_checkpoint,
+            starting_state,
         )
 
     def event(self, session: SessionContext, event_type: str, **payload: Any) -> None:
@@ -164,7 +177,12 @@ class SessionManager:
         session.ending_checkpoint = session.ending_checkpoint or (
             str(latest_checkpoint["checkpoint_id"]) if latest_checkpoint is not None else None
         )
-        result = session.as_dict(ending_state=state, exit_status=exit_status)
+        cumulative_tokens = int(self.state.cumulative()["total_tokens"]) + session.token_usage_delta
+        result = session.as_dict(
+            ending_state=state,
+            exit_status=exit_status,
+            cumulative_tokens=cumulative_tokens,
+        )
         result["stop_reason"] = stop_reason
         if summary:
             result.update(dict(summary))
@@ -180,8 +198,7 @@ class SessionManager:
             candidates_created=session.candidates_created,
             evaluations_completed=session.evaluations_completed,
             token_usage_delta=session.token_usage_delta,
-            cumulative_tokens=int(self.state.cumulative()["total_tokens"])
-            + session.token_usage_delta,
+            cumulative_tokens=cumulative_tokens,
             runtime_seconds=session.elapsed_seconds,
             stop_reason=stop_reason,
             exit_status=exit_status,

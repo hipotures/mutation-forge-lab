@@ -34,7 +34,10 @@ class CheckpointStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def save(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        existing = self.list(verify=False)
+        # Never append past a corrupt or incomplete chain.  A later caller
+        # must repair/report the durable evidence rather than silently
+        # creating a new valid-looking branch.
+        existing = self.list()
         sequence = int(value.get("sequence", 0)) or (
             existing[-1]["sequence"] + 1 if existing else 1
         )

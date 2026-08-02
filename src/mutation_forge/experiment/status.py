@@ -67,6 +67,15 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             "resumable": False,
             "last_error": str(error),
         }
+    try:
+        layout.verify_artifact_manifest()
+    except WorkspaceError as error:
+        return {
+            **_not_created(config, layout),
+            "state": "failed",
+            "resumable": False,
+            "last_error": str(error),
+        }
 
     try:
         state = ExperimentStateStore(layout.state)

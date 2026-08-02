@@ -245,10 +245,6 @@ class TurnArtifactStore:
         source_extracted = source is not None
         if not validation_completed and source_extracted:
             missing.setdefault("validation.json", "validation did not complete")
-        if error:
-            complete = False
-            missing.setdefault("error", error)
-
         # Required transport evidence is recorded as missing rather than
         # silently inferred.  A caller may explicitly mark a pre-response turn
         # complete only when all transport streams were retained.
@@ -294,6 +290,12 @@ class TurnArtifactStore:
             ],
             "missing_files": missing,
         }
+        if error:
+            # A provider failure is a valid retained turn when the complete
+            # communication boundary was persisted.  Evidence incompleteness
+            # is determined by missing/bounded artifacts above, not by the
+            # terminal status itself.
+            manifest["error"] = error
         _atomic_write(directory / ARTIFACT_MANIFEST, _canonical(manifest) + b"\n", exclusive=True)
         if not bool(manifest["artifact_complete"]):
             raise ArtifactIncompleteError(

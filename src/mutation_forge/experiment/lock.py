@@ -134,6 +134,11 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
         "heg_repo",
         "backend_repo",
     )
+    if heg_path is None:
+        # Stage 1 keeps the sibling checkout read-only, but its exact identity
+        # still belongs in experiment metadata even when the minimal config
+        # omits an explicit repositories table.
+        heg_path = project.parent / "heg"
     uv_lock = project / "uv.lock"
     immutable = config.immutable_projection()
     source_hash = config.source_sha256
@@ -156,7 +161,7 @@ def build_lock(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, 
         "source_config_sha256": source_hash,
         "provenance": {
             "mutation_forge": _git_state(project),
-            "heg": _git_state(heg_path) if heg_path is not None else None,
+            "heg": _git_state(heg_path),
             "python": platform.python_version(),
             "python_implementation": platform.python_implementation(),
             "uv_lock_sha256": sha256_file(uv_lock),

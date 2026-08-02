@@ -130,6 +130,7 @@ class ExperimentService:
             )
         else:
             layout.verify_root()
+            layout.verify_artifact_manifest()
             lock = load_lock(layout.lock)
             verify_lock(lock, config, layout)
             self._verify_root_config(layout, config, lock)

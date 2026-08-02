@@ -321,7 +321,11 @@ class ExperimentLayout:
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("path"), str):
                 raise WorkspaceError("invalid experiment artifact manifest entry")
-            path = self.artifacts / str(row["path"])
+            path = (self.artifacts / str(row["path"])).resolve()
+            try:
+                path.relative_to(self.artifacts.resolve())
+            except ValueError as exc:
+                raise WorkspaceError("experiment artifact manifest path escapes artifacts") from exc
             data = path.read_bytes()
             if (
                 int(row.get("size", -1)) != len(data)
