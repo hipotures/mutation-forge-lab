@@ -620,11 +620,13 @@ class NativeExperimentAdapter:
         session: SessionContext,
     ) -> Mapping[str, Any]:
         system_prompt, output_schema, request_prompt, repair_prompt = _load_assets()
+        auth_path = Path.home() / ".codex" / "auth.json"
         provider = self.provider or LocalCodexAppServerProvider(
             model=config.model.name,
             effort=config.model.effort,
             concurrency=config.model.concurrency,
             max_repairs=config.model.max_repairs,
+            auth_json=auth_path if auth_path.is_file() else None,
             persist_artifacts=False,
         )
         wrapped = _NativeProvider(

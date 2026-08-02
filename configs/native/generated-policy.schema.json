@@ -6,11 +6,11 @@
   "additionalProperties": false,
   "required": ["schema_version", "source", "design_summary", "hypothesis", "used_fields", "assumptions", "expected_failure_modes"],
   "properties": {
-    "schema_version": {"const": "mforge.native.generated_policy.v1"},
+    "schema_version": {"type": "string", "const": "mforge.native.generated_policy.v1"},
     "source": {"type": "string", "minLength": 1, "maxLength": 12288},
     "design_summary": {"type": "string", "minLength": 1, "maxLength": 2048},
     "hypothesis": {"type": "string", "minLength": 1, "maxLength": 2048},
-    "used_fields": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 32, "uniqueItems": true},
+    "used_fields": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 32},
     "assumptions": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
     "expected_failure_modes": {"type": "array", "items": {"type": "string"}, "maxItems": 16}
   }

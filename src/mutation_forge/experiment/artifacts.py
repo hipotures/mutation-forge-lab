@@ -109,6 +109,35 @@ def _text(value: object, *, redact_value: bool = True) -> bytes:
     return data
 
 
+def _markdown_text(value: object, *, title: str) -> bytes:
+    """Render human-readable turn text without mislabeling JSON as Markdown.
+
+    Provider prompts and responses are often JSON strings because the native
+    generation envelope carries structured context.  The machine-readable
+    copy belongs in ``*.request.json``/``*.response.json``; the corresponding
+    Markdown artifact is rendered as a fenced JSON block so its extension and
+    contents agree.
+    """
+
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return _text(value)
+    if isinstance(value, str):
+        text = value
+        try:
+            parsed: object = json.loads(text)
+        except (TypeError, ValueError):
+            return _text(text)
+    else:
+        parsed = value
+    rendered = json.dumps(
+        redact(parsed), ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
+    )
+    return f"# {title}\n\n```json\n{rendered}\n```\n".encode()
+
+
 def usage_complete(value: Mapping[str, Any] | None) -> bool:
     """Return whether provider usage is final, non-partial, and exact."""
 
@@ -234,9 +263,17 @@ class TurnArtifactStore:
             put(name, _canonical(redact(value)) + b"\n", required=required)
 
         if request_text is not None:
-            put(f"{slot_text}.request.md", _text(request_text), required=True)
+            put(
+                f"{slot_text}.request.md",
+                _markdown_text(request_text, title="Provider request"),
+                required=True,
+            )
         elif request is not None:
-            put(f"{slot_text}.request.md", _text(request), required=True)
+            put(
+                f"{slot_text}.request.md",
+                _markdown_text(request, title="Provider request"),
+                required=True,
+            )
         else:
             missing[f"{slot_text}.request.md"] = "request construction did not occur"
             complete = False
@@ -247,9 +284,17 @@ class TurnArtifactStore:
             else isinstance(response, str | bytes) or response_text is not None
         )
         if response_text is not None:
-            put(f"{slot_text}.response.md", _text(response_text), required=True)
+            put(
+                f"{slot_text}.response.md",
+                _markdown_text(response_text, title="Provider response"),
+                required=True,
+            )
         elif isinstance(response, str | bytes):
-            put(f"{slot_text}.response.md", _text(response), required=True)
+            put(
+                f"{slot_text}.response.md",
+                _markdown_text(response, title="Provider response"),
+                required=True,
+            )
         elif effective_content:
             missing[f"{slot_text}.response.md"] = (
                 "textual response was marked received but not supplied"

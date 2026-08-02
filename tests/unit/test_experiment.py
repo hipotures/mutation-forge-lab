@@ -388,6 +388,27 @@ def test_full_turn_artifacts_and_canonical_source(tmp_path: Path) -> None:
     ).read_bytes()
 
 
+def test_structured_turn_text_is_rendered_as_markdown(tmp_path: Path) -> None:
+    store = TurnArtifactStore(tmp_path / "artifacts")
+    store.write_turn(
+        generation=0,
+        slot=0,
+        request={"brief": "native context"},
+        request_text='{"brief":"native context"}',
+        response={"source": "def priority(ctx, proposal):\n    return 0\n"},
+        response_text='{"source":"def priority(ctx, proposal):\\n    return 0\\n"}',
+    )
+    directory = store.turn_directory(0, 0)
+    request_markdown = (directory / "slot-00.request.md").read_text(encoding="utf-8")
+    response_markdown = (directory / "slot-00.response.md").read_text(encoding="utf-8")
+    assert request_markdown.startswith("# Provider request\n\n```json\n")
+    assert response_markdown.startswith("# Provider response\n\n```json\n")
+    request_json = json.loads(
+        (directory / "slot-00.request.json").read_text(encoding="utf-8")
+    )
+    assert request_json["brief"] == "native context"
+
+
 def test_incomplete_turn_fails_closed_but_retains_manifest(tmp_path: Path) -> None:
     store = TurnArtifactStore(tmp_path / "artifacts", max_bytes=4)
     with pytest.raises(ArtifactIncompleteError):

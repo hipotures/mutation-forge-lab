@@ -280,6 +280,21 @@ class TransportLogger:
 
     def text(self, name: str, value: str) -> None:
         value = cast(str, safe_value(value))
+        if name.endswith(".md"):
+            try:
+                parsed: object = json.loads(value)
+            except (TypeError, ValueError):
+                pass
+            else:
+                pretty = json.dumps(
+                    safe_value(parsed), ensure_ascii=False, sort_keys=True, indent=2
+                )
+                value = (
+                    f"# {'Provider request' if 'request' in name else 'Provider response'}\n\n"
+                    "```json\n"
+                    f"{pretty}\n"
+                    "```\n"
+                )
         if len(value.encode()) > self.max_bytes:
             original = len(value.encode())
             marker = f"\n[TRUNCATED original_bytes={original}]\n"
