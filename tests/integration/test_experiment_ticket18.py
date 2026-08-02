@@ -11,6 +11,7 @@ from mutation_forge import cli
 from mutation_forge.experiment.artifacts import TurnArtifactStore
 from mutation_forge.experiment.config import load_experiment_config
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
+from mutation_forge.experiment.native import NativeExperimentAdapter
 from mutation_forge.experiment.service import (
     ExperimentService,
     LegacyStage4Adapter,
@@ -100,9 +101,7 @@ class _Provider:
             "final": True,
             "partial": False,
         }
-        (root / f"{prefix}.usage.json").write_text(
-            json.dumps(usage), encoding="utf-8"
-        )
+        (root / f"{prefix}.usage.json").write_text(json.dumps(usage), encoding="utf-8")
         result = {
             "status": "completed",
             "accepted": True,
@@ -113,12 +112,8 @@ class _Provider:
             "provider_thread_id": "thread-1",
             "provider_turn_id": "turn-1",
         }
-        (root / f"{prefix}.response.md").write_text(
-            result["response_text"], encoding="utf-8"
-        )
-        (root / f"{prefix}.response.json").write_text(
-            json.dumps(result), encoding="utf-8"
-        )
+        (root / f"{prefix}.response.md").write_text(result["response_text"], encoding="utf-8")
+        (root / f"{prefix}.response.json").write_text(json.dumps(result), encoding="utf-8")
         return result
 
     def close(self) -> None:
@@ -180,9 +175,7 @@ class _RepairingProvider(_Provider):
         root = Path(request["artifact_dir"])
         prefix = str(request["artifact_prefix"])
         (root / f"{prefix}.response.md").write_text(source, encoding="utf-8")
-        (root / f"{prefix}.response.json").write_text(
-            json.dumps(result), encoding="utf-8"
-        )
+        (root / f"{prefix}.response.json").write_text(json.dumps(result), encoding="utf-8")
         return result
 
 
@@ -209,9 +202,7 @@ class _ChargedFailureProvider(_Provider):
         }
         root = Path(request["artifact_dir"])
         prefix = str(request["artifact_prefix"])
-        (root / f"{prefix}.usage.json").write_text(
-            json.dumps(usage), encoding="utf-8"
-        )
+        (root / f"{prefix}.usage.json").write_text(json.dumps(usage), encoding="utf-8")
         (root / f"{prefix}.response.json").write_text(
             json.dumps(
                 {
@@ -290,9 +281,7 @@ def test_forced_interrupt_resumes_without_repeating_provider_turn(tmp_path: Path
     assert result["state"] == "completed"
     assert provider.calls == 1
     assert experiment_status(config)["provider_turns"] == 1
-    lock = json.loads(
-        (root / "experiment.lock.json").read_text(encoding="utf-8")
-    )
+    lock = json.loads((root / "experiment.lock.json").read_text(encoding="utf-8"))
     assert lock["preset_identity"]["resolved"] is True
     assert set(lock["baseline_identities"]) == {"random", "structural"}
     assert lock["proposal_schema_identities"]
@@ -327,14 +316,7 @@ def test_adapter_runs_real_coordinator_repair_and_resume(tmp_path: Path) -> None
 
     root = tmp_path / "workspace" / "continuation"
     assert list((root / "checkpoints").glob("checkpoint-*.json"))
-    initial = (
-        root
-        / "artifacts"
-        / "generations"
-        / "generation-0000"
-        / "slot-00"
-        / "initial"
-    )
+    initial = root / "artifacts" / "generations" / "generation-0000" / "slot-00" / "initial"
     repair = initial.parent / "repair-01"
     initial_validation = json.loads((initial / "validation.json").read_text(encoding="utf-8"))
     assert initial_validation["valid"] is False
@@ -526,10 +508,7 @@ def test_charged_failed_turn_usage_survives_hard_crash_without_retry(
     )
     with pytest.raises(Stage4ProviderError, match="transport timeout"):
         first.generate(request)
-    manifest_path = (
-        layout.generation_slot_phase(0, "slot-00", "initial")
-        / "turn-manifest.json"
-    )
+    manifest_path = layout.generation_slot_phase(0, "slot-00", "initial") / "turn-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["terminal_status"] == "failed"
     assert manifest["artifact_complete"] is True
@@ -596,7 +575,7 @@ def test_incompatible_stage4_config_fails_before_workspace_creation(tmp_path: Pa
     assert not (tmp_path / "workspace" / "continuation").exists()
 
 
-def test_semantically_invalid_freeze_fails_before_workspace_creation(
+def test_native_experiment_ignores_historical_freeze(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from mutation_forge.stage4 import commands
@@ -610,10 +589,14 @@ def test_semantically_invalid_freeze_fails_before_workspace_creation(
     )
     monkeypatch.setattr(commands, "campaign_root", lambda _config: freeze_root)
 
-    with pytest.raises(WorkspaceError, match="frozen search metadata is invalid"):
-        ExperimentService().run(config)
+    adapter = NativeExperimentAdapter(
+        provider=_Provider(),
+        engine=lambda *_args, **_kwargs: {"status": "completed", "generation": 0},
+    )
+    result = ExperimentService(adapter=adapter).run(config)
 
-    assert not (tmp_path / "workspace" / "continuation").exists()
+    assert result["state"] == "completed"
+    assert (tmp_path / "workspace" / "continuation" / "experiment.lock.json").is_file()
 
 
 def test_failed_pre_response_is_complete_and_text_is_redacted(tmp_path: Path) -> None:
@@ -621,9 +604,7 @@ def test_failed_pre_response_is_complete_and_text_is_redacted(tmp_path: Path) ->
     manifest = store.write_turn(
         generation=0,
         slot=0,
-        request_text=(
-            "Bearer sk-abcdefghijklmnop token=plainsecret from /home/user/private"
-        ),
+        request_text=("Bearer sk-abcdefghijklmnop token=plainsecret from /home/user/private"),
         terminal_status="failed",
         request_accepted=True,
         error="connection closed before content",

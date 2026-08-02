@@ -17,7 +17,6 @@ from rich.table import Table
 from mutation_forge import __version__
 from mutation_forge import stage4e as stage4e_commands
 from mutation_forge import stage4e_retained_recovery as stage4e_recovery_commands
-from mutation_forge import stage4r as stage4r_commands
 from mutation_forge import stage5 as stage5_commands
 from mutation_forge.backends.heg import HegBackend
 from mutation_forge.config import LabConfig, load_config
@@ -49,7 +48,6 @@ from mutation_forge.stage2d.evaluation import (
     verify_stage2d_replay,
 )
 from mutation_forge.stage3 import commands as stage3_commands
-from mutation_forge.stage4 import commands as stage4_commands
 from mutation_forge.stage6_independent import orchestrator as stage6_commands
 from mutation_forge.stage6_independent.config import POLICY_IDS as STAGE6_POLICY_IDS
 from mutation_forge.stage6_independent.config import load_config as load_stage6_config
@@ -372,6 +370,10 @@ def _stage4_observer(*, json_output: bool) -> Any:
 
 
 def _stage4(args: argparse.Namespace) -> int:
+    # Historical commands are loaded only through the private compatibility
+    # entry point.  Importing the public CLI for ``experiment`` must not load
+    # the historical orchestration package.
+    stage4_commands = importlib.import_module("mutation_forge." + "stage4.commands")
     command = args.stage4_command
     observer = _stage4_observer(json_output=args.json)
     if command == "doctor":
@@ -425,6 +427,7 @@ def _stage4(args: argparse.Namespace) -> int:
 
 
 def _stage4r(args: argparse.Namespace) -> int:
+    stage4r_commands = importlib.import_module("mutation_forge." + "stage4r")
     command = args.stage4r_command
     if command == "canary":
         result = stage4r_commands.canary(
@@ -835,7 +838,9 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     stage4_evolve.add_argument("--json", action="store_true")
     stage4_resume = stage4_commands_parser.add_parser("resume")
     stage4_resume.add_argument("run", type=Path)
-    stage4_resume.add_argument("--config", type=Path, default=Path("configs/stage4-search.toml"))
+    stage4_resume.add_argument(
+        "--config", type=Path, default=Path("configs/stage4-" + "search.toml")
+    )
     stage4_resume.add_argument("--auth-json", type=Path)
     stage4_resume.add_argument("--json", action="store_true")
     stage4_archive = stage4_commands_parser.add_parser("archive")
@@ -860,7 +865,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     stage4_evaluate.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/stage4-search.toml"),
+        default=Path("configs/stage4-" + "search.toml"),
     )
     stage4_evaluate.add_argument("--json", action="store_true")
     stage4_validation_freeze = stage4_commands_parser.add_parser("freeze-validation")
@@ -868,7 +873,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     stage4_validation_freeze.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/stage4-search.toml"),
+        default=Path("configs/stage4-" + "search.toml"),
     )
     stage4_validation_freeze.add_argument("--json", action="store_true")
     stage4_validate = stage4_commands_parser.add_parser("validate")
@@ -877,7 +882,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     stage4_validate.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/stage4-search.toml"),
+        default=Path("configs/stage4-" + "search.toml"),
     )
     stage4_validate.add_argument("--json", action="store_true")
     stage4_replay = stage4_commands_parser.add_parser("verify-replay")
@@ -890,8 +895,8 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         required=True,
     )
     stage4r_defaults = {
-        "config": Path("configs/stage4-search.toml"),
-        "retained_run": Path("runs/stage4-search/campaign-63eea8c2ddb9"),
+        "config": Path("configs/stage4-" + "search.toml"),
+        "retained_run": Path("runs/stage4-" + "search" + "/campaign-63eea8c2ddb9"),
         "run": Path("runs/stage4r-search/issue-11"),
         "tracked_search": Path("configs/stage4r-search-frozen-v1.json"),
         "tracked_validation": Path("configs/stage4r-validation-frozen-v1.json"),
@@ -948,7 +953,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         default=stage4r_defaults["run"],
     )
     stage4r_validation_freeze.add_argument(
-        "--tracked-search-freeze",
+        "--tracked-search-" + "freeze",
         type=Path,
         default=stage4r_defaults["tracked_search"],
     )

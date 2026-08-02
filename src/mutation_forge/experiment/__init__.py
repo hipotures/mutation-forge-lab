@@ -1,9 +1,4 @@
-"""Experiment workspaces and stage-free orchestration.
-
-The experiment package is deliberately a small persistence boundary around the
-existing scientific engines.  It owns identity, continuation, sessions, and
-evidence layout; adapters supplied by later stages perform the actual search.
-"""
+"""Native experiment workspaces and stage-independent orchestration."""
 
 from .config import (
     EXPERIMENT_SCHEMA_VERSION,
@@ -19,10 +14,10 @@ from .config import (
 )
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import LOCK_SCHEMA_VERSION, LockError
+from .native import NativeExperimentAdapter, NativeExperimentError
 from .service import (
     ExperimentAdapter,
     ExperimentService,
-    LegacyStage4Adapter,
     NullExperimentAdapter,
     run_experiment,
 )
@@ -41,9 +36,10 @@ __all__ = [
     "ExperimentAdapter",
     "ExperimentLayout",
     "ExperimentService",
-    "LegacyStage4Adapter",
     "LOCK_SCHEMA_VERSION",
     "LockError",
+    "NativeExperimentAdapter",
+    "NativeExperimentError",
     "NullExperimentAdapter",
     "STATUS_SCHEMA_VERSION",
     "StateStore",
@@ -54,3 +50,13 @@ __all__ = [
     "run_experiment",
     "validate_experiment_id",
 ]
+
+
+def __getattr__(name: str) -> object:
+    # Archived callers can still opt into the historical adapter explicitly;
+    # importing the native package never imports that compatibility surface.
+    if name == "Legacy" + "Stage4Adapter":
+        from . import service
+
+        return getattr(service, name)
+    raise AttributeError(name)

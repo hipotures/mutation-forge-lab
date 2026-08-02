@@ -135,7 +135,7 @@ Python 3.12 or newer and the read-only sibling repository at `../heg` are
 required.
 
 ```console
-uv sync
+uv sync --locked
 uv run mforge doctor --heg-repo ../heg
 uv run pytest
 uv run ruff check .
@@ -144,8 +144,21 @@ uv run mypy
 
 ## Experiment workspace workflow
 
-New experiments use one configuration file and two stage-free commands. The
-default file is `./experiment.toml`; `--config PATH` selects another file.
+New experiments use the native experiment engine through two stage-free public
+commands. `mforge experiment run` invokes the native generation coordinator,
+the local Codex App Server provider, sandbox validation/probing, HEG-backed
+evaluation, selection, and durable checkpoints. `experiment.toml` is
+authoritative: its model, search, evaluation, resource, and invocation-budget
+fields are executed as written and immutable scientific fields are recorded in
+the workspace lock.
+
+The default file is `./experiment.toml`; `--config PATH` selects another file.
+Every required prompt, schema, semantic glossary, and baseline ranker is a
+version-controlled native asset. A new experiment does not need a historical
+Stage 4 freeze, campaign directory, tag, or previous `runs/` output. HEG
+remains the mathematical backend, with its current sibling-checkout commit and
+dirty state recorded in the lock. Stage 4 commands and artifacts remain
+historical/private regression material and are not part of this workflow.
 
 ```toml
 schema_version = "mforge.experiment.v1"

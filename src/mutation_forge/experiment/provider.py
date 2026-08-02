@@ -101,7 +101,7 @@ class _CodexTransport:
             auth_checker=self.auth_checker,
             auth_json=self.auth_json,
             limits=AppServerLimits(max_turns=1, max_campaigns=1),
-            base_instructions=str(request["system_prompt"]),
+            base_instructions=str(request.get("system_prompt", "")),
             artifact_dir=artifact_dir,
             artifact_prefix=prefix,
             artifact_root=request.get("artifact_root")
@@ -168,34 +168,50 @@ class _CodexTransport:
         from mutation_forge.stage3.app_server import ModelProfile
 
         adapter = self._adapter(request)
-        try:
-            result = adapter.generate(
-                prompt,
-                ModelProfile("codex", model, effort),
-                output_schema=schema,
+        profile = ModelProfile("codex", model, effort)
+        if adapter.logger:
+            adapter.logger.text("request.md", prompt)
+            adapter.logger.document(
+                "request.json",
+                {
+                    "model": model,
+                    "reasoning_effort": effort,
+                    "prompt": prompt,
+                    "system_prompt": system,
+                    "output_schema": dict(schema),
+                },
             )
+        try:
+            result = adapter.generate(prompt, profile, output_schema=schema)
         except Exception as error:
             name = type(error).__name__.lower()
             message = str(error)
             if "auth" in name or "authenticated" in message.lower() or "login" in message.lower():
                 raise AuthenticationError(str(redact(message))) from error
+            if adapter.logger:
+                adapter.logger.document(
+                    "response.json",
+                    {"status": "failed", "error": str(redact(message))},
+                )
             raise
-        text = str(result.text)
-        response: Any = text
+        response_text = str(result.text)
+        response: Any = response_text
         try:
-            decoded = json.loads(text)
+            decoded = json.loads(response_text)
         except (TypeError, ValueError):
             pass
         else:
             if isinstance(decoded, Mapping):
                 response = dict(decoded)
-        return {
+        usage = self._usage({"usage": self._usage_from_result(result)})
+        value = {
             "status": "completed",
             "accepted": True,
-            "content": bool(text),
+            "charged": usage.get("totalTokens", 0) > 0,
+            "content": bool(response_text),
             "response": response,
-            "response_text": text,
-            "usage": self._usage({"usage": self._usage_from_result(result)}),
+            "response_text": response_text,
+            "usage": usage,
             "provider_thread_id": result.thread_id,
             "provider_turn_id": result.turn_id,
             "provider_request_id": result.request_id,
@@ -203,6 +219,20 @@ class _CodexTransport:
             "effort": effort,
             "transport_sha256": adapter.logger.transcript_sha256 if adapter.logger else None,
         }
+        if adapter.logger:
+            adapter.logger.text("response.md", response_text)
+            adapter.logger.document("response.json", value)
+            adapter.logger.document(
+                "provider-raw.json",
+                {
+                    "usage": usage,
+                    "thread_id": result.thread_id,
+                    "turn_id": result.turn_id,
+                    "request_id": result.request_id,
+                    "diagnostics": list(result.diagnostics),
+                },
+            )
+        return value
 
     @staticmethod
     def _usage_from_result(result: Any) -> Mapping[str, Any]:
@@ -225,8 +255,12 @@ class _CodexTransport:
         if not diagnostics:
             raise ValueError("repair requires bounded diagnostics")
         value = dict(request)
-        value["prompt"] = str(request.get("prompt", "")) + "\n\nDiagnostics:\n" + json.dumps(
-            list(diagnostics), sort_keys=True, separators=(",", ":")
+        value["prompt"] = (
+            str(request.get("repair_prompt", "Repair the generated policy using the diagnostics."))
+            + "\n\n"
+            + str(request.get("prompt", ""))
+            + "\n\nDiagnostics:\n"
+            + json.dumps(list(diagnostics), sort_keys=True, separators=(",", ":"))
         )
         return self.generate(value)
 
@@ -261,14 +295,8 @@ class LocalCodexAppServerProvider:
             config = NativeProviderConfig(
                 model=model if model is not None else DEFAULT_MODEL,
                 effort=effort if effort is not None else DEFAULT_EFFORT,
-                concurrency=(
-                    concurrency if concurrency is not None else DEFAULT_CONCURRENCY
-                ),
-                max_repairs=(
-                    max_repairs
-                    if max_repairs is not None
-                    else DEFAULT_MAX_REPAIRS
-                ),
+                concurrency=(concurrency if concurrency is not None else DEFAULT_CONCURRENCY),
+                max_repairs=(max_repairs if max_repairs is not None else DEFAULT_MAX_REPAIRS),
             )
         elif any(value is not None for value in (model, effort, concurrency, max_repairs)):
             config = NativeProviderConfig(

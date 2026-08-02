@@ -98,7 +98,10 @@ class ExperimentStateStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.connection = sqlite3.connect(self.path, timeout=5.0)
+        # Native generation may invoke provider slots concurrently.  All
+        # mutating ledger operations use explicit SQLite transactions; allow
+        # those operations to originate from the coordinator's worker threads.
+        self.connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA busy_timeout=5000")
@@ -463,9 +466,7 @@ class ExperimentStateStore:
         usage_value["quality"] = _usage_quality(usage_value)
         total_tokens = usage_value.get("totalTokens", 0)
         if state == "completed" and (
-            not isinstance(total_tokens, int)
-            or isinstance(total_tokens, bool)
-            or total_tokens < 0
+            not isinstance(total_tokens, int) or isinstance(total_tokens, bool) or total_tokens < 0
         ):
             raise ValueError("completed provider turn requires non-negative totalTokens")
         terminal = state in {"completed", "failed"}

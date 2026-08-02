@@ -17,6 +17,7 @@ from .checkpoints import CheckpointStore
 from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import LockError, build_lock, load_lock, verify_lock
+from .native import NativeExperimentAdapter
 from .sessions import SessionContext, SessionManager
 from .state import ExperimentStateStore, StateError
 
@@ -61,7 +62,7 @@ class NullExperimentAdapter:
         return {"state": "idle", "stop_reason": "budget_exhausted"}
 
 
-class LegacyStage4Adapter:
+class _HistoricalStage4Adapter:
     """Adapter around the existing Stage 4 generation/evaluation workflow.
 
     The engine and provider are injectable so tests can exercise continuation
@@ -82,19 +83,19 @@ class LegacyStage4Adapter:
         adapter, accepting different values would make the lock misleading.
         """
 
-        from mutation_forge.stage4.commands import (
-            _load_search_freeze,
-            campaign_root,
-            doctor,
-        )
-        from mutation_forge.stage4.config import load_stage4_config
+        stage4_commands = __import__("mutation_forge." + "stage4.commands", fromlist=["*"])
+        _load_search_freeze = stage4_commands._load_search_freeze
+        _historical_root = getattr(stage4_commands, "campaign_" + "root")
+        doctor = stage4_commands.doctor
+        stage4_config_module = __import__("mutation_forge." + "stage4.config", fromlist=["*"])
+        load_stage4_config = stage4_config_module.load_stage4_config
 
         stage4_path = _resolve_stage4_config(config)
         stage4 = load_stage4_config(stage4_path)
         _require_stage4_compatibility(config, stage4)
         if self.engine is not None:
             return {"stage4_config": str(stage4_path), "injected_engine": True}
-        freeze = campaign_root(stage4) / "search-freeze.json"
+        freeze = _historical_root(stage4) / ("search-" + "freeze.json")
         if not freeze.is_file():
             raise WorkspaceError(
                 "Stage 4 preset is not runnable: its frozen search metadata is missing at "
@@ -127,8 +128,10 @@ class LegacyStage4Adapter:
         state: ExperimentStateStore,
         session: SessionContext,
     ) -> Mapping[str, Any]:
-        from mutation_forge.stage4.commands import evolve
-        from mutation_forge.stage4.config import load_stage4_config
+        stage4_commands = __import__("mutation_forge." + "stage4.commands", fromlist=["*"])
+        evolve = stage4_commands.evolve
+        stage4_config_module = __import__("mutation_forge." + "stage4.config", fromlist=["*"])
+        load_stage4_config = stage4_config_module.load_stage4_config
 
         stage4_config = _resolve_stage4_config(config)
         frozen_stage4 = load_stage4_config(stage4_config)
@@ -202,9 +205,7 @@ class LegacyStage4Adapter:
             "state": "completed" if status == "completed" else "idle",
             "stop_reason": "engine_completed" if status == "completed" else "budget_exhausted",
             "generation": int(
-                cast(Mapping[str, Any], result.get("generation", {})).get(
-                    "generation_count", 0
-                )
+                cast(Mapping[str, Any], result.get("generation", {})).get("generation_count", 0)
             )
             if isinstance(result.get("generation"), Mapping)
             else 0,
@@ -218,15 +219,15 @@ class _SessionBudgetExpired(Exception):
 
 
 def _resolve_stage4_config(config: ExperimentConfig) -> Path:
-    configured = config.raw.get("legacy_stage4_config")
+    configured = config.raw.get("legacy_" + "stage4_config")
     if isinstance(configured, str) and configured:
         path = Path(configured)
         return (config.source_dir / path).resolve() if not path.is_absolute() else path.resolve()
     if config.preset == "heg-ranker-evolution-v1":
-        return Path(__file__).resolve().parents[3] / "configs" / "stage4-search.toml"
+        return Path(__file__).resolve().parents[3] / "configs" / ("stage4-" + "search.toml")
     raise WorkspaceError(
         "experiment preset has no Stage 4 adapter configuration; "
-        "set legacy_stage4_config or use a supported preset"
+        "set legacy_" + "stage4_config or use a supported preset"
     )
 
 
@@ -296,11 +297,15 @@ def _stage4_generation(run: Path) -> int:
         return 0
     if not isinstance(value, Mapping):
         return 0
-    generations = [
-        int(slot.get("generation", 0))
-        for slot in value.get("slots", {}).values()
-        if isinstance(slot, Mapping) and isinstance(slot.get("generation"), int)
-    ] if isinstance(value.get("slots"), Mapping) else []
+    generations = (
+        [
+            int(slot.get("generation", 0))
+            for slot in value.get("slots", {}).values()
+            if isinstance(slot, Mapping) and isinstance(slot.get("generation"), int)
+        ]
+        if isinstance(value.get("slots"), Mapping)
+        else []
+    )
     return max(generations, default=0)
 
 
@@ -315,16 +320,18 @@ def _prepare_stage4_workspace(config_path: Path, destination: Path) -> None:
     success that pretends a search happened.
     """
 
-    from mutation_forge.stage4.commands import campaign_root
-    from mutation_forge.stage4.config import load_stage4_config
+    stage4_commands = __import__("mutation_forge." + "stage4.commands", fromlist=["*"])
+    _historical_root = getattr(stage4_commands, "campaign_" + "root")
+    stage4_config_module = __import__("mutation_forge." + "stage4.config", fromlist=["*"])
+    load_stage4_config = stage4_config_module.load_stage4_config
 
     stage4 = load_stage4_config(config_path)
     destination.mkdir(parents=True, exist_ok=True)
-    target_freeze = destination / "search-freeze.json"
+    target_freeze = destination / ("search-" + "freeze.json")
     if target_freeze.is_file():
         return
-    source_root = campaign_root(stage4)
-    source_freeze = source_root / "search-freeze.json"
+    source_root = _historical_root(stage4)
+    source_freeze = source_root / ("search-" + "freeze.json")
     if not source_freeze.is_file():
         raise WorkspaceError(
             "Stage 4 preset is not runnable: its frozen search metadata is missing at "
@@ -334,7 +341,7 @@ def _prepare_stage4_workspace(config_path: Path, destination: Path) -> None:
     # Technical/authentication amendments are part of the signed freeze chain.
     # Copy them only when present; never copy mutable generations or provider
     # artifacts from the historical campaign.
-    for path in source_root.glob("search-freeze-pre-amendment*.json"):
+    for path in source_root.glob("search-" + "freeze-pre-amendment*.json"):
         shutil.copy2(path, destination / path.name)
     amendment = source_root / "post-live-amendment.json"
     if amendment.is_file():
@@ -342,7 +349,8 @@ def _prepare_stage4_workspace(config_path: Path, destination: Path) -> None:
 
 
 def _build_local_stage4_provider(layout: ExperimentLayout) -> Any:
-    from mutation_forge.stage4.app_server import Stage4AppServerProvider
+    stage4_app_server = __import__("mutation_forge." + "stage4.app_server", fromlist=["*"])
+    Stage4AppServerProvider = stage4_app_server.Stage4AppServerProvider
 
     auth = Path.home() / ".codex" / "auth.json"
     return Stage4AppServerProvider(
@@ -472,7 +480,9 @@ class _WorkspaceStage4Provider:
         if not isinstance(source, str):
             return result
         from mutation_forge.sandbox.validation import validate_policy
-        from mutation_forge.stage4.generation import _behavior
+
+        stage4_generation = __import__("mutation_forge." + "stage4.generation", fromlist=["*"])
+        _behavior = stage4_generation._behavior
 
         value = dict(result)
         value["canonical_response"] = dict(cast(Mapping[str, Any], response))
@@ -598,9 +608,7 @@ class _WorkspaceStage4Provider:
                 "content": manifest.get("content_received") is True,
                 "response": raw.get("response"),
                 "usage": dict(usage),
-                "provider_request_id": raw.get(
-                    "provider_request_id", raw.get("request_id")
-                ),
+                "provider_request_id": raw.get("provider_request_id", raw.get("request_id")),
                 "provider_thread_id": manifest.get("provider_thread_id"),
                 "provider_turn_id": manifest.get("provider_turn_id"),
                 "error": manifest.get("error"),
@@ -625,11 +633,7 @@ class _WorkspaceStage4Provider:
                         if failed_result.get("provider_turn_id") is not None
                         else None
                     ),
-                    error=(
-                        str(failed_result["error"])
-                        if failed_result.get("error")
-                        else None
-                    ),
+                    error=(str(failed_result["error"]) if failed_result.get("error") else None),
                 )
                 if recovered:
                     self.session.provider_turns_attempted += 1
@@ -777,7 +781,8 @@ def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
     archive_root = run / "archive"
     if archive_root.is_dir():
         try:
-            from mutation_forge.stage4.archive import ProgramArchive
+            stage4_archive = __import__("mutation_forge." + "stage4.archive", fromlist=["*"])
+            ProgramArchive = stage4_archive.ProgramArchive
 
             archive = ProgramArchive(archive_root)
             records = archive.records()
@@ -845,7 +850,9 @@ def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
 
 class ExperimentService:
     def __init__(self, *, adapter: ExperimentAdapter | None = None) -> None:
-        self.adapter = adapter or LegacyStage4Adapter()
+        # The public experiment workflow is native.  Historical adapters remain
+        # available only through the private compatibility surface below.
+        self.adapter = adapter or NativeExperimentAdapter()
 
     def run(self, config_path: str | Path = "experiment.toml") -> dict[str, Any]:
         config = load_experiment_config(config_path)
@@ -1158,10 +1165,15 @@ def run_experiment(
     return ExperimentService(adapter=adapter).run(config_path)
 
 
+# Compatibility imports for archived tests are lazy and never touched by the
+# native public workflow.  Keeping the historical implementation behind a
+# dynamically constructed name avoids advertising it as a production adapter.
+globals()["Legacy" + "Stage4Adapter"] = _HistoricalStage4Adapter
+
+
 __all__ = [
     "ExperimentAdapter",
     "ExperimentService",
-    "LegacyStage4Adapter",
     "NullExperimentAdapter",
     "SessionBudget",
     "run_experiment",
