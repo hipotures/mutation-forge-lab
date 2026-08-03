@@ -1,8 +1,8 @@
 """Configuration loading for experiment workspaces.
 
-Invocation fields under ``[run]`` remain mutable after an experiment is
-created.  The raw TOML is retained so that every session can preserve the
-exact bytes supplied by its caller.
+Invocation fields under ``[run]`` and ``model.effort`` remain mutable after
+an experiment is created.  The raw TOML is retained so that every session can
+preserve the exact bytes supplied by its caller.
 """
 
 from __future__ import annotations
@@ -203,6 +203,9 @@ class ExperimentConfig:
 
         value = copy.deepcopy(dict(self.raw))
         value.pop("run", None)
+        model = value.get("model")
+        if isinstance(model, dict):
+            model.pop("effort", None)
         return cast(dict[str, Any], _canonicalize_paths(value, self.source_dir))
 
     @property

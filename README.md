@@ -157,6 +157,8 @@ Important behavior:
 - `max_generations` and `max_model_turns` are required. Each accepts a positive
   integer or the exact string `"unbounded"`.
 - Model-turn accounting remains cumulative when the limit is unbounded.
+- `model.effort` may be changed between resumable sessions without creating a
+  new experiment identity; the next provider turn uses the current value.
 - `max_total_tokens_per_hour` is optional. It accepts a positive integer or
   `"unbounded"` and applies to the canonical `totalTokens` charged during the
   rolling previous 60 minutes.

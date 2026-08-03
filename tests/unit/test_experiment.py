@@ -22,6 +22,7 @@ from mutation_forge.experiment.config import (
 )
 from mutation_forge.experiment.generation import GenerationConfig, GenerationCoordinator
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
+from mutation_forge.experiment.lock import canonical_bytes, sha256_bytes, verify_lock
 from mutation_forge.experiment.provider import NativeProviderConfig, _CodexTransport
 from mutation_forge.experiment.service import (
     ExperimentService,
@@ -104,6 +105,27 @@ def test_config_accepts_and_serializes_unbounded_limits(tmp_path: Path) -> None:
         "max_model_turns": "unbounded",
         "selection": "elite-diversity",
     }
+    assert "effort" not in config.immutable_projection()["model"]
+
+
+def test_legacy_lock_allows_current_effort(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace('effort = "high"', 'effort = "xhigh"'),
+        encoding="utf-8",
+    )
+    config = load_experiment_config(path)
+    layout = ExperimentLayout.from_config(config)
+    legacy_projection = config.immutable_projection()
+    legacy_projection["model"]["effort"] = "max"
+    lock = {
+        "exp_id": config.exp_id,
+        "experiment_root": str(layout.root.resolve()),
+        "normalized_immutable_config": legacy_projection,
+        "immutable_config_sha256": sha256_bytes(canonical_bytes(legacy_projection)),
+    }
+
+    verify_lock(lock, config, layout)
 
 
 def test_config_accepts_hourly_token_limit(tmp_path: Path) -> None:
@@ -252,12 +274,23 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     assert started["active_workers"] == 0
 
 
-def test_second_run_continues_and_run_budget_is_mutable(tmp_path: Path) -> None:
+def test_second_run_continues_and_invocation_fields_are_mutable(tmp_path: Path) -> None:
     path = _write_config(tmp_path, wall=1)
     ExperimentService(adapter=NullExperimentAdapter()).run(path)
-    path.write_text(_config(wall=2), encoding="utf-8")
-    result = ExperimentService(adapter=NullExperimentAdapter()).run(path)
+    path.write_text(
+        _config(wall=2).replace('effort = "high"', 'effort = "xhigh"'),
+        encoding="utf-8",
+    )
+    seen_efforts: list[str] = []
+
+    class Adapter:
+        def run(self, config: Any, *_: object) -> dict[str, str]:
+            seen_efforts.append(config.model.effort)
+            return {"state": "idle", "stop_reason": "session_wall_seconds"}
+
+    result = ExperimentService(adapter=Adapter()).run(path)
     assert result["session_id"] == "session-000002"
+    assert seen_efforts == ["xhigh"]
     assert (
         tmp_path / "configs" / "workspace" / "demo" / "artifacts" / "sessions" / "session-000002"
     ).is_dir()

@@ -428,7 +428,13 @@ def immutable_differences(
     expected = lock.get("normalized_immutable_config")
     if not isinstance(expected, Mapping):
         raise LockError("experiment lock has no immutable configuration projection")
-    return _diff_values(expected, config.immutable_projection())
+    expected_projection = dict(expected)
+    expected_model = expected_projection.get("model")
+    if isinstance(expected_model, Mapping):
+        expected_projection["model"] = {
+            key: value for key, value in expected_model.items() if key != "effort"
+        }
+    return _diff_values(expected_projection, config.immutable_projection())
 
 
 def format_differences(differences: list[tuple[str, object, object]]) -> str:
@@ -446,9 +452,14 @@ def verify_lock(
         raise LockError("experiment lock exp_id does not match configuration")
     if Path(str(lock.get("experiment_root", ""))).resolve() != layout.root.resolve():
         raise LockError("experiment lock experiment_root does not match configuration")
+    expected = lock.get("normalized_immutable_config")
+    if not isinstance(expected, Mapping):
+        raise LockError("experiment lock has no immutable configuration projection")
     expected_hash = lock.get("immutable_config_sha256")
+    if expected_hash != sha256_bytes(canonical_bytes(expected)):
+        raise LockError("experiment lock immutable configuration digest is invalid")
     differences = immutable_differences(lock, config)
-    if expected_hash != config.immutable_config_sha256() or differences:
+    if differences:
         raise LockError(format_differences(differences))
 
 

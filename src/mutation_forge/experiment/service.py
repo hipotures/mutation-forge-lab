@@ -669,6 +669,12 @@ def _same_immutable_config(
         current_raw = dict(current.raw)
         raw.pop("run", None)
         current_raw.pop("run", None)
+        for value in (raw, current_raw):
+            model = value.get("model")
+            if isinstance(model, dict):
+                value["model"] = {
+                    key: item for key, item in model.items() if key != "effort"
+                }
         return raw == current_raw
     except (UnicodeError, tomllib.TOMLDecodeError):
         return False
