@@ -36,6 +36,24 @@ VALID_SOURCE = "def priority(ctx, proposal):\n    return 0\n"
 INVALID_SOURCE = "def priority(ctx, proposal)\n    return 0\n"
 
 
+def test_native_output_schema_uses_app_server_supported_keywords() -> None:
+    schema = json.loads(
+        Path("configs/native/generated-policy.schema.json").read_text(encoding="utf-8")
+    )
+
+    def contains_unique_items(value: object) -> bool:
+        if isinstance(value, Mapping):
+            return any(
+                key == "uniqueItems" or contains_unique_items(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_unique_items(item) for item in value)
+        return False
+
+    assert not contains_unique_items(schema)
+
+
 def _write_config(
     path: Path,
     *,
@@ -386,6 +404,28 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     assert request_envelope["prompt"] == prompt
     assert (turn / "slot-00.system-prompt.md").is_file()
     assert (turn / "slot-00.output-schema.json").is_file()
+
+
+def test_native_slot_events_do_not_report_queued_turns_as_active() -> None:
+    events: list[tuple[str, Mapping[str, Any]]] = []
+    provider = RecordingProvider()
+
+    GenerationCoordinator(
+        provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=2,
+            concurrency=1,
+            max_model_turns=2,
+            max_repairs=0,
+        ),
+        observer=lambda event_type, payload: events.append((event_type, payload)),
+    ).run()
+
+    slot_events = [payload for event_type, payload in events if event_type == "slot_queued"]
+    assert provider.max_active == 1
+    assert slot_events
+    assert all("active_model_turns" not in payload for payload in slot_events)
 
 
 def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path) -> None:

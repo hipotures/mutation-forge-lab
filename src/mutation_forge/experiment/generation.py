@@ -1675,7 +1675,6 @@ class GenerationCoordinator:
             results: dict[str, SlotResult] = {}
             futures: dict[Any, tuple[str, GenerationRequest]] = {}
             initial_keys: dict[str, str] = {}
-            active_model_turns = 0
             close_provider = getattr(self.provider, "close", None)
             with _InterruptibleThreadPoolExecutor(
                 max_workers=self.config.max_workers,
@@ -1747,14 +1746,10 @@ class GenerationCoordinator:
                         continue
                     reserve_model_turn()
                     futures[pool.submit(self._invoke, request)] = (slot, request)
-                    active_model_turns += 1
                 while futures:
                     future = next(as_completed(tuple(futures)))
                     slot, request = futures.pop(future)
-                    try:
-                        raw = future.result()
-                    finally:
-                        active_model_turns = max(0, active_model_turns - 1)
+                    raw = future.result()
                     if raw.retained:
                         release_retained_turn()
                         recovered += 1
@@ -1775,7 +1770,6 @@ class GenerationCoordinator:
                                 slot,
                                 request,
                             )
-                            active_model_turns += 1
                             self._emit(
                                 "slot_queued",
                                 generation=generation,
@@ -1783,7 +1777,6 @@ class GenerationCoordinator:
                                 parent_id=request.parent_id,
                                 phase=request.phase,
                                 status="retrying",
-                                active_model_turns=active_model_turns,
                                 remaining_model_turns=(
                                     max(0, self.config.max_model_turns - turns)
                                     if self.config.max_model_turns is not None
@@ -1846,7 +1839,6 @@ class GenerationCoordinator:
                         status=results[slot].status,
                         completed_slots=len(results),
                         population_size=self.config.slots,
-                        active_model_turns=active_model_turns,
                         remaining_model_turns=(
                             max(0, self.config.max_model_turns - turns)
                             if self.config.max_model_turns is not None

@@ -16,8 +16,7 @@
         "type": "string",
         "pattern": "^(ctx|proposal)\\.[A-Za-z][A-Za-z0-9_]*$"
       },
-      "maxItems": 32,
-      "uniqueItems": true
+      "maxItems": 32
     },
     "assumptions": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
     "expected_failure_modes": {"type": "array", "items": {"type": "string"}, "maxItems": 16}
