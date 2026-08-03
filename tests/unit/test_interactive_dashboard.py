@@ -793,6 +793,38 @@ def test_live_generation_cannot_lower_historical_best_objective() -> None:
     assert state.best_candidate == "g0000-slot-06"
 
 
+def test_resumed_generation_start_preserves_persisted_slot_objectives() -> None:
+    retained = GenerationSlots(
+        3,
+        (
+            DashboardSlot(
+                "slot-00",
+                3,
+                phase="development",
+                state="accepted",
+                candidate="g0003-slot-00",
+                objective=0.252683555,
+            ),
+        ),
+    )
+    state = DashboardState(
+        generation=3,
+        displayed_generation=3,
+        population_size=8,
+        generations=(retained,),
+    )
+
+    resumed = reduce_dashboard_event(
+        state,
+        _event("generation_started", generation=3, population_size=8),
+    )
+
+    slot = resumed.generations[0].slots[0]
+    assert slot.state == "accepted"
+    assert slot.phase == "development"
+    assert slot.objective == pytest.approx(0.252683555)
+
+
 def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     state = _running_state()
     state, _ = reduce_dashboard_key(state, "c")

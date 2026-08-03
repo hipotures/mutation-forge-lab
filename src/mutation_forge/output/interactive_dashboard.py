@@ -1019,6 +1019,10 @@ def reduce_dashboard_event(
     elif event_type == "generation_started":
         generation = _integer(payload.get("generation")) or 0
         count = _slot_count(payload, state.population_size)
+        retained_generation = next(
+            (item for item in state.generations if item.generation == generation),
+            None,
+        )
         state = replace(
             state,
             generation=generation,
@@ -1028,7 +1032,8 @@ def reduce_dashboard_event(
             selected_index=0,
             view="matrix" if state.view == "details" else state.view,
         )
-        state = _replace_generation(state, generation, _empty_slots(generation, count))
+        if retained_generation is None:
+            state = _replace_generation(state, generation, _empty_slots(generation, count))
     elif event_type in {"slot_queued", "generation_completed"}:
         event_generation = _integer(payload.get("generation"))
         completed = _integer(payload.get("completed_slots"))
