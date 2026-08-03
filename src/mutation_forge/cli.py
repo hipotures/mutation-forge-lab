@@ -27,6 +27,7 @@ from mutation_forge.experiment.config import load_experiment_config
 from mutation_forge.experiment.service import run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
+from mutation_forge.output.interactive_dashboard import InteractiveDashboardSink
 from mutation_forge.output.rich_live import ProgressLineSink, RichLiveSink
 from mutation_forge.sandbox.config import load_policy_config
 from mutation_forge.sandbox.policy import evaluate_policy, probe_policy
@@ -269,6 +270,7 @@ def _experiment_run(
     *,
     json_output: bool,
     profiling: bool | None = None,
+    dashboard: bool = False,
 ) -> int:
     config = load_experiment_config(config_path)
     machine_output = json_output or config.run.output == "json"
@@ -276,7 +278,20 @@ def _experiment_run(
     if machine_output:
         sinks = [JsonlSink(sys.stderr)]
     elif sys.stdout.isatty():
-        sinks = [RichLiveSink(console=Console(file=sys.stdout), native=True)]
+        if dashboard:
+            locked_config = {
+                **config.resolved_dict(),
+                "config_path": str(config.config_path),
+                "immutable_config_sha256": config.immutable_config_sha256(),
+            }
+            sinks = [
+                InteractiveDashboardSink(
+                    console=Console(file=sys.stdout),
+                    locked_config=locked_config,
+                )
+            ]
+        else:
+            sinks = [RichLiveSink(console=Console(file=sys.stdout), native=True)]
     else:
         sinks = [ProgressLineSink(sys.stdout)]
     try:
@@ -731,6 +746,11 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     experiment_run.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_run.add_argument("--json", action="store_true")
     experiment_run.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="use the optional interactive Rich operator dashboard in a TTY",
+    )
+    experiment_run.add_argument(
         "--profile",
         "--profiling",
         dest="profiling",
@@ -1151,6 +1171,11 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_run.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_run.add_argument("--json", action="store_true")
     experiment_run.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="use the optional interactive Rich operator dashboard in a TTY",
+    )
+    experiment_run.add_argument(
         "--profile",
         "--profiling",
         dest="profiling",
@@ -1193,6 +1218,7 @@ def legacy_main(argv: list[str] | None = None) -> int:
                 args.config,
                 json_output=args.json,
                 profiling=getattr(args, "profiling", None),
+                dashboard=getattr(args, "dashboard", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)
@@ -1285,6 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.config,
                 json_output=args.json,
                 profiling=getattr(args, "profiling", None),
+                dashboard=getattr(args, "dashboard", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)
