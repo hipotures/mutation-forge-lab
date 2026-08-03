@@ -37,6 +37,10 @@ class NativeExperimentError(RuntimeError):
     """A native experiment could not complete its current safe boundary."""
 
 
+class _NativeSessionBudgetExpired(KeyboardInterrupt):
+    """Internal wall-budget boundary, distinct from an operator interrupt."""
+
+
 class _BehaviorProbeError(ValueError):
     def __init__(
         self,
@@ -687,7 +691,7 @@ class _NativeProvider:
         if retained is not None:
             return retained
         if self.session.budget_exhausted():
-            raise KeyboardInterrupt
+            raise _NativeSessionBudgetExpired
         payload = self._payload(request)
         try:
             value = self.provider.generate(payload)
@@ -716,7 +720,7 @@ class _NativeProvider:
         if retained is not None:
             return retained
         if self.session.budget_exhausted():
-            raise KeyboardInterrupt
+            raise _NativeSessionBudgetExpired
         payload = self._payload(request)
         payload["diagnostics"] = [dict(item) for item in diagnostics]
         try:
@@ -1303,11 +1307,11 @@ class NativeExperimentAdapter:
         ) -> Mapping[str, str]:
             nonlocal best_objective, best_candidate_id, last_ir, last_timing_profile
             if session.budget_exhausted():
-                raise KeyboardInterrupt
+                raise _NativeSessionBudgetExpired
             selection_candidates: list[Candidate] = []
             for candidate in candidates:
                 if session.budget_exhausted():
-                    raise KeyboardInterrupt
+                    raise _NativeSessionBudgetExpired
                 program_id = f"g{candidate.generation:04d}-{candidate.slot}"
                 archive.append(
                     {
@@ -1579,6 +1583,7 @@ class NativeExperimentAdapter:
                     scientific_contract=True,
                     checkpoint_path=layout.artifacts / "native-generation-checkpoint.json",
                     turn_timeout_seconds=config.turn_timeout_seconds,
+                    infrastructure_retry_backoff_seconds=1.0,
                 )
                 coordinator = GenerationCoordinator(
                     wrapped,
@@ -1605,6 +1610,22 @@ class NativeExperimentAdapter:
                     ),
                     "summary": dict(generation_result.summary),
                 }
+        except _NativeSessionBudgetExpired:
+            generation = 0
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
+            try:
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if isinstance(checkpoint, Mapping):
+                    value = checkpoint.get("next_generation", checkpoint.get("generation", 0))
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        generation = value
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+            result = {
+                "status": "budget_exhausted",
+                "generation": generation,
+                "summary": {"status": "budget_exhausted", "stop_reason": "wall_seconds"},
+            }
         finally:
             wrapped.close()
         if not isinstance(result, Mapping):

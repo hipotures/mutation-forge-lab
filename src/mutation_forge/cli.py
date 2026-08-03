@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import time
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -271,6 +272,7 @@ def _experiment_run(
     json_output: bool,
     profiling: bool | None = None,
     dashboard: bool = False,
+    until_complete: bool = False,
 ) -> int:
     config = load_experiment_config(config_path)
     machine_output = json_output or config.run.output == "json"
@@ -296,11 +298,19 @@ def _experiment_run(
         sinks = [ProgressLineSink(sys.stdout)]
     try:
         try:
-            result = run_experiment(
-                config_path,
-                event_sinks=sinks,
-                profiling=profiling,
-            )
+            while True:
+                result = run_experiment(
+                    config_path,
+                    event_sinks=sinks,
+                    profiling=profiling,
+                )
+                if not (
+                    until_complete
+                    and result.get("state") == "idle"
+                    and result.get("stop_reason") == "budget_exhausted"
+                ):
+                    break
+                time.sleep(1.0)
         except KeyboardInterrupt:
             # The service has already persisted the interrupted session and
             # released ownership.  Ctrl-C is a normal terminal outcome, not
@@ -751,6 +761,11 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         help="use the optional interactive Rich operator dashboard in a TTY",
     )
     experiment_run.add_argument(
+        "--until-complete",
+        action="store_true",
+        help="continue across wall-budget sessions until the experiment completes",
+    )
+    experiment_run.add_argument(
         "--profile",
         "--profiling",
         dest="profiling",
@@ -1176,6 +1191,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="use the optional interactive Rich operator dashboard in a TTY",
     )
     experiment_run.add_argument(
+        "--until-complete",
+        action="store_true",
+        help="continue across wall-budget sessions until the experiment completes",
+    )
+    experiment_run.add_argument(
         "--profile",
         "--profiling",
         dest="profiling",
@@ -1219,6 +1239,7 @@ def legacy_main(argv: list[str] | None = None) -> int:
                 json_output=args.json,
                 profiling=getattr(args, "profiling", None),
                 dashboard=getattr(args, "dashboard", False),
+                until_complete=getattr(args, "until_complete", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)
@@ -1312,6 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
                 json_output=args.json,
                 profiling=getattr(args, "profiling", None),
                 dashboard=getattr(args, "dashboard", False),
+                until_complete=getattr(args, "until_complete", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)

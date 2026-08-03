@@ -565,6 +565,8 @@ class GenerationConfig:
     checkpoint_path: Path | None = None
     require_usage: bool = False
     turn_timeout_seconds: float = 120.0
+    infrastructure_retry_limit: int = 3
+    infrastructure_retry_backoff_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         population = self.population_size if self.population_size is not None else self.slots
@@ -601,6 +603,18 @@ class GenerationConfig:
             or self.turn_timeout_seconds <= 0
         ):
             raise ValueError("turn_timeout_seconds must be positive")
+        if (
+            isinstance(self.infrastructure_retry_limit, bool)
+            or not isinstance(self.infrastructure_retry_limit, int)
+            or self.infrastructure_retry_limit < 0
+        ):
+            raise ValueError("infrastructure_retry_limit must be non-negative")
+        if (
+            isinstance(self.infrastructure_retry_backoff_seconds, bool)
+            or not isinstance(self.infrastructure_retry_backoff_seconds, int | float)
+            or self.infrastructure_retry_backoff_seconds < 0
+        ):
+            raise ValueError("infrastructure_retry_backoff_seconds must be non-negative")
         object.__setattr__(self, "slots", population)
         object.__setattr__(self, "max_workers", workers)
 
@@ -1297,6 +1311,17 @@ class GenerationCoordinator:
             return "invalid"
         return "failed"
 
+    def _wait_before_infrastructure_retry(self, retry_number: int) -> None:
+        """Apply bounded exponential backoff before an uncharged retry."""
+
+        delay = min(
+            60.0,
+            float(self.config.infrastructure_retry_backoff_seconds)
+            * (2 ** max(0, retry_number - 1)),
+        )
+        if delay > 0:
+            time.sleep(delay)
+
     @staticmethod
     def _invalid_source(raw: Mapping[str, Any]) -> str:
         response = raw.get("response")
@@ -1614,7 +1639,7 @@ class GenerationCoordinator:
             state["model_turns_used"] = turns
             self._save(state)
 
-        def release_retained_turn() -> None:
+        def release_reserved_turn() -> None:
             nonlocal turns, live_turns
             turns = max(self.config.prior_model_turns, turns - 1)
             live_turns = max(0, live_turns - 1)
@@ -1693,7 +1718,7 @@ class GenerationCoordinator:
             )
             parents = self._parents(generation)
             results: dict[str, SlotResult] = {}
-            futures: dict[Any, tuple[str, GenerationRequest]] = {}
+            futures: dict[Any, tuple[str, GenerationRequest, int]] = {}
             initial_keys: dict[str, str] = {}
             close_provider = getattr(self.provider, "close", None)
             with _InterruptibleThreadPoolExecutor(
@@ -1765,30 +1790,38 @@ class GenerationCoordinator:
                         )
                         continue
                     reserve_model_turn()
-                    futures[pool.submit(self._invoke, request)] = (slot, request)
+                    futures[pool.submit(self._invoke, request)] = (slot, request, 0)
                 while futures:
                     future = next(as_completed(tuple(futures)))
-                    slot, request = futures.pop(future)
+                    slot, request, retry_count = futures.pop(future)
                     raw = future.result()
                     if raw.retained:
-                        release_retained_turn()
+                        release_reserved_turn()
                         recovered += 1
+                    uncharged_infrastructure = (
+                        not raw.retained and infrastructure_retry_allowed(raw)
+                    )
                     retryable_infrastructure = (
-                        self.retry_infrastructure
-                        and not raw.retained
-                        and infrastructure_retry_allowed(raw)
+                        self.retry_infrastructure and uncharged_infrastructure
                     )
-                    continuously_retry = (
-                        self.config.max_model_turns is not None
-                        or self.budget_exhausted is not None
-                    )
-                    if retryable_infrastructure and continuously_retry:
+                    if uncharged_infrastructure:
+                        # An uncharged infrastructure failure did not consume a
+                        # model turn; keep it out of the cumulative turn budget.
+                        release_reserved_turn()
+                    if (
+                        retryable_infrastructure
+                        and retry_count < self.config.infrastructure_retry_limit
+                    ):
                         exhausted_reason = budget_reason()
+                        if exhausted_reason is None:
+                            self._wait_before_infrastructure_retry(retry_count + 1)
+                            exhausted_reason = budget_reason()
                         if exhausted_reason is None:
                             reserve_model_turn()
                             futures[pool.submit(self._invoke, request)] = (
                                 slot,
                                 request,
+                                retry_count + 1,
                             )
                             self._emit(
                                 "slot_queued",
@@ -1797,6 +1830,8 @@ class GenerationCoordinator:
                                 parent_id=request.parent_id,
                                 phase=request.phase,
                                 status="retrying",
+                                retry_count=retry_count + 1,
+                                retry_limit=self.config.infrastructure_retry_limit,
                                 remaining_model_turns=(
                                     max(0, self.config.max_model_turns - turns)
                                     if self.config.max_model_turns is not None
@@ -1828,9 +1863,6 @@ class GenerationCoordinator:
                             completed_turns=turns,
                         )
                         continue
-                    if retryable_infrastructure and budget_reason() is None:
-                        reserve_model_turn()
-                        raw = self._invoke(request)
                     candidate, diagnostics = self._assess(request, raw)
                     results[slot] = SlotResult(
                         generation=generation,
@@ -1896,19 +1928,24 @@ class GenerationCoordinator:
                             str(error.get("code", "")) for error in item.errors
                         ],
                     )
-                if (
-                    item is not None
-                    and item.status == "repair_pending"
-                    and self.config.max_model_turns is not None
-                    and turns >= self.config.max_model_turns
-                ):
+                repair_boundary = (
+                    budget_reason()
+                    if item is not None
+                    and item.status in {"repair_pending", "repair_running"}
+                    else None
+                )
+                if repair_boundary is not None:
                     stopped = True
-                    stopped_reason = "max_model_turns"
+                    stopped_reason = repair_boundary
                 while (
                     item is not None
                     and item.status in {"repair_pending", "repair_running"}
                     and item.errors
                     and (self.config.max_model_turns is None or turns < self.config.max_model_turns)
+                    and (
+                        self.budget_exhausted is None
+                        or not self.budget_exhausted()
+                    )
                 ):
                     resuming_repair = item.status == "repair_running"
                     if resuming_repair:
@@ -1981,10 +2018,105 @@ class GenerationCoordinator:
                         raw = self._invoke(req)
                         repaired_retained = raw.retained
                         if raw.retained:
-                            release_retained_turn()
+                            release_reserved_turn()
                             recovered += 1
                         else:
-                            repairs += 1
+                            if not infrastructure_retry_allowed(raw):
+                                repairs += 1
+                        if infrastructure_retry_allowed(raw):
+                            # Uncharged failures are safe to retry and do not
+                            # consume the model-turn budget.
+                            release_reserved_turn()
+                        retry_count = 0
+                        retry_deferred = False
+                        while (
+                            self.retry_infrastructure
+                            and not raw.retained
+                            and infrastructure_retry_allowed(raw)
+                            and retry_count < self.config.infrastructure_retry_limit
+                        ):
+                            exhausted_reason = budget_reason()
+                            if exhausted_reason is None:
+                                self._wait_before_infrastructure_retry(retry_count + 1)
+                                exhausted_reason = budget_reason()
+                            if exhausted_reason is not None:
+                                deferred = replace(
+                                    item,
+                                    status="repair_running",
+                                    repair=raw.as_dict(),
+                                    raw_result=raw.as_dict(),
+                                )
+                                for state_key in (initial_key, *repair_keys):
+                                    slots_state[state_key] = deferred.as_dict()
+                                self._save(state)
+                                results[slot] = deferred
+                                item = deferred
+                                stopped = True
+                                stopped_reason = exhausted_reason
+                                retry_deferred = True
+                                self._emit(
+                                    "repair_retry_deferred",
+                                    generation=generation,
+                                    slot=slot,
+                                    parent_id=item.parent_id,
+                                    phase="repair",
+                                    repair_attempt=repair_attempt,
+                                    reason=exhausted_reason,
+                                    retry_count=retry_count,
+                                    retry_limit=self.config.infrastructure_retry_limit,
+                                )
+                                break
+                            retry_count += 1
+                            self._emit(
+                                "repair_retrying",
+                                generation=generation,
+                                slot=slot,
+                                parent_id=item.parent_id,
+                                phase="repair",
+                                repair_attempt=repair_attempt,
+                                retry_count=retry_count,
+                                retry_limit=self.config.infrastructure_retry_limit,
+                            )
+                            reserve_model_turn()
+                            raw = self._invoke(req)
+                            repaired_retained = raw.retained
+                            if raw.retained:
+                                release_reserved_turn()
+                                recovered += 1
+                            else:
+                                if not infrastructure_retry_allowed(raw):
+                                    repairs += 1
+                            if infrastructure_retry_allowed(raw):
+                                release_reserved_turn()
+                        if retry_deferred:
+                            break
+                        if (
+                            self.retry_infrastructure
+                            and not raw.retained
+                            and infrastructure_retry_allowed(raw)
+                        ):
+                            deferred = replace(
+                                item,
+                                status="repair_running",
+                                repair=raw.as_dict(),
+                                raw_result=raw.as_dict(),
+                            )
+                            for state_key in (initial_key, *repair_keys):
+                                slots_state[state_key] = deferred.as_dict()
+                            self._save(state)
+                            results[slot] = deferred
+                            item = deferred
+                            self._emit(
+                                "repair_retry_exhausted",
+                                generation=generation,
+                                slot=slot,
+                                parent_id=item.parent_id,
+                                phase="repair",
+                                repair_attempt=repair_attempt,
+                                retry_count=retry_count,
+                                retry_limit=self.config.infrastructure_retry_limit,
+                            )
+                            break
                         candidate, diagnostics = self._assess(req, raw, repair=True)
                         status = self._slot_status(
                             candidate,
@@ -2111,7 +2243,9 @@ class GenerationCoordinator:
             state["generation"] = generation
             self._save(state)
             generation_retryable = any(
-                _slot_failure_is_retryable(item.as_dict()) for item in ordered
+                _slot_failure_is_retryable(item.as_dict())
+                or item.status in {"repair_pending", "repair_running"}
+                for item in ordered
             )
             if (
                 not generation_retryable
@@ -2160,7 +2294,7 @@ class GenerationCoordinator:
             if not stopped and not generation_retryable:
                 state["next_generation"] = generation + 1
                 self._save(state)
-            if generation_retryable:
+            if generation_retryable and not stopped:
                 infrastructure_failed = True
             self._emit(
                 "generation_completed",

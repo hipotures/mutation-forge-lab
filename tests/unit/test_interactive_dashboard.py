@@ -972,6 +972,41 @@ def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
     new_sink.close.assert_called_once()
 
 
+def test_until_complete_continues_after_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = SimpleNamespace(
+        run=SimpleNamespace(output="json"),
+        config_path=Path("experiment.toml"),
+        resolved_dict=lambda: {"exp_id": "overnight-run"},
+        immutable_config_sha256=lambda: "abc123",
+    )
+    calls = 0
+
+    def fake_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return (
+            {"status": "completed", "state": "completed"}
+            if calls == 2
+            else {"status": "completed", "state": "idle", "stop_reason": "budget_exhausted"}
+        )
+
+    monkeypatch.setattr(cli, "load_experiment_config", lambda _path: config)
+    monkeypatch.setattr(cli, "run_experiment", fake_run)
+    monkeypatch.setattr(cli, "experiment_status", lambda _path: {"state": "completed"})
+    monkeypatch.setattr(cli, "render_status", lambda _summary: "completed")
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+
+    assert (
+        cli._experiment_run(
+            Path("experiment.toml"),
+            json_output=True,
+            until_complete=True,
+        )
+        == 0
+    )
+    assert calls == 2
+
+
 def test_sink_dispatches_supported_pause_and_retry_without_execution_side_effects() -> None:
     pause = Mock()
     retry = Mock()

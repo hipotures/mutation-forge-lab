@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -919,3 +920,202 @@ def test_uncharged_infrastructure_failure_retries_same_generation(
     assert second.summary["first_generation"] == 0
     assert second.summary["completed_generation_count"] == 1
     assert len(successful_provider.calls) == 1
+
+
+def test_repair_infrastructure_failure_retries_same_request(
+    tmp_path: Path,
+) -> None:
+    class FlakyRepairProvider(RecordingProvider):
+        def __init__(self) -> None:
+            super().__init__(INVALID_SOURCE)
+            self.repair_attempts = 0
+
+        def repair(
+            self, request: Mapping[str, Any], diagnostics: tuple[Mapping[str, Any], ...]
+        ) -> Mapping[str, Any]:
+            self.repair_attempts += 1
+            if self.repair_attempts <= 2:
+                self.calls.append(dict(request))
+                return {
+                    "status": "infrastructure",
+                    "accepted": False,
+                    "charged": False,
+                    "uncharged": True,
+                    "content": False,
+                    "usage": {"totalTokens": 0},
+                    "error": "temporary app-server outage",
+                }
+            self.source = VALID_SOURCE
+            return self.generate(request)
+
+    provider = FlakyRepairProvider()
+    result = GenerationCoordinator(
+        provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=4,
+            max_repairs=1,
+            checkpoint_path=tmp_path / "native-checkpoint.json",
+            infrastructure_retry_limit=2,
+            infrastructure_retry_backoff_seconds=0,
+        ),
+        retry_infrastructure=True,
+    ).run()
+
+    assert result.status == "completed"
+    assert provider.repair_attempts == 3
+    assert [request["phase"] for request in provider.calls] == [
+        "initial",
+        "repair",
+        "repair",
+        "repair",
+    ]
+    assert provider.calls[1]["idempotency_key"] == provider.calls[2]["idempotency_key"]
+    assert provider.calls[2]["idempotency_key"] == provider.calls[3]["idempotency_key"]
+
+
+def test_infrastructure_retry_limit_bounds_initial_attempts(tmp_path: Path) -> None:
+    class AlwaysFailingProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, _request: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.calls += 1
+            return {
+                "status": "infrastructure",
+                "accepted": False,
+                "charged": False,
+                "uncharged": True,
+                "content": False,
+                "usage": {"totalTokens": 0},
+                "error": "provider unavailable",
+            }
+
+    provider = AlwaysFailingProvider()
+    result = GenerationCoordinator(
+        provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=10,
+            max_repairs=0,
+            checkpoint_path=tmp_path / "native-checkpoint.json",
+            infrastructure_retry_limit=2,
+            infrastructure_retry_backoff_seconds=0,
+        ),
+        retry_infrastructure=True,
+    ).run()
+
+    assert result.status == "infrastructure_failed"
+    assert provider.calls == 3
+
+
+def test_repair_infrastructure_failure_resumes_same_attempt(
+    tmp_path: Path,
+) -> None:
+    class RepairFailureProvider(RecordingProvider):
+        def __init__(self, *, succeeds: bool) -> None:
+            super().__init__(INVALID_SOURCE)
+            self.succeeds = succeeds
+
+        def repair(
+            self, request: Mapping[str, Any], diagnostics: tuple[Mapping[str, Any], ...]
+        ) -> Mapping[str, Any]:
+            self.calls.append(dict(request))
+            if not self.succeeds:
+                return {
+                    "status": "infrastructure",
+                    "accepted": False,
+                    "charged": False,
+                    "uncharged": True,
+                    "content": False,
+                    "usage": {"totalTokens": 0},
+                    "error": "temporary timeout",
+                }
+            self.source = VALID_SOURCE
+            return self.generate(request)
+
+    checkpoint = tmp_path / "native-checkpoint.json"
+    first_provider = RepairFailureProvider(succeeds=False)
+    first = GenerationCoordinator(
+        first_provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=4,
+            max_repairs=1,
+            checkpoint_path=checkpoint,
+            infrastructure_retry_limit=1,
+            infrastructure_retry_backoff_seconds=0,
+        ),
+        retry_infrastructure=True,
+    ).run()
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    repair_state = next(
+        value
+        for value in saved["slots"].values()
+        if value.get("status") == "repair_running"
+    )
+
+    second_provider = RepairFailureProvider(succeeds=True)
+    second = GenerationCoordinator(
+        second_provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=4,
+            max_repairs=1,
+            checkpoint_path=checkpoint,
+            infrastructure_retry_limit=1,
+            infrastructure_retry_backoff_seconds=0,
+        ),
+        retry_infrastructure=True,
+    ).run()
+
+    assert first.status == "infrastructure_failed"
+    assert repair_state["repairs"] == 1
+    assert second.status == "completed"
+    assert [request["phase"] for request in second_provider.calls] == ["repair", "repair"]
+    assert second_provider.calls[0]["idempotency_key"] == repair_state["request"]["idempotency_key"]
+
+
+def test_native_wall_budget_is_resumable_not_an_interrupt(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        population=8,
+        max_turns=2,
+        max_repairs=0,
+    )
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "wall_seconds = 30", "wall_seconds = 0.001"
+        ),
+        encoding="utf-8",
+    )
+
+    def engine(provider: Any, **_: Any) -> Mapping[str, Any]:
+        time.sleep(0.02)
+        provider.generate(
+            {
+                "generation": 0,
+                "slot": "slot-00",
+                "phase": "initial",
+                "idempotency_key": "budget-test",
+                "prompt": "budget test",
+            }
+        )
+        return {"status": "completed"}
+
+    result = _service(
+        RecordingProvider(),
+        engine=engine,
+    ).run(config_path)
+
+    assert result["state"] == "idle"
+    assert result["stop_reason"] == "budget_exhausted"

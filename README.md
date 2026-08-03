@@ -158,6 +158,9 @@ Important behavior:
 - `max_model_turns` is cumulative across all continuation sessions.
 - `wall_seconds` applies to one invocation. Reaching it pauses the experiment
   in a resumable `idle` state.
+- Uncharged provider infrastructure failures are retried on the same
+  idempotent request, including repair turns, with a bounded exponential
+  backoff. They do not consume the cumulative model-turn budget.
 - The effective model-turn timeout is
   `turn_timeout_base_seconds * (model.concurrency + 1)`.
 - `max_repairs` is persisted with every slot and remains enforced after resume.
@@ -186,6 +189,16 @@ with the same configuration resume from the latest durable checkpoint.
 without replacing already accepted model turns. Running an already completed
 experiment creates a zero-work `already_completed` session and does not call
 the provider.
+
+To keep one process running across repeated wall-budget sessions, use:
+
+```console
+uv run mforge experiment run --dashboard --until-complete
+```
+
+The loop only continues after a normal `budget_exhausted` boundary. A
+persistent provider infrastructure failure remains visible as a resumable
+failure requiring inspection.
 
 Use the read-only status command at any time:
 
