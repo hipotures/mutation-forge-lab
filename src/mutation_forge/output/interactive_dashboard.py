@@ -2333,8 +2333,7 @@ class InteractiveDashboardSink:
             row_styles=("", "dim"),
         )
         columns: list[tuple[str, Literal["left", "right"], int]] = [
-            ("", "left", 1),
-            ("slot", "left", 7),
+            ("slot", "left", 8),
             ("parent", "left", 13),
             ("phase", "left", 10),
             ("state", "left", 10),
@@ -2349,7 +2348,6 @@ class InteractiveDashboardSink:
         ]
         if mode == "compact":
             visible = {
-                "",
                 "slot",
                 "phase",
                 "state",
@@ -2373,9 +2371,8 @@ class InteractiveDashboardSink:
                 )
         for index, slot in enumerate(group.slots):
             selected = index == self.state.selected_index
-            values = {
-                "": "▶" if selected else "",
-                "slot": slot.slot,
+            values: dict[str, RenderableType] = {
+                "slot": f"▶{slot.slot}" if selected else f" {slot.slot}",
                 "parent": slot.parent if mode == "copy" else _compact(slot.parent, 11),
                 "phase": slot.phase,
                 "state": Text(slot.state, style=STATE_STYLES.get(slot.state, "")),

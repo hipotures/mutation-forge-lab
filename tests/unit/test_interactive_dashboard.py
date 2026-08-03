@@ -1119,6 +1119,27 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     sink.close()
 
 
+def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    sink.state = _running_state()
+
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._slot_matrix(150, "full"))
+    rendered = output.getvalue()
+
+    assert "▶slot-00" in rendered
+    assert "▶  │ slot-00" not in rendered
+    sink.close()
+
+
 def test_quick_view_explains_objective_sparkline_direction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1434,13 +1455,13 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "5fe049bde71d25106360995156c965c91daabb4ca86f6ee8785d76344d176a32"
+        "12fa3e63cee5966394e6cade86e842c82481933d8a0f2b3f98a781dab2c6080d"
     ),
-    "evaluation_active": ("076e2596012b58425675a1504cb925fa5150d4e5806dec79dc0d5f1cbf2146d6"),
+    "evaluation_active": ("79e33d02416c11b30057e2ed86d0375a774d48166d333fa409136a24577cacb7"),
     "validation_details": ("a636e2384da13acf396e16c71a9e6424d105253319becf89f22f7626cc6468d5"),
-    "completed": ("af128eeccdacfafd5f03d6e78c4d27867b050538b5c821820bf3d5d674829158"),
-    "profiling_disabled": ("4549b63407a4c8f2e1aa081f8ff4f48287c843e26b09fc6b745f896d09b36112"),
-    "compact": ("9db3a42fdeb51168155e1e220a741ed4f5f2d6c006d6e81ec854dadf136d0a2f"),
+    "completed": ("1269fe9fdcf25bcb40da9a7d6e468aa54e70ceeb5f36b71af5b497a33288e230"),
+    "profiling_disabled": ("f23f9c2195b49cf7f0a328ee4bf1d8d7369c7c946e775d881a0bfeefed74e11b"),
+    "compact": ("b158271aa36f723fd28921a24d62a64081eef68313037b68d586f5b20a47f284"),
     "minimal": ("a2865872629a132d2b259f22907088ce4a3b3d929d50f702ab2e12fa100d069f"),
 }
 
