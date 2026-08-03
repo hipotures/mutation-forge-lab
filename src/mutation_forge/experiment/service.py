@@ -252,6 +252,10 @@ class ExperimentService:
                     if effective_model_turns is not None
                     else None
                 )
+                hourly_usage = state.hourly_token_usage(
+                    config.run.max_total_tokens_per_hour,
+                    backfill=True,
+                )
                 hub.emit(
                     "session_started",
                     experiment_id=config.exp_id,
@@ -284,10 +288,12 @@ class ExperimentService:
                     cumulative_candidates=counts.get("candidate_count", 0),
                     archive_size=counts.get("candidate_count", 0),
                     cumulative_tokens=cumulative.get("total_tokens", 0),
+                    **hourly_usage,
                     usage=state.token_usage(),
                     session_usage={
                         "inputTokens": 0,
                         "cachedInputTokens": 0,
+                        "cacheWriteInputTokens": 0,
                         "outputTokens": 0,
                         "reasoningOutputTokens": 0,
                         "totalTokens": 0,
@@ -360,6 +366,16 @@ class ExperimentService:
                         checkpoint=session.ending_checkpoint,
                         idempotency_key=(f"{counterexample.get('candidate_id')}:verified"),
                     )
+                if outcome.get("stop_reason") == "hourly_token_limit":
+                    hub.emit(
+                        "hourly_token_session_stopped",
+                        state=outcome["state"],
+                        stop_reason="hourly_token_limit",
+                        checkpoint=session.ending_checkpoint,
+                        **state.hourly_token_usage(
+                            config.run.max_total_tokens_per_hour
+                        ),
+                    )
                 hub.emit(
                     "budget_boundary_reached"
                     if outcome["state"] in {"idle", "paused", "interrupted"}
@@ -381,6 +397,9 @@ class ExperimentService:
                     evaluations_completed=session.evaluations_completed,
                     token_usage_delta=session_summary.get("token_usage_delta", 0),
                     cumulative_tokens=session_summary.get("cumulative_tokens", 0),
+                    **state.hourly_token_usage(
+                        config.run.max_total_tokens_per_hour
+                    ),
                     recovered_work=outcome.get("recovered_work"),
                 )
                 layout.reconcile_artifact_manifest()

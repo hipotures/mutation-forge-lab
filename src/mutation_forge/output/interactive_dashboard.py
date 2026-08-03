@@ -20,7 +20,7 @@ from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderR
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
+from rich.progress import BarColumn, Progress, TextColumn
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
@@ -114,6 +114,7 @@ PANEL_COPY_WIDTHS = {
 class TokenUsage:
     input: int | None = None
     cached: int | None = None
+    cache_write: int | None = None
     output: int | None = None
     reasoning: int | None = None
     total: int | None = None
@@ -202,6 +203,10 @@ class DashboardState:
     provider_turns_attempted: int = 0
     provider_turns_completed: int = 0
     max_model_turns: int | None = None
+    hourly_token_limit: int | None = None
+    hourly_tokens_used: int = 0
+    hourly_limit_reached: bool = False
+    hourly_retry_after: str | None = None
     active_provider_turns: int = 0
     configured_provider_concurrency: int | None = None
     evaluations_completed: int = 0
@@ -290,6 +295,7 @@ def _usage(value: object, *, quality: object = None) -> TokenUsage:
     return TokenUsage(
         input=_integer(source.get("inputTokens")),
         cached=_integer(source.get("cachedInputTokens")),
+        cache_write=_integer(source.get("cacheWriteInputTokens")),
         output=_integer(source.get("outputTokens")),
         reasoning=_integer(source.get("reasoningOutputTokens")),
         total=_integer(source.get("totalTokens")),
@@ -306,6 +312,7 @@ def _add_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
     return TokenUsage(
         input=add(left.input, right.input),
         cached=add(left.cached, right.cached),
+        cache_write=add(left.cache_write, right.cache_write),
         output=add(left.output, right.output),
         reasoning=add(left.reasoning, right.reasoning),
         total=add(left.total, right.total),
@@ -532,6 +539,8 @@ def _global_payload(
         "generation_limit": "generation_limit",
         "population_size": "population_size",
         "max_model_turns": "max_model_turns",
+        "hourly_token_limit": "hourly_token_limit",
+        "hourly_tokens_used": "hourly_tokens_used",
         "configured_concurrency": "configured_provider_concurrency",
         "effective_concurrency": "configured_provider_concurrency",
         "archive_size": "archive_size",
@@ -563,6 +572,12 @@ def _global_payload(
     profiling = payload.get("profiling_enabled")
     if isinstance(profiling, bool):
         values["profiling_enabled"] = profiling
+    hourly_reached = payload.get("hourly_limit_reached")
+    if isinstance(hourly_reached, bool):
+        values["hourly_limit_reached"] = hourly_reached
+    hourly_retry_after = _text(payload.get("hourly_retry_after"))
+    if hourly_retry_after is not None:
+        values["hourly_retry_after"] = hourly_retry_after
     return replace(state, **values)
 
 
@@ -681,6 +696,12 @@ def reduce_dashboard_event(
                 state,
                 cumulative_usage=_add_usage(state.cumulative_usage, delta),
                 session_usage=_add_usage(state.session_usage, delta),
+                hourly_tokens_used=state.hourly_tokens_used + (delta.total or 0),
+                hourly_limit_reached=(
+                    state.hourly_token_limit is not None
+                    and state.hourly_tokens_used + (delta.total or 0)
+                    >= state.hourly_token_limit
+                ),
                 usage_seen=state.usage_seen | {usage_key},
             )
         if event_type == "provider_turn_failed":
@@ -768,6 +789,8 @@ def reduce_dashboard_event(
             elif status == "duplicate":
                 state = replace(state, duplicate_candidates=state.duplicate_candidates + 1)
             state = replace(state, archive_seen=state.archive_seen | {archive_key})
+    elif event_type == "hourly_token_limit_reached":
+        state = replace(state, phase="hourly token limit")
     elif event_type == "budget_boundary_reached":
         state = replace(
             state,
@@ -1741,33 +1764,45 @@ class InteractiveDashboardSink:
         )
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
+        del horizontal
         values = (
             (
                 "Generation",
                 _human_generation(self.state.generation),
                 self.state.generation_limit,
             ),
-            ("Slots resolved", self.state.completed_slots, self.state.population_size),
+            ("Slots", self.state.completed_slots, self.state.population_size),
             (
-                "Model Turn Budget",
+                "Turns",
                 self.state.provider_turns_attempted,
                 self.state.max_model_turns,
             ),
             (
-                "Evaluation Progress",
+                "Hourly tokens",
+                self.state.hourly_tokens_used,
+                self.state.hourly_token_limit,
+            ),
+            (
+                "Evaluation",
                 self.state.evaluation_episodes_completed,
                 self.state.evaluation_episodes_total,
             ),
             (
-                "Wall-time Budget",
+                "Session wall",
                 int(self._elapsed()),
                 int(self.state.wall_seconds) if self.state.wall_seconds is not None else None,
             ),
         )
         renderables: list[RenderableType] = []
         for label, current, total in values:
-            if total is None and label in {"Generation", "Model Turn Budget"}:
-                suffix = "current" if label == "Generation" else "cumulative"
+            if total is None and label in {"Generation", "Turns", "Hourly tokens"}:
+                suffix = (
+                    "current"
+                    if label == "Generation"
+                    else "cumulative"
+                    if label == "Turns"
+                    else "cap off"
+                )
                 renderables.append(Text(f"{label}  {current} · {suffix}"))
                 continue
             renderables.append(
@@ -1775,18 +1810,23 @@ class InteractiveDashboardSink:
                     label,
                     current,
                     total,
-                    width=8 if horizontal else max(12, width - 31),
-                    stacked=horizontal,
+                    width=max(8, min(24, width - 31)),
+                    stacked=False,
+                    critical=label == "Hourly tokens",
                 )
             )
-        if horizontal:
-            grid = Table.grid(expand=True)
-            for _ in renderables:
-                grid.add_column(ratio=1)
-            grid.add_row(*renderables)
-            content: RenderableType = grid
-        else:
-            content = Group(*renderables)
+        if self.state.hourly_limit_reached and self.state.hourly_retry_after:
+            renderables.append(
+                Text(
+                    f"Retry after  {_clock_time(self.state.hourly_retry_after)}",
+                    style="bold red",
+                )
+            )
+        grid = Table.grid(expand=True)
+        grid.add_column(no_wrap=True)
+        for renderable in renderables:
+            grid.add_row(renderable)
+        content: RenderableType = grid
         return Panel(content, border_style="cyan", padding=(0, 1))
 
     def _slot_matrix(self, width: int, mode: str) -> Panel:
@@ -2071,23 +2111,35 @@ class InteractiveDashboardSink:
             ("experiment", "total", cumulative.total),
             ("", "input", cumulative.input),
             ("", "cached", cumulative.cached),
-            ("", "output", cumulative.output),
-            ("", "reasoning (in output)", cumulative.reasoning),
-            ("session", "total", session.total),
-            ("", "input", session.input),
-            ("", "cached", session.cached),
-            ("", "output", session.output),
-            ("", "reasoning (in output)", session.reasoning),
-            ("usage", "quality", cumulative.quality),
         ]
+        if cumulative.cache_write:
+            rows.append(("", "cache write", cumulative.cache_write))
+        rows.extend(
+            (
+                ("", "output", cumulative.output),
+                ("", "reasoning (in output)", cumulative.reasoning),
+                ("session", "total", session.total),
+                ("", "input", session.input),
+                ("", "cached", session.cached),
+            )
+        )
+        if session.cache_write:
+            rows.append(("", "cache write", session.cache_write))
+        rows.extend(
+            (
+                ("", "output", session.output),
+                ("", "reasoning (in output)", session.reasoning),
+                ("usage", "quality", cumulative.quality),
+            )
+        )
         if compact:
-            compact_rows = [
-                rows[0],
-                rows[5],
+            compact_rows: list[tuple[str, str, object]] = [
+                ("experiment", "total", cumulative.total),
+                ("", "reasoning (in output)", cumulative.reasoning),
                 ("", "input", session.input),
                 ("", "output", session.output),
                 ("", "reasoning (in output)", session.reasoning),
-                rows[10],
+                ("usage", "quality", cumulative.quality),
             ]
             rows = compact_rows[: row_limit or 1]
         table = Table.grid(expand=True)
@@ -2504,14 +2556,24 @@ def _progress_bar(
     *,
     width: int,
     stacked: bool,
+    critical: bool = False,
 ) -> RenderableType:
     columns: list[Any] = []
     if not stacked:
         columns.append(TextColumn(label))
     columns.extend(
         (
-            BarColumn(bar_width=width, complete_style="cyan", finished_style="green"),
-            TaskProgressColumn(),
+            BarColumn(
+                bar_width=width,
+                complete_style=(
+                    "red"
+                    if critical and total is not None and current >= total
+                    else "yellow"
+                    if critical and total is not None and current >= total * 0.8
+                    else "cyan"
+                ),
+                finished_style="red" if critical else "green",
+            ),
             TextColumn("{task.fields[ratio]}"),
         )
     )
@@ -2526,9 +2588,22 @@ def _progress_bar(
             "",
             total=max(total, 1),
             completed=max(0, min(current, max(total, 1))),
-            ratio=f"{current}/{total}",
+            ratio=f"{_compact_count(current)}/{_compact_count(total)}",
         )
     return Group(Text(label), progress) if stacked else progress
+
+
+def _compact_count(value: int) -> str:
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
+
+
+def _clock_time(value: str) -> str:
+    time_part = value.split("T", 1)[-1]
+    return time_part[:8] if len(time_part) >= 8 else value
 
 
 def _parameter_line(

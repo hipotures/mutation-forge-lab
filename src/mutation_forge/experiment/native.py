@@ -46,6 +46,10 @@ class _NativeSessionBudgetExpired(KeyboardInterrupt):
     """Internal wall-budget boundary, distinct from an operator interrupt."""
 
 
+class _NativeHourlyTokenLimit(KeyboardInterrupt):
+    """Internal rolling-hour token boundary."""
+
+
 def _counterexample_summary(outcome: CounterexampleOutcome) -> dict[str, Any]:
     candidate = outcome.candidate
     metadata: dict[str, Any] = {}
@@ -348,14 +352,39 @@ class _NativeProvider:
         session: SessionContext,
         *,
         sandbox_limits: SandboxLimits,
+        hourly_token_limit: int | None = None,
+        observer: Any | None = None,
     ) -> None:
         self.provider = provider
         self.layout = layout
         self.state = state
         self.session = session
         self.sandbox_limits = sandbox_limits
+        self.hourly_token_limit = hourly_token_limit
+        self.observer = observer
         self.turns = TurnArtifactStore(layout.artifacts)
         self._lock = threading.RLock()
+
+    def _emit(self, event_type: str, **payload: Any) -> None:
+        if not callable(self.observer):
+            return
+        try:
+            self.observer(event_type, payload)
+        except TypeError:
+            try:
+                self.observer(event_type, **payload)
+            except Exception:
+                return
+        except Exception:
+            return
+
+    def _hourly_limit_reached(self) -> bool:
+        if self.hourly_token_limit is None:
+            return False
+        with self._lock:
+            return self.state.hourly_token_usage(self.hourly_token_limit)[
+                "hourly_limit_reached"
+            ] is True
 
     @staticmethod
     def _phase(request: Mapping[str, Any]) -> str:
@@ -736,6 +765,16 @@ class _NativeProvider:
                 else None,
                 error=str(value.get("error")) if value.get("error") else None,
             )
+            hourly_usage = self.state.hourly_token_usage(self.hourly_token_limit)
+        self._emit("hourly_token_usage_updated", **hourly_usage)
+        if hourly_usage["hourly_limit_reached"]:
+            self._emit(
+                "hourly_token_limit_reached",
+                **hourly_usage,
+                idempotency_key=(
+                    f"hourly-token-limit:{hourly_usage['hourly_retry_after']}"
+                ),
+            )
         return value
 
     def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -744,6 +783,8 @@ class _NativeProvider:
             return retained
         if self.session.budget_exhausted():
             raise _NativeSessionBudgetExpired
+        if self._hourly_limit_reached():
+            raise _NativeHourlyTokenLimit
         payload = self._payload(request)
         try:
             value = self.provider.generate(payload)
@@ -773,6 +814,8 @@ class _NativeProvider:
             return retained
         if self.session.budget_exhausted():
             raise _NativeSessionBudgetExpired
+        if self._hourly_limit_reached():
+            raise _NativeHourlyTokenLimit
         payload = self._payload(request)
         payload["diagnostics"] = [dict(item) for item in diagnostics]
         try:
@@ -1036,12 +1079,15 @@ class NativeExperimentAdapter:
             auth_json=auth_path if auth_path.is_file() else None,
             persist_artifacts=False,
         )
+        callback = observer if observer is not None else event_callback
         wrapped = _NativeProvider(
             provider,
             layout,
             state,
             session,
             sandbox_limits=SandboxLimits(),
+            hourly_token_limit=config.run.max_total_tokens_per_hour,
+            observer=callback,
         )
         archive = _NativeArchive(layout.archive)
         parent_sources, parent_records = self._parent_data(state, layout)
@@ -1049,7 +1095,6 @@ class NativeExperimentAdapter:
             layout.artifacts / "native-generation-checkpoint.json"
         )
         baseline_sources = archive.existing_sources(exclude_program_ids=unfinished_program_ids)
-        callback = observer if observer is not None else event_callback
         profiling_enabled = config.run.profiling_enabled if profiling is None else bool(profiling)
         model_turn_limit = (
             config.search.max_model_turns
@@ -1667,7 +1712,13 @@ class NativeExperimentAdapter:
                     archive_context=render_archive_context,
                     behavior_evaluator=_native_behavior,
                     retry_infrastructure=True,
-                    budget_exhausted=session.budget_exhausted,
+                    budget_exhausted=lambda: (
+                        "wall_seconds"
+                        if session.budget_exhausted()
+                        else "hourly_token_limit"
+                        if wrapped._hourly_limit_reached()
+                        else None
+                    ),
                     observer=callback,
                 )
                 generation_result = coordinator.run(resume=True)
@@ -1710,6 +1761,16 @@ class NativeExperimentAdapter:
                 "status": "budget_exhausted",
                 "generation": generation,
                 "summary": {"status": "budget_exhausted", "stop_reason": "wall_seconds"},
+            }
+        except _NativeHourlyTokenLimit:
+            result = {
+                "status": "budget_exhausted",
+                "generation": 0,
+                "summary": {
+                    "status": "budget_exhausted",
+                    "stop_reason": "hourly_token_limit",
+                    **state.hourly_token_usage(config.run.max_total_tokens_per_hour),
+                },
             }
         finally:
             wrapped.close()

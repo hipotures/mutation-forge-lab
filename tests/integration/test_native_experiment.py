@@ -67,7 +67,13 @@ def _write_config(
     workers: int = 1,
     thread_count: int = 1,
     replay: bool = False,
+    hourly_token_limit: int | None = None,
 ) -> Path:
+    hourly_limit_line = (
+        f"\nmax_total_tokens_per_hour = {hourly_token_limit}"
+        if hourly_token_limit is not None
+        else ""
+    )
     path.write_text(
         f'''schema_version = "mforge.experiment.v2"
 exp_id = "{exp_id}"
@@ -76,7 +82,7 @@ kind = "heg"
 preset = "native"
 
 [run]
-wall_seconds = 30
+wall_seconds = 30{hourly_limit_line}
 
 [model]
 provider = "codex"
@@ -1120,3 +1126,62 @@ def test_native_wall_budget_is_resumable_not_an_interrupt(tmp_path: Path) -> Non
 
     assert result["state"] == "idle"
     assert result["stop_reason"] == "session_wall_seconds"
+
+
+def test_native_hourly_token_limit_stops_and_resumes_without_new_turns(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        population=2,
+        max_turns=10,
+        max_repairs=0,
+        hourly_token_limit=2,
+    )
+    provider = RecordingProvider()
+
+    def engine(wrapped: Any, **_: Any) -> Mapping[str, Any]:
+        for index in range(2):
+            wrapped.generate(
+                {
+                    "generation": 0,
+                    "slot": f"slot-{index:02d}",
+                    "phase": "initial",
+                    "idempotency_key": f"hourly-{index}",
+                    "prompt": "hourly limit test",
+                }
+            )
+        raise AssertionError("the second provider turn must not start")
+
+    service = _service(provider, engine=engine)
+    first = service.run(config_path)
+    second = service.run(config_path)
+    status = experiment_status(config_path)
+    events_path = (
+        tmp_path
+        / "workspace"
+        / "native-test"
+        / "artifacts"
+        / "sessions"
+        / "session-000001"
+        / "events.jsonl"
+    )
+    event_types = [
+        json.loads(line)["event_type"]
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert first["state"] == "idle"
+    assert first["stop_reason"] == "hourly_token_limit"
+    assert second["state"] == "idle"
+    assert second["stop_reason"] == "hourly_token_limit"
+    assert len(provider.calls) == 1
+    assert status["hourly_token_limit"] == 2
+    assert status["hourly_tokens_used"] == 2
+    assert status["hourly_tokens_remaining"] == 0
+    assert status["hourly_limit_reached"] is True
+    assert status["hourly_retry_after"] is not None
+    assert event_types.index("checkpoint_written") < event_types.index(
+        "hourly_token_session_stopped"
+    )

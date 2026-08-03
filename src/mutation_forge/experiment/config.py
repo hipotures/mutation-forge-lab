@@ -1,8 +1,8 @@
 """Configuration loading for experiment workspaces.
 
-Only invocation fields (``run.wall_seconds`` and ``run.output``) are mutable
-after an experiment is created.  The raw TOML is retained so that every
-session can preserve the exact bytes supplied by its caller.
+Invocation fields under ``[run]`` remain mutable after an experiment is
+created.  The raw TOML is retained so that every session can preserve the
+exact bytes supplied by its caller.
 """
 
 from __future__ import annotations
@@ -117,6 +117,7 @@ class ExperimentRunConfig:
     profiling_enabled: bool = False
     deep_profiling_enabled: bool = False
     turn_timeout_base_seconds: float = 120.0
+    max_total_tokens_per_hour: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +258,10 @@ def _reject_credentials(value: object, path: str = "") -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             name = f"{path}.{key}" if path else str(key)
-            if _CREDENTIAL_KEY.search(str(key)):
+            if (
+                str(key) != "max_total_tokens_per_hour"
+                and _CREDENTIAL_KEY.search(str(key))
+            ):
                 raise ValueError(
                     f"credential field {name!r} is not allowed; use local Codex authentication"
                 )
@@ -324,6 +328,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
             "profiling_enabled",
             "deep_profiling_enabled",
             "turn_timeout_base_seconds",
+            "max_total_tokens_per_hour",
         },
     )
     output = run_raw.get("output", "rich")
@@ -343,6 +348,10 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         _positive_number(
             run_raw.get("turn_timeout_base_seconds", 120.0),
             "run.turn_timeout_base_seconds",
+        ),
+        _search_limit(
+            run_raw.get("max_total_tokens_per_hour", "unbounded"),
+            "run.max_total_tokens_per_hour",
         ),
     )
 

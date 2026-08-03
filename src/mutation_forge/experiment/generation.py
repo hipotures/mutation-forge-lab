@@ -657,7 +657,7 @@ class GenerationCoordinator:
         search_feedback: Any = "",
         archive_context: Any = "",
         retry_infrastructure: bool = False,
-        budget_exhausted: Callable[[], bool] | None = None,
+        budget_exhausted: Callable[[], bool | str | None] | None = None,
         behavior_evaluator: Any = None,
         observer: Any = None,
         event_callback: Any = None,
@@ -1581,8 +1581,12 @@ class GenerationCoordinator:
         def budget_reason() -> str | None:
             if self.config.max_model_turns is not None and turns >= self.config.max_model_turns:
                 return "max_model_turns"
-            if self.budget_exhausted is not None and self.budget_exhausted():
-                return "wall_seconds"
+            if self.budget_exhausted is not None:
+                external_reason = self.budget_exhausted()
+                if isinstance(external_reason, str) and external_reason:
+                    return external_reason
+                if external_reason:
+                    return "wall_seconds"
             return None
 
         stored_next_generation = state.get("next_generation")

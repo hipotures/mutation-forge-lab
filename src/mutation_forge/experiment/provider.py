@@ -164,6 +164,7 @@ class _CodexTransport:
             return {
                 "inputTokens": 0,
                 "cachedInputTokens": 0,
+                "cacheWriteInputTokens": 0,
                 "outputTokens": 0,
                 "reasoningOutputTokens": 0,
                 "totalTokens": 0,
@@ -174,6 +175,7 @@ class _CodexTransport:
         for key in (
             "inputTokens",
             "cachedInputTokens",
+            "cacheWriteInputTokens",
             "outputTokens",
             "reasoningOutputTokens",
             "totalTokens",
@@ -326,6 +328,7 @@ class _CodexTransport:
         return {
             "inputTokens": usage.input_tokens,
             "cachedInputTokens": usage.cached_input_tokens,
+            "cacheWriteInputTokens": usage.cache_write_input_tokens,
             "outputTokens": usage.output_tokens,
             "reasoningOutputTokens": usage.reasoning_output_tokens,
             "totalTokens": usage.total_tokens,

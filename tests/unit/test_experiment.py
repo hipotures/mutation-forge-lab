@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 
 from mutation_forge import cli
 from mutation_forge.events import Event
+from mutation_forge.experiment import state as state_module
 from mutation_forge.experiment.artifacts import (
     ArtifactIncompleteError,
     TurnArtifactStore,
@@ -102,6 +104,50 @@ def test_config_accepts_and_serializes_unbounded_limits(tmp_path: Path) -> None:
         "max_model_turns": "unbounded",
         "selection": "elite-diversity",
     }
+
+
+def test_config_accepts_hourly_token_limit(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace(
+            "wall_seconds = 1",
+            "wall_seconds = 1\nmax_total_tokens_per_hour = 1_000_000",
+        ),
+        encoding="utf-8",
+    )
+    config = load_experiment_config(path)
+    assert config.run.max_total_tokens_per_hour == 1_000_000
+    assert "run" not in config.immutable_projection()
+
+
+def test_config_accepts_explicit_unbounded_hourly_token_limit(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace(
+            "wall_seconds = 1",
+            'wall_seconds = 1\nmax_total_tokens_per_hour = "unbounded"',
+        ),
+        encoding="utf-8",
+    )
+    config = load_experiment_config(path)
+    assert config.run.max_total_tokens_per_hour is None
+    assert config.resolved_dict()["run"]["max_total_tokens_per_hour"] == "unbounded"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", '"infinite"'])
+def test_config_rejects_invalid_hourly_token_limit(
+    tmp_path: Path, value: str
+) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace(
+            "wall_seconds = 1",
+            f"wall_seconds = 1\nmax_total_tokens_per_hour = {value}",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="max_total_tokens_per_hour"):
+        load_experiment_config(path)
 
 
 @pytest.mark.parametrize(
@@ -353,6 +399,29 @@ def test_generation_model_turn_boundary_is_not_completed(tmp_path: Path) -> None
     assert result.summary["stop_reason"] == "max_model_turns"
 
 
+def test_generation_hourly_token_boundary_stops_before_provider(
+    tmp_path: Path,
+) -> None:
+    class Provider:
+        def generate(self, _request: object) -> object:
+            raise AssertionError("provider must not run at the hourly token limit")
+
+    result = GenerationCoordinator(
+        Provider(),
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=None,
+            max_repairs=0,
+            checkpoint_path=tmp_path / "generation.json",
+        ),
+        budget_exhausted=lambda: "hourly_token_limit",
+    ).run()
+    assert result.status == "budget_exhausted"
+    assert result.summary["stop_reason"] == "hourly_token_limit"
+
+
 def test_active_owner_and_stale_recovery(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
     service = ExperimentService(adapter=NullExperimentAdapter())
@@ -422,6 +491,7 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
         assert state.token_usage() == {
             "inputTokens": 1,
             "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
             "outputTokens": 2,
             "reasoningOutputTokens": 0,
             "totalTokens": 3,
@@ -454,13 +524,13 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
         assert state.token_usage() == {
             "inputTokens": 5,
             "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
             "outputTokens": 3,
             "reasoningOutputTokens": 0,
             "totalTokens": 8,
             "quality": "partial",
             "chargedFailedTurns": 1,
         }
-
         state.finish_session(
             "session-000001",
             status="idle",
@@ -474,6 +544,65 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
         assert state.cumulative()["provider_turns"] == 2
         assert state.cumulative()["total_tokens"] == 8
 
+
+def test_hourly_token_usage_is_rolling_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    ExperimentStateStore.initialize(
+        state_path,
+        exp_id="demo",
+        lock_hash="test-lock",
+        root=tmp_path,
+    )
+    started = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(state_module, "_now", lambda: started.isoformat())
+    with ExperimentStateStore(state_path) as state:
+        state.create_session(
+            number=1,
+            session_id="session-000001",
+            wall_seconds=30,
+            starting_checkpoint=None,
+        )
+        values = {
+            "idempotency_key": "turn-hourly",
+            "generation": 0,
+            "slot": "slot-00",
+            "phase": "initial",
+            "state": "completed",
+            "usage": {
+                "inputTokens": 600_000,
+                "cachedInputTokens": 0,
+                "cacheWriteInputTokens": 0,
+                "outputTokens": 400_000,
+                "reasoningOutputTokens": 200_000,
+                "totalTokens": 1_000_000,
+                "final": True,
+                "partial": False,
+            },
+        }
+        assert state.record_provider_turn(**values)
+        assert not state.record_provider_turn(**values)
+        charges = state.connection.execute(
+            "SELECT payload_json FROM events "
+            "WHERE event_type='model_token_charge_recorded'"
+        ).fetchall()
+        assert len(charges) == 1
+        charge = json.loads(str(charges[0]["payload_json"]))
+        assert charge["token_delta"] == 1_000_000
+        assert charge["usage"]["reasoningOutputTokens"] == 200_000
+        at_limit = state.hourly_token_usage(1_000_000, now=started)
+        assert at_limit["hourly_tokens_used"] == 1_000_000
+        assert at_limit["hourly_limit_reached"] is True
+        assert at_limit["hourly_retry_after"] == (
+            started + timedelta(hours=1)
+        ).isoformat()
+        expired = state.hourly_token_usage(
+            1_000_000,
+            now=started + timedelta(hours=1, microseconds=1),
+        )
+        assert expired["hourly_tokens_used"] == 0
+        assert expired["hourly_limit_reached"] is False
 
 def test_status_is_versioned_and_read_only(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
@@ -578,6 +707,7 @@ def test_status_reads_nested_stage4_search_metrics(tmp_path: Path) -> None:
     assert status["token_usage"] == {
         "inputTokens": 10,
         "cachedInputTokens": 2,
+        "cacheWriteInputTokens": 0,
         "outputTokens": 5,
         "reasoningOutputTokens": 3,
         "totalTokens": 15,

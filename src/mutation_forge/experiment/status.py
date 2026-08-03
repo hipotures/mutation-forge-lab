@@ -43,9 +43,16 @@ def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str
         "artifacts": {},
         "provider_turns": 0,
         "total_tokens": 0,
+        "hourly_token_limit": config.run.max_total_tokens_per_hour,
+        "hourly_tokens_used": 0,
+        "hourly_tokens_remaining": config.run.max_total_tokens_per_hour,
+        "hourly_window_seconds": 3600,
+        "hourly_limit_reached": False,
+        "hourly_retry_after": None,
         "token_usage": {
             "inputTokens": 0,
             "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
             "outputTokens": 0,
             "reasoningOutputTokens": 0,
             "totalTokens": 0,
@@ -152,6 +159,9 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         best_id = str(best["candidate_id"]) if best is not None else None
         best_metric = best["metric"] if best is not None else None
         token_usage = state.token_usage()
+        hourly_usage = state.hourly_token_usage(
+            config.run.max_total_tokens_per_hour
+        )
         last_error = checkpoint_error or state.latest_error()
         session_metrics: dict[str, Any] = {}
         if session is not None:
@@ -244,6 +254,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
                 else None
             ),
             "total_tokens": int(current["total_tokens"]),
+            **hourly_usage,
             "token_usage": token_usage,
             "ir": session_metrics.get("ir"),
             "compute_seconds": float(current["compute_seconds"]),
@@ -371,6 +382,14 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
         lines.append(
             f"Usage: {status['provider_turns']} model turns, {status['total_tokens']} tokens"
         )
+    hourly_limit = status.get("hourly_token_limit")
+    hourly_used = status.get("hourly_tokens_used", 0)
+    lines.append(
+        "Hourly tokens: "
+        f"{hourly_used} / {hourly_limit if hourly_limit is not None else 'unbounded'}"
+    )
+    if status.get("hourly_limit_reached"):
+        lines.append(f"Retry after: {status.get('hourly_retry_after') or 'pending'}")
     if status.get("effective_model_turns") == "unbounded":
         lines.append(
             f"Model turns: {status.get('model_turns_used', status['provider_turns'])} cumulative"

@@ -64,9 +64,8 @@ uv run mforge doctor --heg-repo ../heg
 
 `doctor` does not authenticate Codex and does not start a model turn. Ensure
 the local Codex installation is authenticated before running an experiment.
-Credentials must not be placed in `experiment.toml`; configuration fields
-whose names look like tokens, passwords, API keys, or authentication files are
-rejected.
+Credentials must not be placed in `experiment.toml`; credential-bearing
+configuration fields are rejected.
 
 ## Quick start
 
@@ -85,6 +84,7 @@ output = "rich"
 profiling_enabled = false
 deep_profiling_enabled = false
 turn_timeout_base_seconds = 120
+max_total_tokens_per_hour = 1_000_000
 
 [model]
 provider = "codex"
@@ -144,7 +144,7 @@ instead of being silently ignored.
 | Section | Purpose |
 | --- | --- |
 | top level | Experiment identity, workspace, native kind, and preset |
-| `[run]` | Per-invocation wall budget, output mode, profiling, and timeout base |
+| `[run]` | Per-invocation wall budget, rolling token cap, output mode, profiling, and timeout base |
 | `[model]` | Codex model, reasoning effort, model concurrency, and repair limit |
 | `[search]` | Population, global generation/turn limits, and parent selection |
 | `[evaluation]` | HEG orders, seeds, horizon, proposal pools, baselines, and replay |
@@ -157,6 +157,12 @@ Important behavior:
 - `max_generations` and `max_model_turns` are required. Each accepts a positive
   integer or the exact string `"unbounded"`.
 - Model-turn accounting remains cumulative when the limit is unbounded.
+- `max_total_tokens_per_hour` is optional. It accepts a positive integer or
+  `"unbounded"` and applies to the canonical `totalTokens` charged during the
+  rolling previous 60 minutes.
+- Reaching the hourly token cap ends the current session as resumable
+  `IDLE` with `stop_reason=hourly_token_limit`; no new model turn starts until
+  enough prior usage leaves the rolling window.
 - `wall_seconds` applies to one invocation. Reaching it pauses the experiment
   in resumable `idle` with `stop_reason=session_wall_seconds`.
 - Uncharged provider infrastructure failures are retried on the same

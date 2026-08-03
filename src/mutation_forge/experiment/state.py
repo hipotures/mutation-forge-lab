@@ -11,7 +11,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +32,13 @@ VALID_STATES = frozenset(
 _USAGE_FIELDS = (
     "inputTokens",
     "cachedInputTokens",
+    "cacheWriteInputTokens",
     "outputTokens",
     "reasoningOutputTokens",
     "totalTokens",
+)
+_EXACT_USAGE_FIELDS = tuple(
+    field for field in _USAGE_FIELDS if field != "cacheWriteInputTokens"
 )
 
 
@@ -71,7 +75,7 @@ def _usage_quality(value: Mapping[str, Any]) -> str:
             isinstance(value.get(name), int)
             and not isinstance(value.get(name), bool)
             and int(value[name]) >= 0
-            for name in _USAGE_FIELDS
+            for name in _EXACT_USAGE_FIELDS
         )
     )
     if exact:
@@ -588,6 +592,31 @@ class ExperimentStateStore:
                     else 0
                 )
                 token_delta = max(0, observed_tokens - prior_observed_tokens)
+                if token_delta:
+                    charged_at = _now()
+                    charge_payload = {
+                        "idempotency_key": (
+                            f"model-token-charge:{idempotency_key}:{observed_tokens}"
+                        ),
+                        "turn_idempotency_key": idempotency_key,
+                        "generation": generation,
+                        "slot": slot,
+                        "phase": phase,
+                        "token_delta": token_delta,
+                        "usage": usage_value,
+                        "charged_at": charged_at,
+                    }
+                    self.connection.execute(
+                        "INSERT OR IGNORE INTO events("
+                        "session_id,event_type,timestamp,idempotency_key,payload_json"
+                        ") VALUES((SELECT current_session_id FROM experiment LIMIT 1),?,?,?,?)",
+                        (
+                            "model_token_charge_recorded",
+                            charged_at,
+                            charge_payload["idempotency_key"],
+                            _json(charge_payload),
+                        ),
+                    )
                 self.connection.execute(
                     "UPDATE sessions SET provider_turns_attempted=provider_turns_attempted+?,"
                     "provider_turns_completed=provider_turns_completed+?,"
@@ -614,6 +643,117 @@ class ExperimentStateStore:
         except BaseException:
             self.connection.rollback()
             raise
+
+    def _backfill_token_charge_events(self) -> None:
+        rows = self.connection.execute(
+            "SELECT idempotency_key,generation,slot,phase,completed_at,usage_json "
+            "FROM provider_turns WHERE completed_at IS NOT NULL"
+        ).fetchall()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            for row in rows:
+                try:
+                    usage = json.loads(str(row["usage_json"]))
+                except json.JSONDecodeError:
+                    continue
+                total = usage.get("totalTokens") if isinstance(usage, Mapping) else None
+                if (
+                    not isinstance(total, int)
+                    or isinstance(total, bool)
+                    or total <= 0
+                    or not isinstance(row["completed_at"], str)
+                ):
+                    continue
+                turn_key = str(row["idempotency_key"])
+                event_key = f"model-token-charge:{turn_key}:{total}"
+                payload = {
+                    "idempotency_key": event_key,
+                    "turn_idempotency_key": turn_key,
+                    "generation": int(row["generation"]),
+                    "slot": str(row["slot"]),
+                    "phase": str(row["phase"]),
+                    "token_delta": total,
+                    "usage": usage,
+                    "charged_at": str(row["completed_at"]),
+                    "backfilled": True,
+                }
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO events("
+                    "session_id,event_type,timestamp,idempotency_key,payload_json"
+                    ") VALUES(NULL,?,?,?,?)",
+                    (
+                        "model_token_charge_recorded",
+                        str(row["completed_at"]),
+                        event_key,
+                        _json(payload),
+                    ),
+                )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def hourly_token_usage(
+        self,
+        limit: int | None,
+        *,
+        now: datetime | None = None,
+        backfill: bool = False,
+    ) -> dict[str, Any]:
+        if backfill:
+            self._backfill_token_charge_events()
+        current = now or datetime.now(UTC)
+        current = (
+            current.replace(tzinfo=UTC)
+            if current.tzinfo is None
+            else current.astimezone(UTC)
+        )
+        cutoff = current - timedelta(hours=1)
+        charges: list[tuple[datetime, int]] = []
+        rows = self.connection.execute(
+            "SELECT timestamp,payload_json FROM events "
+            "WHERE event_type='model_token_charge_recorded' "
+            "AND timestamp>? AND timestamp<=? ORDER BY timestamp,sequence",
+            (cutoff.isoformat(), current.isoformat()),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+                charged_at = datetime.fromisoformat(
+                    str(payload.get("charged_at", row["timestamp"]))
+                )
+            except (ValueError, json.JSONDecodeError):
+                continue
+            if charged_at.tzinfo is None:
+                charged_at = charged_at.replace(tzinfo=UTC)
+            delta = payload.get("token_delta") if isinstance(payload, Mapping) else None
+            if (
+                cutoff < charged_at <= current
+                and isinstance(delta, int)
+                and not isinstance(delta, bool)
+                and delta > 0
+            ):
+                charges.append((charged_at, delta))
+        used = sum(delta for _, delta in charges)
+        reached = limit is not None and used >= limit
+        retry_after: str | None = None
+        if reached and limit is not None:
+            remaining = used
+            for charged_at, delta in charges:
+                remaining -= delta
+                if remaining < limit:
+                    retry_after = (charged_at + timedelta(hours=1)).isoformat()
+                    break
+        return {
+            "hourly_token_limit": limit,
+            "hourly_tokens_used": used,
+            "hourly_tokens_remaining": (
+                None if limit is None else max(0, limit - used)
+            ),
+            "hourly_window_seconds": 3600,
+            "hourly_limit_reached": reached,
+            "hourly_retry_after": retry_after,
+        }
 
     def provider_turn(self, idempotency_key: str) -> dict[str, Any] | None:
         row = self.connection.execute(

@@ -222,7 +222,7 @@ def test_header_zebra_and_horizontal_progress_keep_parameter_groups_together() -
     )
     lines = output.getvalue().splitlines()
     assert lines[0].strip() == "Generation"
-    assert "25%" in lines[1] and "1/4" in lines[1]
+    assert "1/4" in lines[1]
     assert len(lines[1].rstrip()) < 25
 
 
@@ -695,12 +695,45 @@ def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() ->
     assert top.startswith("╭──")
 
 
+@pytest.mark.parametrize("width", (40, 60, 90, 120, 150))
+def test_progress_panel_is_vertical_and_shows_hourly_token_limit(width: int) -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(
+            file=io.StringIO(),
+            width=width,
+            force_terminal=False,
+            color_system=None,
+        ),
+        locked_config={"model": {"name": "gpt-test"}},
+        start_live=False,
+    )
+    sink.state = replace(
+        _running_state(),
+        hourly_token_limit=1_000_000,
+        hourly_tokens_used=84_200,
+    )
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=width,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._progress(width, horizontal=True))
+    rendered = output.getvalue()
+    assert "Hourly tokens" in rendered
+    assert "84.2k/1.00M" in rendered
+    assert "Model Turn Budget" not in rendered
+    assert "Evaluation Progress" not in rendered
+    assert all(len(line) <= width for line in rendered.splitlines())
+    sink.close()
+
+
 @pytest.mark.parametrize(
     ("width", "height", "expected"),
     (
         (150, 55, ("SLOT MATRIX", "Performance & IR", "Quick View")),
         (120, 35, ("SLOT MATRIX", "Token Accounting", "Recent Activity")),
-        (90, 24, ("SELECTED SLOT", "Slots resolved", "Recent Activity")),
+        (90, 24, ("SELECTED SLOT", "Slots", "Recent Activity")),
     ),
 )
 def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
@@ -887,7 +920,7 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     assert "Gen 2/4" in rendered
     assert "generation 2" in rendered
     assert "2 / 14 / 8" in rendered
-    assert "Slots resolved" in rendered
+    assert "Slots" in rendered
 
     footer = sink._footer(150)
     assert "[n/N] view gen" in footer.plain
@@ -1048,6 +1081,50 @@ def test_until_complete_continues_after_wall_budget(monkeypatch: pytest.MonkeyPa
     assert calls == 2
 
 
+def test_until_complete_stops_at_hourly_token_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        run=SimpleNamespace(output="json"),
+        config_path=Path("experiment.toml"),
+        resolved_dict=lambda: {"exp_id": "overnight-run"},
+        immutable_config_sha256=lambda: "abc123",
+    )
+    calls = 0
+
+    def fake_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "idle",
+            "state": "idle",
+            "stop_reason": "hourly_token_limit",
+        }
+
+    monkeypatch.setattr(cli, "load_experiment_config", lambda _path: config)
+    monkeypatch.setattr(cli, "run_experiment", fake_run)
+    monkeypatch.setattr(
+        cli,
+        "experiment_status",
+        lambda _path: {
+            "state": "idle",
+            "hourly_token_limit": 1_000_000,
+            "hourly_tokens_used": 1_000_000,
+        },
+    )
+    monkeypatch.setattr(cli, "render_status", lambda _summary: "idle")
+
+    assert (
+        cli._experiment_run(
+            Path("experiment.toml"),
+            json_output=True,
+            until_complete=True,
+        )
+        == 0
+    )
+    assert calls == 1
+
+
 def test_sink_dispatches_supported_pause_and_retry_without_execution_side_effects() -> None:
     pause = Mock()
     retry = Mock()
@@ -1169,14 +1246,14 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "da23bd14c44aa2574b7f9f7773189ab1aab8d9729cabda84a5689e36dd370bc1"
+        "894b0e86df20ea3be8dab85c2b7fd13c69f1f422f424951b6208d196dfb6c664"
     ),
-    "evaluation_active": ("9c2e71564a666ab052ae72b1ba48477da239aaf24cf90b9336090a5d6509a3a9"),
-    "validation_details": ("ac7640aeafd4e81cfa3f883983d4b08b5620e982be45a5f32edaf7dec36b328f"),
-    "completed": ("36f4ffbc14833ded8be8187592fa9a967e29325b789affd849f04d966a931b88"),
-    "profiling_disabled": ("7b35fbeb8150652ee9c7ee4268298be9ddca4e8966d955f3d1f53384d075159e"),
-    "compact": ("d219b26e3ebf7bc938e2849ea4f12df2d9a395936ef77add4013f5bbf5eafa0c"),
-    "minimal": ("22a3e8de7e835ddae4dc194a165e67bbb7fc34857059e39c077232212c641b22"),
+    "evaluation_active": ("d2073c68a0759600fdc88d9c19d4af3df4f3f8deb1e1d4ab4655ee0b7d142cac"),
+    "validation_details": ("f6f80c5c4fbf817030f2e9bc31fa6302f88ff91e4dd3a21c8c002121ef286dcf"),
+    "completed": ("821f7527446fbb10bd9deed31b66a93c55d6da1dbaf8164a75ff26deb77b410e"),
+    "profiling_disabled": ("0347445cc849f903c69d1131ebe1e8cd5aae47a9f1e51fa0f00b85fb7168e841"),
+    "compact": ("9666728fbd8015d3fd5cfdf9939947ec1e716bc715d1ffa74ac2adba38afc1a3"),
+    "minimal": ("ec16136c52941ed56d4f8607de4a2a7462ceeb3509e26e36526a5b8f298ee259"),
 }
 
 
