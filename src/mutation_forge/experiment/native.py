@@ -715,6 +715,35 @@ class NativeExperimentAdapter:
         self.evaluator = evaluator
         self.backend = backend
 
+    @staticmethod
+    def model_turns_used(
+        layout: ExperimentLayout,
+        state: ExperimentStateStore,
+    ) -> int:
+        """Return the fail-safe global turn count enforced by the coordinator."""
+
+        ledger_turns = state.counts().get("provider_turns", 0)
+        checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return ledger_turns
+        reserved_turns = (
+            checkpoint.get("model_turns_used")
+            if isinstance(checkpoint, Mapping)
+            else None
+        )
+        return max(
+            ledger_turns,
+            (
+                int(reserved_turns)
+                if isinstance(reserved_turns, int)
+                and not isinstance(reserved_turns, bool)
+                and reserved_turns >= 0
+                else 0
+            ),
+        )
+
     def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
         system, schema, request, repair, context, proposal, semantic, baseline = _load_assets()
         slot_briefs = _load_slot_briefs()
@@ -1486,7 +1515,7 @@ class NativeExperimentAdapter:
                     population_size=config.search.population_size,
                     concurrency=config.model.concurrency,
                     max_model_turns=config.search.max_model_turns,
-                    prior_model_turns=state.counts().get("provider_turns", 0),
+                    prior_model_turns=self.model_turns_used(layout, state),
                     max_repairs=config.model.max_repairs,
                     model=config.model.name,
                     effort=config.model.effort,

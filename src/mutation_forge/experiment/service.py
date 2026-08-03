@@ -1018,6 +1018,15 @@ class ExperimentService:
                     session.starting_checkpoint = str(starting_checkpoint["checkpoint_id"])
                 cumulative = state.cumulative()
                 counts = state.counts()
+                ledger_model_turns = counts.get("provider_turns", 0)
+                model_turns_used = ledger_model_turns
+                model_turn_counter = getattr(self.adapter, "model_turns_used", None)
+                if callable(model_turn_counter):
+                    model_turns_used = int(model_turn_counter(layout, state))
+                remaining_model_turns = max(
+                    0,
+                    config.search.max_model_turns - model_turns_used,
+                )
                 hub.emit(
                     "session_started",
                     experiment_id=config.exp_id,
@@ -1037,8 +1046,13 @@ class ExperimentService:
                     population_size=config.search.population_size,
                     generation_limit=config.search.max_generations,
                     max_model_turns=config.search.max_model_turns,
-                    remaining_model_turns=config.search.max_model_turns,
-                    cumulative_provider_turns=counts.get("provider_turns", 0),
+                    remaining_model_turns=remaining_model_turns,
+                    model_turns_used=model_turns_used,
+                    reserved_model_turns=max(
+                        0,
+                        model_turns_used - ledger_model_turns,
+                    ),
+                    cumulative_provider_turns=ledger_model_turns,
                     cumulative_evaluations=counts.get("evaluation_count", 0),
                     cumulative_candidates=counts.get("candidate_count", 0),
                     archive_size=counts.get("candidate_count", 0),

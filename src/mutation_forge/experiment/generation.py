@@ -1785,7 +1785,7 @@ class GenerationCoordinator:
                                 status="retrying",
                                 active_model_turns=active_model_turns,
                                 remaining_model_turns=(
-                                    self.config.max_model_turns - turns
+                                    max(0, self.config.max_model_turns - turns)
                                     if self.config.max_model_turns is not None
                                     else None
                                 ),
@@ -1848,7 +1848,7 @@ class GenerationCoordinator:
                         population_size=self.config.slots,
                         active_model_turns=active_model_turns,
                         remaining_model_turns=(
-                            self.config.max_model_turns - turns
+                            max(0, self.config.max_model_turns - turns)
                             if self.config.max_model_turns is not None
                             else None
                         ),
