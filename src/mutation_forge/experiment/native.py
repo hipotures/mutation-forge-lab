@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from collections.abc import Collection, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -1414,6 +1415,80 @@ class NativeExperimentAdapter:
             )
             return pretty({"evaluated_candidates": summaries[:8]}) if summaries else ""
 
+        configured_evaluation_workers = max(1, config.resources.thread_count)
+        backend_repo = getattr(self.backend, "repo", None)
+        if backend_repo is None and self.backend is None:
+            backend_repo = Path(__file__).resolve().parents[4] / "heg"
+        parallel_evaluation = (
+            self.evaluator is None
+            and configured_evaluation_workers > 1
+            and backend_repo is not None
+            and Path(backend_repo).is_dir()
+        )
+        evaluation_worker_count = (
+            configured_evaluation_workers if parallel_evaluation else 1
+        )
+
+        def run_evaluation(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+            evaluation_progress: Any,
+        ) -> tuple[Mapping[str, Any], float]:
+            evaluator = self.evaluator or evaluate_candidate
+            evaluation_started = time.monotonic()
+            evaluator_kwargs: dict[str, Any] = {
+                "artifact_root": layout.artifacts,
+                "sandbox_limits": SandboxLimits(),
+            }
+            try:
+                parameters = dict(inspect.signature(evaluator).parameters)
+            except (TypeError, ValueError):
+                parameters = {}
+            if parallel_evaluation and evaluator is evaluate_candidate:
+                from mutation_forge.backends.heg import HegBackend
+
+                repository = Path(cast(str | Path, backend_repo))
+
+                def backend_factory(_repo: Path, *, _repository: Path = repository) -> Any:
+                    return HegBackend(_repository)
+
+                if "backend_factory" in parameters:
+                    evaluator_kwargs["backend_factory"] = backend_factory
+                else:
+                    evaluator_kwargs["backend"] = self.backend
+            else:
+                evaluator_kwargs["backend"] = self.backend
+            if "progress" in parameters:
+                evaluator_kwargs["progress"] = evaluation_progress
+            if "profiling_enabled" in parameters:
+                evaluator_kwargs["profiling_enabled"] = profiling_enabled
+            if "counterexample_event_callback" in parameters:
+                evaluator_kwargs["counterexample_event_callback"] = (
+                    lambda event_type, payload: emit(event_type, **dict(payload))
+                )
+            try:
+                result = evaluator(config, program_id, candidate.source, **evaluator_kwargs)
+            except BaseException as error:
+                emit(
+                    "evaluation_failed",
+                    generation=candidate.generation,
+                    slot=candidate.slot,
+                    candidate_id=program_id,
+                    phase="development",
+                    evaluation_id=identity,
+                    status="failed",
+                    evaluations_active=0,
+                    error=f"{type(error).__name__}: {error}",
+                    elapsed_seconds=time.monotonic() - evaluation_started,
+                )
+                raise
+            if not isinstance(result, Mapping):
+                raise NativeExperimentError(
+                    f"evaluation for {program_id} did not return a mapping"
+                )
+            return cast(Mapping[str, Any], result), time.monotonic() - evaluation_started
+
         def on_generation(
             generation: int, candidates: Sequence[Candidate], results: Sequence[SlotResult]
         ) -> Mapping[str, str]:
@@ -1421,68 +1496,64 @@ class NativeExperimentAdapter:
             if session.budget_exhausted():
                 raise _NativeSessionBudgetExpired
             selection_candidates: list[Candidate] = []
-            for candidate in candidates:
-                if session.budget_exhausted():
-                    raise _NativeSessionBudgetExpired
-                program_id = f"g{candidate.generation:04d}-{candidate.slot}"
-                archive.append(
-                    {
-                        "program_id": program_id,
-                        "source": candidate.source,
-                        "source_sha256": candidate.source_sha256,
-                        "normalized_ast_sha256": candidate.normalized_ast_sha256,
-                        "generation": candidate.generation,
-                        "slot": candidate.slot,
-                        "parent_id": candidate.parent_id,
-                        "validation_status": "valid",
-                        "probe_status": "passed",
-                        "usage": dict(candidate.usage),
-                        "behavior": dict(candidate.behavior_signature),
-                    }
+            prepared: list[tuple[Candidate, str, str, Mapping[str, Any] | None]] = []
+            futures: dict[str, Any] = {}
+            executor = (
+                ThreadPoolExecutor(
+                    max_workers=evaluation_worker_count,
+                    thread_name_prefix=f"native-eval-g{generation}",
                 )
-                state.record_candidate(
-                    program_id,
-                    source_sha256=candidate.source_sha256,
-                    archive_path=str(archive.sources / f"{program_id}.py"),
-                    generation=candidate.generation,
-                    slot=candidate.slot,
-                    status="created",
-                    metadata={"behavior": dict(candidate.behavior_signature), "search_metrics": {}},
-                )
-                emit(
-                    "candidate_archived",
-                    generation=generation,
-                    slot=candidate.slot,
-                    candidate_id=program_id,
-                    status="accepted",
-                    archive_size=len(archive.records()),
-                    source_sha256=candidate.source_sha256,
-                    normalized_ast_sha256=candidate.normalized_ast_sha256,
-                    source_lines=len(candidate.source.splitlines()),
-                )
-                identity = f"{program_id}:development"
-                existing_evaluation = state.evaluation(identity)
-                if existing_evaluation is None:
-                    evaluator = self.evaluator or evaluate_candidate
+                if parallel_evaluation
+                else None
+            )
+            try:
+                for candidate in candidates:
+                    if session.budget_exhausted():
+                        raise _NativeSessionBudgetExpired
+                    program_id = f"g{candidate.generation:04d}-{candidate.slot}"
+                    archive.append(
+                        {
+                            "program_id": program_id,
+                            "source": candidate.source,
+                            "source_sha256": candidate.source_sha256,
+                            "normalized_ast_sha256": candidate.normalized_ast_sha256,
+                            "generation": candidate.generation,
+                            "slot": candidate.slot,
+                            "parent_id": candidate.parent_id,
+                            "validation_status": "valid",
+                            "probe_status": "passed",
+                            "usage": dict(candidate.usage),
+                            "behavior": dict(candidate.behavior_signature),
+                        }
+                    )
+                    state.record_candidate(
+                        program_id,
+                        source_sha256=candidate.source_sha256,
+                        archive_path=str(archive.sources / f"{program_id}.py"),
+                        generation=candidate.generation,
+                        slot=candidate.slot,
+                        status="created",
+                        metadata={
+                            "behavior": dict(candidate.behavior_signature),
+                            "search_metrics": {},
+                        },
+                    )
                     emit(
-                        "evaluation_started",
+                        "candidate_archived",
                         generation=generation,
                         slot=candidate.slot,
                         candidate_id=program_id,
-                        phase="development",
-                        evaluation_id=identity,
-                        evaluations_queued=state.counts().get("evaluation_count", 0) + 1,
-                        evaluation_total=(
-                            len(config.evaluation.orders)
-                            * len(config.evaluation.graph_seeds)
-                            * len(config.evaluation.policy_seeds)
-                        ),
-                        development_progress=0.0,
-                        replay_progress=0.0,
-                        worker_count=config.resources.workers,
-                        active_workers=1,
+                        status="accepted",
+                        archive_size=len(archive.records()),
+                        source_sha256=candidate.source_sha256,
+                        normalized_ast_sha256=candidate.normalized_ast_sha256,
+                        source_lines=len(candidate.source.splitlines()),
                     )
-                    evaluation_started = time.monotonic()
+                    identity = f"{program_id}:development"
+                    stored_evaluation = state.evaluation(identity)
+                    prepared.append((candidate, program_id, identity, stored_evaluation))
+                    if stored_evaluation is not None:
+                        continue
 
                     def evaluation_progress(
                         payload: Mapping[str, Any],
@@ -1498,141 +1569,99 @@ class NativeExperimentAdapter:
                         progress_payload.setdefault("slot", _slot)
                         pass_name = progress_payload.get("pass")
                         progress_payload.setdefault(
-                            "phase", pass_name if isinstance(pass_name, str) else "development"
+                            "phase",
+                            pass_name if isinstance(pass_name, str) else "development",
                         )
                         progress_payload.setdefault("evaluation_id", _identity)
-                        progress_payload.setdefault("evaluations_active", 1)
-                        emit(
-                            "evaluation_progress",
-                            **progress_payload,
+                        progress_payload.setdefault(
+                            "evaluations_active",
+                            evaluation_worker_count,
                         )
+                        emit("evaluation_progress", **progress_payload)
 
-                    evaluator_kwargs: dict[str, Any] = {
-                        "artifact_root": layout.artifacts,
-                        "backend": self.backend,
-                        "sandbox_limits": SandboxLimits(),
-                    }
-                    try:
-                        parameters = dict(inspect.signature(evaluator).parameters)
-                    except (TypeError, ValueError):
-                        parameters = {}
-                    if "progress" in parameters:
-                        evaluator_kwargs["progress"] = evaluation_progress
-                    if "profiling_enabled" in parameters:
-                        evaluator_kwargs["profiling_enabled"] = profiling_enabled
-                    if "counterexample_event_callback" in parameters:
-                        evaluator_kwargs["counterexample_event_callback"] = (
-                            lambda event_type, payload: emit(event_type, **dict(payload))
-                        )
-                    try:
-                        result = evaluator(config, program_id, candidate.source, **evaluator_kwargs)
-                    except BaseException as error:
-                        emit(
-                            "evaluation_failed",
-                            generation=generation,
-                            slot=candidate.slot,
-                            candidate_id=program_id,
-                            phase="development",
-                            evaluation_id=identity,
-                            status="failed",
-                            evaluations_active=0,
-                            error=f"{type(error).__name__}: {error}",
-                            elapsed_seconds=time.monotonic() - evaluation_started,
-                        )
-                        raise
-                    state.record_evaluation(
-                        identity,
-                        candidate_id=program_id,
-                        kind="development",
-                        state="completed",
-                        result=cast(Mapping[str, Any], result),
-                    )
-                    session.evaluations_completed += 1
-                    summary = result.get("summary") if isinstance(result, Mapping) else None
-                    metric = summary.get("mean_auc") if isinstance(summary, Mapping) else None
-                    if (
-                        isinstance(metric, (int, float))
-                        and not isinstance(metric, bool)
-                        and (best_objective is None or float(metric) > best_objective)
-                    ):
-                        best_objective = float(metric)
-                        best_candidate_id = program_id
-                    timing_profile = (
-                        result.get("timing_profile") if isinstance(result, Mapping) else None
-                    )
-                    if isinstance(timing_profile, Mapping):
-                        last_timing_profile = dict(timing_profile)
-                    raw_ir = result.get("ir") if isinstance(result, Mapping) else None
-                    if raw_ir is None and isinstance(summary, Mapping):
-                        raw_ir = summary.get("ir", summary.get("improvement_rate"))
-                    if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
-                        last_ir = float(raw_ir)
-                    replay = result.get("replay") if isinstance(result, Mapping) else None
-                    baseline_comparison = (
-                        summary.get("baseline_auc") if isinstance(summary, Mapping) else None
-                    )
                     emit(
-                        "evaluation_completed",
+                        "evaluation_started",
                         generation=generation,
                         slot=candidate.slot,
                         candidate_id=program_id,
                         phase="development",
                         evaluation_id=identity,
-                        status="completed",
-                        evaluations_active=0,
-                        evaluations_completed=session.evaluations_completed,
-                        evaluation_count=state.counts().get("evaluation_count", 0),
-                        mean_auc=metric,
-                        best_auc=(
-                            summary.get("best_auc") if isinstance(summary, Mapping) else None
+                        evaluations_queued=state.counts().get("evaluation_count", 0)
+                        + len(futures)
+                        + 1,
+                        evaluation_total=(
+                            len(config.evaluation.orders)
+                            * len(config.evaluation.graph_seeds)
+                            * len(config.evaluation.policy_seeds)
                         ),
-                        elapsed_seconds=time.monotonic() - evaluation_started,
-                        timing_profile=timing_profile,
-                        development_progress=1.0,
-                        replay_progress=(
-                            1.0
-                            if isinstance(replay, Mapping) and replay.get("enabled") is True
-                            else 0.0
-                        ),
-                        current_objective=metric,
-                        best_objective=best_objective,
-                        best_candidate_id=best_candidate_id,
-                        best_score=best_objective,
-                        baseline_comparison=baseline_comparison,
-                        ir=last_ir,
-                        worker_count=config.resources.workers,
-                        active_workers=0,
+                        development_progress=0.0,
+                        replay_progress=0.0,
+                        worker_count=evaluation_worker_count,
+                        active_workers=min(evaluation_worker_count, len(futures) + 1),
                     )
-                    metadata = {
-                        "search_metrics": {"pooled_median_auc": metric}
-                        if isinstance(metric, (int, float))
-                        else {}
-                    }
-                    state.record_candidate(
-                        program_id,
-                        source_sha256=candidate.source_sha256,
-                        archive_path=str(archive.sources / f"{program_id}.py"),
-                        generation=candidate.generation,
-                        slot=candidate.slot,
-                        status="created",
-                        metadata=metadata,
-                    )
-                else:
-                    # A resumed generation can already have a durable
-                    # evaluation result.  Re-emit it to hydrate the live
-                    # dashboard instead of leaving the recovered slot with
-                    # an empty objective until a new evaluation happens.
-                    restored_summary = stored_evaluation_summary(program_id)
-                    restored_metric = restored_summary.get("mean_auc")
-                    if (
-                        isinstance(restored_metric, (int, float))
-                        and not isinstance(restored_metric, bool)
-                    ):
-                        restored_value = float(restored_metric)
-                        if best_objective is None or restored_value > best_objective:
-                            best_objective = restored_value
+                    if executor is None:
+                        result, elapsed = run_evaluation(
+                            candidate,
+                            program_id,
+                            identity,
+                            evaluation_progress,
+                        )
+                        futures[program_id] = (result, elapsed)
+                    else:
+                        futures[program_id] = executor.submit(
+                            run_evaluation,
+                            candidate,
+                            program_id,
+                            identity,
+                            evaluation_progress,
+                        )
+
+                for candidate, program_id, identity, stored_record in prepared:
+                    if stored_record is None:
+                        future = futures[program_id]
+                        try:
+                            result, evaluation_elapsed = (
+                                future.result() if hasattr(future, "result") else future
+                            )
+                        except BaseException:
+                            if executor is not None:
+                                for pending in futures.values():
+                                    if hasattr(pending, "cancel"):
+                                        pending.cancel()
+                            raise
+                        state.record_evaluation(
+                            identity,
+                            candidate_id=program_id,
+                            kind="development",
+                            state="completed",
+                            result=result,
+                        )
+                        session.evaluations_completed += 1
+                        summary = result.get("summary")
+                        summary = summary if isinstance(summary, Mapping) else {}
+                        metric = summary.get("mean_auc")
+                        if (
+                            isinstance(metric, (int, float))
+                            and not isinstance(metric, bool)
+                            and (best_objective is None or float(metric) > best_objective)
+                        ):
+                            best_objective = float(metric)
                             best_candidate_id = program_id
-                        evaluation_count = state.counts().get("evaluation_count", 0)
+                        timing_profile = result.get("timing_profile")
+                        if isinstance(timing_profile, Mapping):
+                            last_timing_profile = dict(timing_profile)
+                        raw_ir = result.get("ir")
+                        if raw_ir is None:
+                            raw_ir = summary.get("ir", summary.get("improvement_rate"))
+                        if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
+                            last_ir = float(raw_ir)
+                        replay = result.get("replay")
+                        baseline_comparison = summary.get("baseline_auc")
+                        active = sum(
+                            1
+                            for item in futures.values()
+                            if hasattr(item, "done") and not item.done()
+                        )
                         emit(
                             "evaluation_completed",
                             generation=generation,
@@ -1641,53 +1670,116 @@ class NativeExperimentAdapter:
                             phase="development",
                             evaluation_id=identity,
                             status="completed",
-                            restored=True,
-                            evaluations_active=0,
-                            evaluations_completed=evaluation_count,
-                            evaluation_count=evaluation_count,
-                            mean_auc=restored_value,
-                            best_auc=restored_summary.get("best_auc"),
-                            elapsed_seconds=0.0,
+                            evaluations_active=active,
+                            evaluations_completed=session.evaluations_completed,
+                            evaluation_count=state.counts().get("evaluation_count", 0),
+                            mean_auc=metric,
+                            best_auc=summary.get("best_auc"),
+                            elapsed_seconds=evaluation_elapsed,
+                            timing_profile=timing_profile,
                             development_progress=1.0,
-                            replay_progress=1.0,
-                            current_objective=restored_value,
+                            replay_progress=(
+                                1.0
+                                if isinstance(replay, Mapping)
+                                and replay.get("enabled") is True
+                                else 0.0
+                            ),
+                            current_objective=metric,
                             best_objective=best_objective,
                             best_candidate_id=best_candidate_id,
                             best_score=best_objective,
-                            baseline_comparison=restored_summary.get("baseline_auc"),
-                            worker_count=config.resources.workers,
-                            active_workers=0,
+                            baseline_comparison=baseline_comparison,
+                            ir=last_ir,
+                            worker_count=evaluation_worker_count,
+                            active_workers=active,
                         )
-                evaluation_row = state.evaluation(identity)
-                evaluation_result: Mapping[str, Any] = {}
-                if isinstance(evaluation_row, Mapping):
-                    raw_result = evaluation_row.get("result_json")
-                    if isinstance(raw_result, str):
-                        try:
-                            decoded_result = json.loads(raw_result)
-                        except json.JSONDecodeError:
-                            decoded_result = {}
-                        if isinstance(decoded_result, Mapping):
-                            evaluation_result = decoded_result
-                evaluation_summary = evaluation_result.get("summary")
-                if not isinstance(evaluation_summary, Mapping):
-                    evaluation_summary = {}
-                evaluation_metric = evaluation_summary.get("mean_auc")
-                numeric_metric = (
-                    float(evaluation_metric)
-                    if isinstance(evaluation_metric, (int, float))
-                    and not isinstance(evaluation_metric, bool)
-                    else 0.0
-                )
-                selection_candidates.append(
-                    replace(
-                        candidate,
-                        behavior_signature={
-                            **dict(candidate.behavior_signature),
-                            "score": numeric_metric,
-                        },
+                        metadata = {
+                            "search_metrics": {
+                                "pooled_median_auc": metric
+                            }
+                            if isinstance(metric, (int, float))
+                            else {}
+                        }
+                        state.record_candidate(
+                            program_id,
+                            source_sha256=candidate.source_sha256,
+                            archive_path=str(archive.sources / f"{program_id}.py"),
+                            generation=candidate.generation,
+                            slot=candidate.slot,
+                            status="created",
+                            metadata=metadata,
+                        )
+                    else:
+                        restored_summary = stored_evaluation_summary(program_id)
+                        restored_metric = restored_summary.get("mean_auc")
+                        if (
+                            isinstance(restored_metric, (int, float))
+                            and not isinstance(restored_metric, bool)
+                        ):
+                            restored_value = float(restored_metric)
+                            if best_objective is None or restored_value > best_objective:
+                                best_objective = restored_value
+                                best_candidate_id = program_id
+                            evaluation_count = state.counts().get("evaluation_count", 0)
+                            emit(
+                                "evaluation_completed",
+                                generation=generation,
+                                slot=candidate.slot,
+                                candidate_id=program_id,
+                                phase="development",
+                                evaluation_id=identity,
+                                status="completed",
+                                restored=True,
+                                evaluations_active=0,
+                                evaluations_completed=evaluation_count,
+                                evaluation_count=evaluation_count,
+                                mean_auc=restored_value,
+                                best_auc=restored_summary.get("best_auc"),
+                                elapsed_seconds=0.0,
+                                development_progress=1.0,
+                                replay_progress=1.0,
+                                current_objective=restored_value,
+                                best_objective=best_objective,
+                                best_candidate_id=best_candidate_id,
+                                best_score=best_objective,
+                                baseline_comparison=restored_summary.get("baseline_auc"),
+                                worker_count=evaluation_worker_count,
+                                active_workers=0,
+                            )
+                    evaluation_row = state.evaluation(identity)
+                    evaluation_result: Mapping[str, Any] = {}
+                    if isinstance(evaluation_row, Mapping):
+                        raw_result = evaluation_row.get("result_json")
+                        if isinstance(raw_result, str):
+                            try:
+                                decoded_result = json.loads(raw_result)
+                            except json.JSONDecodeError:
+                                decoded_result = {}
+                            if isinstance(decoded_result, Mapping):
+                                evaluation_result = decoded_result
+                    evaluation_summary = evaluation_result.get("summary")
+                    evaluation_summary = (
+                        evaluation_summary if isinstance(evaluation_summary, Mapping) else {}
                     )
-                )
+                    evaluation_metric = evaluation_summary.get("mean_auc")
+                    numeric_metric = (
+                        float(evaluation_metric)
+                        if isinstance(evaluation_metric, (int, float))
+                        and not isinstance(evaluation_metric, bool)
+                        else 0.0
+                    )
+                    selection_candidates.append(
+                        replace(
+                            candidate,
+                            behavior_signature={
+                                **dict(candidate.behavior_signature),
+                                "score": numeric_metric,
+                            },
+                        )
+                    )
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
             selected = self._select_parents(
                 generation,
                 selection_candidates or candidates,
