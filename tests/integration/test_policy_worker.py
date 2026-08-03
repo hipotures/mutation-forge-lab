@@ -172,9 +172,22 @@ def test_shutdown_reaps_process_group_and_removes_isolated_cwd(
     assert not isolated_cwd.exists()
 
 
-def test_total_wall_limit_is_parent_controlled(project_root: Path) -> None:
+def test_idle_parent_time_does_not_consume_worker_call_budget(
+    project_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     worker = PolicyWorker(_source(project_root, "constant.py"))
-    worker._started -= worker.limits.total_wall_seconds + 1
+    idle_clock = time.monotonic() + worker.limits.total_wall_seconds + 1
+    monkeypatch.setattr(time, "monotonic", lambda: idle_clock)
+    try:
+        assert worker.call(_ctx(), _proposal()).priority == 1
+    finally:
+        worker.close()
+
+
+def test_total_call_wall_limit_is_parent_controlled(project_root: Path) -> None:
+    worker = PolicyWorker(_source(project_root, "constant.py"))
+    worker._total_call_wall_seconds = worker.limits.total_wall_seconds
     with pytest.raises(WorkerTimeoutError, match="total wall"):
         worker.call(_ctx(), _proposal())
     worker.close()

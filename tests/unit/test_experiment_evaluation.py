@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+from typing import Any, cast
+
+from mutation_forge.experiment import evaluation
+from mutation_forge.models import GraphScore, GraphState, RewritePlan
+from mutation_forge.proposals.k_switch import ProposalCandidate, ProposalPool
+from mutation_forge.stage2b.rankers import RankResult
+
+
+class _Backend:
+    def generate_seed(self, *, order: int, seed: int) -> GraphState:
+        return GraphState(order, ((0, 1),))
+
+    def validate(self, graph: GraphState) -> Any:
+        return type("Validation", (), {"valid": True, "errors": ()})()
+
+    def score(
+        self,
+        graph: GraphState,
+        *,
+        witness_cap: int,
+        cutoff: Any = None,
+    ) -> GraphScore:
+        return GraphScore(True, ((4, 2),), 2, 32, True, (0, 2, 32))
+
+
+class _PoolGenerator:
+    def __init__(self, backend: _Backend, *, pool_limits: Any) -> None:
+        self.backend = backend
+
+    def generate(self, graph: GraphState, *, policy_seed: int, step: int) -> ProposalPool:
+        candidate = ProposalCandidate(
+            RewritePlan((), (), "test"),
+            cast(
+                Any,
+                {
+                    "proposal_id": "proposal-0",
+                    "k": 2,
+                    "operator_family": "test",
+                    "selector_tags": [],
+                },
+            ),
+        )
+        return ProposalPool(
+            "test",
+            (candidate,),
+            "pool-0",
+            1,
+            {},
+            0,
+            1,
+            {},
+            {},
+            {},
+            0,
+            0,
+        )
+
+
+class _TimedOutRanker:
+    def rank(self, context: Any, pool: ProposalPool) -> RankResult:
+        return RankResult(
+            "candidate",
+            pool.pool_hash,
+            (),
+            None,
+            0,
+            False,
+            True,
+            False,
+            False,
+            {"code": "worker_timeout", "message": "worker exceeded total wall limit"},
+        )
+
+
+def test_rank_failure_is_recorded_without_aborting_evaluation(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(evaluation, "KSwitchPoolGenerator", _PoolGenerator)
+
+    result = evaluation._trajectory(
+        _Backend(),
+        _TimedOutRanker(),
+        {
+            "horizon": 1,
+            "proposal_pool_size": 1,
+            "witness_cap": 64,
+            "baselines": (),
+        },
+        order=4,
+        graph_seed=1,
+        policy_seed=2,
+        candidate_id="candidate",
+    )
+
+    candidate = cast(dict[str, Any], result["policies"])["candidate"]
+    assert candidate["failure_count"] == 1
+    assert candidate["raw_best_so_far_curve"] == [2]
+    trace = candidate["trace"]
+    assert trace[0]["error"] == "ranker did not select a pool proposal"
+    assert trace[0]["rank"]["timeout"] is True
+    assert trace[0]["rank"]["error"]["code"] == "worker_timeout"

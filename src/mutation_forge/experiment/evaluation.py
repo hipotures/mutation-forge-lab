@@ -331,8 +331,28 @@ def _trajectory(
                 )
             )
             if candidate is None:
-                raise RuntimeError(f"{candidate_id} ranker did not select a pool proposal")
-            _advance(backend, state, candidate.rewrite, settings, step, _rank_projection(rank))
+                state["failures"] += 1
+                state["curve"].append(state["score"].total_capped_witnesses)
+                state["recent_accepts"].append(0)
+                state["recent_improvements"].append(0.0)
+                state["stagnation"] += 1
+                state["trace"].append(
+                    {
+                        "step": step,
+                        "accepted": False,
+                        "error": "ranker did not select a pool proposal",
+                        "rank": _rank_projection(rank),
+                    }
+                )
+            else:
+                _advance(
+                    backend,
+                    state,
+                    candidate.rewrite,
+                    settings,
+                    step,
+                    _rank_projection(rank),
+                )
             state["recent_duplicate_rates"].append(
                 pool.deduplicated / max(1, pool.attempted)
             )

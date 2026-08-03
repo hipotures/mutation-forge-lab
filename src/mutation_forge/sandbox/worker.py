@@ -271,11 +271,11 @@ class PolicyWorker:
         if not validation.valid:
             raise ValueError(json.dumps(validation.as_dict(), sort_keys=True))
         self.identity = validation.identity
-        self._started = time.monotonic()
         self._failed = False
         self._closed = False
         self._calls = 0
         self._failures = 0
+        self._total_call_wall_seconds = 0.0
         self._total_elapsed_ns = 0
         self._max_elapsed_ns = 0
         self._controls: dict[str, JsonValue] = {}
@@ -427,8 +427,7 @@ class PolicyWorker:
     ) -> WorkerCallResult:
         if not self.usable:
             raise WorkerCrashError("failed or closed workers cannot be reused")
-        elapsed_total = time.monotonic() - self._started
-        total_remaining = self.limits.total_wall_seconds - elapsed_total
+        total_remaining = self.limits.total_wall_seconds - self._total_call_wall_seconds
         if total_remaining <= 0:
             self._failed = True
             self._terminate()
@@ -438,6 +437,7 @@ class PolicyWorker:
             proposal,
             max_request_bytes=self.limits.request_bytes,
         )
+        call_started = time.monotonic()
         try:
             self._send(
                 {
@@ -490,6 +490,8 @@ class PolicyWorker:
             self._failed = True
             self._terminate()
             raise
+        finally:
+            self._total_call_wall_seconds += max(0.0, time.monotonic() - call_started)
 
     def telemetry(self) -> dict[str, JsonValue]:
         return {
@@ -497,6 +499,7 @@ class PolicyWorker:
             "pid": self._process.pid,
             "calls": self._calls,
             "failures": self._failures,
+            "total_call_wall_seconds": self._total_call_wall_seconds,
             "total_policy_elapsed_ns": self._total_elapsed_ns,
             "max_policy_elapsed_ns": self._max_elapsed_ns,
             "usable": self.usable,
