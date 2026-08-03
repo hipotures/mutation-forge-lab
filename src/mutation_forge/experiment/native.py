@@ -1183,6 +1183,7 @@ class NativeExperimentAdapter:
                 )
             )
             feature_limits = FeatureLimits(forbidden_lengths=prompt_lengths)
+            sandbox_limits = SandboxLimits()
             numeric_scales = {
                 "ctx.order": {
                     "values_in_this_experiment": list(config.evaluation.orders),
@@ -1259,6 +1260,14 @@ class NativeExperimentAdapter:
                 "time. It owns legality, authoritative scoring, and verification. Do not invent "
                 "proposals, post-rewrite scores, proposal IDs, hidden state, or unavailable "
                 "fields.",
+                "",
+                "## Execution limits",
+                "",
+                "The host rejects source that exceeds any of these deterministic limits. "
+                "Keep the ranker compact; do not spend the budget on repeated equivalent "
+                "expressions or long literal tables.",
+                "",
+                fenced(sandbox_limits.as_dict()),
                 "",
                 "## Parent policy",
                 "",
