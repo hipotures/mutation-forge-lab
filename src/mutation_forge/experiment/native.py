@@ -1755,6 +1755,19 @@ class NativeExperimentAdapter:
                                 worker_count=evaluation_worker_count,
                                 active_workers=0,
                             )
+                            state.record_candidate(
+                                program_id,
+                                source_sha256=candidate.source_sha256,
+                                archive_path=str(archive.sources / f"{program_id}.py"),
+                                generation=candidate.generation,
+                                slot=candidate.slot,
+                                status="created",
+                                metadata={
+                                    "search_metrics": {
+                                        "pooled_median_auc": restored_value,
+                                    }
+                                },
+                            )
                     evaluation_row = state.evaluation(identity)
                     evaluation_result: Mapping[str, Any] = {}
                     if isinstance(evaluation_row, Mapping):

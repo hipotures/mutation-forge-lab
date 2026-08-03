@@ -94,15 +94,15 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             "resumable": False,
             "last_error": str(error),
         }
+    manifest_error: str | None = None
     try:
         layout.verify_artifact_manifest(allow_new=True)
     except WorkspaceError as error:
-        return {
-            **_not_created(config, layout),
-            "state": "failed",
-            "resumable": False,
-            "last_error": str(error),
-        }
+        # The active session appends its event log and rewrites the manifest
+        # concurrently.  A read racing that append can observe one file hash
+        # from before the manifest update; defer the strict verdict until the
+        # owner/state row is available instead of reporting a false FAILED.
+        manifest_error = str(error)
     try:
         state = ExperimentStateStore(layout.state)
     except StateError as error:
@@ -136,10 +136,18 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             checkpoint_error = "state database checkpoint does not match checkpoint chain"
         current_state = state.state()
         owner = state.owner()
+        owner_active = owner is not None and process_alive(int(owner["pid"]))
+        if manifest_error is not None and not owner_active:
+            return {
+                **_not_created(config, layout),
+                "state": "failed",
+                "resumable": False,
+                "last_error": manifest_error,
+            }
         if (
             current_state == "running"
             and owner is not None
-            and not process_alive(int(owner["pid"]))
+            and not owner_active
         ):
             current_state = "interrupted"
         if checkpoint_error is not None:
@@ -281,7 +289,10 @@ def _candidate_metric(metadata: Mapping[str, Any]) -> float | int | None:
 
 def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
     rows = state.connection.execute(
-        "SELECT candidate_id,archive_path,generation,slot,status,metadata_json "
+        "SELECT candidate_id,archive_path,generation,slot,status,metadata_json,"
+        "(SELECT result_json FROM evaluations e "
+        " WHERE e.identity = candidates.candidate_id || ':development' "
+        "   AND e.state='completed' LIMIT 1) AS evaluation_json "
         "FROM candidates WHERE status NOT IN ('duplicate','invalid')"
     ).fetchall()
     candidates: list[dict[str, Any]] = []
@@ -292,10 +303,23 @@ def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
             metadata = {}
         if not isinstance(metadata, Mapping):
             metadata = {}
+        metric = _candidate_metric(metadata)
+        if metric is None and row["evaluation_json"]:
+            try:
+                evaluation = json.loads(str(row["evaluation_json"]))
+            except json.JSONDecodeError:
+                evaluation = {}
+            summary = evaluation.get("summary") if isinstance(evaluation, Mapping) else None
+            candidate_metric = summary.get("mean_auc") if isinstance(summary, Mapping) else None
+            if (
+                isinstance(candidate_metric, (int, float))
+                and not isinstance(candidate_metric, bool)
+            ):
+                metric = float(candidate_metric)
         candidates.append(
             {
                 "candidate_id": str(row["candidate_id"]),
-                "metric": _candidate_metric(metadata),
+                "metric": metric,
                 "generation": row["generation"],
                 "slot": row["slot"],
                 "status": str(row["status"]),
