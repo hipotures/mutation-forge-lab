@@ -127,6 +127,7 @@ class GenerationResult:
     request_id: int
     thread_path: str | None
     diagnostics: tuple[Mapping[str, Any], ...] = ()
+    duration_ms: int | None = None
 
 
 ProcessFactory = Callable[..., Any]
@@ -676,6 +677,7 @@ class CodexAppServerAdapter:
         final = None
         final_item = None
         usage_raw = None
+        turn_duration_ms: int | None = None
         terminal = False
         deadline = time.monotonic() + self.limits.turn_timeout
         self._active.clear()
@@ -778,6 +780,14 @@ class CodexAppServerAdapter:
                 t, ids = self._validated_turn(ev, source="turn/completed")
                 if t.get("status") != "completed":
                     raise TurnError(f"turn ended with status {t.get('status')!r}")
+                duration_ms = t.get("durationMs")
+                if duration_ms is not None and (
+                    not isinstance(duration_ms, int)
+                    or isinstance(duration_ms, bool)
+                    or duration_ms < 0
+                ):
+                    raise ProtocolError("turn/completed returned invalid durationMs")
+                turn_duration_ms = duration_ms
                 if self._active:
                     raise ProtocolError("turn completed with active items")
                 if (
@@ -848,6 +858,7 @@ class CodexAppServerAdapter:
             request_id,
             cast(str | None, cast(Json, self._thread).get("path")),
             tuple(self._diag),
+            turn_duration_ms,
         )
 
     def _usage(self, raw: Mapping[str, Any] | None) -> TokenUsage:

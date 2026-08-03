@@ -275,6 +275,7 @@ class _CodexTransport:
             "provider_thread_id": result.thread_id,
             "provider_turn_id": result.turn_id,
             "provider_request_id": result.request_id,
+            "provider_duration_ms": result.duration_ms,
             "model": model,
             "effort": effort,
             "transport_sha256": adapter.logger.transcript_sha256 if adapter.logger else None,

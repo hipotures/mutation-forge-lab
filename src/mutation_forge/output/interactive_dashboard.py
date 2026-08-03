@@ -286,6 +286,14 @@ def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
+def _provider_elapsed(payload: Mapping[str, JsonValue]) -> float | None:
+    duration_ms = _number(payload.get("provider_duration_ms"))
+    if duration_ms is not None and duration_ms >= 0:
+        return duration_ms / 1000.0
+    elapsed = _number(payload.get("operation_elapsed_seconds"))
+    return elapsed if elapsed is not None and elapsed >= 0 else None
+
+
 def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -928,7 +936,14 @@ def reduce_dashboard_event(
             slot_state = "validating" if payload.get("accepted") is True else "failed"
             lifecycle_phase = "response"
             lifecycle_status = "pass" if payload.get("accepted") is True else "fail"
-            elapsed = max(0.0, now - started) if started is not None else elapsed
+            event_elapsed = _provider_elapsed(payload)
+            elapsed = (
+                event_elapsed
+                if event_elapsed is not None
+                else max(0.0, now - started)
+                if started is not None
+                else elapsed
+            )
             started = None
             if payload.get("accepted") is True:
                 error = ""
@@ -939,7 +954,14 @@ def reduce_dashboard_event(
             lifecycle_status = "fail"
             retryable = _retryable_provider_failure(payload)
             error = _text(payload.get("error")) or "provider turn failed"
-            elapsed = max(0.0, now - started) if started is not None else elapsed
+            event_elapsed = _provider_elapsed(payload)
+            elapsed = (
+                event_elapsed
+                if event_elapsed is not None
+                else max(0.0, now - started)
+                if started is not None
+                else elapsed
+            )
             started = None
         elif event_type == "repair_started":
             slot_state = "repair"
@@ -1764,7 +1786,6 @@ class InteractiveDashboardSink:
         )
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
-        del horizontal
         values = (
             (
                 "Generation",
@@ -1822,10 +1843,23 @@ class InteractiveDashboardSink:
                     style="bold red",
                 )
             )
-        grid = Table.grid(expand=True)
-        grid.add_column(no_wrap=True)
-        for renderable in renderables:
-            grid.add_row(renderable)
+        # Keep every metric visible in the fixed-height progress panel.  A
+        # vertical six-row layout used to be clipped after the first few
+        # rows, which made hourly tokens, evaluation, and wall time appear to
+        # disappear.  At dashboard widths, two columns fit the same metrics
+        # in three rows while retaining each bar's numeric ratio.
+        use_columns = width >= 80
+        grid = Table.grid(expand=True, padding=(0, 1) if use_columns else (0, 0))
+        if use_columns:
+            grid.add_column(ratio=1, no_wrap=True)
+            grid.add_column(ratio=1, no_wrap=True)
+            for index in range(0, len(renderables), 2):
+                right = renderables[index + 1] if index + 1 < len(renderables) else Text()
+                grid.add_row(renderables[index], right)
+        else:
+            grid.add_column(no_wrap=True)
+            for renderable in renderables:
+                grid.add_row(renderable)
         content: RenderableType = grid
         return Panel(content, border_style="cyan", padding=(0, 1))
 

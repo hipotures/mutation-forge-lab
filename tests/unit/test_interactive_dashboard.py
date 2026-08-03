@@ -332,12 +332,14 @@ def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> N
             "totalTokens": 18,
         },
         usage_quality="exact",
+        provider_duration_ms=412859,
     )
     once = reduce_dashboard_event(state, completed, monotonic=120.0)
     twice = reduce_dashboard_event(once, completed, monotonic=121.0)
     assert once.cumulative_usage.total == 178
     assert twice.cumulative_usage.total == 178
     assert once.session_usage.total == 18
+    assert once.generations[0].slots[2].elapsed_seconds == pytest.approx(412.859)
     assert twice.session_usage.total == 18
 
     archived = _event(
@@ -722,6 +724,8 @@ def test_progress_panel_is_vertical_and_shows_hourly_token_limit(width: int) -> 
     rendered = output.getvalue()
     assert "Hourly tokens" in rendered
     assert "84.2k/1.00M" in rendered
+    assert "Evaluation" in rendered
+    assert "Session wall" in rendered
     assert "Model Turn Budget" not in rendered
     assert "Evaluation Progress" not in rendered
     assert all(len(line) <= width for line in rendered.splitlines())
@@ -1246,14 +1250,14 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "894b0e86df20ea3be8dab85c2b7fd13c69f1f422f424951b6208d196dfb6c664"
+        "268c53b2e3071a93809605940f7720e641fd5d53da2a300adb57d26b199cfb60"
     ),
-    "evaluation_active": ("d2073c68a0759600fdc88d9c19d4af3df4f3f8deb1e1d4ab4655ee0b7d142cac"),
-    "validation_details": ("f6f80c5c4fbf817030f2e9bc31fa6302f88ff91e4dd3a21c8c002121ef286dcf"),
-    "completed": ("821f7527446fbb10bd9deed31b66a93c55d6da1dbaf8164a75ff26deb77b410e"),
-    "profiling_disabled": ("0347445cc849f903c69d1131ebe1e8cd5aae47a9f1e51fa0f00b85fb7168e841"),
-    "compact": ("9666728fbd8015d3fd5cfdf9939947ec1e716bc715d1ffa74ac2adba38afc1a3"),
-    "minimal": ("ec16136c52941ed56d4f8607de4a2a7462ceeb3509e26e36526a5b8f298ee259"),
+    "evaluation_active": ("85a5690c51ac2ff37564850022b32bfa05aeee859441a66099a47a511486678a"),
+    "validation_details": ("661e90abba3e1c3879946509edbe698bad264a9d5a34a96624315dc13910feca"),
+    "completed": ("915029dba48a02bf711745bd4edfc677a12f2d0f049f8dca563649e66e8f839d"),
+    "profiling_disabled": ("01da8e6e594f70bc6d405d7a5cd081837c5d8372f3bc09c42bd8ecc60f61470f"),
+    "compact": ("f6fd02615400514ff55254f356c9bda8ac1360179793f2a51ba835a69a482864"),
+    "minimal": ("a43735ee60c8dda4ee8dea83c601149dd1789f51a7693d547935d2e9ab18083c"),
 }
 
 

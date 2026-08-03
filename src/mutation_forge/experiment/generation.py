@@ -135,6 +135,7 @@ class ProviderResult:
     provider_request_id: str | None = None
     provider_thread_id: str | None = None
     provider_turn_id: str | None = None
+    provider_duration_ms: int | None = None
     error: str | None = None
     retained: bool = False
     validation: Mapping[str, Any] = field(default_factory=dict)
@@ -169,6 +170,12 @@ class ProviderResult:
                 provider_request_id=value.get("provider_request_id"),
                 provider_thread_id=value.get("provider_thread_id"),
                 provider_turn_id=value.get("provider_turn_id"),
+                provider_duration_ms=(
+                    value.get("provider_duration_ms")
+                    if isinstance(value.get("provider_duration_ms"), int)
+                    and not isinstance(value.get("provider_duration_ms"), bool)
+                    else None
+                ),
                 error=str(value.get("error")) if value.get("error") is not None else None,
                 retained=value.get("retained") is True,
                 validation=cast(Mapping[str, Any], value.get("validation", {}))
@@ -224,6 +231,12 @@ class ProviderResult:
                 provider_request_id=getattr(value, "provider_request_id", None),
                 provider_thread_id=getattr(value, "provider_thread_id", None),
                 provider_turn_id=getattr(value, "provider_turn_id", None),
+                provider_duration_ms=(
+                    getattr(value, "provider_duration_ms", None)
+                    if isinstance(getattr(value, "provider_duration_ms", None), int)
+                    and not isinstance(getattr(value, "provider_duration_ms", None), bool)
+                    else None
+                ),
                 error=getattr(value, "error", None),
                 retained=bool(getattr(value, "retained", False)),
             )
@@ -246,6 +259,7 @@ class ProviderResult:
             "provider_request_id": self.provider_request_id,
             "provider_thread_id": self.provider_thread_id,
             "provider_turn_id": self.provider_turn_id,
+            "provider_duration_ms": self.provider_duration_ms,
             "error": self.error,
             "retained": self.retained,
             "validation": _safe(dict(self.validation)),
@@ -968,6 +982,8 @@ class GenerationCoordinator:
                 provider_request_id=result.provider_request_id,
                 provider_thread_id=result.provider_thread_id or result.thread_id,
                 provider_turn_id=result.provider_turn_id or result.turn_id,
+                provider_duration_ms=result.provider_duration_ms,
+                operation_elapsed_seconds=max(0.0, time.monotonic() - turn_started),
                 error=result.error,
                 idempotency_key=request.idempotency_key,
                 repair_attempt=request.repair_attempt,
@@ -1014,6 +1030,8 @@ class GenerationCoordinator:
                 provider_request_id=result.provider_request_id,
                 provider_thread_id=result.provider_thread_id or result.thread_id,
                 provider_turn_id=result.provider_turn_id or result.turn_id,
+                provider_duration_ms=result.provider_duration_ms,
+                operation_elapsed_seconds=max(0.0, time.monotonic() - turn_started),
                 error=result.error,
                 idempotency_key=request.idempotency_key,
                 repair_attempt=request.repair_attempt,
@@ -1433,6 +1451,7 @@ class GenerationCoordinator:
             "validation_status": ("passed" if result.candidate is not None else "unknown"),
             "probe_status": ("passed" if result.candidate is not None else "unknown"),
             "charged": charged,
+            "provider_duration_ms": provider_result.provider_duration_ms,
             **GenerationCoordinator._usage_payload(provider_result),
             "content": (
                 evidence.get("content")

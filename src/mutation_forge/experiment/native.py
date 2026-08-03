@@ -1461,7 +1461,8 @@ class NativeExperimentAdapter:
                     source_lines=len(candidate.source.splitlines()),
                 )
                 identity = f"{program_id}:development"
-                if state.evaluation(identity) is None:
+                existing_evaluation = state.evaluation(identity)
+                if existing_evaluation is None:
                     evaluator = self.evaluator or evaluate_candidate
                     emit(
                         "evaluation_started",
@@ -1616,6 +1617,47 @@ class NativeExperimentAdapter:
                         status="created",
                         metadata=metadata,
                     )
+                else:
+                    # A resumed generation can already have a durable
+                    # evaluation result.  Re-emit it to hydrate the live
+                    # dashboard instead of leaving the recovered slot with
+                    # an empty objective until a new evaluation happens.
+                    restored_summary = stored_evaluation_summary(program_id)
+                    restored_metric = restored_summary.get("mean_auc")
+                    if (
+                        isinstance(restored_metric, (int, float))
+                        and not isinstance(restored_metric, bool)
+                    ):
+                        restored_value = float(restored_metric)
+                        if best_objective is None or restored_value > best_objective:
+                            best_objective = restored_value
+                            best_candidate_id = program_id
+                        evaluation_count = state.counts().get("evaluation_count", 0)
+                        emit(
+                            "evaluation_completed",
+                            generation=generation,
+                            slot=candidate.slot,
+                            candidate_id=program_id,
+                            phase="development",
+                            evaluation_id=identity,
+                            status="completed",
+                            restored=True,
+                            evaluations_active=0,
+                            evaluations_completed=evaluation_count,
+                            evaluation_count=evaluation_count,
+                            mean_auc=restored_value,
+                            best_auc=restored_summary.get("best_auc"),
+                            elapsed_seconds=0.0,
+                            development_progress=1.0,
+                            replay_progress=1.0,
+                            current_objective=restored_value,
+                            best_objective=best_objective,
+                            best_candidate_id=best_candidate_id,
+                            best_score=best_objective,
+                            baseline_comparison=restored_summary.get("baseline_auc"),
+                            worker_count=config.resources.workers,
+                            active_workers=0,
+                        )
                 evaluation_row = state.evaluation(identity)
                 evaluation_result: Mapping[str, Any] = {}
                 if isinstance(evaluation_row, Mapping):
