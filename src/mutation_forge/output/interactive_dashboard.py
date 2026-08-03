@@ -11,12 +11,12 @@ import time
 import tty
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any, Literal, TextIO
 
 from rich import box
 from rich.align import Align
-from rich.console import Console, Group, RenderableType
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -27,8 +27,15 @@ from rich.text import Text
 
 from mutation_forge.events import Event
 from mutation_forge.models import JsonValue
+from mutation_forge.output.panel_copy import (
+    copy_text_to_clipboard_osc52,
+    render_panel_copy_text,
+    save_panel_copy,
+)
 
 REFRESH_INTERVAL_SECONDS = 1.0
+COPY_NOTICE_SECONDS = 6.0
+PANEL_COPY_TMP_DIR = Path("/tmp")
 DETAIL_TABS = (
     "Overview",
     "Lifecycle",
@@ -81,6 +88,26 @@ LIFECYCLE_PHASES = (
     "evaluation",
     "archived",
 )
+PANEL_COPY_KEYS = {
+    "1": "header",
+    "2": "progress",
+    "3": "slots",
+    "4": "performance",
+    "5": "tokens",
+    "6": "objective",
+    "7": "activity",
+    "8": "quick-view",
+}
+PANEL_COPY_WIDTHS = {
+    "header": 150,
+    "progress": 150,
+    "slots": 150,
+    "performance": 60,
+    "tokens": 60,
+    "objective": 60,
+    "activity": 100,
+    "quick-view": 80,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,8 +238,9 @@ class DashboardState:
 
 @dataclass(frozen=True, slots=True)
 class DashboardAction:
-    kind: Literal["quit", "pause", "resume", "retry"]
+    kind: Literal["quit", "pause", "resume", "retry", "copy"]
     slot: str | None = None
+    panel: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,6 +910,12 @@ def reduce_dashboard_key(
         if len(key) == 1 and key.isprintable():
             return replace(state, search_query=state.search_query + key), None
         return state, None
+    if key in PANEL_COPY_KEYS:
+        panel = PANEL_COPY_KEYS[key]
+        return (
+            replace(state, status_message=f"Preparing panel {key} copy"),
+            DashboardAction("copy", panel=panel),
+        )
     if key in {"UP", "k", "DOWN", "j", "HOME", "END"}:
         group = _generation_slots(state, state.displayed_generation)
         last = max(0, len(group.slots) - 1)
@@ -1102,6 +1136,9 @@ class InteractiveDashboardSink:
         self._rendered = threading.Event()
         self._rendered.set()
         self._closed = False
+        self._pending_copy_action: str | None = None
+        self._copy_notice_message: str | None = None
+        self._copy_notice_until: float | None = None
         self._input = _TerminalInput(input_stream, self.handle_key)
         self.live = Live(
             self.render(),
@@ -1139,6 +1176,9 @@ class InteractiveDashboardSink:
                 retry_supported=self.capabilities.retry is not None,
             )
             self.state = state
+            if action is not None and action.kind == "copy":
+                self._pending_copy_action = action.panel
+                action = None
             self._rendered.clear()
             self._dirty.set()
         if action is not None:
@@ -1164,14 +1204,96 @@ class InteractiveDashboardSink:
             changed = self._dirty.wait(REFRESH_INTERVAL_SECONDS)
             self._dirty.clear()
             with self._lock:
+                notice_expired = self._expire_copy_notice_unlocked()
                 active = self.state.experiment_state not in {
                     "completed",
                     "interrupted",
                     "failed",
                 }
-                if changed or active:
+                if self._pending_copy_action is not None:
+                    self._handle_pending_panel_copy_unlocked()
+                    changed = True
+                if changed or active or notice_expired:
                     self.live.update(self.render_unlocked(), refresh=True)
                 self._rendered.set()
+
+    def _handle_pending_panel_copy_unlocked(self) -> None:
+        panel_name = self._pending_copy_action
+        self._pending_copy_action = None
+        if panel_name is None:
+            return
+        title, renderable = self._panel_copy_source(panel_name)
+        text = render_panel_copy_text(
+            title,
+            renderable,
+            width=PANEL_COPY_WIDTHS[panel_name],
+        )
+        try:
+            path = save_panel_copy(
+                panel_name,
+                self.state.run_id,
+                text,
+                tmp_dir=PANEL_COPY_TMP_DIR,
+            )
+        except OSError as error:
+            notice = f"Panel copy failed: {error.strerror or error.__class__.__name__}"
+        else:
+            try:
+                osc52_sent = copy_text_to_clipboard_osc52(text)
+            except OSError:
+                osc52_sent = False
+            notice = (
+                f"OSC 52 sent · fallback {path}"
+                if osc52_sent
+                else f"OSC 52 unavailable · saved {path}"
+            )
+        self.state = replace(self.state, status_message=notice)
+        self._copy_notice_message = notice
+        self._copy_notice_until = time.monotonic() + COPY_NOTICE_SECONDS
+
+    def _expire_copy_notice_unlocked(self) -> bool:
+        if (
+            self._copy_notice_until is None
+            or time.monotonic() < self._copy_notice_until
+        ):
+            return False
+        if self.state.status_message == self._copy_notice_message:
+            self.state = replace(self.state, status_message="")
+        self._copy_notice_message = None
+        self._copy_notice_until = None
+        return True
+
+    def _panel_copy_source(self, panel_name: str) -> tuple[str, RenderableType]:
+        if panel_name == "header":
+            return "Experiment header", self._header(PANEL_COPY_WIDTHS[panel_name])
+        if panel_name == "progress":
+            return "Experiment progress", self._progress(
+                PANEL_COPY_WIDTHS[panel_name],
+                horizontal=True,
+            )
+        if panel_name == "slots":
+            if self.state.view == "details":
+                slot = _selected_slot(self.state)
+                suffix = f" · {slot.slot}" if slot is not None else ""
+                return (
+                    f"Slot details{suffix}",
+                    self._slot_details(PANEL_COPY_WIDTHS[panel_name], "copy"),
+                )
+            return (
+                f"Slot matrix · generation {self.state.displayed_generation}",
+                self._slot_matrix(PANEL_COPY_WIDTHS[panel_name], "full"),
+            )
+        if panel_name == "performance":
+            return "Performance & IR", self._performance_panel()
+        if panel_name == "tokens":
+            return "Token Accounting", self._tokens_panel()
+        if panel_name == "objective":
+            return "Objective / Archive", self._objective_panel()
+        if panel_name == "activity":
+            return "Recent Activity", self._activity_panel("copy")
+        if panel_name == "quick-view":
+            return "Quick View", self._quick_view_panel("full")
+        raise ValueError(f"Unknown panel copy target: {panel_name}")
 
     def render(self) -> Layout:
         with self._lock:
@@ -1192,8 +1314,12 @@ class InteractiveDashboardSink:
         metric_rows = 1
         if mode == "full":
             root.split_column(
-                Layout(self._header(width), name="header", size=5),
-                Layout(self._progress(width, horizontal=True), name="progress", size=5),
+                Layout(_numbered_panel(self._header(width), "1"), name="header", size=5),
+                Layout(
+                    _numbered_panel(self._progress(width, horizontal=True), "2"),
+                    name="progress",
+                    size=5,
+                ),
                 Layout(name="main", size=13),
                 Layout(name="metrics", size=14),
                 Layout(name="bottom"),
@@ -1203,23 +1329,34 @@ class InteractiveDashboardSink:
             metrics_size = min(13, max(3, height - 29))
             metric_rows = max(1, metrics_size - 2)
             root.split_column(
-                Layout(self._header(width, compact=True), name="header", size=4),
-                Layout(self._progress(width, horizontal=False), name="progress", size=7),
+                Layout(
+                    _numbered_panel(self._header(width, compact=True), "1"),
+                    name="header",
+                    size=4,
+                ),
+                Layout(
+                    _numbered_panel(self._progress(width, horizontal=False), "2"),
+                    name="progress",
+                    size=7,
+                ),
                 Layout(name="main", size=13),
                 Layout(name="metrics", size=metrics_size),
                 Layout(name="bottom"),
                 Layout(self._footer(width), name="footer", size=1),
             )
         root["main"].update(
-            self._slot_details(width, mode)
-            if self.state.view == "details"
-            else self._slot_matrix(width, mode)
+            _numbered_panel(
+                self._slot_details(width, mode)
+                if self.state.view == "details"
+                else self._slot_matrix(width, mode),
+                "3",
+            )
         )
         if mode == "full":
             panels = [
-                Layout(self._performance_panel(), ratio=1),
-                Layout(self._tokens_panel(), ratio=1),
-                Layout(self._objective_panel(), ratio=1),
+                Layout(_numbered_panel(self._performance_panel(), "4"), ratio=1),
+                Layout(_numbered_panel(self._tokens_panel(), "5"), ratio=1),
+                Layout(_numbered_panel(self._objective_panel(), "6"), ratio=1),
             ]
             if self.state.profiling_enabled and self.state.timing_profile is not None:
                 panels.append(Layout(self._profiling_panel(), ratio=1))
@@ -1227,31 +1364,52 @@ class InteractiveDashboardSink:
         else:
             root["metrics"].split_row(
                 Layout(
-                    self._performance_panel(compact=True, row_limit=metric_rows),
+                    _numbered_panel(
+                        self._performance_panel(
+                            compact=True,
+                            row_limit=metric_rows,
+                        ),
+                        "4",
+                    ),
                     ratio=1,
                 ),
                 Layout(
-                    self._tokens_panel(compact=True, row_limit=metric_rows),
+                    _numbered_panel(
+                        self._tokens_panel(
+                            compact=True,
+                            row_limit=metric_rows,
+                        ),
+                        "5",
+                    ),
                     ratio=1,
                 ),
                 Layout(
-                    self._objective_panel(compact=True, row_limit=metric_rows),
+                    _numbered_panel(
+                        self._objective_panel(
+                            compact=True,
+                            row_limit=metric_rows,
+                        ),
+                        "6",
+                    ),
                     ratio=1,
                 ),
             )
         root["bottom"].split_row(
-            Layout(self._activity_panel(mode), ratio=3),
-            Layout(self._quick_view_panel(mode), ratio=2),
+            Layout(_numbered_panel(self._activity_panel(mode), "7"), ratio=3),
+            Layout(_numbered_panel(self._quick_view_panel(mode), "8"), ratio=2),
         )
         return root
 
     def _render_minimal(self, width: int, height: int) -> Layout:
         root = Layout(name="root")
         root.split_column(
-            Layout(self._header(width, minimal=True), size=3),
-            Layout(self._progress(width, horizontal=False), size=7),
-            Layout(self._minimal_slot(), size=5),
-            Layout(self._activity_panel("minimal")),
+            Layout(_numbered_panel(self._header(width, minimal=True), "1"), size=3),
+            Layout(
+                _numbered_panel(self._progress(width, horizontal=False), "2"),
+                size=7,
+            ),
+            Layout(_numbered_panel(self._minimal_slot(), "3"), size=5),
+            Layout(_numbered_panel(self._activity_panel("minimal"), "7")),
             Layout(self._footer(width), size=1),
         )
         return root
@@ -1264,9 +1422,15 @@ class InteractiveDashboardSink:
             minimal=mode == "minimal",
         )
         root.split_column(
-            Layout(header, size=5 if mode == "full" else 4 if mode == "compact" else 3),
             Layout(
-                self._progress(width, horizontal=mode == "full"),
+                _numbered_panel(header, "1"),
+                size=5 if mode == "full" else 4 if mode == "compact" else 3,
+            ),
+            Layout(
+                _numbered_panel(
+                    self._progress(width, horizontal=mode == "full"),
+                    "2",
+                ),
                 size=5 if mode == "full" else 7,
             ),
             Layout(self._overlay_panel(width, height)),
@@ -1529,12 +1693,22 @@ class InteractiveDashboardSink:
             )
         elif tab == "Prompt preview":
             body = Text(
-                _bounded_preview(slot.prompt_preview, 8 if mode == "full" else 5),
+                slot.prompt_preview
+                if mode == "copy" and slot.prompt_preview
+                else _bounded_preview(
+                    slot.prompt_preview,
+                    8 if mode == "full" else 5,
+                ),
                 style="" if slot.prompt_preview else "dim",
             )
         else:
             body = Text(
-                _bounded_preview(slot.response_preview, 8 if mode == "full" else 5),
+                slot.response_preview
+                if mode == "copy" and slot.response_preview
+                else _bounded_preview(
+                    slot.response_preview,
+                    8 if mode == "full" else 5,
+                ),
                 style="" if slot.response_preview else "dim",
             )
         return Panel(
@@ -1686,7 +1860,14 @@ class InteractiveDashboardSink:
         return Panel(table, title="Profiling · top-N", border_style="cyan")
 
     def _activity_panel(self, mode: str) -> Panel:
-        limit = 8 if mode == "full" else 4 if mode == "compact" else 5
+        if mode == "copy":
+            limit = len(self.state.activity)
+        elif mode == "full":
+            limit = 8
+        elif mode == "compact":
+            limit = 4
+        else:
+            limit = 5
         query = self.state.search_query.lower()
         entries = [
             item
@@ -1792,6 +1973,8 @@ class InteractiveDashboardSink:
                 "  q graceful stop         p pause/resume scheduling\n"
                 "  n/Shift+N generation    r confirmed retryable slot\n"
                 "  c config  l logs  t top  / search  h help\n\n"
+                "Panel copy\n"
+                "  1–8 copy the numbered panel to OSC 52 and /tmp\n\n"
                 "Metrics\n"
                 "  IR uses completed authoritative evaluations only.\n"
                 "  Unknown values are —, never inferred as zero.\n"
@@ -1813,6 +1996,7 @@ class InteractiveDashboardSink:
             return Text("Retry selected slot? [y/N]".ljust(width), style="reverse")
         labels = (
             (
+                "[1–8] copy",
                 "[q] quit",
                 "[p] pause/resume",
                 "[n] next gen",
@@ -1825,6 +2009,7 @@ class InteractiveDashboardSink:
             )
             if width >= 110
             else (
+                "[1–8] copy",
                 "[q]quit",
                 "[p]pause",
                 "[n]gen",
@@ -1841,9 +2026,9 @@ class InteractiveDashboardSink:
             if index:
                 footer.append("  ", style="reverse")
             disabled = (
-                (index == 1 and self.capabilities.pause is None)
-                or (index == 3 and self.capabilities.retry is None)
-                or (index == 6 and not self.state.profiling_enabled)
+                (label.startswith("[p]") and self.capabilities.pause is None)
+                or (label.startswith("[r]") and self.capabilities.retry is None)
+                or (label.startswith("[t]") and not self.state.profiling_enabled)
             )
             footer.append(label, style="reverse dim" if disabled else "reverse")
         status = f" · {self.state.status_message}" if self.state.status_message else ""
@@ -1897,6 +2082,67 @@ def _responsive_mode(width: int, height: int) -> Literal["full", "compact", "min
     if width >= 110 and height >= 32:
         return "compact"
     return "minimal"
+
+
+@dataclass(frozen=True, slots=True)
+class _NumberedPanel:
+    panel: Panel
+    number: str
+
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        width = (
+            options.max_width
+            if self.panel.width is None
+            else min(options.max_width, self.panel.width)
+        )
+        title = _numbered_panel_title(self.panel.title, self.number, width)
+        numbered = Panel(
+            self.panel.renderable,
+            box=self.panel.box,
+            title=title,
+            title_align="left",
+            subtitle=self.panel.subtitle,
+            subtitle_align=self.panel.subtitle_align,
+            safe_box=self.panel.safe_box,
+            expand=self.panel.expand,
+            style=self.panel.style,
+            border_style=self.panel.border_style,
+            width=self.panel.width,
+            height=self.panel.height,
+            padding=self.panel.padding,
+            highlight=self.panel.highlight,
+        )
+        yield from console.render(numbered, options)
+
+
+def _numbered_panel(panel: Panel, number: str) -> _NumberedPanel:
+    return _NumberedPanel(panel, number)
+
+
+def _numbered_panel_title(
+    title: str | Text | None,
+    number: str,
+    panel_width: int,
+) -> Text:
+    width = max(1, panel_width - 6)
+    characters = ["─"] * width
+    characters[-1] = number
+    if width >= 2:
+        characters[-2] = " "
+    if title is not None:
+        plain_title = (
+            title.plain if isinstance(title, Text) else Text.from_markup(title).plain
+        ).strip()
+        label = f" {plain_title} "
+        available = max(0, width - 3)
+        label = _compact(label, available)
+        start = max(0, min((width - len(label)) // 2, available - len(label)))
+        characters[start : start + len(label)] = label
+    return Text("".join(characters))
 
 
 def _progress_bar(

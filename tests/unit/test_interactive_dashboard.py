@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 from rich.console import Console
+from rich.panel import Panel
 
 from mutation_forge import cli
 from mutation_forge.events import Event
@@ -376,6 +377,32 @@ def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     assert "unavailable" in state.status_message
 
 
+def test_number_keys_request_stable_panel_copies_but_remain_search_text() -> None:
+    state = _running_state()
+    for key, panel in dashboard.PANEL_COPY_KEYS.items():
+        state, action = reduce_dashboard_key(state, key)
+        assert action == dashboard.DashboardAction("copy", panel=panel)
+
+    state = replace(state, search_editing=True, search_query="")
+    state, action = reduce_dashboard_key(state, "5")
+    assert action is None
+    assert state.search_query == "5"
+
+
+def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() -> None:
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=40,
+        force_terminal=False,
+        color_system=None,
+    ).print(dashboard._numbered_panel(Panel("body", title="Tokens"), "5"))
+    top = output.getvalue().splitlines()[0]
+    assert len(top) == 40
+    assert "Tokens" in top
+    assert top.endswith(" 5 ─╮")
+
+
 @pytest.mark.parametrize(
     ("width", "height", "expected"),
     (
@@ -435,8 +462,10 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
         )
         assert "experiment input" in rendered
         assert "session total" in rendered
+        assert "[1–8] copy" in rendered
     elif width >= 110:
         assert "session total" in rendered
+        assert "[1–8] copy" in rendered
     sink.close()
 
 
@@ -530,6 +559,7 @@ def test_key_decoder_handles_navigation_and_detail_keys() -> None:
         "TAB",
         "BACKSPACE",
     ]
+    assert _decode_keys(b"12345678") == (list("12345678"), b"")
 
 
 def test_terminal_input_restores_terminal_mode() -> None:
@@ -621,6 +651,64 @@ def test_sink_dispatches_supported_pause_and_retry_without_execution_side_effect
     sink.close()
 
 
+def test_pending_panel_copy_writes_fallback_and_expires_notice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = [130.0]
+    clipboard = Mock(return_value=False)
+    monkeypatch.setattr(dashboard, "PANEL_COPY_TMP_DIR", tmp_path)
+    monkeypatch.setattr(dashboard, "copy_text_to_clipboard_osc52", clipboard)
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: now[0])
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        start_live=False,
+    )
+    sink.state = _running_state()
+
+    sink.handle_key("5")
+    assert sink._pending_copy_action == "tokens"
+    with sink._lock:
+        sink._handle_pending_panel_copy_unlocked()
+
+    path = tmp_path / "panel-tokens-dashboard-run.txt"
+    copied = path.read_text(encoding="utf-8")
+    assert copied.startswith("# Token Accounting\n\n")
+    assert "experiment input" in copied
+    assert "\x1b" not in copied
+    clipboard.assert_called_once_with(copied)
+    assert sink.state.status_message == f"OSC 52 unavailable · saved {path}"
+
+    now[0] += dashboard.COPY_NOTICE_SECONDS
+    with sink._lock:
+        assert sink._expire_copy_notice_unlocked()
+    assert sink.state.status_message == ""
+    sink.close()
+
+
+def test_slot_detail_copy_includes_full_prompt_preview() -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        start_live=False,
+    )
+    state = _running_state()
+    slots = list(state.generations[0].slots)
+    prompt = "\n".join(f"line {index}" for index in range(12))
+    slots[0] = replace(slots[0], prompt_preview=prompt)
+    sink.state = replace(
+        state,
+        generations=(GenerationSlots(1, tuple(slots)),),
+        view="details",
+        detail_tab=6,
+    )
+    title, renderable = sink._panel_copy_source("slots")
+    copied = dashboard.render_panel_copy_text(title, renderable, width=150)
+    assert "line 0" in copied
+    assert "line 11" in copied
+    assert "\n…\n" not in copied
+    sink.close()
+
+
 def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> None:
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), force_terminal=False),
@@ -638,25 +726,25 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "338cfedf6b42168fb8167db61acf527dddbe73e76b371cd03225a1826bc9cc39"
+        "35f393716b6852a6272b521412888a98796cdf744df56b591edcc5785d87dc0b"
     ),
     "evaluation_active": (
-        "3848f031c27d73c404a8e5a6e6bc6db5bf9a3358e210804866a3e50b910bbcf5"
+        "fb49725056f7cc475e84585a19ff0a26bd2f5196f293ec97aa25c58b7c4f24d1"
     ),
     "validation_details": (
-        "2621d8bb39fa2cc0d6fb2bf1cc0c4103b0d823a7cb140283ae8f20753cd0d491"
+        "233775d3ba84ef8bf2f34aa882c9bcca5d1c6a687582c20e6938f0aa45006e0b"
     ),
     "completed": (
-        "f22c5f4ba0116d402d0ab3616a8cba9096bb398095452bc19264558a5c20b578"
+        "b66219e3a02cd838dcd89efdee717738235747fd048445a1f4595117acb1afd6"
     ),
     "profiling_disabled": (
-        "d86735c1b76214fff21c2130b1d45d1527dfa0c2601e08948eea7893f849c4b1"
+        "36750d7c7473db75a1a58035486cc3a6a42a16cf40336a441259980e6df9bad0"
     ),
     "compact": (
-        "4b32d911aba6f0597c934f647d0d275893622574d9bd8d37ccc6ad9c8cf4a4b0"
+        "675f5b8e700febc6abd3551202e1d6f330e09a560503e0e376ec81549953ce78"
     ),
     "minimal": (
-        "83cfdfe6cfdecc8de3e2e1c54c7c60c0ec17d5d0a026aa0b02783b039ae1e77d"
+        "d191c1a48b1446d8e0a2420bf11c3e08d00fab9ef456617f7f25440d3964ed36"
     ),
 }
 
