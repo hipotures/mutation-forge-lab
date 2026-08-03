@@ -320,7 +320,7 @@ def load_persisted_dashboard_state(
     except (OSError, UnicodeError, json.JSONDecodeError):
         checkpoint = {}
 
-    generation_value = checkpoint.get("generation")
+    generation_value = checkpoint.get("next_generation", checkpoint.get("generation"))
     checkpoint_generation = (
         generation_value
         if isinstance(generation_value, int) and not isinstance(generation_value, bool)

@@ -155,7 +155,16 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         counts = state.counts()
         session = state.session()
         current = state.cumulative()
-        generation = int(checkpoint.get("generation", 0)) if checkpoint else 0
+        generation_value = (
+            checkpoint.get("next_generation", checkpoint.get("generation", 0))
+            if checkpoint
+            else 0
+        )
+        generation = (
+            int(generation_value)
+            if isinstance(generation_value, int) and not isinstance(generation_value, bool)
+            else 0
+        )
         completed_slots = checkpoint.get("completed_slots", 0) if checkpoint else 0
         if not isinstance(completed_slots, int):
             completed_slots = len(completed_slots) if isinstance(completed_slots, list) else 0
