@@ -10,7 +10,7 @@ from typing import Any
 from .checkpoints import CheckpointIntegrityError, CheckpointStore
 from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
-from .lock import LockError, load_lock, verify_lock
+from .lock import LockError, load_lock, model_turn_limit_difference, verify_lock
 from .state import ExperimentStateStore, StateError, process_alive
 
 STATUS_SCHEMA_VERSION = "mforge.experiment.status.v1"
@@ -73,7 +73,11 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         }
     try:
         lock = load_lock(layout.lock)
-        verify_lock(lock, config, layout)
+        try:
+            verify_lock(lock, config, layout)
+        except LockError:
+            if not _model_turn_extension_allowed(lock, config, layout):
+                raise
     except (LockError, OSError, ValueError) as error:
         return {
             **_not_created(config, layout),
@@ -155,6 +159,40 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
                 parsed = {}
             if isinstance(parsed, Mapping):
                 session_metrics = dict(parsed)
+        last_stop_reason = experiment.get("terminal_stop_reason") or (
+            session or {}
+        ).get("stop_reason")
+        if last_stop_reason == "already_completed":
+            last_stop_reason = state.latest_meaningful_stop_reason() or last_stop_reason
+        if current_state == "completed" and last_stop_reason == "max_model_turns":
+            current_state = "idle"
+        stored_model_turn_limit = state.metadata("effective_model_turns")
+        configured_model_turns = _locked_model_turns(lock)
+        effective_model_turns = config.search.max_model_turns
+        if isinstance(stored_model_turn_limit, int) and not isinstance(
+            stored_model_turn_limit, bool
+        ):
+            effective_model_turns = max(effective_model_turns, stored_model_turn_limit)
+        if configured_model_turns is None:
+            configured_model_turns = config.search.max_model_turns
+        model_turns_used = counts["provider_turns"]
+        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json"
+        if native_checkpoint.is_file():
+            try:
+                native_state = json.loads(native_checkpoint.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                native_state = {}
+            checkpoint_turns = (
+                native_state.get("model_turns_used")
+                if isinstance(native_state, Mapping)
+                else None
+            )
+            if (
+                isinstance(checkpoint_turns, int)
+                and not isinstance(checkpoint_turns, bool)
+                and checkpoint_turns >= 0
+            ):
+                model_turns_used = max(model_turns_used, checkpoint_turns)
         session_id = str(session["session_id"]) if session is not None else None
         artifacts: dict[str, str] = {}
         native_checkpoint = layout.artifacts / "native-generation-checkpoint.json"
@@ -186,6 +224,12 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             "ranked_candidates": ranked_candidates,
             "artifacts": artifacts,
             "provider_turns": counts["provider_turns"],
+            "model_turns_used": model_turns_used,
+            "configured_model_turns": configured_model_turns,
+            "effective_model_turns": effective_model_turns,
+            "remaining_model_turns": max(
+                0, effective_model_turns - model_turns_used
+            ),
             "total_tokens": int(current["total_tokens"]),
             "token_usage": token_usage,
             "ir": session_metrics.get("ir"),
@@ -193,8 +237,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             "last_checkpoint": checkpoint.get("checkpoint_id")
             if checkpoint
             else experiment.get("current_checkpoint"),
-            "last_stop_reason": experiment.get("terminal_stop_reason")
-            or (session or {}).get("stop_reason"),
+            "last_stop_reason": last_stop_reason,
             "last_error": last_error,
         }
     finally:
@@ -317,7 +360,15 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
             f"Usage: {status['provider_turns']} model turns, "
             f"{status['total_tokens']} tokens"
         )
-    lines.append(f"Model turns: {status['provider_turns']}")
+    if status.get("effective_model_turns") is not None:
+        lines.append(
+            "Model turns: "
+            f"{status.get('model_turns_used', status['provider_turns'])} "
+            f"/ {status['effective_model_turns']} "
+            f"(remaining {status.get('remaining_model_turns', 0)})"
+        )
+    else:
+        lines.append(f"Model turns: {status['provider_turns']}")
     artifacts = status.get("artifacts")
     if isinstance(artifacts, Mapping) and artifacts:
         lines.append("Artifacts:")
@@ -342,3 +393,53 @@ __all__ = [
     "render_status",
     "status",
 ]
+
+
+def _locked_model_turns(lock: Mapping[str, Any]) -> int | None:
+    normalized = lock.get("normalized_immutable_config")
+    if isinstance(normalized, Mapping):
+        search = normalized.get("search")
+        if isinstance(search, Mapping):
+            value = search.get("max_model_turns")
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+    return None
+
+
+def _model_turn_extension_allowed(
+    lock: Mapping[str, Any], config: ExperimentConfig, layout: ExperimentLayout
+) -> bool:
+    difference = model_turn_limit_difference(lock, config)
+    if difference is None:
+        return False
+    locked_limit, requested_limit = difference
+    try:
+        with ExperimentStateStore(layout.state) as state:
+            experiment = state.experiment()
+            current_state = state.state()
+            stored_limit = state.metadata("effective_model_turns")
+            stop_reason = _meaningful_stop_reason(state, experiment)
+    except (OSError, StateError, ValueError, TypeError):
+        return False
+    if stored_limit == requested_limit:
+        return True
+    return (
+        current_state in {"idle", "completed"}
+        and stop_reason == "max_model_turns"
+        and requested_limit
+        > max(
+            locked_limit,
+            stored_limit
+            if isinstance(stored_limit, int) and not isinstance(stored_limit, bool)
+            else 0,
+        )
+    )
+
+
+def _meaningful_stop_reason(
+    state: ExperimentStateStore, experiment: Mapping[str, Any]
+) -> str:
+    terminal = str(experiment.get("terminal_stop_reason") or "")
+    if terminal == "already_completed":
+        return str(state.latest_meaningful_stop_reason() or terminal)
+    return terminal

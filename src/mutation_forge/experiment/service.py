@@ -16,7 +16,13 @@ from .artifacts import ArtifactIncompleteError, TurnArtifactStore
 from .checkpoints import CheckpointStore
 from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
-from .lock import LockError, build_lock, load_lock, verify_lock
+from .lock import (
+    LockError,
+    build_lock,
+    load_lock,
+    model_turn_limit_difference,
+    verify_lock,
+)
 from .native import NativeExperimentAdapter
 from .observer import CallbackEventSink, ExperimentEventHub
 from .sessions import SessionContext, SessionManager
@@ -901,6 +907,7 @@ class ExperimentService:
                 hub.close()
 
         created = not layout.root.exists()
+        allow_model_turn_extension = False
         if created:
             try:
                 preflight = self._preflight(config)
@@ -941,8 +948,18 @@ class ExperimentService:
             try:
                 layout.verify_root()
                 lock = load_lock(layout.lock)
-                verify_lock(lock, config, layout)
-                self._verify_root_config(layout, config, lock)
+                try:
+                    verify_lock(lock, config, layout)
+                except LockError:
+                    if not _model_turn_extension_allowed(lock, config, layout):
+                        raise
+                    allow_model_turn_extension = True
+                self._verify_root_config(
+                    layout,
+                    config,
+                    lock,
+                    allow_model_turn_extension=allow_model_turn_extension,
+                )
             except BaseException as error:
                 fail_before_session(error)
                 raise
@@ -971,6 +988,60 @@ class ExperimentService:
             # first verifies every previously committed digest.
             layout.reconcile_artifact_manifest()
             current_state = state.state()
+            experiment = state.experiment()
+            last_stop_reason = str(experiment.get("terminal_stop_reason") or "")
+            if last_stop_reason == "already_completed":
+                last_stop_reason = str(state.latest_meaningful_stop_reason() or "")
+            stored_model_turn_limit = state.metadata("effective_model_turns")
+            effective_model_turns = config.search.max_model_turns
+            if (
+                isinstance(stored_model_turn_limit, int)
+                and not isinstance(stored_model_turn_limit, bool)
+                and stored_model_turn_limit >= config.search.max_model_turns
+            ):
+                effective_model_turns = stored_model_turn_limit
+            if allow_model_turn_extension:
+                requested_limit = config.search.max_model_turns
+                difference = model_turn_limit_difference(lock, config)
+                extension_base = (
+                    stored_model_turn_limit
+                    if isinstance(stored_model_turn_limit, int)
+                    and not isinstance(stored_model_turn_limit, bool)
+                    else difference[0]
+                    if difference is not None
+                    else effective_model_turns
+                )
+                if requested_limit > extension_base:
+                    state.set_metadata("effective_model_turns", requested_limit)
+                    state.write_event(
+                        "model_turn_budget_extended",
+                        {
+                            "locked_model_turns": (
+                                difference[0]
+                                if difference is not None
+                                else effective_model_turns
+                            ),
+                            "effective_model_turns": requested_limit,
+                            "reason": "continuation_after_max_model_turns",
+                        },
+                    )
+                    effective_model_turns = requested_limit
+                elif stored_model_turn_limit is None:
+                    state.set_metadata("effective_model_turns", effective_model_turns)
+            # Older runs incorrectly persisted a model-turn boundary as
+            # completed.  Reclassify that durable state before deciding whether
+            # this invocation is a no-op, while preserving generation-limit
+            # completion as genuinely terminal.
+            if current_state == "completed" and last_stop_reason == "max_model_turns":
+                checkpoint = state.checkpoint()
+                state.set_state(
+                    "idle",
+                    stop_reason="max_model_turns",
+                    checkpoint=(
+                        str(checkpoint["checkpoint_id"]) if checkpoint is not None else None
+                    ),
+                )
+                current_state = "idle"
             if current_state == "completed":
                 result = self._record_completed_session(config, layout, state, hub=hub)
                 hub.emit(
@@ -1025,7 +1096,7 @@ class ExperimentService:
                     model_turns_used = int(model_turn_counter(layout, state))
                 remaining_model_turns = max(
                     0,
-                    config.search.max_model_turns - model_turns_used,
+                    effective_model_turns - model_turns_used,
                 )
                 hub.emit(
                     "session_started",
@@ -1047,7 +1118,7 @@ class ExperimentService:
                     active_workers=0,
                     population_size=config.search.population_size,
                     generation_limit=config.search.max_generations,
-                    max_model_turns=config.search.max_model_turns,
+                    max_model_turns=effective_model_turns,
                     remaining_model_turns=remaining_model_turns,
                     model_turns_used=model_turns_used,
                     reserved_model_turns=max(
@@ -1076,6 +1147,7 @@ class ExperimentService:
                     session,
                     observer=hub,
                     profiling=profiling_enabled,
+                    effective_max_model_turns=effective_model_turns,
                 )
                 outcome = self._normalize_outcome(adapter_result, session)
                 final_checkpoint = checkpoints.save(
@@ -1141,7 +1213,14 @@ class ExperimentService:
                     recovered_work=outcome.get("recovered_work"),
                 )
                 layout.reconcile_artifact_manifest()
-                final_result = self._run_result(config, layout, state, session_summary, outcome)
+                final_result = self._run_result(
+                    config,
+                    layout,
+                    state,
+                    session_summary,
+                    outcome,
+                    effective_model_turns=effective_model_turns,
+                )
                 hub.close()
                 return final_result
             except BaseException as error:
@@ -1212,6 +1291,8 @@ class ExperimentService:
         layout: ExperimentLayout,
         config: ExperimentConfig,
         lock: Mapping[str, Any],
+        *,
+        allow_model_turn_extension: bool = False,
     ) -> None:
         try:
             stored = layout.experiment_config.read_bytes()
@@ -1223,7 +1304,11 @@ class ExperimentService:
 
         if hashlib.sha256(stored).hexdigest() != lock.get("source_config_sha256"):
             raise LockError("immutable root experiment.toml does not match experiment.lock.json")
-        if stored != config.source_bytes and not _same_immutable_config(stored, config):
+        if stored != config.source_bytes and not _same_immutable_config(
+            stored,
+            config,
+            allow_model_turn_extension=allow_model_turn_extension,
+        ):
             raise LockError("immutable root experiment.toml differs from the locked specification")
 
     def _invoke_adapter(
@@ -1235,6 +1320,7 @@ class ExperimentService:
         *,
         observer: Any | None = None,
         profiling: bool | None = None,
+        effective_max_model_turns: int | None = None,
     ) -> Mapping[str, Any] | None:
         # Adapters from early experiments sometimes accepted an explicit
         # budget.  Support that additive form without changing the core API.
@@ -1251,6 +1337,8 @@ class ExperimentService:
             kwargs["event_callback"] = observer
         if "profiling" in parameters:
             kwargs["profiling"] = profiling
+        if "effective_max_model_turns" in parameters:
+            kwargs["effective_max_model_turns"] = effective_max_model_turns
         if "budget" in parameters:
             kwargs["budget"] = SessionBudget(config.run.wall_seconds, session.monotonic_started)
             return run(
@@ -1285,6 +1373,8 @@ class ExperimentService:
             else "idle"
         )
         if session.budget_exhausted() and state == "running":
+            state = "idle"
+        if state == "completed" and outcome.get("stop_reason") == "max_model_turns":
             state = "idle"
         outcome["state"] = state
         # Checkpoint fields are append-only identity lists.  Adapters may
@@ -1357,15 +1447,19 @@ class ExperimentService:
         state: ExperimentStateStore,
         session: Mapping[str, Any],
         outcome: Mapping[str, Any],
+        *,
+        effective_model_turns: int,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "schema_version": "mforge.experiment.run.v1",
             "status": (
                 "failed"
                 if outcome.get("stop_reason") == "infrastructure_failed"
-                else "completed"
-                if outcome.get("state") in {"idle", "completed"}
-                else "failed"
+            else "completed"
+            if outcome.get("state") == "completed"
+            else "budget_exhausted"
+            if outcome.get("state") == "idle"
+            else "failed"
             ),
             "exp_id": config.exp_id,
             "state": outcome.get("state"),
@@ -1375,6 +1469,7 @@ class ExperimentService:
             "checkpoint": session.get("ending_checkpoint"),
             "provider_turns": state.counts().get("provider_turns", 0),
             "evaluation_count": state.counts().get("evaluation_count", 0),
+            "effective_model_turns": effective_model_turns,
         }
         if "result" in outcome:
             result["result"] = outcome["result"]
@@ -1393,7 +1488,51 @@ class ExperimentService:
         return result
 
 
-def _same_immutable_config(stored_bytes: bytes, current: ExperimentConfig) -> bool:
+def _model_turn_extension_allowed(
+    lock: Mapping[str, Any], config: ExperimentConfig, layout: ExperimentLayout
+) -> bool:
+    difference = model_turn_limit_difference(lock, config)
+    if difference is None:
+        return False
+    locked_limit, requested_limit = difference
+    try:
+        with ExperimentStateStore(layout.state) as state:
+            experiment = state.experiment()
+            current_state = state.state()
+            stored_limit = state.metadata("effective_model_turns")
+            stop_reason = _meaningful_stop_reason(state, experiment)
+    except (OSError, StateError, ValueError, TypeError):
+        return False
+    if stored_limit == requested_limit:
+        return True
+    return (
+        current_state in {"idle", "completed"}
+        and stop_reason == "max_model_turns"
+        and requested_limit
+        > max(
+            locked_limit,
+            stored_limit
+            if isinstance(stored_limit, int) and not isinstance(stored_limit, bool)
+            else 0,
+        )
+    )
+
+
+def _meaningful_stop_reason(
+    state: ExperimentStateStore, experiment: Mapping[str, Any]
+) -> str:
+    terminal = str(experiment.get("terminal_stop_reason") or "")
+    if terminal == "already_completed":
+        return str(state.latest_meaningful_stop_reason() or terminal)
+    return terminal
+
+
+def _same_immutable_config(
+    stored_bytes: bytes,
+    current: ExperimentConfig,
+    *,
+    allow_model_turn_extension: bool = False,
+) -> bool:
     try:
         import tomllib
 
@@ -1401,6 +1540,17 @@ def _same_immutable_config(stored_bytes: bytes, current: ExperimentConfig) -> bo
         current_raw = dict(current.raw)
         raw.pop("run", None)
         current_raw.pop("run", None)
+        if allow_model_turn_extension:
+            stored_search = raw.get("search")
+            current_search = current_raw.get("search")
+            if not isinstance(stored_search, dict) or not isinstance(current_search, dict):
+                return False
+            stored_search = dict(stored_search)
+            current_search = dict(current_search)
+            stored_search.pop("max_model_turns", None)
+            current_search.pop("max_model_turns", None)
+            raw["search"] = stored_search
+            current_raw["search"] = current_search
         return raw == current_raw
     except (UnicodeError, tomllib.TOMLDecodeError):
         return False

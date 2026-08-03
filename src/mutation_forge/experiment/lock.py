@@ -428,6 +428,31 @@ def immutable_differences(
     return _diff_values(expected, config.immutable_projection())
 
 
+def model_turn_limit_difference(
+    lock: Mapping[str, Any], config: ExperimentConfig
+) -> tuple[int, int] | None:
+    """Return ``(locked, requested)`` for the one allowed budget increase.
+
+    A larger model-turn cap is a continuation budget, not a new scientific
+    identity, but only when it is the sole immutable difference.  The caller
+    still has to prove that the existing workspace stopped at that cap.
+    """
+
+    differences = immutable_differences(lock, config)
+    if len(differences) != 1 or differences[0][0] != "search.max_model_turns":
+        return None
+    locked, requested = differences[0][1:]
+    if (
+        isinstance(locked, bool)
+        or not isinstance(locked, int)
+        or isinstance(requested, bool)
+        or not isinstance(requested, int)
+        or requested <= locked
+    ):
+        return None
+    return locked, requested
+
+
 def format_differences(differences: list[tuple[str, object, object]]) -> str:
     lines = ["Experiment configuration differs from the locked specification:"]
     for name, locked, current in differences:
@@ -466,6 +491,7 @@ __all__ = [
     "format_differences",
     "immutable_differences",
     "load_lock",
+    "model_turn_limit_difference",
     "sha256_file",
     "verify_lock",
     "write_lock",

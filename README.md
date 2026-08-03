@@ -155,7 +155,9 @@ Important behavior:
 - `population_size` must be `8`, matching the eight differentiated mutation
   briefs in the native preset.
 - `max_generations` is a global experiment limit, not a per-session batch size.
-- `max_model_turns` is cumulative across all continuation sessions.
+- `max_model_turns` is cumulative across all continuation sessions. Reaching
+  it pauses the experiment in a resumable `idle` state; it is not scientific
+  completion.
 - `wall_seconds` applies to one invocation. Reaching it pauses the experiment
   in a resumable `idle` state.
 - Uncharged provider infrastructure failures are retried on the same
@@ -167,8 +169,10 @@ Important behavior:
 - `output` is either `rich` or `json`; `--json` selects JSON output for the
   current command.
 - Model, search, evaluation, and resource settings are locked when the
-  workspace is created. Use a new `exp_id` for a scientifically different
-  experiment.
+  workspace is created. A run stopped at `max_model_turns` may raise only that
+  cap in the same workspace; the extension is recorded in SQLite while the
+  original lock remains immutable. Other scientific changes require a new
+  `exp_id`.
 
 ## Lifecycle and resume
 
@@ -179,10 +183,10 @@ with the same configuration resume from the latest durable checkpoint.
 | --- | --- |
 | `not_created` | Configuration is valid, but no workspace exists yet |
 | `running` | A session currently owns the experiment |
-| `idle` | The invocation wall budget expired; running again resumes work |
+| `idle` | A wall or model-turn budget boundary paused the run; running again resumes work |
 | `interrupted` | The process was interrupted or its owner died; running again resumes |
 | `failed` | Workspace, provider, or orchestration failure requires inspection |
-| `completed` | A global generation or model-turn limit was reached |
+| `completed` | The global generation limit was reached |
 
 `Ctrl-C` records an interrupted, resumable session. A subsequent
 `experiment run` recovers completed turn artifacts and continues pending work

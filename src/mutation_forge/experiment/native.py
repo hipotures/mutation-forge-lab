@@ -953,6 +953,7 @@ class NativeExperimentAdapter:
         observer: Any | None = None,
         event_callback: Any | None = None,
         profiling: bool | None = None,
+        effective_max_model_turns: int | None = None,
     ) -> Mapping[str, Any]:
         (
             system_prompt,
@@ -993,6 +994,11 @@ class NativeExperimentAdapter:
         callback = observer if observer is not None else event_callback
         profiling_enabled = (
             config.run.profiling_enabled if profiling is None else bool(profiling)
+        )
+        model_turn_limit = (
+            config.search.max_model_turns
+            if effective_max_model_turns is None
+            else effective_max_model_turns
         )
 
         def emit(event_type: str, **payload: Any) -> None:
@@ -1046,7 +1052,7 @@ class NativeExperimentAdapter:
                 "search": {
                     "population_size": config.search.population_size,
                     "max_generations": config.search.max_generations,
-                    "max_model_turns": config.search.max_model_turns,
+                    "max_model_turns": model_turn_limit,
                     "selection": config.search.selection,
                 },
                 "evaluation": {
@@ -1564,6 +1570,8 @@ class NativeExperimentAdapter:
                     engine_kwargs["event_callback"] = callback
                 if "profiling" in engine_parameters:
                     engine_kwargs["profiling"] = profiling_enabled
+                if "max_model_turns" in engine_parameters:
+                    engine_kwargs["max_model_turns"] = model_turn_limit
                 result = engine(wrapped, **engine_kwargs)
             else:
                 generation_config = GenerationConfig(
@@ -1571,7 +1579,7 @@ class NativeExperimentAdapter:
                     generations=config.search.max_generations,
                     population_size=config.search.population_size,
                     concurrency=config.model.concurrency,
-                    max_model_turns=config.search.max_model_turns,
+                    max_model_turns=model_turn_limit,
                     prior_model_turns=self.model_turns_used(layout, state),
                     max_repairs=config.model.max_repairs,
                     model=config.model.name,
@@ -1645,6 +1653,8 @@ class NativeExperimentAdapter:
             outcome_stop_reason = (
                 "infrastructure_failed"
                 if str(result.get("status")) == "infrastructure_failed"
+                else "max_model_turns"
+                if result_stop_reason == "max_model_turns"
                 else "budget_exhausted"
             )
         outcome: dict[str, Any] = {

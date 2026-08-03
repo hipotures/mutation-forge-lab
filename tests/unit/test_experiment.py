@@ -17,6 +17,7 @@ from mutation_forge.experiment.config import (
     load_experiment_config,
     validate_experiment_id,
 )
+from mutation_forge.experiment.generation import GenerationConfig, GenerationCoordinator
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
 from mutation_forge.experiment.provider import NativeProviderConfig, _CodexTransport
 from mutation_forge.experiment.service import ExperimentService, NullExperimentAdapter
@@ -159,6 +160,75 @@ def test_completed_experiment_makes_no_adapter_call(tmp_path: Path) -> None:
     result = service.run(path)
     assert adapter.calls == 1
     assert result["provider_calls"] == 0
+
+
+def test_model_turn_boundary_is_resumable_and_extendable(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls: list[int | None] = []
+
+        def run(
+            self,
+            _config: object,
+            _layout: object,
+            _state: object,
+            _session: object,
+            *,
+            effective_max_model_turns: int | None = None,
+        ) -> dict[str, str]:
+            self.calls.append(effective_max_model_turns)
+            if len(self.calls) == 1:
+                return {"state": "completed", "stop_reason": "max_model_turns"}
+            return {"state": "idle", "stop_reason": "budget_exhausted"}
+
+    adapter = Adapter()
+    service = ExperimentService(adapter=adapter)
+    first = service.run(path)
+    assert first["state"] == "idle"
+    assert first["status"] == "budget_exhausted"
+    assert first["stop_reason"] == "max_model_turns"
+
+    path.write_text(_config().replace("max_model_turns = 4", "max_model_turns = 8"))
+    second = service.run(path)
+    assert second["state"] == "idle"
+    assert adapter.calls == [4, 8]
+
+    status = experiment_status(path)
+    assert status["state"] == "idle"
+    assert status["resumable"] is True
+    assert status["configured_model_turns"] == 4
+    assert status["effective_model_turns"] == 8
+    assert status["remaining_model_turns"] == 8
+
+    root = tmp_path / "configs" / "workspace" / "demo"
+    with ExperimentStateStore(root / "state.sqlite3") as state:
+        assert state.metadata("effective_model_turns") == 8
+        events = state.connection.execute(
+            "SELECT event_type FROM events WHERE event_type='model_turn_budget_extended'"
+        ).fetchall()
+        assert len(events) == 1
+
+
+def test_generation_model_turn_boundary_is_not_completed(tmp_path: Path) -> None:
+    class Provider:
+        def generate(self, _request: object) -> object:
+            raise AssertionError("model provider must not run at an exhausted cap")
+
+    result = GenerationCoordinator(
+        Provider(),
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=0,
+            max_repairs=0,
+            checkpoint_path=tmp_path / "generation.json",
+        ),
+    ).run()
+    assert result.status == "budget_exhausted"
+    assert result.summary["stop_reason"] == "max_model_turns"
 
 
 def test_active_owner_and_stale_recovery(tmp_path: Path) -> None:

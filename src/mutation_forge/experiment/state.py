@@ -383,6 +383,14 @@ class ExperimentStateStore:
             dict(row) for row in self.connection.execute("SELECT * FROM sessions ORDER BY number")
         ]
 
+    def latest_meaningful_stop_reason(self) -> str | None:
+        row = self.connection.execute(
+            "SELECT stop_reason FROM sessions "
+            "WHERE stop_reason IS NOT NULL AND stop_reason != 'already_completed' "
+            "ORDER BY number DESC LIMIT 1"
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def acquire_owner(
         self,
         *,
@@ -651,6 +659,24 @@ class ExperimentStateStore:
     def latest_error(self) -> str | None:
         value = self.experiment().get("last_error")
         return str(value) if value else None
+
+    def metadata(self, key: str) -> Any | None:
+        row = self.connection.execute(
+            "SELECT value FROM metadata WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(str(row[0]))
+        except json.JSONDecodeError as exc:
+            raise StateError(f"invalid metadata value for {key!r}") from exc
+
+    def set_metadata(self, key: str, value: object) -> None:
+        self.connection.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
+            (key, _json(value)),
+        )
+        self.connection.commit()
 
     def cumulative(self) -> dict[str, int | float]:
         row = self.experiment()

@@ -2329,7 +2329,7 @@ class GenerationCoordinator:
         status = (
             "infrastructure_failed"
             if infrastructure_failed
-            else "completed"
+            else "budget_exhausted"
             if stopped_reason == "max_model_turns"
             else "budget_exhausted"
             if stopped
