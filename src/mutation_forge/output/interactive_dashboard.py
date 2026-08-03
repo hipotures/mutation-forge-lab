@@ -242,6 +242,16 @@ class DashboardState:
     retry_confirmation: bool = False
     paused: bool = False
     status_message: str = ""
+    counterexample_state: str = "none"
+    counterexample_candidate: str = "—"
+    counterexample_order: int | None = None
+    counterexample_edges: int | None = None
+    counterexample_minimum_degree: int | None = None
+    counterexample_lengths: tuple[int, ...] = ()
+    counterexample_primary: str = "not started"
+    counterexample_independent: str = "not started"
+    counterexample_certificate: str = "—"
+    event_keys: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,8 +320,7 @@ def _slot_count(payload: Mapping[str, JsonValue], current: int) -> int:
 
 def _empty_slots(generation: int, count: int) -> tuple[DashboardSlot, ...]:
     return tuple(
-        DashboardSlot(slot=f"slot-{index:02d}", generation=generation)
-        for index in range(count)
+        DashboardSlot(slot=f"slot-{index:02d}", generation=generation) for index in range(count)
     )
 
 
@@ -440,7 +449,11 @@ def _event_activity(event: Event) -> ActivityEntry | None:
             _text(payload.get("error")) or "provider turn failed",
             slot,
         )
-    if event_type in {"experiment_failed", "experiment_interrupted"}:
+    if event_type in {
+        "experiment_failed",
+        "experiment_interrupted",
+        "experiment_exhausted",
+    }:
         return ActivityEntry(
             event.timestamp[11:19],
             "experiment",
@@ -470,6 +483,14 @@ def _event_activity(event: Event) -> ActivityEntry | None:
         "checkpoint_written",
         "budget_boundary_reached",
         "experiment_completed",
+        "experiment_exhausted",
+        "counterexample_candidate_found",
+        "counterexample_primary_verification_started",
+        "counterexample_primary_verification_completed",
+        "counterexample_independent_verification_started",
+        "counterexample_independent_verification_completed",
+        "counterexample_verification_conflict",
+        "counterexample_verified",
     }
     if event_type not in meaningful:
         return None
@@ -556,6 +577,19 @@ def reduce_dashboard_event(
     now = time.monotonic() if monotonic is None else monotonic
     payload = event.payload
     event_type = event.event_type
+    raw_idempotency_key = _text(payload.get("idempotency_key"))
+    idempotency_key = (
+        f"{event_type}:{raw_idempotency_key}"
+        if raw_idempotency_key is not None
+        else None
+    )
+    if idempotency_key is not None and idempotency_key in state.event_keys:
+        return state
+    if idempotency_key is not None:
+        state = replace(
+            state,
+            event_keys=state.event_keys | {idempotency_key},
+        )
     state = _global_payload(
         replace(state, run_id=event.run_id),
         payload,
@@ -564,6 +598,7 @@ def reduce_dashboard_event(
             "session_started",
             "budget_boundary_reached",
             "experiment_completed",
+            "experiment_exhausted",
             "experiment_interrupted",
             "experiment_failed",
         },
@@ -585,9 +620,7 @@ def reduce_dashboard_event(
             cumulative_usage=cumulative,
             session_usage=session,
             provider_turns_attempted=model_turns_used,
-            provider_turns_completed=(
-                _integer(payload.get("cumulative_provider_turns")) or 0
-            ),
+            provider_turns_completed=(_integer(payload.get("cumulative_provider_turns")) or 0),
         )
     elif event_type == "generation_started":
         generation = _integer(payload.get("generation")) or 0
@@ -681,9 +714,7 @@ def reduce_dashboard_event(
         total = _integer(payload.get("total")) or _integer(payload.get("evaluation_total"))
         state = replace(
             state,
-            evaluation_episodes_completed=max(
-                state.evaluation_episodes_completed, completed or 0
-            ),
+            evaluation_episodes_completed=max(state.evaluation_episodes_completed, completed or 0),
             evaluation_episodes_total=total or state.evaluation_episodes_total,
         )
     elif event_type in {"evaluation_completed", "evaluation_failed"}:
@@ -745,10 +776,85 @@ def reduce_dashboard_event(
         )
     elif event_type == "experiment_completed":
         state = replace(state, experiment_state="completed", phase="completed")
+    elif event_type == "experiment_exhausted":
+        state = replace(state, experiment_state="exhausted", phase="exhausted")
     elif event_type == "experiment_interrupted":
         state = replace(state, experiment_state="interrupted", phase="interrupted")
     elif event_type == "experiment_failed":
         state = replace(state, experiment_state="failed", phase="failed")
+    elif event_type == "counterexample_candidate_found":
+        lengths = payload.get("target_forbidden_lengths")
+        state = replace(
+            state,
+            counterexample_state="candidate",
+            counterexample_candidate=_text(payload.get("candidate_id")) or "—",
+            counterexample_order=_integer(payload.get("order")),
+            counterexample_edges=_integer(payload.get("edge_count")),
+            counterexample_minimum_degree=_integer(payload.get("minimum_degree")),
+            counterexample_lengths=(
+                tuple(
+                    item for item in lengths if isinstance(item, int) and not isinstance(item, bool)
+                )
+                if isinstance(lengths, list)
+                else ()
+            ),
+            phase="exact verification",
+        )
+    elif event_type == "counterexample_primary_verification_started":
+        state = replace(
+            state,
+            counterexample_state="primary_verifying",
+            counterexample_primary="running",
+            phase="exact verification",
+        )
+    elif event_type == "counterexample_primary_verification_completed":
+        state = replace(
+            state,
+            counterexample_state=(
+                "primary_verified"
+                if payload.get("status") == "VERIFIED" and payload.get("complete") is True
+                else "candidate"
+            ),
+            counterexample_primary=(
+                f"{payload.get('status', 'UNKNOWN')} · "
+                f"{'complete' if payload.get('complete') is True else 'incomplete'}"
+            ),
+        )
+    elif event_type == "counterexample_independent_verification_started":
+        state = replace(
+            state,
+            counterexample_state="independent_verifying",
+            counterexample_independent="running",
+            phase="exact verification",
+        )
+    elif event_type == "counterexample_independent_verification_completed":
+        state = replace(
+            state,
+            counterexample_independent=(
+                f"{payload.get('status', 'UNKNOWN')} · "
+                f"{'complete' if payload.get('complete') is True else 'incomplete'}"
+            ),
+        )
+    elif event_type == "counterexample_verification_conflict":
+        state = replace(
+            state,
+            counterexample_state="conflict",
+            experiment_state="failed",
+            phase="verification conflict",
+        )
+    elif event_type == "counterexample_verified":
+        state = replace(
+            state,
+            counterexample_state="verified",
+            counterexample_candidate=(
+                _text(payload.get("candidate_id")) or state.counterexample_candidate
+            ),
+            counterexample_certificate=(
+                _text(payload.get("certificate")) or state.counterexample_certificate
+            ),
+            experiment_state="completed",
+            phase="exact verification",
+        )
 
     slot_name = _text(payload.get("slot"))
     if slot_name is not None:
@@ -861,9 +967,7 @@ def reduce_dashboard_event(
             elapsed = None
             evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
             evaluation_completed = 0
-            evaluation_total = (
-                _integer(payload.get("evaluation_total")) or evaluation_total
-            )
+            evaluation_total = _integer(payload.get("evaluation_total")) or evaluation_total
             evaluation_pass = _text(payload.get("pass")) or phase
             evaluation_order = None
             graph_seed = None
@@ -922,11 +1026,7 @@ def reduce_dashboard_event(
             error = _text(payload.get("error")) or "evaluation failed"
         elif event_type == "candidate_archived":
             archived_state = _text(payload.get("status"))
-            if not (
-                archived_state == "invalid"
-                and slot.state == "failed"
-                and slot.retryable
-            ):
+            if not (archived_state == "invalid" and slot.state == "failed" and slot.retryable):
                 slot_state = archived_state or slot_state
             lifecycle_phase = "archived"
             lifecycle_status = "pass" if slot_state in {"accepted", "duplicate"} else "fail"
@@ -1381,10 +1481,7 @@ class InteractiveDashboardSink:
         self._copy_notice_until = time.monotonic() + COPY_NOTICE_SECONDS
 
     def _expire_copy_notice_unlocked(self) -> bool:
-        if (
-            self._copy_notice_until is None
-            or time.monotonic() < self._copy_notice_until
-        ):
+        if self._copy_notice_until is None or time.monotonic() < self._copy_notice_until:
             return False
         if self.state.status_message == self._copy_notice_message:
             self.state = replace(self.state, status_message="")
@@ -1578,6 +1675,7 @@ class InteractiveDashboardSink:
             "running": "bold cyan",
             "paused": "bold yellow",
             "idle": "bold yellow",
+            "exhausted": "bold blue",
             "completed": "bold green",
             "interrupted": "bold magenta",
             "failed": "bold red",
@@ -1590,8 +1688,12 @@ class InteractiveDashboardSink:
                 ("State", self.state.experiment_state.upper(), state_style),
                 (
                     "Gen",
-                    f"{_human_generation(self.state.generation)}/"
-                    f"{_show(self.state.generation_limit)}",
+                    (
+                        str(_human_generation(self.state.generation))
+                        if self.state.generation_limit is None
+                        else f"{_human_generation(self.state.generation)}/"
+                        f"{self.state.generation_limit}"
+                    ),
                     None,
                 ),
                 ("Phase", self.state.phase, None),
@@ -1662,16 +1764,21 @@ class InteractiveDashboardSink:
                 int(self.state.wall_seconds) if self.state.wall_seconds is not None else None,
             ),
         )
-        renderables = [
-            _progress_bar(
-                label,
-                current,
-                total,
-                width=8 if horizontal else max(12, width - 31),
-                stacked=horizontal,
+        renderables: list[RenderableType] = []
+        for label, current, total in values:
+            if total is None and label in {"Generation", "Model Turn Budget"}:
+                suffix = "current" if label == "Generation" else "cumulative"
+                renderables.append(Text(f"{label}  {current} · {suffix}"))
+                continue
+            renderables.append(
+                _progress_bar(
+                    label,
+                    current,
+                    total,
+                    width=8 if horizontal else max(12, width - 31),
+                    stacked=horizontal,
+                )
             )
-            for label, current, total in values
-        ]
         if horizontal:
             grid = Table.grid(expand=True)
             for _ in renderables:
@@ -1718,11 +1825,7 @@ class InteractiveDashboardSink:
                 "probe",
                 "candidate / error",
             }
-            columns = [
-                item
-                for item in columns
-                if item[0] in visible
-            ]
+            columns = [item for item in columns if item[0] in visible]
         for name, justify, max_width in columns:
             if mode == "copy":
                 table.add_column(name, justify=justify, no_wrap=True)
@@ -1806,8 +1909,7 @@ class InteractiveDashboardSink:
                 ):
                     eta = max(
                         0.0,
-                        (slot.evaluation_total - slot.evaluation_completed)
-                        / slot.evaluation_rate,
+                        (slot.evaluation_total - slot.evaluation_completed) / slot.evaluation_rate,
                     )
                 rows.extend(
                     (
@@ -1850,11 +1952,7 @@ class InteractiveDashboardSink:
                     )
                 )
             rows.append(("next action", _next_action(slot)))
-            body = (
-                _paired_key_value_grid(rows)
-                if width >= 110
-                else _key_value_grid(rows)
-            )
+            body = _paired_key_value_grid(rows) if width >= 110 else _key_value_grid(rows)
         elif tab == "Lifecycle":
             table = Table.grid(expand=True)
             table.add_column()
@@ -1907,9 +2005,7 @@ class InteractiveDashboardSink:
                 style="" if slot.response_preview else "dim",
             )
         return Panel(
-            Group(tabs, body)
-            if mode == "copy"
-            else Group(tabs, Rule(style="cyan"), body),
+            Group(tabs, body) if mode == "copy" else Group(tabs, Rule(style="cyan"), body),
             title=f"▶ SLOT DETAILS · {slot.slot}",
             border_style="cyan",
         )
@@ -1952,12 +2048,13 @@ class InteractiveDashboardSink:
             rows.extend(
                 (
                     ("wall/user/sys", f"{int(elapsed)}/{int(user)}/{int(system)}s"),
-                    ("active slots", sum(
-                        slot.state in ACTIVE_STATES
-                        for slot in _generation_slots(
-                            self.state, self.state.generation
-                        ).slots
-                    )),
+                    (
+                        "active slots",
+                        sum(
+                            slot.state in ACTIVE_STATES
+                            for slot in _generation_slots(self.state, self.state.generation).slots
+                        ),
+                    ),
                 )
             )
         return Panel(_key_value_grid(rows), title="Performance & IR", border_style="cyan")
@@ -2102,12 +2199,45 @@ class InteractiveDashboardSink:
         return Panel(table, title=title, border_style="cyan")
 
     def _quick_view_panel(self, mode: str) -> Panel:
+        if self.state.counterexample_state != "none":
+            verified = self.state.counterexample_state == "verified"
+            rows: tuple[tuple[str, object], ...] = (
+                ("Candidate", self.state.counterexample_candidate),
+                ("Order", self.state.counterexample_order),
+                ("Edges", self.state.counterexample_edges),
+                ("Minimum degree", self.state.counterexample_minimum_degree),
+                (
+                    "Target lengths",
+                    ", ".join(map(str, self.state.counterexample_lengths)) or "—",
+                ),
+                (
+                    "Exact cycle counts",
+                    (
+                        ", ".join(f"C{length}=0" for length in self.state.counterexample_lengths)
+                        if verified
+                        else "pending"
+                    ),
+                ),
+                ("Primary", self.state.counterexample_primary),
+                ("Independent", self.state.counterexample_independent),
+                ("Certificate", self.state.counterexample_certificate),
+            )
+            title = (
+                "Quick View · VERIFIED COUNTEREXAMPLE"
+                if verified
+                else "Quick View · COUNTEREXAMPLE CANDIDATE"
+            )
+            return Panel(
+                _key_value_grid(rows),
+                title=title,
+                border_style="bright_green" if verified else "yellow",
+            )
         group = _generation_slots(self.state, self.state.displayed_generation)
         active = sum(item.state in ACTIVE_STATES for item in group.slots)
         queued = sum(item.state == "queued" for item in group.slots)
         failed = sum(item.state == "failed" for item in group.slots)
         invalid = sum(item.state == "invalid" for item in group.slots)
-        rows: tuple[tuple[str, object], ...] = (
+        rows = (
             (
                 "Gen / Turn / Slots",
                 f"{_human_generation(self.state.displayed_generation)} / "
@@ -2173,7 +2303,7 @@ class InteractiveDashboardSink:
                 "  Enter/→ details         Esc/← matrix\n"
                 "  Tab/Shift+Tab detail tab\n\n"
                 "Actions\n"
-                "  q graceful stop         p pause/resume scheduling\n"
+                "  q safe interrupt        p pause/resume scheduling\n"
                 "  n/N view next/previous generation\n"
                 "  r confirmed retryable slot\n"
                 "  c config  l logs  t top  / search  h help\n\n"
@@ -2201,7 +2331,7 @@ class InteractiveDashboardSink:
         labels = (
             (
                 "[1–8] copy",
-                "[q] quit",
+                "[q] interrupt",
                 "[p] pause/resume",
                 "[n/N] view gen",
                 "[r] retry failed",
@@ -2214,7 +2344,7 @@ class InteractiveDashboardSink:
             if width >= 110
             else (
                 "[1–8] copy",
-                "[q]quit",
+                "[q]interrupt",
                 "[p]pause",
                 "[n/N]gen",
                 "[r]retry",
@@ -2234,10 +2364,7 @@ class InteractiveDashboardSink:
                 or (label.startswith("[r]") and self.capabilities.retry is None)
                 or (
                     label.startswith("[t]")
-                    and (
-                        not self.state.profiling_enabled
-                        or self.state.timing_profile is None
-                    )
+                    and (not self.state.profiling_enabled or self.state.timing_profile is None)
                 )
             )
             footer.append(label, style="reverse dim" if disabled else "reverse")
@@ -2334,11 +2461,7 @@ class _UnpaddedTitlePanel(Panel):
     def _title(self) -> Text | None:
         if not self.title:
             return None
-        title = (
-            Text.from_markup(self.title)
-            if isinstance(self.title, str)
-            else self.title.copy()
-        )
+        title = Text.from_markup(self.title) if isinstance(self.title, str) else self.title.copy()
         title.end = ""
         title.plain = title.plain.replace("\n", " ")
         title.no_wrap = True

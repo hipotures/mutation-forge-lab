@@ -31,13 +31,25 @@ POOL_SCHEMA_VERSION = "stage2b.pool.v1"
 FEATURE_SCHEMA_VERSION = "stage2b.features.v1"
 
 
+class EvaluationContractError(RuntimeError):
+    """The authoritative score and target-length contracts disagree."""
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureLimits:
-    forbidden_lengths: tuple[int, ...] = (4, 5, 6)
+    forbidden_lengths: tuple[int, ...]
     witness_sample_cap: int = 32
     cycle_node_budget: int = 20_000
     distance_query_budget: int = 256
     local_risk_budget: int = 2_048
+
+    def __post_init__(self) -> None:
+        if (
+            not self.forbidden_lengths
+            or len(set(self.forbidden_lengths)) != len(self.forbidden_lengths)
+            or any(length < 1 for length in self.forbidden_lengths)
+        ):
+            raise ValueError("forbidden_lengths must be unique positive integers")
 
     def as_dict(self) -> dict[str, JsonValue]:
         return {
@@ -190,12 +202,28 @@ def make_scientific_context(
     recent_acceptance_rate: float = 0.0,
     recent_duplicate_rate: float = 0.0,
 ) -> ScientificContext:
-    count_map = dict(score.capped_cycle_counts)
+    observed = tuple(length for length, _ in score.capped_cycle_counts)
+    counts = tuple(count for _, count in score.capped_cycle_counts)
+    if observed != forbidden_lengths:
+        raise EvaluationContractError(
+            "score lengths do not match backend target lengths: "
+            f"expected {forbidden_lengths!r}, observed {observed!r}"
+        )
+    if len(observed) != len(set(observed)):
+        raise EvaluationContractError("score contains duplicate target lengths")
+    if any(count < 0 for count in counts):
+        raise EvaluationContractError("score contains a negative witness count")
+    if sum(counts) != score.total_capped_witnesses:
+        raise EvaluationContractError(
+            "score total_capped_witnesses does not equal its count vector"
+        )
+    if not score.valid and score.total_capped_witnesses == 0:
+        raise EvaluationContractError("invalid score cannot report zero witnesses")
     return {
         "schema_version": SCIENTIFIC_CONTEXT_SCHEMA_VERSION,
         "order": graph.order,
         "forbidden_lengths": list(forbidden_lengths),
-        "capped_cycle_counts": [count_map.get(length, 0) for length in forbidden_lengths],
+        "capped_cycle_counts": list(counts),
         "weighted_penalty": score.weighted_penalty,
         "step": step,
         "remaining_steps": remaining_steps,
@@ -412,11 +440,11 @@ class KSwitchPoolGenerator:
         backend: GraphBackend,
         *,
         pool_limits: PoolLimits | None = None,
-        feature_limits: FeatureLimits | None = None,
+        feature_limits: FeatureLimits,
     ) -> None:
         self.backend = backend
         self.pool_limits = pool_limits or PoolLimits()
-        self.feature_limits = feature_limits or FeatureLimits()
+        self.feature_limits = feature_limits
 
     @staticmethod
     def _seed(

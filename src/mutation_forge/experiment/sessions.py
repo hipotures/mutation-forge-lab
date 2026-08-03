@@ -78,7 +78,7 @@ class SessionContext:
         cumulative_tokens: int = 0,
     ) -> dict[str, Any]:
         return {
-            "schema_version": "mforge.experiment.session.v1",
+            "schema_version": "mforge.experiment.session.v2",
             "session_number": self.number,
             "session_id": self.session_id,
             "start_time": self.started_at,
@@ -124,7 +124,7 @@ class SessionManager:
             directory / "session.json",
             _canonical(
                 {
-                    "schema_version": "mforge.experiment.session.v1",
+                    "schema_version": "mforge.experiment.session.v2",
                     "session_number": number,
                     "session_id": session_id,
                     "start_time": _now(),
@@ -162,13 +162,11 @@ class SessionManager:
             session.provider_turns_attempted += 1
         elif event_type in {"provider_turn_completed", "provider_turn_failed"}:
             if payload.get("retained") is True:
-                session.provider_turns_attempted = max(
-                    0, session.provider_turns_attempted - 1
-                )
+                session.provider_turns_attempted = max(0, session.provider_turns_attempted - 1)
             elif event_type == "provider_turn_completed":
                 session.provider_turns_completed += 1
         event = {
-            "schema_version": "1.0",
+            "schema_version": "mforge.experiment.events.v2",
             "run_id": session.session_id,
             "timestamp": _now(),
             "event_type": event_type,

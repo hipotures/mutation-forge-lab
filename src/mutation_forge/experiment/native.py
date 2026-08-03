@@ -13,6 +13,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+from mutation_forge.counterexamples import (
+    CounterexampleHalt,
+    CounterexampleOutcome,
+    CounterexampleVerified,
+)
 from mutation_forge.proposals.k_switch import FeatureLimits
 from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.policy import probe_scientific_policy
@@ -25,7 +30,7 @@ from .artifacts import (
     is_generated_policy,
 )
 from .config import ExperimentConfig
-from .evaluation import DEFAULT_FORBIDDEN_LENGTHS, DEFAULT_WITNESS_CAP, evaluate_candidate
+from .evaluation import DEFAULT_WITNESS_CAP, evaluate_candidate
 from .generation import Candidate, GenerationConfig, GenerationCoordinator, SlotResult
 from .layout import ExperimentLayout, WorkspaceError
 from .provider import LocalCodexAppServerProvider
@@ -39,6 +44,67 @@ class NativeExperimentError(RuntimeError):
 
 class _NativeSessionBudgetExpired(KeyboardInterrupt):
     """Internal wall-budget boundary, distinct from an operator interrupt."""
+
+
+def _counterexample_summary(outcome: CounterexampleOutcome) -> dict[str, Any]:
+    candidate = outcome.candidate
+    metadata: dict[str, Any] = {}
+    if candidate is not None:
+        try:
+            value = json.loads(candidate.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            value = {}
+        if isinstance(value, Mapping):
+            metadata = dict(value)
+    certificate = outcome.certificate
+    primary = outcome.primary
+    independent = outcome.independent
+    state = (
+        "verified"
+        if outcome.decision.value == "stop_verified"
+        else "conflict"
+        if outcome.stop_reason == "verification_conflict"
+        else "primary_verified"
+        if primary is not None and primary.status == "VERIFIED" and primary.complete
+        else "candidate"
+    )
+    return {
+        "state": state,
+        "status": outcome.decision.value,
+        "stop_reason": outcome.stop_reason,
+        "candidate_id": candidate.candidate_id if candidate is not None else None,
+        "candidate_path": (
+            str(candidate.artifact_directory) if candidate is not None else None
+        ),
+        "order": metadata.get("order"),
+        "edge_count": metadata.get("edge_count"),
+        "minimum_degree": metadata.get("minimum_degree"),
+        "target_forbidden_lengths": metadata.get("target_forbidden_lengths"),
+        "primary": (
+            {
+                "status": primary.status,
+                "complete": primary.complete,
+                "verifier_id": primary.verifier_id,
+                "artifact_ref": str(primary.artifact_path),
+            }
+            if primary is not None
+            else None
+        ),
+        "independent": (
+            {
+                "status": independent.status,
+                "complete": independent.complete,
+                "verifier_id": independent.verifier_id,
+                "artifact_ref": str(independent.artifact_path),
+            }
+            if independent is not None
+            else None
+        ),
+        "certificate_path": (
+            str(certificate.artifact_path) if certificate is not None else None
+        ),
+        "certificate_sha256": certificate.sha256 if certificate is not None else None,
+    }
 
 
 class _BehaviorProbeError(ValueError):
@@ -76,7 +142,7 @@ def _asset_path(name: str) -> Path:
         "schema": root / "configs" / "native" / "generated-policy.schema.json",
         "context": root / "configs" / "schemas" / "stage2b-context.schema.json",
         "proposal": root / "configs" / "schemas" / "stage2b-proposal.schema.json",
-        "semantic": root / "configs" / "stage3-field-semantics.v1.json",
+        "semantic": root / "configs" / "stage3-field-semantics.v2.json",
         "baseline": root / "configs" / "native" / "baseline-rankers.json",
     }
     try:
@@ -129,11 +195,7 @@ def _load_slot_briefs() -> dict[str, str]:
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise NativeExperimentError(f"cannot load native mutation brief {path}") from exc
         brief = value.get("brief") if isinstance(value, Mapping) else None
-        if (
-            not isinstance(brief, str)
-            or not brief.strip()
-            or value.get("slot_id") != slot
-        ):
+        if not isinstance(brief, str) or not brief.strip() or value.get("slot_id") != slot:
             raise NativeExperimentError(f"invalid native mutation brief {path}")
         briefs[slot] = brief.strip()
     return briefs
@@ -391,9 +453,7 @@ class _NativeProvider:
             ) from exc
         if not isinstance(manifest, Mapping):
             return None
-        usage_total = (
-            usage.get("totalTokens") if isinstance(usage, Mapping) else None
-        )
+        usage_total = usage.get("totalTokens") if isinstance(usage, Mapping) else None
         retryable = manifest.get("artifact_complete") is not True or (
             str(manifest.get("terminal_status", "completed")) != "completed"
             and manifest.get("charged") is not True
@@ -490,11 +550,7 @@ class _NativeProvider:
             value["metadata_validation"] = {
                 "schema_version": "mforge.native.metadata-validation.v1",
                 "status": (
-                    "matched"
-                    if matches
-                    else "mismatch"
-                    if validation.valid
-                    else "not_validated"
+                    "matched" if matches else "mismatch" if validation.valid else "not_validated"
                 ),
                 "declared_used_fields": declared,
                 "extracted_used_fields": extracted,
@@ -523,9 +579,7 @@ class _NativeProvider:
                     }
                     retained_telemetry = getattr(error, "telemetry", {})
                     value["worker_telemetry"] = (
-                        dict(retained_telemetry)
-                        if isinstance(retained_telemetry, Mapping)
-                        else {}
+                        dict(retained_telemetry) if isinstance(retained_telemetry, Mapping) else {}
                     )
                 else:
                     value["behavior"] = behavior
@@ -638,9 +692,7 @@ class _NativeProvider:
                 error=str(value.get("error")) if value.get("error") else None,
             )
         elif isinstance(retained_manifest, Mapping):
-            if (
-                retained_manifest.get("artifact_complete") is True
-            ):
+            if retained_manifest.get("artifact_complete") is True:
                 self.turns.verify_turn(directory)
             else:
                 self.turns.record_existing_turn(
@@ -774,16 +826,14 @@ class NativeExperimentAdapter:
     ) -> int:
         """Return the fail-safe global turn count enforced by the coordinator."""
 
-        ledger_turns = state.counts().get("provider_turns", 0)
+        ledger_turns = int(state.cumulative().get("provider_turns", 0))
         checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
         try:
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return ledger_turns
         reserved_turns = (
-            checkpoint.get("model_turns_used")
-            if isinstance(checkpoint, Mapping)
-            else None
+            checkpoint.get("model_turns_used") if isinstance(checkpoint, Mapping) else None
         )
         return max(
             ledger_turns,
@@ -799,9 +849,9 @@ class NativeExperimentAdapter:
     def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
         system, schema, request, repair, context, proposal, semantic, baseline = _load_assets()
         slot_briefs = _load_slot_briefs()
-        if config.kind != "ranker-search":
+        if config.kind != "heg":
             raise WorkspaceError(f"unsupported experiment kind {config.kind!r}")
-        if config.preset != "heg-ranker-evolution-v1":
+        if config.preset != "native":
             raise WorkspaceError(f"unsupported native experiment preset {config.preset!r}")
         if config.model.provider != "codex":
             raise WorkspaceError(
@@ -811,11 +861,6 @@ class NativeExperimentAdapter:
             raise WorkspaceError(f"unsupported model.effort {config.model.effort!r}")
         if config.search.selection != "elite-diversity":
             raise WorkspaceError(f"unsupported native selection policy {config.search.selection!r}")
-        if config.search.population_size != len(slot_briefs):
-            raise WorkspaceError(
-                "native preset requires population_size="
-                f"{len(slot_briefs)} for its differentiated mutation briefs"
-            )
         unsupported_baselines = set(config.evaluation.baselines).difference(
             {"random", "structural"}
         )
@@ -966,6 +1011,21 @@ class NativeExperimentAdapter:
             baseline_rankers,
         ) = _load_assets()
         slot_briefs = _load_slot_briefs()
+        target_lengths_backend = self.backend
+        close_target_lengths_backend = False
+        if target_lengths_backend is None:
+            from mutation_forge.backends.heg import HegBackend
+
+            target_lengths_backend = HegBackend(Path(__file__).resolve().parents[4] / "heg")
+            close_target_lengths_backend = True
+        try:
+            target_forbidden_lengths_by_order = {
+                str(order): list(target_lengths_backend.target_forbidden_lengths(order))
+                for order in config.evaluation.orders
+            }
+        finally:
+            if close_target_lengths_backend:
+                target_lengths_backend.close()
         auth_path = Path.home() / ".codex" / "auth.json"
         provider = self.provider or LocalCodexAppServerProvider(
             model=config.model.name,
@@ -988,13 +1048,9 @@ class NativeExperimentAdapter:
         unfinished_program_ids = _unfinished_generation_program_ids(
             layout.artifacts / "native-generation-checkpoint.json"
         )
-        baseline_sources = archive.existing_sources(
-            exclude_program_ids=unfinished_program_ids
-        )
+        baseline_sources = archive.existing_sources(exclude_program_ids=unfinished_program_ids)
         callback = observer if observer is not None else event_callback
-        profiling_enabled = (
-            config.run.profiling_enabled if profiling is None else bool(profiling)
-        )
+        profiling_enabled = config.run.profiling_enabled if profiling is None else bool(profiling)
         model_turn_limit = (
             config.search.max_model_turns
             if effective_max_model_turns is None
@@ -1064,18 +1120,29 @@ class NativeExperimentAdapter:
                     "baselines": list(config.evaluation.baselines),
                     "replay": config.evaluation.replay,
                 },
+                "target": "erdos_gyarfas",
+                "target_forbidden_lengths_by_order": (target_forbidden_lengths_by_order),
                 "resources": {
                     "workers": config.resources.workers,
                     "thread_count": config.resources.thread_count,
                 },
             }
-            feature_limits = FeatureLimits()
+            prompt_lengths = tuple(
+                sorted(
+                    {
+                        length
+                        for lengths in target_forbidden_lengths_by_order.values()
+                        for length in lengths
+                    }
+                )
+            )
+            feature_limits = FeatureLimits(forbidden_lengths=prompt_lengths)
             numeric_scales = {
                 "ctx.order": {
                     "values_in_this_experiment": list(config.evaluation.orders),
                 },
                 "ctx.forbidden_lengths": {
-                    "values": list(DEFAULT_FORBIDDEN_LENGTHS),
+                    "values_by_order": target_forbidden_lengths_by_order,
                 },
                 "ctx.capped_cycle_counts": {
                     "per_item_minimum": 0,
@@ -1110,9 +1177,7 @@ class NativeExperimentAdapter:
                 },
                 "proposal.removed_edge_load_sum_by_length": {
                     "per_item_minimum": 0,
-                    "per_item_maximum": (
-                        feature_limits.witness_sample_cap * 4
-                    ),
+                    "per_item_maximum": (feature_limits.witness_sample_cap * 4),
                 },
                 "proposal.removed_edge_load_max_by_length": {
                     "per_item_minimum": 0,
@@ -1302,11 +1367,7 @@ class NativeExperimentAdapter:
                     str(item["candidate_id"]),
                 )
             )
-            return (
-                pretty({"evaluated_candidates": summaries[:8]})
-                if summaries
-                else ""
-            )
+            return pretty({"evaluated_candidates": summaries[:8]}) if summaries else ""
 
         def on_generation(
             generation: int, candidates: Sequence[Candidate], results: Sequence[SlotResult]
@@ -1413,6 +1474,10 @@ class NativeExperimentAdapter:
                         evaluator_kwargs["progress"] = evaluation_progress
                     if "profiling_enabled" in parameters:
                         evaluator_kwargs["profiling_enabled"] = profiling_enabled
+                    if "counterexample_event_callback" in parameters:
+                        evaluator_kwargs["counterexample_event_callback"] = (
+                            lambda event_type, payload: emit(event_type, **dict(payload))
+                        )
                     try:
                         result = evaluator(config, program_id, candidate.source, **evaluator_kwargs)
                     except BaseException as error:
@@ -1451,11 +1516,7 @@ class NativeExperimentAdapter:
                     )
                     if isinstance(timing_profile, Mapping):
                         last_timing_profile = dict(timing_profile)
-                    raw_ir = (
-                        result.get("ir")
-                        if isinstance(result, Mapping)
-                        else None
-                    )
+                    raw_ir = result.get("ir") if isinstance(result, Mapping) else None
                     if raw_ir is None and isinstance(summary, Mapping):
                         raw_ir = summary.get("ir", summary.get("improvement_rate"))
                     if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
@@ -1618,6 +1679,22 @@ class NativeExperimentAdapter:
                     ),
                     "summary": dict(generation_result.summary),
                 }
+        except CounterexampleVerified as verified:
+            result = {
+                "status": "counterexample_verified",
+                "generation": 0,
+                "summary": _counterexample_summary(verified.outcome),
+            }
+        except CounterexampleHalt as halted:
+            result = {
+                "status": (
+                    "counterexample_failed"
+                    if halted.outcome.decision.value == "fail"
+                    else "counterexample_paused"
+                ),
+                "generation": 0,
+                "summary": _counterexample_summary(halted.outcome),
+            }
         except _NativeSessionBudgetExpired:
             generation = 0
             checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
@@ -1638,25 +1715,55 @@ class NativeExperimentAdapter:
             wrapped.close()
         if not isinstance(result, Mapping):
             raise NativeExperimentError("native generation engine returned a non-object result")
-        batch_completed = str(result.get("status", "completed")) == "completed"
+        if not isinstance(result.get("summary"), Mapping):
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
+            try:
+                checkpoint_value = json.loads(
+                    checkpoint_path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                checkpoint_value = {}
+            checkpoint_summary = (
+                checkpoint_value.get("summary")
+                if isinstance(checkpoint_value, Mapping)
+                else None
+            )
+            if isinstance(checkpoint_summary, Mapping):
+                result = {**dict(result), "summary": dict(checkpoint_summary)}
+        result_status = str(result.get("status", "completed"))
+        batch_completed = result_status == "completed"
         summary = result.get("summary")
         result_stop_reason = (
             str(summary.get("stop_reason"))
             if isinstance(summary, Mapping) and summary.get("stop_reason")
             else None
         )
-        if batch_completed:
+        if result_status == "counterexample_verified":
             outcome_state = "completed"
+            outcome_stop_reason = "counterexample_verified"
+        elif result_status == "counterexample_failed":
+            outcome_state = "failed"
+            outcome_stop_reason = result_stop_reason or "verification_conflict"
+        elif result_status == "counterexample_paused":
+            outcome_state = "paused"
+            outcome_stop_reason = result_stop_reason or "primary_verification_inconclusive"
+        elif batch_completed:
+            outcome_state = "exhausted"
             outcome_stop_reason = result_stop_reason or "generation_limit"
         else:
-            outcome_state = "idle"
-            outcome_stop_reason = (
-                "infrastructure_failed"
-                if str(result.get("status")) == "infrastructure_failed"
-                else "max_model_turns"
-                if result_stop_reason == "max_model_turns"
-                else "budget_exhausted"
-            )
+            if str(result.get("status")) == "infrastructure_failed":
+                outcome_state = "paused"
+                outcome_stop_reason = "infrastructure_failed"
+            elif result_stop_reason == "max_model_turns":
+                outcome_state = "exhausted"
+                outcome_stop_reason = "max_model_turns"
+            else:
+                outcome_state = "idle"
+                outcome_stop_reason = (
+                    "session_wall_seconds"
+                    if result_stop_reason == "wall_seconds"
+                    else result_stop_reason or "session_boundary"
+                )
         outcome: dict[str, Any] = {
             "state": outcome_state,
             "stop_reason": outcome_stop_reason,
@@ -1665,6 +1772,8 @@ class NativeExperimentAdapter:
             "evaluations": [],
             "result": dict(result),
         }
+        if result_status.startswith("counterexample_") and isinstance(summary, Mapping):
+            outcome["counterexample"] = dict(summary)
         if str(result.get("status")) == "infrastructure_failed":
             outcome["last_error"] = (
                 "native generation paused after an uncharged provider infrastructure failure"

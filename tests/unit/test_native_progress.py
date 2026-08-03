@@ -501,11 +501,11 @@ def test_json_cli_keeps_one_final_stdout_object_and_progress_on_stderr(
 ) -> None:
     config = tmp_path / "experiment.toml"
     config.write_text(
-        """schema_version = "mforge.experiment.v1"
+        """schema_version = "mforge.experiment.v2"
 exp_id = "json-progress"
 workspace = "./workspace"
-kind = "ranker-search"
-preset = "heg-ranker-evolution-v1"
+kind = "heg"
+preset = "native"
 
 [run]
 wall_seconds = 30

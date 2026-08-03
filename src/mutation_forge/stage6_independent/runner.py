@@ -539,7 +539,7 @@ def _episode(
             state = states[policy_id]
             seed = _digest_int("stage6.trajectory.v1", eid, step)
             pool = _pool(proposer, backend, state["graph"], seed=seed ^ policy_index, step=step)
-            context = {"schema_version": "stage2b.context.v1", "order": state["graph"].order, "capped_cycle_counts": [item[1] for item in initial.capped_cycle_counts], "weighted_penalty": state["score"].weighted_penalty, "step": step, "remaining_steps": horizon - step - 1, "stagnation": state["rejected"], "recent_best_improvement": 0.0, "recent_acceptance_rate": 0.0, "recent_duplicate_rate": 0.0}
+            context = {"schema_version": "mforge.scientific_context.v2", "order": state["graph"].order, "forbidden_lengths": [item[0] for item in initial.capped_cycle_counts], "capped_cycle_counts": [item[1] for item in initial.capped_cycle_counts], "weighted_penalty": state["score"].weighted_penalty, "step": step, "remaining_steps": horizon - step - 1, "stagnation": state["rejected"], "recent_best_improvement": 0.0, "recent_acceptance_rate": 0.0, "recent_duplicate_rate": 0.0}
             candidate, selection = _select(policies[policy_id], context, pool, policy_workers, policy_id)
             candidate_graph = backend.apply_rewrite(state["graph"], _rewrite(candidate))
             candidate_score = _score(backend, scorer, candidate_graph, state["score"])

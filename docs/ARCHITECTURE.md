@@ -13,7 +13,9 @@ declarative RewritePlan
       |
 host invariant validation
       |
-read-only graph backend -> scorer -> exact verifier for heuristic zero only
+read-only graph backend -> scorer -> immutable zero candidate
+                                      |
+                             primary + independent verifier
       |
 events + SQLite + immutable artifacts
 ```
@@ -59,7 +61,7 @@ relabel vertices, so labeled equality is sufficient for these transient sets.
 ## Later package boundaries
 
 `experiment/` is the public orchestration boundary introduced by issue #18.
-`config.py` resolves `mforge.experiment.v1` relative to its source file and
+`config.py` resolves `mforge.experiment.v2` relative to its source file and
 separates invocation budgets from the immutable lock projection. `layout.py`,
 `lock.py`, `state.py`, and `sessions.py` provide the atomic workspace,
 configuration identity, SQLite ownership/idempotency state, checkpoints, and

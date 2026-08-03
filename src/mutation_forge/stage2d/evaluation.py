@@ -7,7 +7,7 @@ import os
 import platform
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
@@ -191,7 +191,7 @@ def _apply_policy_step(
     context = make_scientific_context(
         state.graph,
         state.score,
-        forbidden_lengths=config.stage2b.features.forbidden_lengths,
+        forbidden_lengths=backend.target_forbidden_lengths(state.graph.order),
         step=step,
         remaining_steps=horizon - step - 1,
         stagnation=state.stagnation,
@@ -331,7 +331,10 @@ def run_trajectory_episode(
         generator = KSwitchPoolGenerator(
             applied_backend,
             pool_limits=config.stage2b.pool,
-            feature_limits=config.stage2b.features,
+            feature_limits=replace(
+                config.stage2b.features,
+                forbidden_lengths=applied_backend.target_forbidden_lengths(graph.order),
+            ),
         )
         divergence_step: int | None = None
         shared_pool_steps = 0

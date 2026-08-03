@@ -17,7 +17,7 @@ PROMPT_VERSION = "ranker_v1"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTEXT_SCHEMA = REPO_ROOT / "configs/schemas/stage2b-context.schema.json"
 PROPOSAL_SCHEMA = REPO_ROOT / "configs/schemas/stage2b-proposal.schema.json"
-SEMANTICS_GLOSSARY = REPO_ROOT / "configs/stage3-field-semantics.v1.json"
+SEMANTICS_GLOSSARY = REPO_ROOT / "configs/stage3-field-semantics.v2.json"
 SYSTEM_PROMPT_PATH = REPO_ROOT / "prompts/ranker_v1_system.md"
 REQUEST_PROMPT_PATH = REPO_ROOT / "prompts/ranker_v1_request.md"
 OUTPUT_SCHEMA_PATH = REPO_ROOT / "prompts/ranker_v1_output_schema.json"
@@ -57,7 +57,7 @@ def load_semantic_glossary(
     if (
         not isinstance(value, dict)
         or set(value) != root_keys
-        or value.get("schema_version") != "stage3.field_semantics.v1"
+        or value.get("schema_version") != "stage3.field_semantics.v2"
         or value.get("context_schema_sha256") != schema_sha256(context_schema)
         or value.get("proposal_schema_sha256") != schema_sha256(proposal_schema)
     ):
@@ -348,9 +348,9 @@ def render_request_prompt(
         + "\n\n"
         + program_contract()
         + "\n\nOUTPUT FIELD REQUIREMENTS\n\n"
-        "- schema_version: exactly \"stage3.generated_policy.v1\".\n"
+        '- schema_version: exactly "stage3.generated_policy.v1".\n'
         "- source: only the complete priority(ctx, proposal) function; no imports or other definitions.\n"
-        "- design_summary: begin with \"Hypothesis:\" and state why this ranking should select better mutations than an unstructured selection rule, in a falsifiable way.\n"
+        '- design_summary: begin with "Hypothesis:" and state why this ranking should select better mutations than an unstructured selection rule, in a falsifiable way.\n'
         "- used_fields: list every accessed field exactly once as ctx.<field> or proposal.<field>.\n"
         "- assumptions: explicitly list each assumed direction of effect that is not guaranteed by the field definition; use an empty array if none.\n\n"
         "Return exactly one JSON object with keys schema_version, source, design_summary, "

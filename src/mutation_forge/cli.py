@@ -25,7 +25,7 @@ from mutation_forge.evaluation.benchmark import load_summary
 from mutation_forge.evaluation.dataset import build_dataset
 from mutation_forge.events import EventSink, JsonlSink
 from mutation_forge.experiment.config import load_experiment_config
-from mutation_forge.experiment.service import run_experiment
+from mutation_forge.experiment.service import final_stop_experiment, run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
 from mutation_forge.output.interactive_dashboard import InteractiveDashboardSink
@@ -307,7 +307,7 @@ def _experiment_run(
                 if not (
                     until_complete
                     and result.get("state") == "idle"
-                    and result.get("stop_reason") == "budget_exhausted"
+                    and result.get("stop_reason") == "session_wall_seconds"
                 ):
                     break
                 time.sleep(1.0)
@@ -338,6 +338,17 @@ def _experiment_status(config_path: Path, *, json_output: bool) -> int:
     result = experiment_status(config_path)
     print(render_status(result, json_output=json_output))
     return 0 if result.get("state") != "failed" else 1
+
+
+def _experiment_stop(config_path: Path, *, final: bool, json_output: bool) -> int:
+    if not final:
+        raise ValueError("experiment stop requires --final")
+    result = final_stop_experiment(config_path)
+    if json_output:
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    else:
+        Console().print(render_status(experiment_status(config_path)))
+    return 0
 
 
 def _stage2d(args: argparse.Namespace) -> int:
@@ -747,7 +758,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     experiment_commands = experiment.add_subparsers(
         dest="experiment_command",
         required=True,
-        metavar="{run,status}",
+        metavar="{run,status,stop}",
     )
     experiment_run = experiment_commands.add_parser(
         "run",
@@ -787,6 +798,13 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     )
     experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_status.add_argument("--json", action="store_true")
+    experiment_stop = experiment_commands.add_parser(
+        "stop",
+        help="persist an explicit terminal operator decision",
+    )
+    experiment_stop.add_argument("--config", type=Path, default=Path("experiment.toml"))
+    experiment_stop.add_argument("--final", action="store_true", required=True)
+    experiment_stop.add_argument("--json", action="store_true")
 
     dataset = commands.add_parser("dataset", help=argparse.SUPPRESS)
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
@@ -1177,7 +1195,7 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_commands = experiment.add_subparsers(
         dest="experiment_command",
         required=True,
-        metavar="{run,status}",
+        metavar="{run,status,stop}",
     )
     experiment_run = experiment_commands.add_parser(
         "run",
@@ -1217,6 +1235,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_status.add_argument("--json", action="store_true")
+    experiment_stop = experiment_commands.add_parser(
+        "stop",
+        help="persist an explicit terminal operator decision",
+    )
+    experiment_stop.add_argument("--config", type=Path, default=Path("experiment.toml"))
+    experiment_stop.add_argument("--final", action="store_true", required=True)
+    experiment_stop.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1243,6 +1268,12 @@ def legacy_main(argv: list[str] | None = None) -> int:
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)
+        if args.command == "experiment" and args.experiment_command == "stop":
+            return _experiment_stop(
+                args.config,
+                final=args.final,
+                json_output=args.json,
+            )
         if args.command == "dataset" and args.dataset_command == "build":
             return _build_dataset(load_config(args.config), json_output=args.json)
         if args.command == "baseline" and args.baseline_command == "run":
@@ -1337,6 +1368,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(args.config, json_output=args.json)
+        if args.command == "experiment" and args.experiment_command == "stop":
+            return _experiment_stop(
+                args.config,
+                final=args.final,
+                json_output=args.json,
+            )
     except Exception as error:
         if getattr(args, "json", False):
             print(

@@ -28,9 +28,7 @@ from mutation_forge.sandbox.errors import (
 from mutation_forge.sandbox.validation import ValidationResult, validate_policy
 from mutation_forge.sandbox.worker import PolicyWorker
 
-FIXED_PROBE_BUNDLES: tuple[
-    tuple[ProbeContext, tuple[ProbeProposal, ...]], ...
-] = (
+FIXED_PROBE_BUNDLES: tuple[tuple[ProbeContext, tuple[ProbeProposal, ...]], ...] = (
     (
         {
             "probe_id": "weighted",
@@ -93,7 +91,7 @@ def _scientific_proposal(
     risk: int,
 ) -> ScientificProposal:
     return {
-        "schema_version": "stage2b.proposal.v1",
+        "schema_version": "mforge.scientific_proposal.v2",
         "proposal_id": f"{index:064x}",
         "k": k,
         "operator_family": f"legal_{k}_switch",
@@ -118,9 +116,9 @@ SCIENTIFIC_PROBE_BUNDLES: tuple[
     (
         "early-search",
         {
-            "schema_version": "stage2b.context.v1",
+            "schema_version": "mforge.scientific_context.v2",
             "order": 12,
-            "forbidden_lengths": [4, 5, 6],
+            "forbidden_lengths": [4, 8, 16],
             "capped_cycle_counts": [12, 5, 1],
             "weighted_penalty": 39,
             "step": 0,
@@ -163,9 +161,9 @@ SCIENTIFIC_PROBE_BUNDLES: tuple[
     (
         "stagnated-search",
         {
-            "schema_version": "stage2b.context.v1",
+            "schema_version": "mforge.scientific_context.v2",
             "order": 30,
-            "forbidden_lengths": [4, 5, 6],
+            "forbidden_lengths": [4, 8, 16],
             "capped_cycle_counts": [64, 40, 17],
             "weighted_penalty": 315,
             "step": 24,
@@ -255,9 +253,7 @@ def _signature_payload(
             for proposal in proposals:
                 try:
                     result = worker.call(ctx, proposal)
-                    flags = _failure_flags(
-                        None if result.status == "ok" else "exception"
-                    )
+                    flags = _failure_flags(None if result.status == "ok" else "exception")
                     priority = result.priority
                     finite = result.status == "ok"
                     error = result.error
@@ -293,9 +289,7 @@ def _signature_payload(
                 {
                     "probe_id": ctx["probe_id"],
                     "priorities": cast(list[JsonValue], results),
-                    "rank_order": [
-                        cast(str, item["proposal_id"]) for item in ranked
-                    ],
+                    "rank_order": [cast(str, item["proposal_id"]) for item in ranked],
                     "selected_proposal_id": (
                         cast(str, ranked[0]["proposal_id"]) if ranked else None
                     ),
@@ -379,8 +373,8 @@ def probe_scientific_policy(
     applied_limits = limits or SandboxLimits()
     validation = validate_policy(source, applied_limits, scientific=True)
     input_contract: dict[str, JsonValue] = {
-        "context": "stage2b.context.v1",
-        "proposal": "stage2b.proposal.v1",
+        "context": "mforge.scientific_context.v2",
+        "proposal": "mforge.scientific_proposal.v2",
     }
     result: dict[str, JsonValue] = {
         "schema_version": SCIENTIFIC_PROBE_SCHEMA_VERSION,
@@ -442,9 +436,7 @@ def probe_scientific_policy(
                     list[JsonValue],
                     [item["proposal_id"] for item in ranked],
                 ),
-                "selected_proposal_id": (
-                    ranked[0]["proposal_id"] if ranked else None
-                ),
+                "selected_proposal_id": (ranked[0]["proposal_id"] if ranked else None),
             }
             probes.append(probe)
             if failure is not None:
@@ -533,8 +525,7 @@ def evaluate_policy(
     project_state = git_state(config.project_repo)
     heg_state = git_state(config.heg_repo)
     heg_pin_verified = (
-        heg_state["commit"] == config.frozen_heg_commit
-        and heg_state["dirty"] is False
+        heg_state["commit"] == config.frozen_heg_commit and heg_state["dirty"] is False
     )
     project_base_verified = _git_is_ancestor(
         config.project_repo,
@@ -624,12 +615,8 @@ def replay_policy(
             == cast(dict[str, JsonValue], expected_identity)["source_sha256"]
         ),
         "normalized_ast_sha256_match": (
-            cast(dict[str, JsonValue], replayed["identity"])[
-                "normalized_ast_sha256"
-            ]
-            == cast(dict[str, JsonValue], expected_identity)[
-                "normalized_ast_sha256"
-            ]
+            cast(dict[str, JsonValue], replayed["identity"])["normalized_ast_sha256"]
+            == cast(dict[str, JsonValue], expected_identity)["normalized_ast_sha256"]
         ),
         "identity_match": identity_match,
         "behavior_signature_match": signature_match,

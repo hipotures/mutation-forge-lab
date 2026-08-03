@@ -9,7 +9,7 @@ import statistics
 import subprocess
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -836,10 +836,13 @@ def run_diagnostic_cell(
     generator = KSwitchPoolGenerator(
         backend,
         pool_limits=config.stage2b.pool,
-        feature_limits=config.stage2b.features,
+        feature_limits=replace(
+            config.stage2b.features,
+            forbidden_lengths=backend.target_forbidden_lengths(graph.order),
+        ),
     )
     feature_analyzer = FeatureAnalyzer(
-        forbidden_lengths=config.stage2b.features.forbidden_lengths,
+        forbidden_lengths=backend.target_forbidden_lengths(graph.order),
         sample_cap=config.diagnostics.feature_sample_cap,
         distinct_cap=config.diagnostics.distinct_value_cap,
         near_constant_epsilon=config.diagnostics.near_constant_epsilon,

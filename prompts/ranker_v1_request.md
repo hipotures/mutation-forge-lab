@@ -18,8 +18,8 @@ proposal contains candidate-specific bounded structural proxies and must provide
 
 CONTEXT FIELDS (POOL-CONSTANT)
 
-- ctx.schema_version [string constant 'stage2b.context.v1'; scope=pool_constant]:
-  Fixed context contract literal stage2b.context.v1.
+- ctx.schema_version [string constant 'mforge.scientific_context.v2'; scope=pool_constant]:
+  Fixed context contract literal mforge.scientific_context.v2.
   Interpretation: provenance_only.
 - ctx.order [integer; minimum 4; scope=pool_constant]:
   Number of vertices in the current graph.
@@ -54,8 +54,8 @@ CONTEXT FIELDS (POOL-CONSTANT)
 
 PROPOSAL FIELDS (CANDIDATE-SPECIFIC OR PROVENANCE)
 
-- proposal.schema_version [string constant 'stage2b.proposal.v1'; scope=contract_constant]:
-  Fixed proposal contract literal stage2b.proposal.v1.
+- proposal.schema_version [string constant 'mforge.scientific_proposal.v2'; scope=contract_constant]:
+  Fixed proposal contract literal mforge.scientific_proposal.v2.
   Interpretation: provenance_only.
 - proposal.proposal_id [string; pattern '^[0-9a-f]{64}$'; scope=candidate_specific]:
   Opaque deterministic SHA-256 identifier for the declarative rewrite plan.

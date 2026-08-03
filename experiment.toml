@@ -1,26 +1,29 @@
-schema_version = "mforge.experiment.v1"
+schema_version = "mforge.experiment.v2"
 
-exp_id = "heg_llm_live_5"
+exp_id = "heg_llm_open_ended"
 workspace = "./workspace"
 
-kind = "ranker-search"
-preset = "heg-ranker-evolution-v1"
+kind = "heg"
+preset = "native"
 
 [run]
 wall_seconds = 3600
+output = "rich"
+profiling_enabled = false
+deep_profiling_enabled = false
 turn_timeout_base_seconds = 120
 
 [model]
 provider = "codex"
 name = "gpt-5.6-luna"
 effort = "xhigh"
-concurrency = 1
-max_repairs = 3
+concurrency = 8
+max_repairs = 1
 
 [search]
 population_size = 8
-max_generations = 4
-max_model_turns = 64
+max_generations = "unbounded"
+max_model_turns = "unbounded"
 selection = "elite-diversity"
 
 [evaluation]

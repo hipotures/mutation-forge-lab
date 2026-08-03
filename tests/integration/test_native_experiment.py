@@ -33,7 +33,7 @@ from mutation_forge.sandbox.validation import (
     render_policy_validator_contract,
 )
 
-VALID_SOURCE = "def priority(ctx, proposal):\n    return 0\n"
+VALID_SOURCE = 'def priority(ctx, proposal):\n    return proposal["local_c4_risk"]\n'
 INVALID_SOURCE = "def priority(ctx, proposal)\n    return 0\n"
 
 
@@ -45,8 +45,7 @@ def test_native_output_schema_uses_app_server_supported_keywords() -> None:
     def contains_unique_items(value: object) -> bool:
         if isinstance(value, Mapping):
             return any(
-                key == "uniqueItems" or contains_unique_items(item)
-                for key, item in value.items()
+                key == "uniqueItems" or contains_unique_items(item) for key, item in value.items()
             )
         if isinstance(value, list):
             return any(contains_unique_items(item) for item in value)
@@ -70,11 +69,11 @@ def _write_config(
     replay: bool = False,
 ) -> Path:
     path.write_text(
-        f'''schema_version = "mforge.experiment.v1"
+        f'''schema_version = "mforge.experiment.v2"
 exp_id = "{exp_id}"
 workspace = "{workspace.as_posix()}"
-kind = "ranker-search"
-preset = "heg-ranker-evolution-v1"
+kind = "heg"
+preset = "native"
 
 [run]
 wall_seconds = 30
@@ -129,7 +128,7 @@ class RecordingProvider:
                 "source": self.source,
                 "design_summary": "A deterministic test policy.",
                 "hypothesis": "A bounded structural score is reproducible.",
-                "used_fields": ["proposal.k"],
+                "used_fields": ["proposal.local_c4_risk"],
                 "assumptions": ["The host supplies legal proposals."],
                 "expected_failure_modes": ["The simple ranker may underperform."],
             }
@@ -263,7 +262,7 @@ def test_public_experiment_sources_have_no_historical_stage4_references() -> Non
             assert forbidden.search(path.read_text(encoding="utf-8")) is None, path
 
 
-def test_fresh_native_experiment_creates_workspace_and_next_run_starts_next_batch(
+def test_fresh_finite_native_experiment_exhausts_and_next_run_is_a_noop(
     tmp_path: Path,
 ) -> None:
     config_path = _write_config(tmp_path / "experiment.toml", workspace=tmp_path / "workspace")
@@ -272,22 +271,12 @@ def test_fresh_native_experiment_creates_workspace_and_next_run_starts_next_batc
 
     first = service.run(config_path)
     root = tmp_path / "workspace" / "native-test"
-    state = ExperimentStateStore(root / "state.sqlite3")
-    try:
-        checkpoint = state.checkpoint()
-        state.set_state(
-            "completed",
-            stop_reason="generation_limit",
-            checkpoint=str(checkpoint["checkpoint_id"]) if checkpoint is not None else None,
-        )
-    finally:
-        state.close()
     second = service.run(config_path)
 
-    assert first["state"] == "idle"
-    assert second["state"] == "idle"
-    assert second["stop_reason"] == "generation_batch_completed"
-    assert [request["generation"] for request in provider.calls] == [0, 1]
+    assert first["state"] == "exhausted"
+    assert second["state"] == "exhausted"
+    assert second["stop_reason"] == "generation_limit"
+    assert [request["generation"] for request in provider.calls] == [0]
     assert (root / "experiment.toml").is_file()
     assert (root / "experiment.lock.json").is_file()
     assert (root / "state.sqlite3").is_file()
@@ -301,8 +290,8 @@ def test_fresh_native_experiment_creates_workspace_and_next_run_starts_next_batc
     assert "search-freeze" not in lock_text
     assert "stage4" not in lock_text
     status = experiment_status(config_path)
-    assert status["state"] == "idle"
-    assert status["provider_turns"] == 2
+    assert status["state"] == "exhausted"
+    assert status["provider_turns"] == 1
     assert status["unique_candidate_count"] == 1
     assert status["best_program_id"] == "g0000-slot-00"
 
@@ -359,7 +348,7 @@ def test_native_live_progress_is_visible_before_blocked_provider_finishes(
         sink.close()
     assert not worker.is_alive()
     assert not errors
-    assert result["state"] == "idle"
+    assert result["state"] == "exhausted"
 
 
 def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> None:
@@ -378,7 +367,7 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     root = ExperimentLayout.from_config(config).root
     lock = json.loads((root / "experiment.lock.json").read_text(encoding="utf-8"))
 
-    assert result["state"] == "idle"
+    assert result["state"] == "exhausted"
     assert len(provider.calls) == 2
     assert provider.max_active == 1
     assert {request["model"] for request in provider.calls} == {"gpt-5.6-luna"}
@@ -506,7 +495,7 @@ def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path
     initial = root / "artifacts" / "generations" / "generation-0000" / "slot-00" / "initial"
     repair = initial.parent / "repair-01"
 
-    assert result["state"] == "idle"
+    assert result["state"] == "exhausted"
     assert [request["phase"] for request in provider.calls] == ["initial", "repair"]
     assert json.loads((initial / "validation.json").read_text(encoding="utf-8"))["valid"] is False
     assert json.loads((repair / "validation.json").read_text(encoding="utf-8"))["valid"] is True
@@ -533,27 +522,25 @@ def test_invalid_final_repair_is_terminal_and_not_repeated_on_resume(
     second = service.run(config_path)
     root = tmp_path / "workspace" / "native-test"
     checkpoint = json.loads(
-        (root / "artifacts" / "native-generation-checkpoint.json").read_text(
-            encoding="utf-8"
-        )
+        (root / "artifacts" / "native-generation-checkpoint.json").read_text(encoding="utf-8")
     )
     events = [
         json.loads(line)
-        for line in (
-            root / "artifacts" / "sessions" / "session-000001" / "events.jsonl"
-        ).read_text(encoding="utf-8").splitlines()
+        for line in (root / "artifacts" / "sessions" / "session-000001" / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     slot_states = list(checkpoint["slots"].values())
     state = ExperimentStateStore(root / "state.sqlite3")
     try:
-        assert state.counts()["provider_turns"] == 4
-        assert state.cumulative()["total_tokens"] == 8
+        assert state.counts()["provider_turns"] == 2
+        assert state.cumulative()["total_tokens"] == 4
     finally:
         state.close()
 
-    assert first["state"] == "idle"
-    assert second["stop_reason"] == "generation_batch_completed"
-    assert [request["generation"] for request in provider.calls] == [0, 0, 1, 1]
+    assert first["state"] == "exhausted"
+    assert second["stop_reason"] == "generation_limit"
+    assert [request["generation"] for request in provider.calls] == [0, 0]
     assert {item["status"] for item in slot_states} == {"invalid"}
     assert {item["repairs"] for item in slot_states} == {1}
     assert {item["remaining_repairs"] for item in slot_states} == {0}
@@ -582,18 +569,10 @@ def test_multiple_repairs_use_distinct_durable_attempts(tmp_path: Path) -> None:
     _service(provider).run(config_path)
     root = tmp_path / "workspace" / "native-test"
     checkpoint = json.loads(
-        (root / "artifacts" / "native-generation-checkpoint.json").read_text(
-            encoding="utf-8"
-        )
+        (root / "artifacts" / "native-generation-checkpoint.json").read_text(encoding="utf-8")
     )
     slot = next(iter(checkpoint["slots"].values()))
-    phases = (
-        root
-        / "artifacts"
-        / "generations"
-        / "generation-0000"
-        / "slot-00"
-    )
+    phases = root / "artifacts" / "generations" / "generation-0000" / "slot-00"
 
     assert len(provider.calls) == 3
     assert slot["status"] == "invalid"
@@ -632,9 +611,7 @@ class CrashAfterFailedRepairEvidenceEngine:
     ) -> Mapping[str, Any]:
         self.calls += 1
         coordinator_type = (
-            _CrashAfterRepairAssessmentCoordinator
-            if self.calls == 1
-            else GenerationCoordinator
+            _CrashAfterRepairAssessmentCoordinator if self.calls == 1 else GenerationCoordinator
         )
         generation = coordinator_type(
             provider,
@@ -682,12 +659,10 @@ def test_resume_reuses_durable_failed_repair_evidence(tmp_path: Path) -> None:
     finally:
         final_state.close()
     checkpoint = json.loads(
-        (root / "artifacts" / "native-generation-checkpoint.json").read_text(
-            encoding="utf-8"
-        )
+        (root / "artifacts" / "native-generation-checkpoint.json").read_text(encoding="utf-8")
     )
 
-    assert resumed["state"] == "idle"
+    assert resumed["state"] == "exhausted"
     assert len(provider.calls) == 2
     assert {item["status"] for item in checkpoint["slots"].values()} == {"invalid"}
 
@@ -704,7 +679,7 @@ def test_native_prompts_embed_exact_validator_contract_and_repair_budget(
     provider = RepairProvider()
     _service(provider).run(config_path)
 
-    contract = render_policy_validator_contract(SandboxLimits())
+    contract = render_policy_validator_contract(SandboxLimits(), scientific=True)
     assert len(provider.calls) == 2
     assert all(contract in request["prompt"] for request in provider.calls)
     assert VALIDATOR_VERSION in contract
@@ -721,8 +696,7 @@ def test_native_prompts_embed_exact_validator_contract_and_repair_budget(
     ("source", "expected_code"),
     [
         (
-            "def helper():\n    return 1\n\n"
-            "def priority(ctx, proposal):\n    return helper()\n",
+            "def helper():\n    return 1\n\ndef priority(ctx, proposal):\n    return helper()\n",
             "top_level_contract",
         ),
         (
@@ -827,8 +801,8 @@ def test_interrupt_resume_reuses_durable_turn_and_evaluation(tmp_path: Path) -> 
 
     resumed = service.run(config_path)
     status = experiment_status(config_path)
-    assert resumed["state"] == "idle"
-    assert status["state"] == "idle"
+    assert resumed["state"] == "exhausted"
+    assert status["state"] == "exhausted"
     assert len(provider.calls) == 1
     assert status["provider_turns"] == 1
     assert status["unique_candidate_count"] == 1
@@ -856,12 +830,12 @@ def test_charged_failed_turn_is_retained_without_replacement_call(tmp_path: Path
         assert row["state"] == "failed"
         assert usage["quality"] == "partial"
         assert usage["totalTokens"] == 12_000
-        assert state.cumulative()["total_tokens"] == 24_000
+        assert state.cumulative()["total_tokens"] == 12_000
     finally:
         state.close()
-    assert first["state"] == "idle"
-    assert second["stop_reason"] == "generation_batch_completed"
-    assert provider.calls == 2
+    assert first["state"] == "exhausted"
+    assert second["stop_reason"] == "max_model_turns"
+    assert provider.calls == 1
 
 
 def test_uncharged_infrastructure_failure_retries_same_generation(
@@ -920,6 +894,35 @@ def test_uncharged_infrastructure_failure_retries_same_generation(
     assert second.summary["first_generation"] == 0
     assert second.summary["completed_generation_count"] == 1
     assert len(successful_provider.calls) == 1
+
+
+def test_unbounded_generation_canary_crosses_finite_defaults(
+    tmp_path: Path,
+) -> None:
+    provider = RecordingProvider()
+    completed_generations: list[int] = []
+
+    def select(generation: int, *_args: object) -> None:
+        completed_generations.append(generation)
+
+    result = GenerationCoordinator(
+        provider,
+        config=GenerationConfig(
+            generations=None,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=None,
+            max_repairs=0,
+            checkpoint_path=tmp_path / "unbounded-checkpoint.json",
+        ),
+        selection_callback=select,
+        budget_exhausted=lambda: len(completed_generations) >= 8,
+    ).run()
+
+    assert completed_generations == list(range(8))
+    assert len(provider.calls) == 8
+    assert result.status == "budget_exhausted"
+    assert result.summary["stop_reason"] == "wall_seconds"
 
 
 def test_repair_infrastructure_failure_retries_same_request(
@@ -1056,9 +1059,7 @@ def test_repair_infrastructure_failure_resumes_same_attempt(
     ).run()
     saved = json.loads(checkpoint.read_text(encoding="utf-8"))
     repair_state = next(
-        value
-        for value in saved["slots"].values()
-        if value.get("status") == "repair_running"
+        value for value in saved["slots"].values() if value.get("status") == "repair_running"
     )
 
     second_provider = RepairFailureProvider(succeeds=True)
@@ -1118,4 +1119,4 @@ def test_native_wall_budget_is_resumable_not_an_interrupt(tmp_path: Path) -> Non
     ).run(config_path)
 
     assert result["state"] == "idle"
-    assert result["stop_reason"] == "budget_exhausted"
+    assert result["stop_reason"] == "session_wall_seconds"

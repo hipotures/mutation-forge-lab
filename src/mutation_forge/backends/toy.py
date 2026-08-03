@@ -23,6 +23,11 @@ class ToyBackend:
 
     backend_id = "toy-connected-cubic-v1"
 
+    def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
+        if order < 4:
+            return ()
+        return (4,)
+
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
         if order < 4 or order % 2:
             raise ValueError("toy connected-cubic seeds require an even order >= 4")
@@ -30,8 +35,7 @@ class ToyBackend:
         labels = list(range(order))
         rng.shuffle(labels)
         edges = {
-            normalized_edge((labels[index], labels[(index + 1) % order]))
-            for index in range(order)
+            normalized_edge((labels[index], labels[(index + 1) % order])) for index in range(order)
         }
         half = order // 2
         edges.update(

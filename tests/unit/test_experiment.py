@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from mutation_forge import cli
+from mutation_forge.events import Event
 from mutation_forge.experiment.artifacts import (
     ArtifactIncompleteError,
     TurnArtifactStore,
@@ -20,7 +21,11 @@ from mutation_forge.experiment.config import (
 from mutation_forge.experiment.generation import GenerationConfig, GenerationCoordinator
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
 from mutation_forge.experiment.provider import NativeProviderConfig, _CodexTransport
-from mutation_forge.experiment.service import ExperimentService, NullExperimentAdapter
+from mutation_forge.experiment.service import (
+    ExperimentService,
+    NullExperimentAdapter,
+    final_stop_experiment,
+)
 from mutation_forge.experiment.state import ActiveSessionError, ExperimentStateStore
 from mutation_forge.experiment.status import (
     STATUS_SCHEMA_VERSION,
@@ -30,11 +35,11 @@ from mutation_forge.experiment.status import (
 
 
 def _config(*, exp_id: str = "demo", workspace: str = "./workspace", wall: int = 1) -> str:
-    return f'''schema_version = "mforge.experiment.v1"
+    return f'''schema_version = "mforge.experiment.v2"
 exp_id = "{exp_id}"
 workspace = "{workspace}"
-kind = "ranker-search"
-preset = "heg-ranker-evolution-v1"
+kind = "heg"
+preset = "native"
 
 [run]
 wall_seconds = {wall}
@@ -80,6 +85,91 @@ def test_config_resolves_workspace_relative_to_config(tmp_path: Path) -> None:
     assert config.experiment_root == path.parent / "workspace" / "demo"
 
 
+def test_config_accepts_and_serializes_unbounded_limits(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config()
+        .replace("max_generations = 2", 'max_generations = "unbounded"')
+        .replace("max_model_turns = 4", 'max_model_turns = "unbounded"'),
+        encoding="utf-8",
+    )
+    config = load_experiment_config(path)
+    assert config.search.max_generations is None
+    assert config.search.max_model_turns is None
+    assert config.resolved_dict()["search"] == {
+        "population_size": 2,
+        "max_generations": "unbounded",
+        "max_model_turns": "unbounded",
+        "selection": "elite-diversity",
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_generations", "0"),
+        ("max_generations", "-1"),
+        ("max_generations", '"infinite"'),
+        ("max_generations", "true"),
+        ("max_model_turns", "0"),
+        ("max_model_turns", '"none"'),
+    ],
+)
+def test_config_rejects_invalid_search_limits(tmp_path: Path, field: str, value: str) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace(
+            f"{field} = {2 if field == 'max_generations' else 4}", f"{field} = {value}"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        load_experiment_config(path)
+
+
+def test_config_rejects_v1_explicitly(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace("mforge.experiment.v2", "mforge.experiment.v1"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="accepts only mforge.experiment.v2"):
+        load_experiment_config(path)
+
+
+def test_config_does_not_infer_missing_search_limits(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace("max_generations = 2\n", ""),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="max_generations"):
+        load_experiment_config(path)
+
+
+def test_durable_events_are_idempotent_by_key(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    ExperimentStateStore.initialize(
+        state_path,
+        exp_id="demo",
+        lock_hash="0" * 64,
+        root=tmp_path,
+    )
+    with ExperimentStateStore(state_path) as state:
+        first = state.write_event(
+            "counterexample_candidate_found",
+            {"candidate_id": "cx-test", "idempotency_key": "cx-test:candidate"},
+        )
+        repeated = state.write_event(
+            "counterexample_candidate_found",
+            {"candidate_id": "cx-test", "idempotency_key": "cx-test:candidate"},
+        )
+        count = state.connection.execute("SELECT COUNT(*) FROM events").fetchone()
+
+    assert repeated == first
+    assert count is not None and count[0] == 1
+
+
 @pytest.mark.parametrize("value", ["", ".", "..", "a/b", r"a\\b", "/tmp/demo", "bad\x01"])
 def test_exp_id_rejects_unsafe_names(value: str) -> None:
     with pytest.raises(ValueError):
@@ -107,9 +197,9 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     ).read_bytes() == path.read_bytes()
     events = [
         json.loads(line)
-        for line in (
-            root / "artifacts" / "sessions" / "session-000001" / "events.jsonl"
-        ).read_text(encoding="utf-8").splitlines()
+        for line in (root / "artifacts" / "sessions" / "session-000001" / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     started = next(event for event in events if event["event_type"] == "session_started")
     assert started["worker_count"] == 1
@@ -152,7 +242,7 @@ def test_completed_experiment_makes_no_adapter_call(tmp_path: Path) -> None:
 
         def run(self, *_: object) -> dict[str, str]:
             self.calls += 1
-            return {"state": "completed", "stop_reason": "generation_limit"}
+            return {"state": "completed", "stop_reason": "counterexample_verified"}
 
     adapter = Complete()
     service = ExperimentService(adapter=adapter)
@@ -162,7 +252,56 @@ def test_completed_experiment_makes_no_adapter_call(tmp_path: Path) -> None:
     assert result["provider_calls"] == 0
 
 
-def test_model_turn_boundary_is_resumable_and_extendable(tmp_path: Path) -> None:
+def test_operator_final_stop_is_terminal_and_resumeless(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    adapter = NullExperimentAdapter()
+    ExperimentService(adapter=adapter).run(path)
+
+    result = final_stop_experiment(path)
+    status = experiment_status(path)
+
+    assert result["changed"] is True
+    assert result["stop_reason"] == "operator_final_stop"
+    assert status["state"] == "completed"
+    assert status["terminal"] is True
+    assert status["resumable"] is False
+    assert status["last_stop_reason"] == "operator_final_stop"
+
+
+def test_verified_event_follows_terminal_checkpoint(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+
+    class Verified:
+        def run(self, *_: object) -> dict[str, object]:
+            return {
+                "state": "completed",
+                "stop_reason": "counterexample_verified",
+                "counterexample": {
+                    "candidate_id": "cx-" + "a" * 64,
+                    "certificate_path": "/evidence/certificate.json",
+                    "certificate_sha256": "b" * 64,
+                },
+            }
+
+    class Sink:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def write(self, event: Event) -> None:
+            self.events.append(event.event_type)
+
+        def close(self) -> None:
+            return None
+
+    sink = Sink()
+    ExperimentService(adapter=Verified(), event_sinks=[sink]).run(path)
+    checkpoint_index = sink.events.index("checkpoint_written")
+    verified_index = sink.events.index("counterexample_verified")
+    completed_index = sink.events.index("experiment_completed")
+    assert checkpoint_index < verified_index < completed_index
+
+
+def test_model_turn_boundary_is_exhausted_and_config_is_immutable(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
 
     class Adapter:
@@ -179,36 +318,19 @@ def test_model_turn_boundary_is_resumable_and_extendable(tmp_path: Path) -> None
             effective_max_model_turns: int | None = None,
         ) -> dict[str, str]:
             self.calls.append(effective_max_model_turns)
-            if len(self.calls) == 1:
-                return {"state": "completed", "stop_reason": "max_model_turns"}
-            return {"state": "idle", "stop_reason": "budget_exhausted"}
+            return {"state": "exhausted", "stop_reason": "max_model_turns"}
 
     adapter = Adapter()
     service = ExperimentService(adapter=adapter)
     first = service.run(path)
-    assert first["state"] == "idle"
-    assert first["status"] == "budget_exhausted"
+    assert first["state"] == "exhausted"
+    assert first["status"] == "exhausted"
     assert first["stop_reason"] == "max_model_turns"
 
     path.write_text(_config().replace("max_model_turns = 4", "max_model_turns = 8"))
-    second = service.run(path)
-    assert second["state"] == "idle"
-    assert adapter.calls == [4, 8]
-
-    status = experiment_status(path)
-    assert status["state"] == "idle"
-    assert status["resumable"] is True
-    assert status["configured_model_turns"] == 4
-    assert status["effective_model_turns"] == 8
-    assert status["remaining_model_turns"] == 8
-
-    root = tmp_path / "configs" / "workspace" / "demo"
-    with ExperimentStateStore(root / "state.sqlite3") as state:
-        assert state.metadata("effective_model_turns") == 8
-        events = state.connection.execute(
-            "SELECT event_type FROM events WHERE event_type='model_turn_budget_extended'"
-        ).fetchall()
-        assert len(events) == 1
+    with pytest.raises(ValueError, match="differs from the locked"):
+        service.run(path)
+    assert adapter.calls == [4]
 
 
 def test_generation_model_turn_boundary_is_not_completed(tmp_path: Path) -> None:
@@ -327,7 +449,7 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
         assert failed is not None
         failed_usage = json.loads(failed["usage_json"])
         assert failed_usage["quality"] == "partial"
-        assert state.cumulative()["provider_turns"] == 1
+        assert state.cumulative()["provider_turns"] == 2
         assert state.cumulative()["total_tokens"] == 8
         assert state.token_usage() == {
             "inputTokens": 5,
@@ -349,7 +471,7 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
             token_usage_delta=8,
             cumulative_tokens=8,
         )
-        assert state.cumulative()["provider_turns"] == 1
+        assert state.cumulative()["provider_turns"] == 2
         assert state.cumulative()["total_tokens"] == 8
 
 
@@ -588,9 +710,7 @@ def test_turn_prompt_is_exact_and_response_is_semantic_projection(tmp_path: Path
     assert "```python\ndef priority(ctx, proposal):" in response_markdown
     assert (directory / "slot-00.response.raw.txt").read_text() == response_text
     assert json.loads((directory / "slot-00.response.json").read_text()) == response
-    request_json = json.loads(
-        (directory / "slot-00.request.json").read_text(encoding="utf-8")
-    )
+    request_json = json.loads((directory / "slot-00.request.json").read_text(encoding="utf-8"))
     assert request_json["brief"] == "native context"
 
 

@@ -19,6 +19,9 @@ class _TinyBackend:
 
     calls: int = 0
 
+    def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
+        return (4,) if order >= 4 else ()
+
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
         return GraphState(order, ((0, 1),))
 
@@ -115,7 +118,11 @@ def test_trajectories_diverge_then_generate_independent_pools(
         "_rankers",
         lambda config, policies, **_: (rankers, ["random", "structural"], []),
     )
-    monkeypatch.setattr(evaluation, "_pool_generator", lambda backend, config: generator)
+    monkeypatch.setattr(
+        evaluation,
+        "_pool_generator",
+        lambda backend, config, *, order: generator,
+    )
     record = evaluation.run_development_episode(
         config,
         {"episode_id": "tiny", "order": 4, "graph_seed": 1, "policy_seed": 2, "horizon": 3},

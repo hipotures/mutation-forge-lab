@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mutation-forge.invalid/schemas/stage2b-proposal.v1.json",
-  "title": "Mutation Forge Stage 2B ranker proposal",
+  "$id": "https://mutation-forge.invalid/schemas/scientific-proposal.v2.json",
+  "title": "Mutation Forge scientific ranker proposal v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,7 +23,7 @@
     "reconnection_span"
   ],
   "properties": {
-    "schema_version": {"const": "stage2b.proposal.v1"},
+    "schema_version": {"const": "mforge.scientific_proposal.v2"},
     "proposal_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "k": {"enum": [2, 3, 4]},
     "operator_family": {"enum": ["legal_2_switch", "legal_3_switch", "legal_4_switch"]},

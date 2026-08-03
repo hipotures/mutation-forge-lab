@@ -12,14 +12,14 @@ from mutation_forge.models import (
 )
 
 type ProposalTimingRecorder = Callable[[str, int], None]
-type DeepProposalProfileRecorder = Callable[
-    [str, Mapping[str, int | float | bool]], None
-]
+type DeepProposalProfileRecorder = Callable[[str, Mapping[str, int | float | bool]], None]
 type ScoreProfileRecorder = Callable[[str, Mapping[str, int]], None]
 
 
 class GraphBackend(Protocol):
     backend_id: str
+
+    def target_forbidden_lengths(self, order: int) -> tuple[int, ...]: ...
 
     def generate_seed(self, *, order: int, seed: int) -> GraphState: ...
 

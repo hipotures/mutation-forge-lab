@@ -8,6 +8,7 @@ import statistics
 import subprocess
 import time
 from collections import Counter
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -416,7 +417,10 @@ def run_toy_gate(
     generator = KSwitchPoolGenerator(
         backend,
         pool_limits=config.pool,
-        feature_limits=config.features,
+        feature_limits=replace(
+            config.features,
+            forbidden_lengths=backend.target_forbidden_lengths(graph.order),
+        ),
     )
     runs: list[dict[str, JsonValue]] = []
     with (
@@ -588,7 +592,10 @@ def _pilot_once(
         generator = KSwitchPoolGenerator(
             backend,
             pool_limits=config.pool,
-            feature_limits=config.features,
+            feature_limits=replace(
+                config.features,
+                forbidden_lengths=backend.target_forbidden_lengths(config.heg_pilot.order),
+            ),
         )
         with (
             SourceRanker("random", random_source, config.sandbox) as random_ranker,
@@ -690,7 +697,10 @@ def inspect_proposals(config: Stage2BConfig) -> dict[str, JsonValue]:
     generator = KSwitchPoolGenerator(
         backend,
         pool_limits=config.pool,
-        feature_limits=config.features,
+        feature_limits=replace(
+            config.features,
+            forbidden_lengths=backend.target_forbidden_lengths(graph.order),
+        ),
     )
     pool = generator.generate(
         graph,
@@ -884,12 +894,15 @@ def evaluate_source_policy(
     pool = KSwitchPoolGenerator(
         backend,
         pool_limits=config.pool,
-        feature_limits=config.features,
+        feature_limits=replace(
+            config.features,
+            forbidden_lengths=backend.target_forbidden_lengths(graph.order),
+        ),
     ).generate(graph, policy_seed=config.toy_gate.policy_seeds[0], step=0)
     context = make_scientific_context(
         graph,
         score,
-        forbidden_lengths=config.features.forbidden_lengths,
+        forbidden_lengths=backend.target_forbidden_lengths(graph.order),
         step=0,
         remaining_steps=0,
     )

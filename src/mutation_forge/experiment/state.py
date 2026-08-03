@@ -15,9 +15,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-STATE_SCHEMA_VERSION = 1
-TERMINAL_STATES = frozenset({"completed"})
-VALID_STATES = frozenset({"created", "running", "idle", "interrupted", "failed", "completed"})
+STATE_SCHEMA_VERSION = "mforge.experiment.state.v2"
+TERMINAL_STATES = frozenset({"exhausted", "failed", "completed"})
+RESUMABLE_STATES = frozenset({"idle", "paused", "interrupted"})
+VALID_STATES = frozenset(
+    {
+        "running",
+        "idle",
+        "paused",
+        "interrupted",
+        "failed",
+        "exhausted",
+        "completed",
+    }
+)
 _USAGE_FIELDS = (
     "inputTokens",
     "cachedInputTokens",
@@ -215,6 +226,7 @@ class ExperimentStateStore:
                     session_id TEXT,
                     event_type TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
+                    idempotency_key TEXT UNIQUE,
                     payload_json TEXT NOT NULL
                 );
                 """
@@ -222,12 +234,12 @@ class ExperimentStateStore:
             now = _now()
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
-                ("schema_version", str(STATE_SCHEMA_VERSION)),
+                ("schema_version", STATE_SCHEMA_VERSION),
             )
             connection.execute(
                 "INSERT INTO experiment(exp_id,root,lock_hash,state,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,?)",
-                (exp_id, str(Path(root).resolve()), lock_hash, "created", now, now),
+                (exp_id, str(Path(root).resolve()), lock_hash, "idle", now, now),
             )
             connection.commit()
         finally:
@@ -240,8 +252,13 @@ class ExperimentStateStore:
             ).fetchone()
         except sqlite3.DatabaseError as exc:
             raise StateError(f"cannot read state database: {self.path}") from exc
-        if row is None or int(row[0]) != STATE_SCHEMA_VERSION:
-            raise StateError(f"unsupported state database schema: {self.path}")
+        if row is None or row[0] != STATE_SCHEMA_VERSION:
+            observed = None if row is None else row[0]
+            raise StateError(
+                f"Unsupported experiment state schema: {observed}. "
+                f"This runtime accepts only {STATE_SCHEMA_VERSION}. "
+                "Create a fresh workspace."
+            )
         integrity = self.connection.execute("PRAGMA integrity_check").fetchone()
         if integrity is None or integrity[0] != "ok":
             raise StateError(f"state database integrity check failed: {self.path}")
@@ -407,9 +424,12 @@ class ExperimentStateStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM ownership WHERE singleton=1").fetchone()
             if row is not None:
-                # Ownership is a durable hint, not a reason to block recovery.
-                # A restarted invocation always takes over the workspace and
-                # preserves the previous session as interrupted.
+                if alive(int(row["pid"])):
+                    raise ActiveSessionError(
+                        exp_id,
+                        int(row["pid"]),
+                        str(row["started_at"]),
+                    )
                 connection.execute(
                     "UPDATE sessions SET status='interrupted',finished_at=?,"
                     "ending_state='interrupted',"
@@ -446,12 +466,22 @@ class ExperimentStateStore:
     def write_event(
         self, event_type: str, payload: Mapping[str, Any], *, session_id: str | None = None
     ) -> int:
+        raw_key = payload.get("idempotency_key")
+        idempotency_key = raw_key if isinstance(raw_key, str) and raw_key else None
         cursor = self.connection.execute(
-            "INSERT INTO events(session_id,event_type,timestamp,payload_json) VALUES(?,?,?,?)",
-            (session_id, event_type, _now(), _json(dict(payload))),
+            "INSERT OR IGNORE INTO events("
+            "session_id,event_type,timestamp,idempotency_key,payload_json"
+            ") VALUES(?,?,?,?,?)",
+            (session_id, event_type, _now(), idempotency_key, _json(dict(payload))),
         )
         self.connection.commit()
-        return int(cursor.lastrowid or 0)
+        if cursor.rowcount:
+            return int(cursor.lastrowid or 0)
+        row = self.connection.execute(
+            "SELECT sequence FROM events WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
 
     def record_provider_turn(
         self,
@@ -489,12 +519,29 @@ class ExperimentStateStore:
             # exits without touching any ledger.
             self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
-                "SELECT state FROM provider_turns WHERE idempotency_key=?",
+                "SELECT state,usage_json FROM provider_turns WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
             if row is not None and row["state"] == "completed":
                 self.connection.rollback()
                 return False
+            prior_usage: Mapping[str, Any] = {}
+            if row is not None:
+                try:
+                    decoded = json.loads(str(row["usage_json"]))
+                    if isinstance(decoded, Mapping):
+                        prior_usage = decoded
+                except json.JSONDecodeError:
+                    prior_usage = {}
+            prior_total = prior_usage.get("totalTokens", 0)
+            prior_consumed = row is not None and (
+                row["state"] == "completed"
+                or (
+                    isinstance(prior_total, int)
+                    and not isinstance(prior_total, bool)
+                    and prior_total > 0
+                )
+            )
             if row is not None:
                 self.connection.execute(
                     "UPDATE provider_turns SET state=?,provider_thread_id=?,provider_turn_id=?,"
@@ -532,18 +579,35 @@ class ExperimentStateStore:
                     ),
                 )
             if terminal:
+                consumed = completed or observed_tokens > 0
+                prior_observed_tokens = (
+                    int(prior_total)
+                    if isinstance(prior_total, int)
+                    and not isinstance(prior_total, bool)
+                    and prior_total >= 0
+                    else 0
+                )
+                token_delta = max(0, observed_tokens - prior_observed_tokens)
                 self.connection.execute(
-                    "UPDATE sessions SET provider_turns_attempted=provider_turns_attempted+1,"
+                    "UPDATE sessions SET provider_turns_attempted=provider_turns_attempted+?,"
                     "provider_turns_completed=provider_turns_completed+?,"
                     "token_usage_delta=token_usage_delta+? "
                     "WHERE session_id=(SELECT current_session_id FROM experiment LIMIT 1)",
-                    (1 if completed else 0, observed_tokens),
+                    (
+                        1 if row is None else 0,
+                        1 if completed and (row is None or row["state"] != "completed") else 0,
+                        token_delta,
+                    ),
                 )
                 self.connection.execute(
                     "UPDATE experiment SET "
                     "cumulative_model_turns=cumulative_model_turns+?,"
                     "cumulative_tokens=cumulative_tokens+?,updated_at=?",
-                    (1 if completed else 0, observed_tokens, _now()),
+                    (
+                        1 if consumed and not prior_consumed else 0,
+                        token_delta,
+                        _now(),
+                    ),
                 )
             self.connection.commit()
             return True
@@ -661,9 +725,7 @@ class ExperimentStateStore:
         return str(value) if value else None
 
     def metadata(self, key: str) -> Any | None:
-        row = self.connection.execute(
-            "SELECT value FROM metadata WHERE key=?", (key,)
-        ).fetchone()
+        row = self.connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
         if row is None:
             return None
         try:
@@ -690,9 +752,7 @@ class ExperimentStateStore:
         totals = {field: 0 for field in _USAGE_FIELDS}
         qualities: set[str] = set()
         charged_failed_turns = 0
-        rows = self.connection.execute(
-            "SELECT state,usage_json FROM provider_turns"
-        ).fetchall()
+        rows = self.connection.execute("SELECT state,usage_json FROM provider_turns").fetchall()
         for row in rows:
             try:
                 usage = json.loads(str(row["usage_json"]))
@@ -742,6 +802,7 @@ __all__ = [
     "ExperimentStateStore",
     "StateStore",
     "STATE_SCHEMA_VERSION",
+    "RESUMABLE_STATES",
     "StateError",
     "VALID_STATES",
     "process_alive",

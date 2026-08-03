@@ -7,7 +7,7 @@ from typing import Protocol, TextIO
 
 from mutation_forge.models import JsonValue
 
-EVENT_SCHEMA_VERSION = "1.0"
+EVENT_SCHEMA_VERSION = "mforge.experiment.events.v2"
 EVENT_TYPES = frozenset(
     {
         "run_started",
@@ -57,9 +57,17 @@ EVENT_TYPES = frozenset(
         "selection_started",
         "selection_completed",
         "budget_boundary_reached",
+        "experiment_exhausted",
         "experiment_completed",
         "experiment_interrupted",
         "experiment_failed",
+        "counterexample_candidate_found",
+        "counterexample_primary_verification_started",
+        "counterexample_primary_verification_completed",
+        "counterexample_independent_verification_started",
+        "counterexample_independent_verification_completed",
+        "counterexample_verification_conflict",
+        "counterexample_verified",
     }
 )
 
@@ -89,15 +97,22 @@ class EventSink(Protocol):
 
 
 class EventBus:
-    def __init__(self, run_id: str, sinks: list[EventSink]) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        sinks: list[EventSink],
+        *,
+        schema_version: str = EVENT_SCHEMA_VERSION,
+    ) -> None:
         self.run_id = run_id
         self.sinks = sinks
+        self.schema_version = schema_version
 
     def emit(self, event_type: str, **payload: JsonValue) -> Event:
         if event_type not in EVENT_TYPES:
             raise ValueError(f"unknown event type: {event_type}")
         event = Event(
-            schema_version=EVENT_SCHEMA_VERSION,
+            schema_version=self.schema_version,
             timestamp=datetime.now(UTC).isoformat(),
             run_id=self.run_id,
             event_type=event_type,

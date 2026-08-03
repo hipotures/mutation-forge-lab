@@ -4,6 +4,14 @@ import time
 from collections.abc import Callable
 
 from mutation_forge.backends.base import GraphBackend
+from mutation_forge.counterexamples import (
+    CandidateProvenance,
+    CounterexampleDecision,
+    CounterexampleHalt,
+    CounterexampleOutcome,
+    CounterexamplePipeline,
+    CounterexampleVerified,
+)
 from mutation_forge.evaluation.profiling import (
     DeepOperatorTimingAccumulator,
     DeepScoreTimingAccumulator,
@@ -39,18 +47,13 @@ def run_episode(
     profiling_enabled: bool = True,
     deep_profiling_enabled: bool = False,
     score_cache_enabled: bool = True,
+    counterexample_pipeline: CounterexamplePipeline | None = None,
 ) -> EpisodeResult:
     started = time.monotonic()
     timing = TimingAccumulator() if profiling_enabled else None
-    deep_timing = (
-        DeepOperatorTimingAccumulator() if deep_profiling_enabled else None
-    )
-    deep_score_timing = (
-        DeepScoreTimingAccumulator() if deep_profiling_enabled else None
-    )
-    record_score_profile = (
-        deep_score_timing.record if deep_score_timing is not None else None
-    )
+    deep_timing = DeepOperatorTimingAccumulator() if deep_profiling_enabled else None
+    deep_score_timing = DeepScoreTimingAccumulator() if deep_profiling_enabled else None
+    record_score_profile = deep_score_timing.record if deep_score_timing is not None else None
     timing_started_ns = time.perf_counter_ns() if timing is not None else 0
     phase_started_ns = time.perf_counter_ns() if timing is not None else 0
     current = initial_graph
@@ -72,9 +75,7 @@ def run_episode(
     best_score = initial_score
     curve: list[int] = []
     first_improvement: int | None = None
-    exact_zero_submissions = 0
-    exact_verified_count = 0
-    exact_verification_failures = 0
+    counterexample_records: list[dict[str, JsonValue]] = []
     legal = 0
     invalid = 0
     noop = 0
@@ -92,11 +93,62 @@ def run_episode(
         if deep_score_timing is not None:
             deep_score_timing.record("score_cache", {"inserts": 1})
     source = TwoSwitchProposalSource(backend, baseline.operator_family)
-    record_proposal_timing = (
-        timing.record_proposal_phase if timing is not None else None
-    )
+    record_proposal_timing = timing.record_proposal_phase if timing is not None else None
     completed = 0
     timed_out = False
+
+    def inspect_counterexample(
+        graph: GraphState,
+        score: GraphScore,
+        evaluation: int,
+    ) -> None:
+        if (
+            counterexample_pipeline is None
+            or score.total_capped_witnesses != 0
+            or graph in exact_submissions
+        ):
+            return
+        exact_submissions.add(graph)
+        outcome: CounterexampleOutcome = counterexample_pipeline.inspect(
+            graph=graph,
+            score=score,
+            witness_cap=witness_cap,
+            provenance=CandidateProvenance(
+                source_kind="baseline",
+                source_id=baseline.policy_id,
+                episode_id=entry_id,
+                graph_seed=graph_seed,
+                policy_seed=policy_seed,
+                evaluation_step=evaluation,
+            ),
+        )
+        record: dict[str, JsonValue] = {
+            "decision": outcome.decision.value,
+            "stop_reason": outcome.stop_reason,
+            "candidate_id": (
+                outcome.candidate.candidate_id if outcome.candidate is not None else None
+            ),
+            "primary_status": (outcome.primary.status if outcome.primary is not None else None),
+            "independent_status": (
+                outcome.independent.status if outcome.independent is not None else None
+            ),
+            "certificate_sha256": (
+                outcome.certificate.sha256 if outcome.certificate is not None else None
+            ),
+        }
+        counterexample_records.append(record)
+        if outcome.decision is CounterexampleDecision.STOP_VERIFIED:
+            raise CounterexampleVerified(outcome)
+        if outcome.decision in {
+            CounterexampleDecision.PAUSE_INCONCLUSIVE,
+            CounterexampleDecision.FAIL,
+        }:
+            raise CounterexampleHalt(outcome)
+
+    phase_started_ns = time.perf_counter_ns() if timing is not None else 0
+    inspect_counterexample(current, initial_score, 0)
+    if timing is not None:
+        timing.exact_verification_ns += time.perf_counter_ns() - phase_started_ns
 
     for evaluation in range(1, evaluations + 1):
         if time.monotonic() >= deadline:
@@ -109,9 +161,7 @@ def run_episode(
             policy_seed=effective_policy_seed,
             evaluation=evaluation,
             record_timing=record_proposal_timing,
-            record_deep_profile=(
-                deep_timing.record if deep_timing is not None else None
-            ),
+            record_deep_profile=(deep_timing.record if deep_timing is not None else None),
         )
         policy_elapsed_ns = time.perf_counter_ns() - policy_started_ns
         policy_call_ms += policy_elapsed_ns / 1_000_000
@@ -138,9 +188,7 @@ def run_episode(
             )
         except ValueError:
             if timing is not None:
-                timing.rewrite_application_ns += (
-                    time.perf_counter_ns() - phase_started_ns
-                )
+                timing.rewrite_application_ns += time.perf_counter_ns() - phase_started_ns
             invalid += 1
             phase_started_ns = time.perf_counter_ns() if timing is not None else 0
             curve.append(best_score.total_capped_witnesses)
@@ -184,11 +232,7 @@ def run_episode(
                 candidate_score = backend.score(
                     candidate,
                     witness_cap=witness_cap,
-                    cutoff=(
-                        current_score
-                        if current_score.total_capped_witnesses > 0
-                        else None
-                    ),
+                    cutoff=(current_score if current_score.total_capped_witnesses > 0 else None),
                     record_profile=record_score_profile,
                 )
         except (RuntimeError, TimeoutError):
@@ -213,11 +257,7 @@ def run_episode(
                     "dominated_results": int(candidate_score is None),
                 },
             )
-        if (
-            score_cache_enabled
-            and not cache_hit
-            and candidate_score is not None
-        ):
+        if score_cache_enabled and not cache_hit and candidate_score is not None:
             score_cache[candidate] = candidate_score
             if deep_score_timing is not None:
                 deep_score_timing.record("score_cache", {"inserts": 1})
@@ -236,23 +276,11 @@ def run_episode(
                     first_improvement = evaluation
         if timing is not None:
             timing.controller_ns += time.perf_counter_ns() - phase_started_ns
-        if (
-            candidate_score is not None
-            and candidate_score.total_capped_witnesses == 0
-            and candidate not in exact_submissions
-        ):
-            exact_submissions.add(candidate)
-            exact_zero_submissions += 1
+        if candidate_score is not None:
             phase_started_ns = time.perf_counter_ns() if timing is not None else 0
-            verification = backend.exact_verify(candidate)
+            inspect_counterexample(candidate, candidate_score, evaluation)
             if timing is not None:
-                timing.exact_verification_ns += (
-                    time.perf_counter_ns() - phase_started_ns
-                )
-            if verification.status == "VERIFIED":
-                exact_verified_count += 1
-            elif verification.status != "REJECTED":
-                exact_verification_failures += 1
+                timing.exact_verification_ns += time.perf_counter_ns() - phase_started_ns
             if time.monotonic() >= deadline:
                 timed_out = True
                 break
@@ -279,9 +307,7 @@ def run_episode(
                 }
             )
             if timing is not None:
-                timing.progress_reporting_ns += (
-                    time.perf_counter_ns() - phase_started_ns
-                )
+                timing.progress_reporting_ns += time.perf_counter_ns() - phase_started_ns
         if time.monotonic() >= deadline:
             timed_out = True
             break
@@ -293,9 +319,7 @@ def run_episode(
         timing.finalization_ns += time.perf_counter_ns() - phase_started_ns
     elapsed_seconds = time.monotonic() - started
     timing_profile = (
-        timing.finish(time.perf_counter_ns() - timing_started_ns)
-        if timing is not None
-        else None
+        timing.finish(time.perf_counter_ns() - timing_started_ns) if timing is not None else None
     )
     return EpisodeResult(
         baseline=baseline.policy_id,
@@ -309,9 +333,7 @@ def run_episode(
         best_curve=tuple(curve),
         normalized_best_auc=_normalized_auc(curve, initial_score.total_capped_witnesses),
         first_improvement_evaluation=first_improvement,
-        exact_zero_submissions=exact_zero_submissions,
-        exact_verified_count=exact_verified_count,
-        exact_verification_failures=exact_verification_failures,
+        counterexample_records=tuple(counterexample_records),
         legal_proposals=legal,
         invalid_proposals=invalid,
         noop_proposals=noop,
@@ -323,12 +345,6 @@ def run_episode(
         final_graph6=final_graph6,
         final_graph_hash=final_graph_hash,
         timing_profile=timing_profile,
-        deep_operator_profile=(
-            deep_timing.finish() if deep_timing is not None else None
-        ),
-        deep_score_profile=(
-            deep_score_timing.finish()
-            if deep_score_timing is not None
-            else None
-        ),
+        deep_operator_profile=(deep_timing.finish() if deep_timing is not None else None),
+        deep_score_profile=(deep_score_timing.finish() if deep_score_timing is not None else None),
     )

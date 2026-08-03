@@ -41,12 +41,15 @@ def test_paired_rankers_receive_identical_pool_through_stage2a_worker(
     pool = KSwitchPoolGenerator(
         backend,
         pool_limits=config.pool,
-        feature_limits=config.features,
+        feature_limits=replace(
+            config.features,
+            forbidden_lengths=backend.target_forbidden_lengths(graph.order),
+        ),
     ).generate(graph, policy_seed=1, step=0)
     context = make_scientific_context(
         graph,
         score,
-        forbidden_lengths=config.features.forbidden_lengths,
+        forbidden_lengths=backend.target_forbidden_lengths(graph.order),
         step=0,
         remaining_steps=7,
     )

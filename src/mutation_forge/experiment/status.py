@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from .checkpoints import CheckpointIntegrityError, CheckpointStore
-from .config import ExperimentConfig, load_experiment_config
+from .config import ExperimentConfig, load_experiment_config, serialize_search_limit
 from .layout import ExperimentLayout, WorkspaceError
-from .lock import LockError, load_lock, model_turn_limit_difference, verify_lock
-from .state import ExperimentStateStore, StateError, process_alive
+from .lock import LockError, load_lock, verify_lock
+from .state import RESUMABLE_STATES, ExperimentStateStore, StateError, process_alive
 
-STATUS_SCHEMA_VERSION = "mforge.experiment.status.v1"
+STATUS_SCHEMA_VERSION = "mforge.experiment.status.v2"
 
 
 def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, Any]:
@@ -25,7 +25,12 @@ def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str
         "workspace": str(layout.root),
         "session_id": None,
         "generation": 0,
-        "max_generations": config.search.max_generations,
+        "max_generations": serialize_search_limit(config.search.max_generations),
+        "search_limits": {
+            "max_generations": serialize_search_limit(config.search.max_generations),
+            "max_model_turns": serialize_search_limit(config.search.max_model_turns),
+        },
+        "terminal": False,
         "completed_slots": 0,
         "slot_count": config.search.population_size,
         "candidate_count": 0,
@@ -52,6 +57,7 @@ def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str
         "last_checkpoint": None,
         "last_stop_reason": None,
         "last_error": None,
+        "counterexample": {"state": "none"},
     }
 
 
@@ -73,11 +79,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         }
     try:
         lock = load_lock(layout.lock)
-        try:
-            verify_lock(lock, config, layout)
-        except LockError:
-            if not _model_turn_extension_allowed(lock, config, layout):
-                raise
+        verify_lock(lock, config, layout)
     except (LockError, OSError, ValueError) as error:
         return {
             **_not_created(config, layout),
@@ -159,23 +161,16 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
                 parsed = {}
             if isinstance(parsed, Mapping):
                 session_metrics = dict(parsed)
-        last_stop_reason = experiment.get("terminal_stop_reason") or (
-            session or {}
-        ).get("stop_reason")
+        last_stop_reason = experiment.get("terminal_stop_reason") or (session or {}).get(
+            "stop_reason"
+        )
         if last_stop_reason == "already_completed":
             last_stop_reason = state.latest_meaningful_stop_reason() or last_stop_reason
-        if current_state == "completed" and last_stop_reason == "max_model_turns":
-            current_state = "idle"
-        stored_model_turn_limit = state.metadata("effective_model_turns")
         configured_model_turns = _locked_model_turns(lock)
         effective_model_turns = config.search.max_model_turns
-        if isinstance(stored_model_turn_limit, int) and not isinstance(
-            stored_model_turn_limit, bool
-        ):
-            effective_model_turns = max(effective_model_turns, stored_model_turn_limit)
-        if configured_model_turns is None:
+        if configured_model_turns is None and config.search.max_model_turns is not None:
             configured_model_turns = config.search.max_model_turns
-        model_turns_used = counts["provider_turns"]
+        model_turns_used = int(current["provider_turns"])
         native_checkpoint = layout.artifacts / "native-generation-checkpoint.json"
         if native_checkpoint.is_file():
             try:
@@ -183,9 +178,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             except (OSError, UnicodeError, json.JSONDecodeError):
                 native_state = {}
             checkpoint_turns = (
-                native_state.get("model_turns_used")
-                if isinstance(native_state, Mapping)
-                else None
+                native_state.get("model_turns_used") if isinstance(native_state, Mapping) else None
             )
             if (
                 isinstance(checkpoint_turns, int)
@@ -204,15 +197,33 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
                 artifacts["session_summary"] = str(session_summary)
         if layout.archive.is_dir():
             artifacts["candidate_archive"] = str(layout.archive)
+        raw_counterexample = session_metrics.get("counterexample")
+        counterexample = (
+            dict(raw_counterexample)
+            if isinstance(raw_counterexample, Mapping)
+            else {
+                "state": ("verified" if last_stop_reason == "counterexample_verified" else "none")
+            }
+        )
+        if last_stop_reason == "counterexample_verified":
+            counterexample["state"] = "verified"
+        certificate_path = counterexample.get("certificate_path")
+        if isinstance(certificate_path, str):
+            artifacts["counterexample_certificate"] = certificate_path
         return {
             "schema_version": STATUS_SCHEMA_VERSION,
             "exp_id": config.exp_id,
             "state": current_state,
-            "resumable": current_state in {"idle", "interrupted"},
+            "resumable": current_state in RESUMABLE_STATES,
+            "terminal": current_state in {"exhausted", "failed", "completed"},
             "workspace": str(layout.root),
             "session_id": session_id,
             "generation": generation,
-            "max_generations": config.search.max_generations,
+            "max_generations": serialize_search_limit(config.search.max_generations),
+            "search_limits": {
+                "max_generations": serialize_search_limit(config.search.max_generations),
+                "max_model_turns": serialize_search_limit(config.search.max_model_turns),
+            },
             "completed_slots": completed_slots,
             "slot_count": config.search.population_size,
             "candidate_count": counts["candidate_count"],
@@ -225,10 +236,12 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             "artifacts": artifacts,
             "provider_turns": counts["provider_turns"],
             "model_turns_used": model_turns_used,
-            "configured_model_turns": configured_model_turns,
-            "effective_model_turns": effective_model_turns,
-            "remaining_model_turns": max(
-                0, effective_model_turns - model_turns_used
+            "configured_model_turns": serialize_search_limit(configured_model_turns),
+            "effective_model_turns": serialize_search_limit(effective_model_turns),
+            "remaining_model_turns": (
+                max(0, effective_model_turns - model_turns_used)
+                if effective_model_turns is not None
+                else None
             ),
             "total_tokens": int(current["total_tokens"]),
             "token_usage": token_usage,
@@ -239,6 +252,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             else experiment.get("current_checkpoint"),
             "last_stop_reason": last_stop_reason,
             "last_error": last_error,
+            "counterexample": counterexample,
         }
     finally:
         state.close()
@@ -251,11 +265,7 @@ def _candidate_metric(metadata: Mapping[str, Any]) -> float | int | None:
     if nested_metric is None:
         nested_metric = nested.get("pooled_median_auc")
     metric = metadata.get("best_primary_metric", metadata.get("pooled_auc", nested_metric))
-    return (
-        metric
-        if isinstance(metric, int | float) and not isinstance(metric, bool)
-        else None
-    )
+    return metric if isinstance(metric, int | float) and not isinstance(metric, bool) else None
 
 
 def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
@@ -311,10 +321,13 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
     if status.get("last_checkpoint"):
         lines.append(f"Checkpoint: {status['last_checkpoint']}")
     if status.get("generation") is not None:
-        lines.append(
-            f"Progress: {status['generation']} completed generations "
-            f"(limit {status['max_generations']})"
-        )
+        if status.get("max_generations") == "unbounded":
+            lines.append(f"Progress: generation {status['generation']} · open-ended")
+        else:
+            lines.append(
+                f"Progress: {status['generation']} completed generations "
+                f"(limit {status['max_generations']})"
+            )
     lines.append(
         f"Results: {status['unique_candidate_count']} accepted candidates, "
         f"{status.get('evaluation_count', 0)} evaluations"
@@ -322,8 +335,7 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
     ranked = status.get("ranked_candidates")
     if status.get("best_program_id"):
         lines.append(
-            f"Winner: {status['best_program_id']}, primary metric "
-            f"{status['best_primary_metric']}"
+            f"Winner: {status['best_program_id']}, primary metric {status['best_primary_metric']}"
         )
         if status.get("winner_source"):
             lines.append(f"Winner code: {status['winner_source']}")
@@ -357,10 +369,13 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
         )
     else:
         lines.append(
-            f"Usage: {status['provider_turns']} model turns, "
-            f"{status['total_tokens']} tokens"
+            f"Usage: {status['provider_turns']} model turns, {status['total_tokens']} tokens"
         )
-    if status.get("effective_model_turns") is not None:
+    if status.get("effective_model_turns") == "unbounded":
+        lines.append(
+            f"Model turns: {status.get('model_turns_used', status['provider_turns'])} cumulative"
+        )
+    elif status.get("effective_model_turns") is not None:
         lines.append(
             "Model turns: "
             f"{status.get('model_turns_used', status['provider_turns'])} "
@@ -404,42 +419,3 @@ def _locked_model_turns(lock: Mapping[str, Any]) -> int | None:
             if isinstance(value, int) and not isinstance(value, bool):
                 return value
     return None
-
-
-def _model_turn_extension_allowed(
-    lock: Mapping[str, Any], config: ExperimentConfig, layout: ExperimentLayout
-) -> bool:
-    difference = model_turn_limit_difference(lock, config)
-    if difference is None:
-        return False
-    locked_limit, requested_limit = difference
-    try:
-        with ExperimentStateStore(layout.state) as state:
-            experiment = state.experiment()
-            current_state = state.state()
-            stored_limit = state.metadata("effective_model_turns")
-            stop_reason = _meaningful_stop_reason(state, experiment)
-    except (OSError, StateError, ValueError, TypeError):
-        return False
-    if stored_limit == requested_limit:
-        return True
-    return (
-        current_state in {"idle", "completed"}
-        and stop_reason == "max_model_turns"
-        and requested_limit
-        > max(
-            locked_limit,
-            stored_limit
-            if isinstance(stored_limit, int) and not isinstance(stored_limit, bool)
-            else 0,
-        )
-    )
-
-
-def _meaningful_stop_reason(
-    state: ExperimentStateStore, experiment: Mapping[str, Any]
-) -> str:
-    terminal = str(experiment.get("terminal_stop_reason") or "")
-    if terminal == "already_completed":
-        return str(state.latest_meaningful_stop_reason() or terminal)
-    return terminal

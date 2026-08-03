@@ -29,6 +29,8 @@ from mutation_forge.sandbox.validation import (
     validate_policy,
 )
 
+GENERATION_SCHEMA_VERSION = "mforge.experiment.generation.v2"
+
 
 class _InterruptibleThreadPoolExecutor(ThreadPoolExecutor):
     """Stop provider work before waiting for workers during Ctrl-C cleanup.
@@ -178,19 +180,13 @@ class ProviderResult:
                 behavior=cast(Mapping[str, Any], value.get("behavior", {}))
                 if isinstance(value.get("behavior"), Mapping)
                 else {},
-                worker_telemetry=cast(
-                    Mapping[str, Any], value.get("worker_telemetry", {})
-                )
+                worker_telemetry=cast(Mapping[str, Any], value.get("worker_telemetry", {}))
                 if isinstance(value.get("worker_telemetry"), Mapping)
                 else {},
-                canonical_response=cast(
-                    Mapping[str, Any], value.get("canonical_response", {})
-                )
+                canonical_response=cast(Mapping[str, Any], value.get("canonical_response", {}))
                 if isinstance(value.get("canonical_response"), Mapping)
                 else {},
-                metadata_validation=cast(
-                    Mapping[str, Any], value.get("metadata_validation", {})
-                )
+                metadata_validation=cast(Mapping[str, Any], value.get("metadata_validation", {}))
                 if isinstance(value.get("metadata_validation"), Mapping)
                 else {},
                 response_projection_valid=(
@@ -204,9 +200,7 @@ class ProviderResult:
                     if isinstance(item, Mapping)
                 )
                 if isinstance(value.get("response_diagnostics"), Sequence)
-                and not isinstance(
-                    value.get("response_diagnostics"), (str, bytes, bytearray)
-                )
+                and not isinstance(value.get("response_diagnostics"), (str, bytes, bytearray))
                 else (),
             )
         if all(hasattr(value, name) for name in ("response", "status", "usage")):
@@ -261,9 +255,7 @@ class ProviderResult:
             "canonical_response": _safe(dict(self.canonical_response)),
             "metadata_validation": _safe(dict(self.metadata_validation)),
             "response_projection_valid": self.response_projection_valid,
-            "response_diagnostics": [
-                _safe(dict(item)) for item in self.response_diagnostics
-            ],
+            "response_diagnostics": [_safe(dict(item)) for item in self.response_diagnostics],
         }
 
 
@@ -494,44 +486,9 @@ def _slot_failure_is_retryable(value: Mapping[str, Any]) -> bool:
     usage = raw.get("usage")
     total_tokens = usage.get("totalTokens") if isinstance(usage, Mapping) else None
     charged = raw.get("charged") is True or (
-        isinstance(total_tokens, int)
-        and not isinstance(total_tokens, bool)
-        and total_tokens > 0
+        isinstance(total_tokens, int) and not isinstance(total_tokens, bool) and total_tokens > 0
     )
     return not charged
-
-
-def _restore_pending_behavior_repair(
-    value: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    if (
-        str(value.get("status", "")) != "invalid"
-        or int(value.get("remaining_repairs", 0)) <= 0
-    ):
-        return None
-    raw = value.get("raw_result")
-    if not isinstance(raw, Mapping):
-        raw = (
-            value.get("repair")
-            if isinstance(value.get("repair"), Mapping)
-            else value.get("initial")
-        )
-    behavior = raw.get("behavior") if isinstance(raw, Mapping) else None
-    if not isinstance(behavior, Mapping) or behavior.get("status") != "failed":
-        return None
-    identity = raw.get("identity") if isinstance(raw, Mapping) else None
-    if (
-        not isinstance(identity, Mapping)
-        or identity.get("probe_schema_version") != "stage2a.probe.v1"
-    ):
-        return None
-    error = str(behavior.get("error", "behavior probe failed"))
-    return {
-        **dict(value),
-        "status": "repair_pending",
-        "errors": [{"code": "behavior_error", "message": error[:256]}],
-        "legacy_repair_migration": "stage2a.probe.v1",
-    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,7 +503,7 @@ class GenerationResult:
 @dataclass(frozen=True, slots=True)
 class GenerationConfig:
     campaign_id: str = "native"
-    generations: int = 1
+    generations: int | None = 1
     slots: int = 8
     population_size: int | None = None
     max_workers: int = 8
@@ -572,12 +529,12 @@ class GenerationConfig:
         population = self.population_size if self.population_size is not None else self.slots
         if isinstance(population, bool) or not isinstance(population, int) or population <= 0:
             raise ValueError("population_size/slots must be a positive integer")
-        if (
+        if self.generations is not None and (
             isinstance(self.generations, bool)
             or not isinstance(self.generations, int)
             or self.generations <= 0
         ):
-            raise ValueError("generations must be a positive integer")
+            raise ValueError("generations must be a positive integer or None")
         workers = self.concurrency if self.concurrency is not None else self.max_workers
         if isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0:
             raise ValueError("concurrency/max_workers must be a positive integer")
@@ -1006,9 +963,7 @@ class GenerationCoordinator:
                 content=result.content,
                 charged=result.charged,
                 uncharged=result.uncharged,
-                retained=bool(
-                    isinstance(value, Mapping) and value.get("retained") is True
-                ),
+                retained=bool(isinstance(value, Mapping) and value.get("retained") is True),
                 **self._usage_payload(result),
                 provider_request_id=result.provider_request_id,
                 provider_thread_id=result.provider_thread_id or result.thread_id,
@@ -1140,12 +1095,9 @@ class GenerationCoordinator:
                 scientific=self.config.scientific_contract,
             )
             validation_diagnostics = [
-                item.as_dict()
-                for item in validation.errors[: self.config.max_repair_diagnostics]
+                item.as_dict() for item in validation.errors[: self.config.max_repair_diagnostics]
             ]
-            validation_codes = [
-                str(item["code"]) for item in validation_diagnostics
-            ]
+            validation_codes = [str(item["code"]) for item in validation_diagnostics]
             self._emit(
                 "validation_completed",
                 generation=request.generation,
@@ -1238,9 +1190,7 @@ class GenerationCoordinator:
                 }
                 for item in errors[: self.config.max_repair_diagnostics]
             ]
-            validation_codes = [
-                str(item["code"]) for item in validation_diagnostics
-            ]
+            validation_codes = [str(item["code"]) for item in validation_diagnostics]
             self._emit(
                 "validation_completed",
                 generation=request.generation,
@@ -1266,9 +1216,7 @@ class GenerationCoordinator:
                     (code, message),
                     {"code": code, "message": message},
                 )
-        diagnostics = tuple(diagnostics_by_identity.values())[
-            : self.config.max_repair_diagnostics
-        ]
+        diagnostics = tuple(diagnostics_by_identity.values())[: self.config.max_repair_diagnostics]
         if errors or validation is None or not validation.valid or source is None:
             return None, diagnostics
         identity = validation.identity
@@ -1336,17 +1284,24 @@ class GenerationCoordinator:
     def _load(self) -> dict[str, Any]:
         if self.resume_hook is not None:
             value = self.resume_hook()
-            if isinstance(value, Mapping):
-                return dict(value)
+            if not isinstance(value, Mapping):
+                raise ValueError("native generation resume state must be an object")
+            state = dict(value)
+            if state.get("schema_version") != GENERATION_SCHEMA_VERSION:
+                raise ValueError("unsupported native generation checkpoint schema")
+            return state
         if self._checkpoint_file is not None and self._checkpoint_file.exists():
             try:
                 value = json.loads(self._checkpoint_file.read_text(encoding="utf-8"))
-                if isinstance(value, dict):
-                    return value
-            except (OSError, ValueError, TypeError):
-                pass
+            except (OSError, json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("cannot read native generation checkpoint") from exc
+            if not isinstance(value, dict):
+                raise ValueError("native generation checkpoint must be an object")
+            if value.get("schema_version") != GENERATION_SCHEMA_VERSION:
+                raise ValueError("unsupported native generation checkpoint schema")
+            return value
         return {
-            "schema_version": "mforge.experiment.generation.v1",
+            "schema_version": GENERATION_SCHEMA_VERSION,
             "campaign_id": self.config.campaign_id,
             "slots": {},
             "callbacks": {},
@@ -1387,8 +1342,7 @@ class GenerationCoordinator:
                 1
                 for item in cast(Mapping[str, Any], payload.get("slots", {})).values()
                 if isinstance(item, Mapping)
-                and str(item.get("status", ""))
-                in {"accepted", "duplicate", "failed", "invalid"}
+                and str(item.get("status", "")) in {"accepted", "duplicate", "failed", "invalid"}
             ),
             durable=True,
         )
@@ -1466,31 +1420,23 @@ class GenerationCoordinator:
         if error is None and result.status == "invalid":
             error = "invalid candidate"
         candidate_id = (
-            f"g{result.generation:04d}-{result.slot}"
-            if result.candidate is not None
-            else None
+            f"g{result.generation:04d}-{result.slot}" if result.candidate is not None else None
         )
         charged = (
             evidence.get("charged")
-            if isinstance(evidence, Mapping)
-            and isinstance(evidence.get("charged"), bool)
+            if isinstance(evidence, Mapping) and isinstance(evidence.get("charged"), bool)
             else None
         )
         return {
             "error": error,
             "candidate_id": candidate_id,
-            "validation_status": (
-                "passed" if result.candidate is not None else "unknown"
-            ),
-            "probe_status": (
-                "passed" if result.candidate is not None else "unknown"
-            ),
+            "validation_status": ("passed" if result.candidate is not None else "unknown"),
+            "probe_status": ("passed" if result.candidate is not None else "unknown"),
             "charged": charged,
             **GenerationCoordinator._usage_payload(provider_result),
             "content": (
                 evidence.get("content")
-                if isinstance(evidence, Mapping)
-                and isinstance(evidence.get("content"), bool)
+                if isinstance(evidence, Mapping) and isinstance(evidence.get("content"), bool)
                 else None
             ),
         }
@@ -1541,9 +1487,7 @@ class GenerationCoordinator:
         )
         repair_raw = self._invoke(repair_request)
         repaired, repair_diagnostics = self._assess(repair_request, repair_raw, repair=True)
-        repaired_status = self._slot_status(
-            repaired, repair_diagnostics, repair_raw, repairs=1
-        )
+        repaired_status = self._slot_status(repaired, repair_diagnostics, repair_raw, repairs=1)
         self._emit(
             "repair_completed",
             generation=request.generation,
@@ -1560,9 +1504,7 @@ class GenerationCoordinator:
             ),
             repairs=1,
             remaining_repairs=max(0, self.config.max_repairs - 1),
-            validation_codes=[
-                str(item.get("code", "")) for item in repair_diagnostics
-            ],
+            validation_codes=[str(item.get("code", "")) for item in repair_diagnostics],
         )
         return SlotResult(
             generation=request.generation,
@@ -1586,7 +1528,7 @@ class GenerationCoordinator:
             self._load()
             if resume
             else {
-                "schema_version": "mforge.experiment.generation.v1",
+                "schema_version": GENERATION_SCHEMA_VERSION,
                 "campaign_id": self.config.campaign_id,
                 "slots": {},
                 "callbacks": {},
@@ -1594,16 +1536,6 @@ class GenerationCoordinator:
         )
         slots_state = cast(dict[str, Any], state.setdefault("slots", {}))
         callbacks = cast(dict[str, Any], state.setdefault("callbacks", {}))
-        restored_behavior_repairs = False
-        for key, cached in tuple(slots_state.items()):
-            if not isinstance(cached, Mapping):
-                continue
-            restored = _restore_pending_behavior_repair(cached)
-            if restored is not None:
-                slots_state[key] = restored
-                restored_behavior_repairs = True
-        if restored_behavior_repairs:
-            self._save(state)
         seen: dict[str, str] = {}
         for index, source in enumerate(self.existing_sources):
             identity = validate_policy(
@@ -1647,10 +1579,7 @@ class GenerationCoordinator:
             self._save(state)
 
         def budget_reason() -> str | None:
-            if (
-                self.config.max_model_turns is not None
-                and turns >= self.config.max_model_turns
-            ):
+            if self.config.max_model_turns is not None and turns >= self.config.max_model_turns:
                 return "max_model_turns"
             if self.budget_exhausted is not None and self.budget_exhausted():
                 return "wall_seconds"
@@ -1703,7 +1632,18 @@ class GenerationCoordinator:
                 self.parent_assignments = {first_generation: dict(selected)}
             elif isinstance(selected, Sequence) and not isinstance(selected, (str, bytes)):
                 self.parent_assignments = {first_generation: list(selected)}
-        for generation in range(first_generation, generation_limit):
+        generation = first_generation
+        while generation_limit is None or generation < generation_limit:
+            boundary = budget_reason()
+            has_retained_generation_state = any(
+                isinstance(value, Mapping)
+                and value.get("generation") == generation
+                for value in slots_state.values()
+            )
+            if boundary is not None and not has_retained_generation_state:
+                stopped = True
+                stopped_reason = boundary
+                break
             self._emit(
                 "generation_started",
                 generation=generation,
@@ -1761,8 +1701,7 @@ class GenerationCoordinator:
                             repairs=results[slot].repairs,
                             remaining_repairs=results[slot].remaining_repairs,
                             validation_codes=[
-                                str(error.get("code", ""))
-                                for error in results[slot].errors
+                                str(error.get("code", "")) for error in results[slot].errors
                             ],
                             **self._recovered_event_payload(results[slot]),
                             completed_slots=len(results),
@@ -1798,8 +1737,8 @@ class GenerationCoordinator:
                     if raw.retained:
                         release_reserved_turn()
                         recovered += 1
-                    uncharged_infrastructure = (
-                        not raw.retained and infrastructure_retry_allowed(raw)
+                    uncharged_infrastructure = not raw.retained and infrastructure_retry_allowed(
+                        raw
                     )
                     retryable_infrastructure = (
                         self.retry_infrastructure and uncharged_infrastructure
@@ -1868,9 +1807,7 @@ class GenerationCoordinator:
                         generation=generation,
                         slot=slot,
                         parent_id=request.parent_id,
-                        status=self._slot_status(
-                            candidate, diagnostics, raw, repairs=0
-                        ),
+                        status=self._slot_status(candidate, diagnostics, raw, repairs=0),
                         candidate=candidate,
                         errors=tuple(diagnostics if not candidate else ()),
                         repairs=0,
@@ -1924,14 +1861,11 @@ class GenerationCoordinator:
                         repairs=item.repairs,
                         remaining_repairs=0,
                         retained=True,
-                        validation_codes=[
-                            str(error.get("code", "")) for error in item.errors
-                        ],
+                        validation_codes=[str(error.get("code", "")) for error in item.errors],
                     )
                 repair_boundary = (
                     budget_reason()
-                    if item is not None
-                    and item.status in {"repair_pending", "repair_running"}
+                    if item is not None and item.status == "repair_pending"
                     else None
                 )
                 if repair_boundary is not None:
@@ -1941,19 +1875,18 @@ class GenerationCoordinator:
                     item is not None
                     and item.status in {"repair_pending", "repair_running"}
                     and item.errors
-                    and (self.config.max_model_turns is None or turns < self.config.max_model_turns)
                     and (
-                        self.budget_exhausted is None
-                        or not self.budget_exhausted()
+                        item.status == "repair_running"
+                        or self.config.max_model_turns is None
+                        or turns < self.config.max_model_turns
                     )
+                    and (self.budget_exhausted is None or not self.budget_exhausted())
                 ):
                     resuming_repair = item.status == "repair_running"
                     if resuming_repair:
                         req = GenerationRequest.from_value(item.request)
                         repair_attempt = item.repairs
-                        repair_keys = item.repair_idempotency_keys or (
-                            req.idempotency_key,
-                        )
+                        repair_keys = item.repair_idempotency_keys or (req.idempotency_key,)
                     else:
                         if item.repairs >= self.config.max_repairs:
                             item = replace(
@@ -1982,9 +1915,7 @@ class GenerationCoordinator:
                             repairs=repair_attempt,
                             request=req.as_dict(),
                             repair_idempotency_keys=repair_keys,
-                            remaining_repairs=max(
-                                0, self.config.max_repairs - repair_attempt
-                            ),
+                            remaining_repairs=max(0, self.config.max_repairs - repair_attempt),
                         )
                         results[slot] = item
                         slots_state[initial_key] = item.as_dict()
@@ -1999,9 +1930,7 @@ class GenerationCoordinator:
                         diagnostics=list(item.errors),
                         repair_attempt=repair_attempt,
                         max_repairs=self.config.max_repairs,
-                        remaining_repairs=max(
-                            0, self.config.max_repairs - repair_attempt
-                        ),
+                        remaining_repairs=max(0, self.config.max_repairs - repair_attempt),
                         retained=resuming_repair,
                     )
                     cached = slots_state.get(req.idempotency_key)
@@ -2138,9 +2067,7 @@ class GenerationCoordinator:
                             raw_result=raw.as_dict(),
                             initial_request=item.initial_request,
                             repair_idempotency_keys=repair_keys,
-                            remaining_repairs=max(
-                                0, self.config.max_repairs - repair_attempt
-                            ),
+                            remaining_repairs=max(0, self.config.max_repairs - repair_attempt),
                         )
                     for state_key in (initial_key, *repair_keys):
                         slots_state[state_key] = repaired.as_dict()
@@ -2162,9 +2089,7 @@ class GenerationCoordinator:
                         repairs=repaired.repairs,
                         remaining_repairs=repaired.remaining_repairs,
                         retained=repaired_retained,
-                        validation_codes=[
-                            str(error.get("code", "")) for error in repaired.errors
-                        ],
+                        validation_codes=[str(error.get("code", "")) for error in repaired.errors],
                     )
                     results[slot] = repaired
                     item = repaired
@@ -2230,11 +2155,7 @@ class GenerationCoordinator:
                         generation=generation,
                         slot=slot,
                         parent_id=item.parent_id,
-                        status=(
-                            "invalid"
-                            if item.status in {"failed", "invalid"}
-                            else item.status
-                        ),
+                        status=("invalid" if item.status in {"failed", "invalid"} else item.status),
                         errors=list(item.errors),
                         archive_size=len(seen),
                     )
@@ -2263,7 +2184,7 @@ class GenerationCoordinator:
                     # A selector may directly provide the next parent vector.
                     # Preserve it as an in-memory assignment while retaining
                     # the callback result in the checkpoint for auditability.
-                    if generation + 1 < generation_limit:
+                    if generation_limit is None or generation + 1 < generation_limit:
                         if isinstance(selected, Mapping):
                             self.parent_assignments = {generation + 1: dict(selected)}
                         elif isinstance(selected, Sequence) and not isinstance(
@@ -2303,10 +2224,7 @@ class GenerationCoordinator:
                 completed_slots=len(ordered),
                 population_size=self.config.slots,
                 accepted_candidates=sum(
-                    1
-                    for group in generations
-                    for item in group
-                    if item.status == "accepted"
+                    1 for group in generations for item in group if item.status == "accepted"
                 ),
                 invalid_candidates=sum(
                     1
@@ -2315,17 +2233,21 @@ class GenerationCoordinator:
                     if item.status in {"failed", "invalid"}
                 ),
                 duplicate_candidates=sum(
-                    1
-                    for group in generations
-                    for item in group
-                    if item.status == "duplicate"
+                    1 for group in generations for item in group if item.status == "duplicate"
                 ),
                 recovered_work=recovered,
                 stopped=stopped or infrastructure_failed,
             )
             if stopped or infrastructure_failed:
                 break
+            generation += 1
         flat = tuple(item for group in generations for item in group)
+        if (
+            stopped_reason is None
+            and any(item.status == "failed" for item in flat)
+            and budget_reason() == "max_model_turns"
+        ):
+            stopped_reason = "max_model_turns"
         status = (
             "infrastructure_failed"
             if infrastructure_failed
@@ -2338,9 +2260,7 @@ class GenerationCoordinator:
         summary = {
             "status": status,
             "generation_count": len(generations),
-            "completed_generation_count": int(
-                state.get("next_generation", first_generation)
-            ),
+            "completed_generation_count": int(state.get("next_generation", first_generation)),
             "first_generation": first_generation,
             "generation_limit": generation_limit,
             "slots_per_generation": self.config.slots,

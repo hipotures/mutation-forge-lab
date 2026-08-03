@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-CHECKPOINT_SCHEMA_VERSION = "mforge.experiment.checkpoint.v1"
+CHECKPOINT_SCHEMA_VERSION = "mforge.experiment.checkpoint.v2"
 
 
 class CheckpointIntegrityError(RuntimeError):

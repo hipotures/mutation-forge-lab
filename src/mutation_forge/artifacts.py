@@ -78,7 +78,7 @@ class RunArtifacts:
         status: str,
     ) -> dict[str, Any]:
         manifest: dict[str, Any] = {
-            "schema_version": "1.0",
+            "schema_version": "mforge.experiment.run.v2",
             "run_id": self.run_id,
             "status": status,
             "created_at": datetime.now(UTC).isoformat(),
@@ -91,7 +91,7 @@ class RunArtifacts:
             "score_schema_version": "1.0",
             "proposal_schema_version": "1.0",
             "policy_schema_version": "1.0",
-            "event_schema_version": "1.0",
+            "event_schema_version": "mforge.experiment.events.v2",
             "resource_limits": {
                 "wall_seconds": config.run.wall_seconds,
                 "evaluations_per_episode": config.search.evaluations_per_episode,

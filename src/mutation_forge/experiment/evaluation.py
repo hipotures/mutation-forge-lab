@@ -17,6 +17,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from mutation_forge.backends.base import GraphBackend
+from mutation_forge.counterexamples import (
+    CandidateProvenance,
+    CounterexampleDecision,
+    CounterexampleHalt,
+    CounterexamplePipeline,
+    CounterexampleVerified,
+)
 from mutation_forge.models import GraphScore, GraphState, JsonValue
 from mutation_forge.policies.baselines import (
     BASELINES,
@@ -24,6 +31,7 @@ from mutation_forge.policies.baselines import (
     HEG_UNIFORM_TWO_SWITCH,
 )
 from mutation_forge.proposals.k_switch import (
+    FeatureLimits,
     KSwitchPoolGenerator,
     PoolLimits,
     make_scientific_context,
@@ -32,11 +40,10 @@ from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.validation import ProgramIdentity
 from mutation_forge.stage2b.rankers import SourceRanker
 
-SCHEMA_VERSION = "mforge.experiment.evaluation.v1"
-DEVELOPMENT_ARTIFACT_VERSION = "mforge.experiment.evaluation.development.v1"
-REPLAY_ARTIFACT_VERSION = "mforge.experiment.evaluation.replay.v1"
+SCHEMA_VERSION = "mforge.experiment.evaluation.v2"
+DEVELOPMENT_ARTIFACT_VERSION = "mforge.experiment.evaluation.development.v2"
+REPLAY_ARTIFACT_VERSION = "mforge.experiment.evaluation.replay.v2"
 DEFAULT_WITNESS_CAP = 64
-DEFAULT_FORBIDDEN_LENGTHS = (4, 5, 6)
 _THREAD_ENVIRONMENT = {
     name: "1"
     for name in (
@@ -265,12 +272,47 @@ def _trajectory(
     graph_seed: int,
     policy_seed: int,
     candidate_id: str,
+    counterexample_pipeline: CounterexamplePipeline | None = None,
 ) -> dict[str, JsonValue]:
     graph = backend.generate_seed(order=order, seed=graph_seed)
     validation = backend.validate(graph)
     if not validation.valid:
         raise ValueError(f"invalid generated graph: {validation.errors}")
     initial = _score(backend, graph, settings["witness_cap"])
+    episode_id = f"o{order}-g{graph_seed}-p{policy_seed}"
+    candidate_generation: int | None = None
+    candidate_slot: str | None = None
+    candidate_parts = candidate_id.split("-", 1)
+    if (
+        len(candidate_parts) == 2
+        and candidate_parts[0].startswith("g")
+        and candidate_parts[0][1:].isdigit()
+    ):
+        candidate_generation = int(candidate_parts[0][1:])
+        candidate_slot = candidate_parts[1]
+    if counterexample_pipeline is not None:
+        outcome = counterexample_pipeline.inspect(
+            graph=graph,
+            score=initial,
+            witness_cap=settings["witness_cap"],
+            provenance=CandidateProvenance(
+                source_kind="seed",
+                source_id=candidate_id,
+                generation=candidate_generation,
+                slot=candidate_slot,
+                episode_id=episode_id,
+                graph_seed=graph_seed,
+                policy_seed=policy_seed,
+                evaluation_step=0,
+            ),
+        )
+        if outcome.decision is CounterexampleDecision.STOP_VERIFIED:
+            raise CounterexampleVerified(outcome)
+        if outcome.decision in {
+            CounterexampleDecision.PAUSE_INCONCLUSIVE,
+            CounterexampleDecision.FAIL,
+        }:
+            raise CounterexampleHalt(outcome)
     states: dict[str, dict[str, Any]] = {}
     names = [candidate_id, *settings["baselines"]]
     for name in names:
@@ -288,7 +330,11 @@ def _trajectory(
             "recent_duplicate_rates": [],
         }
     pool_generator = KSwitchPoolGenerator(
-        backend, pool_limits=PoolLimits(pool_size=settings["proposal_pool_size"])
+        backend,
+        pool_limits=PoolLimits(pool_size=settings["proposal_pool_size"]),
+        feature_limits=FeatureLimits(
+            forbidden_lengths=backend.target_forbidden_lengths(graph.order)
+        ),
     )
     for step in range(settings["horizon"]):
         state = states[candidate_id]
@@ -301,20 +347,16 @@ def _trajectory(
             context = make_scientific_context(
                 state["graph"],
                 state["score"],
-                forbidden_lengths=DEFAULT_FORBIDDEN_LENGTHS,
+                forbidden_lengths=backend.target_forbidden_lengths(state["graph"].order),
                 step=step,
                 remaining_steps=settings["horizon"] - step - 1,
                 stagnation=state["stagnation"],
                 recent_best_improvement=max(recent_improvements, default=0.0),
                 recent_acceptance_rate=(
-                    sum(recent_accepts) / len(recent_accepts)
-                    if recent_accepts
-                    else 0.0
+                    sum(recent_accepts) / len(recent_accepts) if recent_accepts else 0.0
                 ),
                 recent_duplicate_rate=(
-                    sum(recent_duplicates) / len(recent_duplicates)
-                    if recent_duplicates
-                    else 0.0
+                    sum(recent_duplicates) / len(recent_duplicates) if recent_duplicates else 0.0
                 ),
             )
             rank = ranker.rank(context, pool)
@@ -352,18 +394,22 @@ def _trajectory(
                     settings,
                     step,
                     _rank_projection(rank),
+                    counterexample_pipeline=counterexample_pipeline,
+                    source_kind="generated_ranker",
+                    source_id=candidate_id,
+                    generation=candidate_generation,
+                    slot=candidate_slot,
+                    episode_id=episode_id,
+                    graph_seed=graph_seed,
+                    policy_seed=policy_seed,
                 )
-            state["recent_duplicate_rates"].append(
-                pool.deduplicated / max(1, pool.attempted)
-            )
+            state["recent_duplicate_rates"].append(pool.deduplicated / max(1, pool.attempted))
         else:
             state["failures"] += 1
             state["curve"].append(state["score"].total_capped_witnesses)
             state["recent_accepts"].append(0)
             state["recent_improvements"].append(0.0)
-            state["recent_duplicate_rates"].append(
-                pool.deduplicated / max(1, pool.attempted)
-            )
+            state["recent_duplicate_rates"].append(pool.deduplicated / max(1, pool.attempted))
             state["stagnation"] += 1
             state["trace"].append(
                 {
@@ -389,6 +435,14 @@ def _trajectory(
                 settings,
                 step,
                 {"operator_family": operator_family},
+                counterexample_pipeline=counterexample_pipeline,
+                source_kind="baseline",
+                source_id=baseline,
+                generation=candidate_generation,
+                slot=candidate_slot,
+                episode_id=episode_id,
+                graph_seed=graph_seed,
+                policy_seed=policy_seed,
             )
             baseline_state["recent_duplicate_rates"].append(0.0)
     policies: dict[str, JsonValue] = {}
@@ -402,7 +456,7 @@ def _trajectory(
         )
         cast(dict[str, JsonValue], policies[name])["trace"] = state["trace"]
     return {
-        "episode_id": f"o{order}-g{graph_seed}-p{policy_seed}",
+        "episode_id": episode_id,
         "order": order,
         "graph_seed": graph_seed,
         "policy_seed": policy_seed,
@@ -419,6 +473,15 @@ def _advance(
     settings: Mapping[str, Any],
     step: int,
     rank: Mapping[str, Any],
+    *,
+    counterexample_pipeline: CounterexamplePipeline | None = None,
+    source_kind: str,
+    source_id: str,
+    generation: int | None,
+    slot: str | None,
+    episode_id: str,
+    graph_seed: int,
+    policy_seed: int,
 ) -> None:
     previous = state["score"]
     try:
@@ -436,6 +499,29 @@ def _advance(
             {"step": step, "accepted": False, "error": str(error), "rank": dict(rank)}
         )
         return
+    if counterexample_pipeline is not None:
+        outcome = counterexample_pipeline.inspect(
+            graph=proposed,
+            score=score,
+            witness_cap=settings["witness_cap"],
+            provenance=CandidateProvenance(
+                source_kind=source_kind,
+                source_id=source_id,
+                generation=generation,
+                slot=slot,
+                episode_id=episode_id,
+                graph_seed=graph_seed,
+                policy_seed=policy_seed,
+                evaluation_step=step,
+            ),
+        )
+        if outcome.decision is CounterexampleDecision.STOP_VERIFIED:
+            raise CounterexampleVerified(outcome)
+        if outcome.decision in {
+            CounterexampleDecision.PAUSE_INCONCLUSIVE,
+            CounterexampleDecision.FAIL,
+        }:
+            raise CounterexampleHalt(outcome)
     accepted = score.ordering_key < state["score"].ordering_key
     if accepted:
         state["graph"], state["score"] = proposed, score
@@ -447,10 +533,7 @@ def _advance(
     state["recent_improvements"].append(
         max(
             0.0,
-            (
-                previous.total_capped_witnesses
-                - state["score"].total_capped_witnesses
-            )
+            (previous.total_capped_witnesses - state["score"].total_capped_witnesses)
             / max(1, state["initial_total"]),
         )
     )
@@ -476,6 +559,7 @@ def _run_once(
     progress: Callable[[Mapping[str, JsonValue]], None] | None = None,
     profiling_enabled: bool = False,
     pass_name: str = "development",
+    counterexample_pipeline: CounterexamplePipeline | None = None,
 ) -> dict[str, JsonValue]:
     source_text, ranker, owned_ranker = _source_and_ranker(candidate_id, source, limits)
     started = time.monotonic()
@@ -483,8 +567,8 @@ def _run_once(
     phase_calls: dict[str, int] = {}
     try:
         episodes: list[dict[str, JsonValue]] = []
-        total = len(settings["orders"]) * len(settings["graph_seeds"]) * len(
-            settings["policy_seeds"]
+        total = (
+            len(settings["orders"]) * len(settings["graph_seeds"]) * len(settings["policy_seeds"])
         )
         completed = 0
         for order in settings["orders"]:
@@ -499,6 +583,7 @@ def _run_once(
                         graph_seed=graph_seed,
                         policy_seed=policy_seed,
                         candidate_id=candidate_id,
+                        counterexample_pipeline=counterexample_pipeline,
                     )
                     episodes.append(episode)
                     completed += 1
@@ -516,19 +601,13 @@ def _run_once(
                             "pass": pass_name,
                             "pass_progress": completed / max(total, 1),
                             "development_progress": (
-                                completed / max(total, 1)
-                                if pass_name == "development"
-                                else 0.0
+                                completed / max(total, 1) if pass_name == "development" else 0.0
                             ),
                             "replay_progress": (
-                                completed / max(total, 1)
-                                if pass_name == "replay"
-                                else 0.0
+                                completed / max(total, 1) if pass_name == "replay" else 0.0
                             ),
                         }
-                        progress(
-                            progress_fields
-                        )
+                        progress(progress_fields)
             phase_seconds[f"order_{order}"] = time.monotonic() - order_started
             phase_calls[f"order_{order}"] = len(settings["graph_seeds"]) * len(
                 settings["policy_seeds"]
@@ -615,6 +694,8 @@ def evaluate_candidate(
     sandbox_limits: SandboxLimits | None = None,
     progress: Callable[[Mapping[str, JsonValue]], None] | None = None,
     profiling_enabled: bool = False,
+    counterexample_pipeline: CounterexamplePipeline | None = None,
+    counterexample_event_callback: (Callable[[str, Mapping[str, Any]], None] | None) = None,
 ) -> dict[str, JsonValue]:
     """Evaluate one validated ranker source and persist development/replay evidence."""
     if (
@@ -654,6 +735,11 @@ def evaluate_candidate(
         return HegBackend(_repo_path(config, heg_repo))
 
     primary_backend = make_backend()
+    pipeline = counterexample_pipeline or CounterexamplePipeline(
+        backend=primary_backend,
+        artifact_root=root,
+        event_callback=counterexample_event_callback,
+    )
     try:
         primary = _run_once(
             config,
@@ -665,6 +751,7 @@ def evaluate_candidate(
             progress=progress,
             profiling_enabled=profiling_enabled,
             pass_name="development",
+            counterexample_pipeline=pipeline,
         )
         backend_repo = getattr(primary_backend, "repo", None)
         observed_repo = (
@@ -707,6 +794,7 @@ def evaluate_candidate(
                     progress=progress,
                     profiling_enabled=profiling_enabled,
                     pass_name="replay",
+                    counterexample_pipeline=None,
                 )
             finally:
                 if replay_backend is not primary_backend and backend is None:

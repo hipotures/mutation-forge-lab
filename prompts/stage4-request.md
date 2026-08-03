@@ -15,8 +15,8 @@ SEARCH-TRAINING FEEDBACK (COMPACT)
 BOUNDED ARCHIVE CONTEXT
 
 
-Context schema (https://mutation-forge.invalid/schemas/stage2b-context.v1.json):
-- schema_version: string constant 'stage2b.context.v1' (required)
+Context schema (https://mutation-forge.invalid/schemas/scientific-context.v2.json):
+- schema_version: string constant 'mforge.scientific_context.v2' (required)
 - order: integer; minimum 4 (required)
 - forbidden_lengths: array (1..16 items; unique) of integer; minimum 1 (required)
 - capped_cycle_counts: array (1..16 items) of integer; minimum 0 (required)
@@ -29,8 +29,8 @@ Context schema (https://mutation-forge.invalid/schemas/stage2b-context.v1.json):
 - recent_duplicate_rate: number; range [0, 1] (required)
 Alignment: forbidden_lengths and capped_cycle_counts have equal length
 
-Proposal schema (https://mutation-forge.invalid/schemas/stage2b-proposal.v1.json):
-- schema_version: string constant 'stage2b.proposal.v1' (required)
+Proposal schema (https://mutation-forge.invalid/schemas/scientific-proposal.v2.json):
+- schema_version: string constant 'mforge.scientific_proposal.v2' (required)
 - proposal_id: string; pattern '^[0-9a-f]{64}$' (required)
 - k: integer; allowed values: [2, 3, 4] (required)
 - operator_family: string; allowed values: ['legal_2_switch', 'legal_3_switch', 'legal_4_switch'] (required)
@@ -64,8 +64,8 @@ proposal contains candidate-specific bounded structural proxies and must provide
 
 CONTEXT FIELDS (POOL-CONSTANT)
 
-- ctx.schema_version [string constant 'stage2b.context.v1'; scope=pool_constant]:
-  Fixed context contract literal stage2b.context.v1.
+- ctx.schema_version [string constant 'mforge.scientific_context.v2'; scope=pool_constant]:
+  Fixed context contract literal mforge.scientific_context.v2.
   Interpretation: provenance_only.
 - ctx.order [integer; minimum 4; scope=pool_constant]:
   Number of vertices in the current graph.
@@ -100,8 +100,8 @@ CONTEXT FIELDS (POOL-CONSTANT)
 
 PROPOSAL FIELDS (CANDIDATE-SPECIFIC OR PROVENANCE)
 
-- proposal.schema_version [string constant 'stage2b.proposal.v1'; scope=contract_constant]:
-  Fixed proposal contract literal stage2b.proposal.v1.
+- proposal.schema_version [string constant 'mforge.scientific_proposal.v2'; scope=contract_constant]:
+  Fixed proposal contract literal mforge.scientific_proposal.v2.
   Interpretation: provenance_only.
 - proposal.proposal_id [string; pattern '^[0-9a-f]{64}$'; scope=candidate_specific]:
   Opaque deterministic SHA-256 identifier for the declarative rewrite plan.

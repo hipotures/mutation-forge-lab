@@ -9,8 +9,8 @@ from typing import TypedDict, cast
 from mutation_forge.models import JsonValue
 
 PROBE_SCHEMA_VERSION = "stage2a.probe.v1"
-SCIENTIFIC_CONTEXT_SCHEMA_VERSION = "stage2b.context.v1"
-SCIENTIFIC_PROPOSAL_SCHEMA_VERSION = "stage2b.proposal.v1"
+SCIENTIFIC_CONTEXT_SCHEMA_VERSION = "mforge.scientific_context.v2"
+SCIENTIFIC_PROPOSAL_SCHEMA_VERSION = "mforge.scientific_proposal.v2"
 SCIENTIFIC_SELECTOR_TAGS = frozenset(
     {
         "uniform_random",

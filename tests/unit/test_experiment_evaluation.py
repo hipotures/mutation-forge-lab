@@ -9,6 +9,9 @@ from mutation_forge.stage2b.rankers import RankResult
 
 
 class _Backend:
+    def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
+        return (4,) if order >= 4 else ()
+
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
         return GraphState(order, ((0, 1),))
 
@@ -26,7 +29,13 @@ class _Backend:
 
 
 class _PoolGenerator:
-    def __init__(self, backend: _Backend, *, pool_limits: Any) -> None:
+    def __init__(
+        self,
+        backend: _Backend,
+        *,
+        pool_limits: Any,
+        feature_limits: Any,
+    ) -> None:
         self.backend = backend
 
     def generate(self, graph: GraphState, *, policy_seed: int, step: int) -> ProposalPool:

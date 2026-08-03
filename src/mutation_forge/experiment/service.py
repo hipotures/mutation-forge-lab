@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
-import shutil
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -12,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from .artifacts import ArtifactIncompleteError, TurnArtifactStore
 from .checkpoints import CheckpointStore
 from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
@@ -20,13 +17,12 @@ from .lock import (
     LockError,
     build_lock,
     load_lock,
-    model_turn_limit_difference,
     verify_lock,
 )
 from .native import NativeExperimentAdapter
 from .observer import CallbackEventSink, ExperimentEventHub
 from .sessions import SessionContext, SessionManager
-from .state import ExperimentStateStore, StateError
+from .state import ExperimentStateStore, StateError, process_alive
 
 
 class ExperimentAdapter(Protocol):
@@ -66,793 +62,7 @@ class NullExperimentAdapter:
         session: SessionContext,
     ) -> Mapping[str, Any]:
         del config, layout, state, session
-        return {"state": "idle", "stop_reason": "budget_exhausted"}
-
-
-class _HistoricalStage4Adapter:
-    """Adapter around the existing Stage 4 generation/evaluation workflow.
-
-    The engine and provider are injectable so tests can exercise continuation
-    without a live account.  Normal runs resolve the frozen Stage 4 config
-    from the preset and use the installed local Codex profile; credentials are
-    never copied into the experiment workspace.
-    """
-
-    def __init__(self, *, provider: Any | None = None, engine: Any | None = None) -> None:
-        self.provider = provider
-        self.engine = engine
-
-    def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
-        """Reject an unrunnable or semantically different Stage 4 invocation.
-
-        The public experiment schema currently exposes a wider search surface
-        than the frozen Stage 4 engine implements.  Until there is a native
-        adapter, accepting different values would make the lock misleading.
-        """
-
-        stage4_commands = __import__("mutation_forge." + "stage4.commands", fromlist=["*"])
-        _load_search_freeze = stage4_commands._load_search_freeze
-        _historical_root = getattr(stage4_commands, "campaign_" + "root")
-        doctor = stage4_commands.doctor
-        stage4_config_module = __import__("mutation_forge." + "stage4.config", fromlist=["*"])
-        load_stage4_config = stage4_config_module.load_stage4_config
-
-        stage4_path = _resolve_stage4_config(config)
-        stage4 = load_stage4_config(stage4_path)
-        _require_stage4_compatibility(config, stage4)
-        if self.engine is not None:
-            return {"stage4_config": str(stage4_path), "injected_engine": True}
-        freeze = _historical_root(stage4) / ("search-" + "freeze.json")
-        if not freeze.is_file():
-            raise WorkspaceError(
-                "Stage 4 preset is not runnable: its frozen search metadata is missing at "
-                f"{freeze}; run the private Stage 4 freeze workflow first"
-            )
-        try:
-            _load_search_freeze(stage4)
-        except (OSError, UnicodeError, ValueError, RuntimeError) as error:
-            raise WorkspaceError(
-                "Stage 4 preset is not runnable: its frozen search metadata is invalid"
-            ) from error
-        auth_json = Path.home() / ".codex" / "auth.json"
-        result = doctor(
-            stage4_path,
-            auth_json=auth_json if auth_json.is_file() else None,
-            check_auth=True,
-            write=False,
-        )
-        if (
-            result.get("status") != "completed"
-            or cast(Mapping[str, Any], result.get("auth", {})).get("authenticated") is not True
-        ):
-            raise WorkspaceError("Stage 4 App Server doctor did not authenticate a READY profile")
-        return {"stage4_config": str(stage4_path), "doctor": dict(result)}
-
-    def run(
-        self,
-        config: ExperimentConfig,
-        layout: ExperimentLayout,
-        state: ExperimentStateStore,
-        session: SessionContext,
-    ) -> Mapping[str, Any]:
-        stage4_commands = __import__("mutation_forge." + "stage4.commands", fromlist=["*"])
-        evolve = stage4_commands.evolve
-        stage4_config_module = __import__("mutation_forge." + "stage4.config", fromlist=["*"])
-        load_stage4_config = stage4_config_module.load_stage4_config
-
-        stage4_config = _resolve_stage4_config(config)
-        frozen_stage4 = load_stage4_config(stage4_config)
-        engine = self.engine or evolve
-        provider = self.provider or _build_local_stage4_provider(layout)
-        run_override = layout.artifacts
-        if self.engine is None:
-            _prepare_stage4_workspace(stage4_config, run_override)
-        adapter_provider = _WorkspaceStage4Provider(
-            provider, layout, state, session, sandbox_limits=frozen_stage4.sandbox
-        )
-
-        def observe(event: Mapping[str, Any]) -> None:
-            event_type = str(event.get("event", "adapter_event"))
-            state.write_event(event_type, event, session_id=session.session_id)
-            if session.budget_exhausted() and event_type == "generation_completed":
-                raise _SessionBudgetExpired
-
-        engine_kwargs: dict[str, Any] = {
-            "provider": adapter_provider,
-            # Compatibility was checked before workspace creation; both
-            # values are now the same frozen scientific identity.
-            "concurrency": frozen_stage4.model.concurrency,
-            "resume": True,
-            "observer": observe,
-        }
-        try:
-            engine_parameters: Mapping[str, inspect.Parameter]
-            try:
-                engine_parameters = inspect.signature(engine).parameters
-            except (TypeError, ValueError):
-                engine_parameters = {}
-            if "run_override" in engine_parameters:
-                engine_kwargs["run_override"] = run_override
-            result = engine(stage4_config, **engine_kwargs)
-        except _SessionBudgetExpired:
-            indexed = _index_legacy_run(run_override, state)
-            session.candidates_created += indexed["candidates"]
-            session.evaluations_completed += indexed["evaluations"]
-            generation = _stage4_generation(run_override)
-            return {
-                "state": "idle",
-                "stop_reason": "budget_exhausted",
-                "generation": generation,
-                "provider_turns": session.provider_turns_completed,
-            }
-        finally:
-            close = getattr(provider, "close", None)
-            if callable(close):
-                close()
-
-        if not isinstance(result, Mapping):
-            raise RuntimeError("Stage 4 adapter returned a non-object result")
-        run_path = result.get("run")
-        if isinstance(run_path, str) and Path(run_path).is_dir():
-            destination = layout.artifacts
-            if Path(run_path).resolve() != destination.resolve():
-                destination.mkdir(parents=True, exist_ok=True)
-                for source in Path(run_path).iterdir():
-                    target = destination / source.name
-                    if source.is_dir():
-                        shutil.copytree(source, target, dirs_exist_ok=True)
-                    elif source.is_file():
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(source, target)
-            indexed = _index_legacy_run(destination, state)
-            session.candidates_created += indexed["candidates"]
-            session.evaluations_completed += indexed["evaluations"]
-        status = str(result.get("status", "completed"))
-        return {
-            "state": "completed" if status == "completed" else "idle",
-            "stop_reason": "engine_completed" if status == "completed" else "budget_exhausted",
-            "generation": int(
-                cast(Mapping[str, Any], result.get("generation", {})).get("generation_count", 0)
-            )
-            if isinstance(result.get("generation"), Mapping)
-            else 0,
-            "provider_turns": session.provider_turns_completed,
-            "result": dict(result),
-        }
-
-
-class _SessionBudgetExpired(Exception):
-    pass
-
-
-def _resolve_stage4_config(config: ExperimentConfig) -> Path:
-    configured = config.raw.get("legacy_" + "stage4_config")
-    if isinstance(configured, str) and configured:
-        path = Path(configured)
-        return (config.source_dir / path).resolve() if not path.is_absolute() else path.resolve()
-    if config.preset == "heg-ranker-evolution-v1":
-        return Path(__file__).resolve().parents[3] / "configs" / ("stage4-" + "search.toml")
-    raise WorkspaceError(
-        "experiment preset has no Stage 4 adapter configuration; "
-        "set legacy_" + "stage4_config or use a supported preset"
-    )
-
-
-def _require_stage4_compatibility(config: ExperimentConfig, stage4: Any) -> None:
-    """Fail closed when public config would not be executed by frozen Stage 4."""
-
-    expected: dict[str, object] = {
-        "kind": "ranker-search",
-        "preset": "heg-ranker-evolution-v1",
-        "model.provider": "codex",
-        "model.name": stage4.model.name,
-        "model.effort": stage4.model.effort,
-        "model.concurrency": stage4.model.concurrency,
-        "model.max_repairs": stage4.model.max_repairs,
-        "search.population_size": stage4.model.slots,
-        "search.max_generations": stage4.model.generations,
-        "search.max_model_turns": stage4.model.max_accepted_turns,
-        "search.selection": "elite-diversity",
-        "evaluation.orders": stage4.experiment.orders,
-        "evaluation.graph_seeds": stage4.experiment.graph_seeds,
-        "evaluation.policy_seeds": stage4.experiment.policy_seeds,
-        "evaluation.horizon": stage4.experiment.horizon,
-        "evaluation.proposal_pool_size": stage4.stage2b.pool.pool_size,
-        "evaluation.baselines": ("random", "structural"),
-        "evaluation.replay": True,
-        "resources.workers": stage4.limits.max_evaluation_workers,
-        "resources.thread_count": stage4.limits.thread_count,
-    }
-    actual: dict[str, object] = {
-        "kind": config.kind,
-        "preset": config.preset,
-        "model.provider": config.model.provider,
-        "model.name": config.model.name,
-        "model.effort": config.model.effort,
-        "model.concurrency": config.model.concurrency,
-        "model.max_repairs": config.model.max_repairs,
-        "search.population_size": config.search.population_size,
-        "search.max_generations": config.search.max_generations,
-        "search.max_model_turns": config.search.max_model_turns,
-        "search.selection": config.search.selection,
-        "evaluation.orders": config.evaluation.orders,
-        "evaluation.graph_seeds": config.evaluation.graph_seeds,
-        "evaluation.policy_seeds": config.evaluation.policy_seeds,
-        "evaluation.horizon": config.evaluation.horizon,
-        "evaluation.proposal_pool_size": config.evaluation.proposal_pool_size,
-        "evaluation.baselines": config.evaluation.baselines,
-        "evaluation.replay": config.evaluation.replay,
-        "resources.workers": config.resources.workers,
-        "resources.thread_count": config.resources.thread_count,
-    }
-    mismatches = [
-        f"{name}={actual[name]!r} (frozen Stage 4 requires {expected[name]!r})"
-        for name in expected
-        if actual[name] != expected[name]
-    ]
-    if mismatches:
-        raise WorkspaceError(
-            "experiment.toml is incompatible with preset heg-ranker-evolution-v1: "
-            + "; ".join(mismatches)
-        )
-
-
-def _stage4_generation(run: Path) -> int:
-    try:
-        value = json.loads((run / "generation-checkpoint.json").read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return 0
-    if not isinstance(value, Mapping):
-        return 0
-    generations = (
-        [
-            int(slot.get("generation", 0))
-            for slot in value.get("slots", {}).values()
-            if isinstance(slot, Mapping) and isinstance(slot.get("generation"), int)
-        ]
-        if isinstance(value.get("slots"), Mapping)
-        else []
-    )
-    return max(generations, default=0)
-
-
-def _prepare_stage4_workspace(config_path: Path, destination: Path) -> None:
-    """Bring only the immutable Stage 4 freeze into the experiment root.
-
-    Stage 4's scientific inputs remain owned by its frozen configuration.  The
-    experiment owns the mutable campaign/checkpoint/evidence directory.  If a
-    prior private Stage 4 campaign exists, copy its signed freeze metadata once
-    so the legacy engine can verify the same identities under the workspace.
-    Missing freeze metadata is a hard precondition failure, never an idle
-    success that pretends a search happened.
-    """
-
-    stage4_commands = __import__("mutation_forge." + "stage4.commands", fromlist=["*"])
-    _historical_root = getattr(stage4_commands, "campaign_" + "root")
-    stage4_config_module = __import__("mutation_forge." + "stage4.config", fromlist=["*"])
-    load_stage4_config = stage4_config_module.load_stage4_config
-
-    stage4 = load_stage4_config(config_path)
-    destination.mkdir(parents=True, exist_ok=True)
-    target_freeze = destination / ("search-" + "freeze.json")
-    if target_freeze.is_file():
-        return
-    source_root = _historical_root(stage4)
-    source_freeze = source_root / ("search-" + "freeze.json")
-    if not source_freeze.is_file():
-        raise WorkspaceError(
-            "Stage 4 preset is not runnable: its frozen search metadata is missing at "
-            f"{source_freeze}; run the private Stage 4 freeze workflow first"
-        )
-    shutil.copy2(source_freeze, target_freeze)
-    # Technical/authentication amendments are part of the signed freeze chain.
-    # Copy them only when present; never copy mutable generations or provider
-    # artifacts from the historical campaign.
-    for path in source_root.glob("search-" + "freeze-pre-amendment*.json"):
-        shutil.copy2(path, destination / path.name)
-    amendment = source_root / "post-live-amendment.json"
-    if amendment.is_file():
-        shutil.copy2(amendment, destination / amendment.name)
-
-
-def _build_local_stage4_provider(layout: ExperimentLayout) -> Any:
-    stage4_app_server = __import__("mutation_forge." + "stage4.app_server", fromlist=["*"])
-    Stage4AppServerProvider = stage4_app_server.Stage4AppServerProvider
-
-    auth = Path.home() / ".codex" / "auth.json"
-    return Stage4AppServerProvider(
-        auth_json=auth if auth.is_file() else None,
-        artifact_dir=layout.artifacts / "generations",
-        artifact_root=layout.artifacts,
-    )
-
-
-class _WorkspaceStage4Provider:
-    """Route Stage 4 transport artifacts and idempotency into one workspace."""
-
-    def __init__(
-        self,
-        provider: Any,
-        layout: ExperimentLayout,
-        state: ExperimentStateStore,
-        session: SessionContext,
-        *,
-        sandbox_limits: Any,
-    ) -> None:
-        self.provider = provider
-        self.layout = layout
-        self.state = state
-        self.session = session
-        self.sandbox_limits = sandbox_limits
-        self.turns = TurnArtifactStore(layout.artifacts)
-
-    @staticmethod
-    def _phase(request: Mapping[str, Any]) -> str:
-        phase = str(request.get("phase", "initial"))
-        if phase == "initial":
-            return phase
-        if phase == "repair":
-            return "repair-01"
-        return phase
-
-    def _payload(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        value = dict(request)
-        generation = int(request.get("generation", 0))
-        slot = str(request.get("slot", "slot-00"))
-        phase = self._phase(request)
-        directory = self.layout.generation_slot_phase(
-            generation,
-            slot,
-            phase,
-        )
-        value.update(
-            {
-                "artifact_dir": str(directory),
-                "artifact_root": str(self.layout.artifacts),
-                "artifact_prefix": slot,
-            }
-        )
-        return value
-
-    def _record(self, request: Mapping[str, Any], result: Mapping[str, Any]) -> None:
-        generation = int(request.get("generation", 0))
-        slot = str(request.get("slot", "slot-00"))
-        phase = self._phase(request)
-        directory = self.layout.generation_slot_phase(
-            generation,
-            slot,
-            phase,
-        )
-        result = self._with_validation_evidence(result)
-        status = str(result.get("status", "completed"))
-        usage = result.get("usage") if isinstance(result.get("usage"), Mapping) else None
-        key = self._key(request)
-        if not directory.is_dir():
-            if status == "completed":
-                raise ArtifactIncompleteError(
-                    f"completed provider turn has no artifact directory: {directory}"
-                )
-        elif (directory / "turn-manifest.json").exists():
-            self.turns.verify_turn(directory)
-        else:
-            self.turns.record_existing_turn(
-                directory,
-                generation=generation,
-                slot=slot,
-                phase=phase,
-                request=request,
-                result=result,
-            )
-            self.turns.verify_turn(directory)
-
-        # Commit logical completion only after the durable evidence package
-        # has been assembled and its exact hashes have been verified.
-        self.state.record_provider_turn(
-            idempotency_key=key,
-            generation=generation,
-            slot=slot,
-            phase=phase,
-            state="completed" if status == "completed" else "failed",
-            artifact_path=str(directory),
-            usage=cast(Mapping[str, Any], usage or {}),
-            provider_thread_id=(
-                str(result["provider_thread_id"])
-                if result.get("provider_thread_id") is not None
-                else str(result["thread_id"])
-                if result.get("thread_id") is not None
-                else None
-            ),
-            provider_turn_id=(
-                str(result["provider_turn_id"])
-                if result.get("provider_turn_id") is not None
-                else str(result["turn_id"])
-                if result.get("turn_id") is not None
-                else None
-            ),
-            error=str(result.get("error")) if result.get("error") else None,
-        )
-        self.session.provider_turns_attempted += 1
-        if status == "completed":
-            self.session.provider_turns_completed += 1
-        if isinstance(usage, Mapping):
-            total = usage.get("totalTokens")
-            if isinstance(total, int) and not isinstance(total, bool):
-                self.session.token_usage_delta += total
-
-    def _with_validation_evidence(self, result: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Persist the same validation/probe boundary before accepting a turn."""
-
-        response = result.get("response")
-        source = response.get("source") if isinstance(response, Mapping) else None
-        if not isinstance(source, str):
-            return result
-        from mutation_forge.sandbox.validation import validate_policy
-
-        stage4_generation = __import__("mutation_forge." + "stage4.generation", fromlist=["*"])
-        _behavior = stage4_generation._behavior
-
-        value = dict(result)
-        value["canonical_response"] = dict(cast(Mapping[str, Any], response))
-        value["provenance"] = {
-            key: value.get(key)
-            for key in (
-                "provider_request_id",
-                "provider_thread_id",
-                "provider_turn_id",
-                "model",
-                "effort",
-                "prompt_hashes",
-                "appserver_doctor_sha256",
-            )
-        }
-        validation = validate_policy(source, self.sandbox_limits)
-        value["validation"] = validation.as_dict()
-        value["identity"] = validation.identity.as_dict()
-        value["validation_completed"] = True
-        if validation.valid:
-            try:
-                behavior, telemetry = _behavior(source, self.sandbox_limits, 10_000)
-            except Exception as error:
-                behavior, telemetry = (
-                    {"status": "failed", "error": f"{type(error).__name__}: {error}"},
-                    {},
-                )
-            value["behavior"] = behavior
-            value["worker_telemetry"] = telemetry
-        return value
-
-    @staticmethod
-    def _key(request: Mapping[str, Any]) -> str:
-        value = request.get("idempotency_key", request.get("request_idempotency_key"))
-        if isinstance(value, str) and value:
-            return value
-        # A provider failure can happen before the generation engine has
-        # assembled its normal request identity.  Keep that failure indexed
-        # under a deterministic, non-empty primary key rather than merging
-        # every pre-request failure into one SQLite row.
-        return "pre-request:" + ":".join(
-            (
-                str(request.get("campaign_id", "experiment")),
-                str(request.get("generation", 0)),
-                str(request.get("slot", "slot-00")),
-                str(request.get("phase", "initial")),
-            )
-        )
-
-    def _record_failure(self, request: Mapping[str, Any], error: BaseException) -> None:
-        evidence = getattr(error, "evidence", {})
-        result: dict[str, Any] = {
-            "status": "failed",
-            "error": f"{type(error).__name__}: {error}",
-        }
-        if isinstance(evidence, Mapping):
-            result.update(dict(evidence))
-        with suppress(Exception):
-            self._record(request, result)
-
-    @staticmethod
-    def _retained_usage(directory: Path) -> Mapping[str, Any]:
-        for usage_path in reversed(sorted(directory.glob("*.usage.json"))):
-            try:
-                value = json.loads(usage_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if isinstance(value, Mapping):
-                return cast(Mapping[str, Any], value)
-        return {}
-
-    def _retained_result(self, request: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        """Recover a terminal provider envelope before issuing a duplicate call."""
-
-        key = self._key(request)
-        existing = self.state.provider_turn(key)
-        directory = self.layout.generation_slot_phase(
-            int(request.get("generation", 0)),
-            str(request.get("slot", "slot-00")),
-            self._phase(request),
-        )
-        manifest_path = directory / "turn-manifest.json"
-        if existing is None and not manifest_path.is_file():
-            return None
-        if existing is not None and existing.get("state") not in {"completed", "failed"}:
-            return None
-        self.turns.verify_turn(directory)
-        try:
-            manifest = json.loads((directory / "turn-manifest.json").read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise ArtifactIncompleteError(
-                "terminal provider turn has no readable manifest"
-            ) from exc
-        if not isinstance(manifest, Mapping) or manifest.get("request_idempotency_key") != key:
-            raise ArtifactIncompleteError(
-                "terminal provider turn idempotency key does not match request"
-            )
-        terminal_status = str(manifest.get("terminal_status", ""))
-        if terminal_status not in {"completed", "failed"}:
-            raise ArtifactIncompleteError("retained provider turn is not terminal")
-        if existing is not None and existing.get("state") != terminal_status:
-            raise ArtifactIncompleteError("retained provider turn state does not match SQLite")
-        usage = self._retained_usage(directory)
-        if terminal_status == "completed" and manifest.get("usage_final_exact") is not True:
-            raise ArtifactIncompleteError("completed provider turn has non-exact usage")
-        response_paths = sorted(directory.glob("*.response.json")) if directory.is_dir() else []
-        if terminal_status == "failed":
-            raw: Mapping[str, Any] = {}
-            for response_path in reversed(response_paths):
-                try:
-                    value = json.loads(response_path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeError, json.JSONDecodeError):
-                    continue
-                if isinstance(value, Mapping):
-                    raw = cast(Mapping[str, Any], value)
-                    break
-            failed_result: dict[str, Any] = {
-                "status": "failed",
-                "accepted": manifest.get("request_accepted") is True,
-                "accepted_turn": manifest.get("request_accepted") is True,
-                "charged": manifest.get("charged"),
-                "uncharged": manifest.get("uncharged"),
-                "content": manifest.get("content_received") is True,
-                "response": raw.get("response"),
-                "usage": dict(usage),
-                "provider_request_id": raw.get("provider_request_id", raw.get("request_id")),
-                "provider_thread_id": manifest.get("provider_thread_id"),
-                "provider_turn_id": manifest.get("provider_turn_id"),
-                "error": manifest.get("error"),
-                "retained": True,
-            }
-            if existing is None:
-                recovered = self.state.record_provider_turn(
-                    idempotency_key=key,
-                    generation=int(request.get("generation", 0)),
-                    slot=str(request.get("slot", "slot-00")),
-                    phase=self._phase(request),
-                    state="failed",
-                    artifact_path=str(directory),
-                    usage=usage,
-                    provider_thread_id=(
-                        str(failed_result["provider_thread_id"])
-                        if failed_result.get("provider_thread_id") is not None
-                        else None
-                    ),
-                    provider_turn_id=(
-                        str(failed_result["provider_turn_id"])
-                        if failed_result.get("provider_turn_id") is not None
-                        else None
-                    ),
-                    error=(str(failed_result["error"]) if failed_result.get("error") else None),
-                )
-                if recovered:
-                    self.session.provider_turns_attempted += 1
-                    total = usage.get("totalTokens")
-                    if isinstance(total, int) and not isinstance(total, bool):
-                        self.session.token_usage_delta += total
-            return failed_result
-        for response_path in reversed(response_paths):
-            try:
-                raw = json.loads(response_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if not isinstance(raw, Mapping):
-                continue
-            raw_status = raw.get("status")
-            if raw_status is not None and raw_status not in {"completed", "success"}:
-                continue
-            response = raw.get("response", raw)
-            response_text = raw.get("response_text")
-            if not isinstance(response_text, str):
-                text_path = response_path.with_name(
-                    response_path.name.removesuffix(".response.json") + ".response.md"
-                )
-                try:
-                    response_text = text_path.read_text(encoding="utf-8")
-                except OSError:
-                    response_text = None
-            if not usage:
-                value = raw.get("usage")
-                if isinstance(value, Mapping):
-                    usage = cast(Mapping[str, Any], value)
-            result: dict[str, Any] = {
-                "status": "completed",
-                "accepted": True,
-                "accepted_turn": True,
-                "content": bool(response_text),
-                "response": response,
-                "response_text": response_text,
-                "usage": dict(usage),
-                "provider_request_id": raw.get("provider_request_id", raw.get("request_id")),
-                "provider_thread_id": raw.get("provider_thread_id", raw.get("thread_id")),
-                "provider_turn_id": raw.get("provider_turn_id", raw.get("turn_id")),
-                "retained": True,
-            }
-            if existing is None:
-                recovered = self.state.record_provider_turn(
-                    idempotency_key=key,
-                    generation=int(request.get("generation", 0)),
-                    slot=str(request.get("slot", "slot-00")),
-                    phase=self._phase(request),
-                    state="completed",
-                    artifact_path=str(directory),
-                    usage=usage,
-                    provider_thread_id=(
-                        str(result["provider_thread_id"])
-                        if result.get("provider_thread_id") is not None
-                        else None
-                    ),
-                    provider_turn_id=(
-                        str(result["provider_turn_id"])
-                        if result.get("provider_turn_id") is not None
-                        else None
-                    ),
-                )
-                if recovered:
-                    self.session.provider_turns_attempted += 1
-                    self.session.provider_turns_completed += 1
-                    total = usage.get("totalTokens")
-                    if isinstance(total, int) and not isinstance(total, bool):
-                        self.session.token_usage_delta += total
-            return result
-        return None
-
-    def generate(self, request: Mapping[str, Any]) -> Any:
-        retained = self._retained_result(request)
-        if retained is not None:
-            return retained
-        if self.session.budget_exhausted():
-            raise _SessionBudgetExpired
-        payload = self._payload(request)
-        try:
-            value = self.provider.generate(payload)
-        except BaseException as error:
-            self._record_failure(request, error)
-            raise
-        result = value if isinstance(value, Mapping) else {"response": value}
-        self._record(request, cast(Mapping[str, Any], result))
-        return value
-
-    def repair(self, request: Mapping[str, Any], diagnostics: Any) -> Any:
-        retained = self._retained_result(request)
-        if retained is not None:
-            return retained
-        if self.session.budget_exhausted():
-            raise _SessionBudgetExpired
-        payload = self._payload(request)
-        payload["diagnostics"] = list(diagnostics)
-        try:
-            method = getattr(self.provider, "repair", None)
-            if callable(method):
-                value = method(payload, diagnostics)
-            else:
-                value = self.provider.generate(payload)
-        except BaseException as error:
-            self._record_failure(request, error)
-            raise
-        result = value if isinstance(value, Mapping) else {"response": value}
-        self._record(request, cast(Mapping[str, Any], result))
-        return value
-
-    def load_retained_result(self, request: Mapping[str, Any]) -> Any:
-        retained = self._retained_result(request)
-        if retained is not None:
-            return retained
-        method = getattr(self.provider, "load_retained_result", None)
-        if callable(method):
-            value = method(self._payload(request))
-            if isinstance(value, Mapping):
-                self._record(request, cast(Mapping[str, Any], value))
-            return value
-        return None
-
-    def close(self) -> None:
-        close = getattr(self.provider, "close", None)
-        if callable(close):
-            close()
-
-
-def _index_legacy_run(run: Path, state: ExperimentStateStore) -> dict[str, int]:
-    """Project the legacy filesystem authorities into experiment SQLite.
-
-    Stage 4 deliberately keeps JSON archives and evaluation summaries as the
-    scientific source of truth.  The experiment database is an operational
-    index, so re-reading those immutable files after every resumed engine run
-    is safe and makes status useful without rerunning scoring.
-    """
-
-    counts = {"candidates": 0, "evaluations": 0, "generation": 0}
-    known_candidates = {
-        str(row[0]) for row in state.connection.execute("SELECT candidate_id FROM candidates")
-    }
-    known_evaluations = {
-        str(row[0]) for row in state.connection.execute("SELECT identity FROM evaluations")
-    }
-    archive_root = run / "archive"
-    if archive_root.is_dir():
-        try:
-            stage4_archive = __import__("mutation_forge." + "stage4.archive", fromlist=["*"])
-            ProgramArchive = stage4_archive.ProgramArchive
-
-            archive = ProgramArchive(archive_root)
-            records = archive.records()
-        except (OSError, ValueError, TypeError):
-            records = ()
-        for record in records:
-            metadata = {
-                "normalized_ast_sha256": record.normalized_ast_sha256,
-                "behavior_signature_sha256": record.behavior_signature_sha256,
-                "validation_status": record.validation_status,
-                "probe_status": record.probe_status,
-                "smoke_10k_status": record.smoke_10k_status,
-                "replay_status": record.replay_status,
-                "fitness_status": record.fitness_status,
-                "search_metrics": dict(record.search_metrics),
-                "usage": dict(record.usage),
-                "error": record.error,
-            }
-            state.record_candidate(
-                record.program_id,
-                source_sha256=record.source_sha256,
-                archive_path=str(run / record.source_path) if record.source_path else None,
-                generation=record.generation,
-                slot=record.slot,
-                status=("duplicate" if record.duplicate_of else "created"),
-                metadata=metadata,
-            )
-            if record.program_id not in known_candidates:
-                counts["candidates"] += 1
-                known_candidates.add(record.program_id)
-            counts["generation"] = max(counts["generation"], record.generation)
-
-    for summary_path in sorted(run.rglob("*-summary.json")):
-        try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        if (
-            not isinstance(summary, Mapping)
-            or summary.get("schema_version") != "stage4.evaluation.v1"
-        ):
-            continue
-        candidate_key = summary.get("candidate_cache_key")
-        pass_name = summary.get("pass")
-        if not isinstance(candidate_key, str) or not isinstance(pass_name, str):
-            continue
-        identity = f"{candidate_key}:{pass_name}"
-        compact = {
-            key: value
-            for key, value in summary.items()
-            if key not in {"shards", "manifest_shards", "manifest_episode_ids"}
-        }
-        state.record_evaluation(
-            identity,
-            candidate_id=str(summary.get("candidate_id", "roster")),
-            kind=pass_name,
-            state="completed",
-            result=compact,
-        )
-        if identity not in known_evaluations:
-            counts["evaluations"] += 1
-            known_evaluations.add(identity)
-    return counts
+        return {"state": "idle", "stop_reason": "session_wall_seconds"}
 
 
 class ExperimentService:
@@ -864,8 +74,6 @@ class ExperimentService:
         observer: Any | None = None,
         profiling: bool | None = None,
     ) -> None:
-        # The public experiment workflow is native.  Historical adapters remain
-        # available only through the private compatibility surface below.
         self.adapter = adapter or NativeExperimentAdapter()
         self.event_sinks = list(event_sinks)
         if observer is not None:
@@ -907,7 +115,6 @@ class ExperimentService:
                 hub.close()
 
         created = not layout.root.exists()
-        allow_model_turn_extension = False
         if created:
             try:
                 preflight = self._preflight(config)
@@ -941,25 +148,15 @@ class ExperimentService:
                 "workspace_initialized",
                 experiment_id=config.exp_id,
                 workspace=str(layout.root),
-                state="created",
+                state="idle",
                 run_mode="fresh",
             )
         else:
             try:
                 layout.verify_root()
                 lock = load_lock(layout.lock)
-                try:
-                    verify_lock(lock, config, layout)
-                except LockError:
-                    if not _model_turn_extension_allowed(lock, config, layout):
-                        raise
-                    allow_model_turn_extension = True
-                self._verify_root_config(
-                    layout,
-                    config,
-                    lock,
-                    allow_model_turn_extension=allow_model_turn_extension,
-                )
+                verify_lock(lock, config, layout)
+                self._verify_root_config(layout, config, lock)
             except BaseException as error:
                 fail_before_session(error)
                 raise
@@ -986,70 +183,26 @@ class ExperimentService:
             # A crash may leave new, fsynced files outside the last manifest.
             # Reconciliation accepts only those append-only additions; it
             # first verifies every previously committed digest.
+            layout.verify_artifact_manifest(allow_new=True)
             layout.reconcile_artifact_manifest()
             current_state = state.state()
             experiment = state.experiment()
             last_stop_reason = str(experiment.get("terminal_stop_reason") or "")
             if last_stop_reason == "already_completed":
                 last_stop_reason = str(state.latest_meaningful_stop_reason() or "")
-            stored_model_turn_limit = state.metadata("effective_model_turns")
             effective_model_turns = config.search.max_model_turns
-            if (
-                isinstance(stored_model_turn_limit, int)
-                and not isinstance(stored_model_turn_limit, bool)
-                and stored_model_turn_limit >= config.search.max_model_turns
-            ):
-                effective_model_turns = stored_model_turn_limit
-            if allow_model_turn_extension:
-                requested_limit = config.search.max_model_turns
-                difference = model_turn_limit_difference(lock, config)
-                extension_base = (
-                    stored_model_turn_limit
-                    if isinstance(stored_model_turn_limit, int)
-                    and not isinstance(stored_model_turn_limit, bool)
-                    else difference[0]
-                    if difference is not None
-                    else effective_model_turns
-                )
-                if requested_limit > extension_base:
-                    state.set_metadata("effective_model_turns", requested_limit)
-                    state.write_event(
-                        "model_turn_budget_extended",
-                        {
-                            "locked_model_turns": (
-                                difference[0]
-                                if difference is not None
-                                else effective_model_turns
-                            ),
-                            "effective_model_turns": requested_limit,
-                            "reason": "continuation_after_max_model_turns",
-                        },
-                    )
-                    effective_model_turns = requested_limit
-                elif stored_model_turn_limit is None:
-                    state.set_metadata("effective_model_turns", effective_model_turns)
-            # Older runs incorrectly persisted a model-turn boundary as
-            # completed.  Reclassify that durable state before deciding whether
-            # this invocation is a no-op, while preserving generation-limit
-            # completion as genuinely terminal.
-            if current_state == "completed" and last_stop_reason == "max_model_turns":
-                checkpoint = state.checkpoint()
-                state.set_state(
-                    "idle",
-                    stop_reason="max_model_turns",
-                    checkpoint=(
-                        str(checkpoint["checkpoint_id"]) if checkpoint is not None else None
-                    ),
-                )
-                current_state = "idle"
-            if current_state == "completed":
-                result = self._record_completed_session(config, layout, state, hub=hub)
+            if current_state in {"completed", "exhausted", "failed"}:
+                result = self._terminal_result(config, layout, state)
                 hub.emit(
-                    "experiment_completed",
+                    "experiment_completed"
+                    if current_state == "completed"
+                    else "experiment_failed"
+                    if current_state == "failed"
+                    else "experiment_exhausted",
                     experiment_id=config.exp_id,
                     workspace=str(layout.root),
-                    state="completed",
-                    stop_reason="already_completed",
+                    state=current_state,
+                    stop_reason=last_stop_reason,
                     checkpoint=result.get("checkpoint"),
                 )
                 hub.close()
@@ -1094,9 +247,10 @@ class ExperimentService:
                 model_turn_counter = getattr(self.adapter, "model_turns_used", None)
                 if callable(model_turn_counter):
                     model_turns_used = int(model_turn_counter(layout, state))
-                remaining_model_turns = max(
-                    0,
-                    effective_model_turns - model_turns_used,
+                remaining_model_turns = (
+                    max(0, effective_model_turns - model_turns_used)
+                    if effective_model_turns is not None
+                    else None
                 )
                 hub.emit(
                     "session_started",
@@ -1161,6 +315,13 @@ class ExperimentService:
                         "result": dict(outcome),
                     }
                 )
+                session.ending_checkpoint = str(final_checkpoint["checkpoint_id"])
+                state.set_state(
+                    outcome["state"],
+                    error=outcome.get("last_error"),
+                    stop_reason=outcome.get("stop_reason"),
+                    checkpoint=session.ending_checkpoint,
+                )
                 state.record_checkpoint(
                     sequence=int(final_checkpoint["sequence"]),
                     checkpoint_id=str(final_checkpoint["checkpoint_id"]),
@@ -1169,7 +330,6 @@ class ExperimentService:
                     generation=int(outcome.get("generation", 0)),
                     completed_slots=len(cast(list[Any], outcome.get("completed_slots", []))),
                 )
-                session.ending_checkpoint = str(final_checkpoint["checkpoint_id"])
                 hub.emit(
                     "checkpoint_written",
                     checkpoint=session.ending_checkpoint,
@@ -1178,24 +338,35 @@ class ExperimentService:
                     state=outcome["state"],
                     durable=True,
                 )
-                state.set_state(
-                    outcome["state"],
-                    error=outcome.get("last_error"),
-                    stop_reason=outcome.get("stop_reason"),
-                    checkpoint=session.ending_checkpoint,
-                )
                 session_summary = manager.finish(
                     session,
                     state=outcome["state"],
                     stop_reason=str(outcome.get("stop_reason", "budget_exhausted")),
-                    exit_status=(
-                        1 if outcome.get("stop_reason") == "infrastructure_failed" else 0
-                    ),
+                    exit_status=(1 if outcome.get("stop_reason") == "infrastructure_failed" else 0),
                     summary={**outcome, "result": outcome.get("result")},
                 )
+                counterexample = outcome.get("counterexample")
+                if (
+                    outcome["state"] == "completed"
+                    and outcome.get("stop_reason") == "counterexample_verified"
+                    and isinstance(counterexample, Mapping)
+                ):
+                    hub.emit(
+                        "counterexample_verified",
+                        candidate_id=counterexample.get("candidate_id"),
+                        certificate=counterexample.get("certificate_path"),
+                        certificate_sha256=counterexample.get("certificate_sha256"),
+                        stop_reason="counterexample_verified",
+                        checkpoint=session.ending_checkpoint,
+                        idempotency_key=(f"{counterexample.get('candidate_id')}:verified"),
+                    )
                 hub.emit(
                     "budget_boundary_reached"
-                    if outcome["state"] == "idle"
+                    if outcome["state"] in {"idle", "paused", "interrupted"}
+                    else "experiment_failed"
+                    if outcome["state"] == "failed"
+                    else "experiment_exhausted"
+                    if outcome["state"] == "exhausted"
                     else "experiment_completed",
                     experiment_id=config.exp_id,
                     workspace=str(layout.root),
@@ -1291,8 +462,6 @@ class ExperimentService:
         layout: ExperimentLayout,
         config: ExperimentConfig,
         lock: Mapping[str, Any],
-        *,
-        allow_model_turn_extension: bool = False,
     ) -> None:
         try:
             stored = layout.experiment_config.read_bytes()
@@ -1304,11 +473,7 @@ class ExperimentService:
 
         if hashlib.sha256(stored).hexdigest() != lock.get("source_config_sha256"):
             raise LockError("immutable root experiment.toml does not match experiment.lock.json")
-        if stored != config.source_bytes and not _same_immutable_config(
-            stored,
-            config,
-            allow_model_turn_extension=allow_model_turn_extension,
-        ):
+        if stored != config.source_bytes and not _same_immutable_config(stored, config):
             raise LockError("immutable root experiment.toml differs from the locked specification")
 
     def _invoke_adapter(
@@ -1369,12 +534,19 @@ class ExperimentService:
         requested_state = str(outcome.get("state", "idle"))
         state = (
             requested_state
-            if requested_state in {"idle", "interrupted", "failed", "completed"}
+            if requested_state
+            in {
+                "running",
+                "idle",
+                "paused",
+                "interrupted",
+                "failed",
+                "exhausted",
+                "completed",
+            }
             else "idle"
         )
         if session.budget_exhausted() and state == "running":
-            state = "idle"
-        if state == "completed" and outcome.get("stop_reason") == "max_model_turns":
             state = "idle"
         outcome["state"] = state
         # Checkpoint fields are append-only identity lists.  Adapters may
@@ -1383,62 +555,41 @@ class ExperimentService:
         for field in ("completed_slots", "provider_turns", "evaluations"):
             if not isinstance(outcome.get(field), list):
                 outcome[field] = []
-        outcome.setdefault("stop_reason", "budget_exhausted" if state == "idle" else "completed")
+        outcome.setdefault(
+            "stop_reason",
+            "session_wall_seconds"
+            if state == "idle"
+            else "generation_limit"
+            if state == "exhausted"
+            else "counterexample_verified"
+            if state == "completed"
+            else state,
+        )
         return outcome
 
     @staticmethod
-    def _record_completed_session(
+    def _terminal_result(
         config: ExperimentConfig,
         layout: ExperimentLayout,
         state: ExperimentStateStore,
-        *,
-        hub: ExperimentEventHub | None = None,
     ) -> dict[str, Any]:
-        number = state.next_session_number()
-        session_id = f"session-{number:06d}"
-        state.acquire_owner(exp_id=config.exp_id, session_id=session_id)
-        manager = SessionManager(layout, state)
-        try:
-            session = manager.start(config)
-            if hub is not None:
-                hub.attach_session(manager, session)
-                hub.emit(
-                    "session_started",
-                    experiment_id=config.exp_id,
-                    workspace=str(layout.root),
-                    session_id=session.session_id,
-                    session_number=session.number,
-                    run_mode="continuation",
-                    state="completed",
-                    checkpoint=session.starting_checkpoint,
-                    stop_reason="already_completed",
-                )
-            latest_checkpoint = state.checkpoint()
-            session.ending_checkpoint = (
-                str(latest_checkpoint["checkpoint_id"]) if latest_checkpoint is not None else None
-            )
-            summary = manager.finish(
-                session,
-                state="completed",
-                stop_reason="already_completed",
-                summary={"provider_calls": 0, "evaluation_calls": 0},
-            )
-            layout.write_artifact_manifest()
-            return {
-                "schema_version": "mforge.experiment.run.v1",
-                "status": "completed",
-                "exp_id": config.exp_id,
-                "state": "completed",
-                "workspace": str(layout.root),
-                "session_id": session_id,
-                "stop_reason": "already_completed",
-                "checkpoint": session.ending_checkpoint,
-                "provider_calls": 0,
-                "evaluation_calls": 0,
-                "session": summary,
-            }
-        finally:
-            state.release_owner(session_id)
+        experiment = state.experiment()
+        terminal_state = state.state()
+        session = state.session() or {}
+        checkpoint = state.checkpoint()
+        return {
+            "schema_version": "mforge.experiment.run.v2",
+            "status": terminal_state,
+            "exp_id": config.exp_id,
+            "state": terminal_state,
+            "workspace": str(layout.root),
+            "session_id": session.get("session_id"),
+            "stop_reason": experiment.get("terminal_stop_reason"),
+            "checkpoint": (checkpoint.get("checkpoint_id") if checkpoint is not None else None),
+            "provider_calls": 0,
+            "evaluation_calls": 0,
+            "session": dict(session),
+        }
 
     @staticmethod
     def _run_result(
@@ -1448,18 +599,18 @@ class ExperimentService:
         session: Mapping[str, Any],
         outcome: Mapping[str, Any],
         *,
-        effective_model_turns: int,
+        effective_model_turns: int | None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "schema_version": "mforge.experiment.run.v1",
+            "schema_version": "mforge.experiment.run.v2",
             "status": (
                 "failed"
-                if outcome.get("stop_reason") == "infrastructure_failed"
-            else "completed"
-            if outcome.get("state") == "completed"
-            else "budget_exhausted"
-            if outcome.get("state") == "idle"
-            else "failed"
+                if outcome.get("state") == "failed"
+                else "completed"
+                if outcome.get("state") == "completed"
+                else "exhausted"
+                if outcome.get("state") == "exhausted"
+                else str(outcome.get("state", "idle"))
             ),
             "exp_id": config.exp_id,
             "state": outcome.get("state"),
@@ -1488,50 +639,9 @@ class ExperimentService:
         return result
 
 
-def _model_turn_extension_allowed(
-    lock: Mapping[str, Any], config: ExperimentConfig, layout: ExperimentLayout
-) -> bool:
-    difference = model_turn_limit_difference(lock, config)
-    if difference is None:
-        return False
-    locked_limit, requested_limit = difference
-    try:
-        with ExperimentStateStore(layout.state) as state:
-            experiment = state.experiment()
-            current_state = state.state()
-            stored_limit = state.metadata("effective_model_turns")
-            stop_reason = _meaningful_stop_reason(state, experiment)
-    except (OSError, StateError, ValueError, TypeError):
-        return False
-    if stored_limit == requested_limit:
-        return True
-    return (
-        current_state in {"idle", "completed"}
-        and stop_reason == "max_model_turns"
-        and requested_limit
-        > max(
-            locked_limit,
-            stored_limit
-            if isinstance(stored_limit, int) and not isinstance(stored_limit, bool)
-            else 0,
-        )
-    )
-
-
-def _meaningful_stop_reason(
-    state: ExperimentStateStore, experiment: Mapping[str, Any]
-) -> str:
-    terminal = str(experiment.get("terminal_stop_reason") or "")
-    if terminal == "already_completed":
-        return str(state.latest_meaningful_stop_reason() or terminal)
-    return terminal
-
-
 def _same_immutable_config(
     stored_bytes: bytes,
     current: ExperimentConfig,
-    *,
-    allow_model_turn_extension: bool = False,
 ) -> bool:
     try:
         import tomllib
@@ -1540,17 +650,6 @@ def _same_immutable_config(
         current_raw = dict(current.raw)
         raw.pop("run", None)
         current_raw.pop("run", None)
-        if allow_model_turn_extension:
-            stored_search = raw.get("search")
-            current_search = current_raw.get("search")
-            if not isinstance(stored_search, dict) or not isinstance(current_search, dict):
-                return False
-            stored_search = dict(stored_search)
-            current_search = dict(current_search)
-            stored_search.pop("max_model_turns", None)
-            current_search.pop("max_model_turns", None)
-            raw["search"] = stored_search
-            current_raw["search"] = current_search
         return raw == current_raw
     except (UnicodeError, tomllib.TOMLDecodeError):
         return False
@@ -1572,10 +671,80 @@ def run_experiment(
     ).run(config_path)
 
 
-# Compatibility imports for archived tests are lazy and never touched by the
-# native public workflow.  Keeping the historical implementation behind a
-# dynamically constructed name avoids advertising it as a production adapter.
-globals()["Legacy" + "Stage4Adapter"] = _HistoricalStage4Adapter
+def final_stop_experiment(
+    config_path: str | Path = "experiment.toml",
+) -> dict[str, Any]:
+    """Persist an explicit non-resumable operator stop without running work."""
+
+    config = load_experiment_config(config_path)
+    layout = ExperimentLayout.from_config(config)
+    layout.verify_root()
+    lock = load_lock(layout.lock)
+    verify_lock(lock, config, layout)
+    layout.verify_artifact_manifest(allow_new=True)
+    state = ExperimentStateStore(layout.state)
+    try:
+        owner = state.owner()
+        if owner is not None and process_alive(int(owner["pid"])):
+            raise WorkspaceError(
+                "experiment is active; interrupt the running session before final stop"
+            )
+        if state.state() in {"completed", "failed", "exhausted"}:
+            return {
+                "state": state.state(),
+                "stop_reason": state.experiment().get("terminal_stop_reason"),
+                "changed": False,
+            }
+        checkpoints = CheckpointStore(layout.checkpoints)
+        latest = checkpoints.latest()
+        generation = int(latest.get("generation", 0)) if latest else 0
+        checkpoint = checkpoints.save(
+            {
+                "experiment_id": config.exp_id,
+                "state": "completed",
+                "generation": generation,
+                "completed_slots": [],
+                "provider_turns": [],
+                "evaluations": [],
+                "result": {
+                    "state": "completed",
+                    "stop_reason": "operator_final_stop",
+                },
+            }
+        )
+        checkpoint_id = str(checkpoint["checkpoint_id"])
+        state.set_state(
+            "completed",
+            stop_reason="operator_final_stop",
+            checkpoint=checkpoint_id,
+        )
+        state.record_checkpoint(
+            sequence=int(checkpoint["sequence"]),
+            checkpoint_id=checkpoint_id,
+            path=str(layout.checkpoint_path(int(checkpoint["sequence"]))),
+            sha256=str(checkpoint["checkpoint_sha256"]),
+            generation=generation,
+            completed_slots=0,
+        )
+        state.write_event(
+            "experiment_completed",
+            {
+                "schema_version": "mforge.experiment.events.v2",
+                "state": "completed",
+                "stop_reason": "operator_final_stop",
+                "checkpoint": checkpoint_id,
+                "idempotency_key": f"{config.exp_id}:operator-final-stop",
+            },
+        )
+        layout.reconcile_artifact_manifest()
+        return {
+            "state": "completed",
+            "stop_reason": "operator_final_stop",
+            "checkpoint": checkpoint_id,
+            "changed": True,
+        }
+    finally:
+        state.close()
 
 
 __all__ = [
@@ -1583,5 +752,6 @@ __all__ = [
     "ExperimentService",
     "NullExperimentAdapter",
     "SessionBudget",
+    "final_stop_experiment",
     "run_experiment",
 ]

@@ -15,7 +15,7 @@ def test_jsonl_event_has_required_envelope_and_no_ansi() -> None:
     bus.close()
     line = stream.getvalue()
     event = json.loads(line)
-    assert event["schema_version"] == "1.0"
+    assert event["schema_version"] == "mforge.experiment.events.v2"
     assert event["run_id"] == "run-1"
     assert event["event_type"] == "run_started"
     assert event["stage"] == "stage1"

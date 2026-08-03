@@ -292,9 +292,63 @@ class ExperimentLayout:
         return self.write_artifact_manifest()
 
     def verify_artifact_manifest(self, *, allow_new: bool = False) -> bool:
-        del allow_new
         if not self.experiment_manifest.is_file():
             raise WorkspaceError("experiment artifact manifest is missing")
+        try:
+            value = json.loads(self.experiment_manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise WorkspaceError("experiment artifact manifest is unreadable") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != "mforge.experiment.manifest.v2"
+            or not isinstance(value.get("files"), list)
+        ):
+            raise WorkspaceError("unsupported experiment artifact manifest schema")
+        base = {
+            "schema_version": value["schema_version"],
+            "files": value["files"],
+        }
+        expected_manifest_hash = hashlib.sha256(
+            json.dumps(
+                base,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if value.get("manifest_sha256") != expected_manifest_hash:
+            raise WorkspaceError("experiment artifact manifest hash mismatch")
+        listed_paths: set[str] = set()
+        for entry in value["files"]:
+            if not isinstance(entry, dict):
+                raise WorkspaceError("invalid experiment artifact manifest entry")
+            relative = entry.get("path")
+            if not isinstance(relative, str) or not relative:
+                raise WorkspaceError("invalid experiment artifact manifest path")
+            path = (self.artifacts / relative).resolve()
+            try:
+                path.relative_to(self.artifacts.resolve())
+            except ValueError as exc:
+                raise WorkspaceError("experiment artifact path escapes workspace") from exc
+            if not path.is_file():
+                raise WorkspaceError(f"experiment artifact is missing: {relative}")
+            data = path.read_bytes()
+            if (
+                entry.get("size") != len(data)
+                or entry.get("sha256") != hashlib.sha256(data).hexdigest()
+            ):
+                raise WorkspaceError(f"experiment artifact digest mismatch: {relative}")
+            listed_paths.add(relative)
+        if not allow_new:
+            actual_paths = {
+                path.relative_to(self.artifacts).as_posix()
+                for path in self.artifacts.rglob("*")
+                if path.is_file()
+                and path.name != "experiment-manifest.json"
+                and not path.name.startswith(".")
+            }
+            if actual_paths != listed_paths:
+                raise WorkspaceError("experiment artifact manifest does not match workspace")
         return True
 
 
@@ -352,7 +406,7 @@ def _artifact_manifest(root: Path) -> dict[str, Any]:
                 "sha256": hashlib.sha256(data).hexdigest(),
             }
         )
-    base = {"schema_version": "mforge.experiment.manifest.v1", "files": files}
+    base = {"schema_version": "mforge.experiment.manifest.v2", "files": files}
     return {
         **base,
         "manifest_sha256": hashlib.sha256(

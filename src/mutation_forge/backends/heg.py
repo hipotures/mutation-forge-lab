@@ -88,12 +88,8 @@ class HegBackend:
         self.score_implementation = "heg-cpp-score-worker"
         self._score_timeout_seconds = score_timeout_seconds
         self._score_longest_first_enabled = score_longest_first_enabled
-        self._score_compact_dominated_enabled = (
-            score_compact_dominated_enabled
-        )
-        self._score_prepared_request_cache_enabled = (
-            score_prepared_request_cache_enabled
-        )
+        self._score_compact_dominated_enabled = score_compact_dominated_enabled
+        self._score_prepared_request_cache_enabled = score_prepared_request_cache_enabled
         context_factory = getattr(self._plugin, "new_mutation_context", None)
         if context_factory is None:
             raise RuntimeError(
@@ -108,9 +104,7 @@ class HegBackend:
         self._score_cutoff_enabled = score_cutoff_enabled
         self._prepared_graph_cache_enabled = prepared_graph_cache_enabled
         self._prepared_graphs: OrderedDict[GraphState, _PreparedGraph] = OrderedDict()
-        self._prepared_proposal_handoff_enabled = (
-            prepared_proposal_handoff_enabled
-        )
+        self._prepared_proposal_handoff_enabled = prepared_proposal_handoff_enabled
         self._prepared_proposal: _PreparedProposal | None = None
         self.commit = self._git("rev-parse", "HEAD")
         self.dirty = bool(self._git("status", "--short"))
@@ -172,9 +166,7 @@ class HegBackend:
             {
                 "lookups": int(self._prepared_graph_cache_enabled),
                 "hits": int(prepared is not None),
-                "misses": int(
-                    self._prepared_graph_cache_enabled and prepared is None
-                ),
+                "misses": int(self._prepared_graph_cache_enabled and prepared is None),
             },
         )
         if prepared is not None:
@@ -187,11 +179,7 @@ class HegBackend:
             "graph_materialization",
             {
                 "calls": 1,
-                "elapsed_ns": (
-                    time.perf_counter_ns() - started_ns
-                    if recorder is not None
-                    else 0
-                ),
+                "elapsed_ns": (time.perf_counter_ns() - started_ns if recorder is not None else 0),
             },
         )
         prepared = _PreparedGraph(heg_graph)
@@ -218,10 +206,7 @@ class HegBackend:
         started_ns = time.perf_counter_ns() if recorder is not None else 0
         result = self._plugin.validate_graph(prepared.graph)
         errors: list[str] = [] if result.valid else [result.message]
-        if any(
-            prepared.graph.degree(vertex) != 3
-            for vertex in range(prepared.graph.n)
-        ):
+        if any(prepared.graph.degree(vertex) != 3 for vertex in range(prepared.graph.n)):
             errors.append("connected-cubic mode requires degree 3 at every vertex")
         prepared.validation = GraphValidation(not errors, tuple(errors))
         prepared.validation_context = self._validation_context_class(
@@ -233,11 +218,7 @@ class HegBackend:
             "validation",
             {
                 "calls": 1,
-                "elapsed_ns": (
-                    time.perf_counter_ns() - started_ns
-                    if recorder is not None
-                    else 0
-                ),
+                "elapsed_ns": (time.perf_counter_ns() - started_ns if recorder is not None else 0),
             },
         )
         return prepared.validation
@@ -266,9 +247,7 @@ class HegBackend:
                 timeout_seconds=self._score_timeout_seconds,
                 memory_limit_bytes=64 * 1024 * 1024,
                 cutoff_longest_first=self._score_longest_first_enabled,
-                prepared_request_cache_enabled=(
-                    self._score_prepared_request_cache_enabled
-                ),
+                prepared_request_cache_enabled=(self._score_prepared_request_cache_enabled),
             )
         return self._worker
 
@@ -341,21 +320,11 @@ class HegBackend:
             "calls": 1,
             "full_results": int(not dominated),
             "dominated_results": int(dominated),
-            "request_packing_ns": (
-                int(timing.request_packing_ns) if timing is not None else 0
-            ),
-            "request_write_ns": (
-                int(timing.request_write_ns) if timing is not None else 0
-            ),
-            "response_read_ns": (
-                int(timing.response_read_ns) if timing is not None else 0
-            ),
-            "response_parsing_ns": (
-                int(timing.response_parsing_ns) if timing is not None else 0
-            ),
-            "worker_roundtrip_ns": (
-                int(timing.worker_roundtrip_ns) if timing is not None else 0
-            ),
+            "request_packing_ns": (int(timing.request_packing_ns) if timing is not None else 0),
+            "request_write_ns": (int(timing.request_write_ns) if timing is not None else 0),
+            "response_read_ns": (int(timing.response_read_ns) if timing is not None else 0),
+            "response_parsing_ns": (int(timing.response_parsing_ns) if timing is not None else 0),
+            "worker_roundtrip_ns": (int(timing.worker_roundtrip_ns) if timing is not None else 0),
         }
         for index, result in enumerate(results):
             prefix = f"cycle_{int(result.length)}"
@@ -363,9 +332,7 @@ class HegBackend:
             payload[f"{prefix}_elapsed_ns"] = int(result.elapsed_ns)
             payload[f"{prefix}_nodes"] = int(result.nodes)
             payload[f"{prefix}_complete"] = int(result.complete)
-            payload[f"{prefix}_cutoff"] = int(
-                dominated and index == len(results) - 1
-            )
+            payload[f"{prefix}_cutoff"] = int(dominated and index == len(results) - 1)
         self._record(recorder, "worker_response", payload)
 
     def _worker_response(
@@ -404,9 +371,7 @@ class HegBackend:
                     {
                         "calls": 1,
                         "elapsed_ns": (
-                            time.perf_counter_ns() - started_ns
-                            if recorder is not None
-                            else 0
+                            time.perf_counter_ns() - started_ns if recorder is not None else 0
                         ),
                     },
                 )
@@ -476,9 +441,7 @@ class HegBackend:
                 return None
             cycle_results = response.results
         else:
-            fallback_started_ns = (
-                time.perf_counter_ns() if record_profile is not None else 0
-            )
+            fallback_started_ns = time.perf_counter_ns() if record_profile is not None else 0
             cycle_results = self._reference_cycle_counts(
                 heg_graph,
                 lengths,
@@ -497,9 +460,7 @@ class HegBackend:
                     ),
                 },
             )
-        assembly_started_ns = (
-            time.perf_counter_ns() if record_profile is not None else 0
-        )
+        assembly_started_ns = time.perf_counter_ns() if record_profile is not None else 0
         assert prepared.validation_context is not None
         result = self._plugin.score_from_cycle_counts(
             heg_graph,
@@ -529,6 +490,9 @@ class HegBackend:
             complete=bool(result.complete),
             ordering_key=tuple(int(item) for item in result.ordering_key),
         )
+
+    def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
+        return tuple(int(length) for length in self._plugin.forbidden_lengths(order))
 
     def exact_verify(self, graph: GraphState) -> ExactVerification:
         result = self._plugin.exact_verify(self._prepare(graph).graph)
@@ -585,8 +549,7 @@ class HegBackend:
             and rewrite.added_edges == prepared_proposal.added_edges
             and rewrite.operator_family == prepared_proposal.operator_family
             and len(rewrite.metadata) == 1
-            and rewrite.metadata.get("evaluation")
-            == prepared_proposal.evaluation
+            and rewrite.metadata.get("evaluation") == prepared_proposal.evaluation
         ):
             candidate = self._from_heg(prepared_proposal.graph)
             if candidate.order != graph.order:
@@ -659,9 +622,7 @@ class HegBackend:
             if prepared is not None:
                 heg_graph = prepared.graph
             else:
-                phase_started_ns = (
-                    time.perf_counter_ns() if record_timing is not None else 0
-                )
+                phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0
                 heg_graph = self._to_heg(graph)
                 self._store_prepared(graph, _PreparedGraph(heg_graph))
                 if record_timing is not None:
@@ -677,9 +638,7 @@ class HegBackend:
             "mutation_operator": heg_operator,
         }
         if heg_operator == "forbidden_cycle_break_switch":
-            mutation_config["forbidden_witness_context"] = (
-                self._mutation_witness_context
-            )
+            mutation_config["forbidden_witness_context"] = self._mutation_witness_context
         deep_profile = None
         if record_deep_profile is not None:
             profile_factory = getattr(self._plugin, "new_mutation_profile", None)
@@ -690,18 +649,14 @@ class HegBackend:
             deep_profile = profile_factory()
             mutation_config["mutation_profile"] = deep_profile
 
-        measure_operator = (
-            record_timing is not None or record_deep_profile is not None
-        )
+        measure_operator = record_timing is not None or record_deep_profile is not None
         phase_started_ns = time.perf_counter_ns() if measure_operator else 0
         result = self._plugin.mutate_with_delta(
             heg_graph,
             rng,
             mutation_config,
         )
-        operator_elapsed_ns = (
-            time.perf_counter_ns() - phase_started_ns if measure_operator else 0
-        )
+        operator_elapsed_ns = time.perf_counter_ns() - phase_started_ns if measure_operator else 0
         if record_timing is not None:
             record_timing("operator_search", operator_elapsed_ns)
         if record_deep_profile is not None:
@@ -709,9 +664,7 @@ class HegBackend:
             deep_profile.record_operator(heg_operator, operator_elapsed_ns)
             record_deep_profile(
                 operator_family,
-                deep_profile.payload(
-                    cache_enabled=self._mutation_witness_cache_enabled
-                ),
+                deep_profile.payload(cache_enabled=self._mutation_witness_cache_enabled),
             )
 
         phase_started_ns = time.perf_counter_ns() if record_timing is not None else 0

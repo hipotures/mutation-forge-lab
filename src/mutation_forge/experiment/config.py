@@ -17,9 +17,10 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
-EXPERIMENT_SCHEMA_VERSION = "mforge.experiment.v1"
+EXPERIMENT_SCHEMA_VERSION = "mforge.experiment.v2"
+type SearchLimit = int | Literal["unbounded"]
 MAX_EXPERIMENT_ID_BYTES = 128
 _CREDENTIAL_KEY = re.compile(
     r"(?i)(?:token|password|secret|credential|auth[_-]?json|api[_-]?key|private[_-]?key)"
@@ -44,6 +45,16 @@ def _positive_number(value: object, name: str) -> float:
     return result
 
 
+def _search_limit(value: object, name: str) -> int | None:
+    if value == "unbounded":
+        return None
+    return _positive_int(value, name)
+
+
+def serialize_search_limit(value: int | None) -> SearchLimit:
+    return "unbounded" if value is None else value
+
+
 def _table(raw: Mapping[str, Any], name: str) -> dict[str, Any]:
     value = raw.get(name, {})
     if not isinstance(value, dict):
@@ -51,9 +62,7 @@ def _table(raw: Mapping[str, Any], name: str) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
-def _reject_unknown_fields(
-    value: Mapping[str, Any], name: str, allowed: set[str]
-) -> None:
+def _reject_unknown_fields(value: Mapping[str, Any], name: str, allowed: set[str]) -> None:
     """Reject typoed or legacy keys instead of silently ignoring them."""
 
     unknown = set(value).difference(allowed)
@@ -122,8 +131,8 @@ class ExperimentModelConfig:
 @dataclass(frozen=True, slots=True)
 class ExperimentSearchConfig:
     population_size: int
-    max_generations: int
-    max_model_turns: int
+    max_generations: int | None
+    max_model_turns: int | None
     selection: str
 
 
@@ -214,6 +223,10 @@ class ExperimentConfig:
         result["workspace"] = str(self.workspace)
         result["exp_id"] = self.exp_id
         result["schema_version"] = self.schema_version
+        search = result.get("search")
+        if isinstance(search, dict):
+            search["max_generations"] = serialize_search_limit(self.search.max_generations)
+            search["max_model_turns"] = serialize_search_limit(self.search.max_model_turns)
         return cast(dict[str, Any], _canonicalize_paths(result, self.source_dir))
 
 
@@ -280,8 +293,9 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     )
     if raw.get("schema_version") != EXPERIMENT_SCHEMA_VERSION:
         raise ValueError(
-            f"schema_version must be {EXPERIMENT_SCHEMA_VERSION!r}, "
-            f"got {raw.get('schema_version')!r}"
+            f"Unsupported experiment schema: {raw.get('schema_version')}.\n"
+            f"This runtime accepts only {EXPERIMENT_SCHEMA_VERSION}.\n"
+            "Create a fresh workspace."
         )
     exp_id = validate_experiment_id(raw.get("exp_id"))
     workspace_value = raw.get("workspace")
@@ -309,18 +323,13 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
             "output",
             "profiling_enabled",
             "deep_profiling_enabled",
-            "profiling",
-            "profile",
             "turn_timeout_base_seconds",
         },
     )
     output = run_raw.get("output", "rich")
     if output not in {"rich", "json"}:
         raise ValueError("run.output must be 'rich' or 'json'")
-    profile_value = run_raw.get(
-        "profiling_enabled",
-        run_raw.get("profiling", run_raw.get("profile", False)),
-    )
+    profile_value = run_raw.get("profiling_enabled", False)
     if not isinstance(profile_value, bool):
         raise ValueError("run.profiling_enabled must be a boolean")
     deep_profile_value = run_raw.get("deep_profiling_enabled", False)
@@ -365,8 +374,8 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         raise ValueError("search.selection must be a non-empty string")
     search = ExperimentSearchConfig(
         _positive_int(search_raw.get("population_size"), "search.population_size"),
-        _positive_int(search_raw.get("max_generations"), "search.max_generations"),
-        _positive_int(search_raw.get("max_model_turns"), "search.max_model_turns"),
+        _search_limit(search_raw.get("max_generations"), "search.max_generations"),
+        _search_limit(search_raw.get("max_model_turns"), "search.max_model_turns"),
         selection,
     )
 
@@ -421,10 +430,6 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     )
 
 
-# Short alias for callers that treat the experiment loader like the legacy
-# stage loaders.
-load_config = load_experiment_config
-
 __all__ = [
     "EXPERIMENT_SCHEMA_VERSION",
     "MAX_EXPERIMENT_ID_BYTES",
@@ -434,7 +439,8 @@ __all__ = [
     "ExperimentResourcesConfig",
     "ExperimentRunConfig",
     "ExperimentSearchConfig",
-    "load_config",
+    "SearchLimit",
     "load_experiment_config",
+    "serialize_search_limit",
     "validate_experiment_id",
 ]

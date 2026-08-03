@@ -26,6 +26,7 @@ from .service import (
     ExperimentAdapter,
     ExperimentService,
     NullExperimentAdapter,
+    final_stop_experiment,
     run_experiment,
 )
 from .state import StateStore
@@ -53,6 +54,7 @@ __all__ = [
     "ExperimentObserver",
     "NativeEventBus",
     "NullExperimentAdapter",
+    "final_stop_experiment",
     "STATUS_SCHEMA_VERSION",
     "StateStore",
     "WorkspaceError",
@@ -62,13 +64,3 @@ __all__ = [
     "run_experiment",
     "validate_experiment_id",
 ]
-
-
-def __getattr__(name: str) -> object:
-    # Archived callers can still opt into the historical adapter explicitly;
-    # importing the native package never imports that compatibility surface.
-    if name == "Legacy" + "Stage4Adapter":
-        from . import service
-
-        return getattr(service, name)
-    raise AttributeError(name)

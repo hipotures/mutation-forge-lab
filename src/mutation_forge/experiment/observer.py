@@ -23,10 +23,7 @@ def _json_safe(value: Any) -> JsonValue:
     if value is None or isinstance(value, (str, int, float, bool)):
         return cast(JsonValue, value)
     if isinstance(value, Mapping):
-        return {
-            str(key): _json_safe(item)
-            for key, item in value.items()
-        }
+        return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_json_safe(item) for item in value]
     if hasattr(value, "as_dict") and callable(value.as_dict):
@@ -103,7 +100,11 @@ class ExperimentEventHub:
     ) -> None:
         self.run_id = run_id
         self._sinks = list(sinks)
-        self._bus = EventBus(run_id, self._sinks)
+        self._bus = EventBus(
+            run_id,
+            self._sinks,
+            schema_version="mforge.experiment.events.v2",
+        )
         self._lock = threading.RLock()
         self._session_manager: Any | None = None
         self._session: Any | None = None
@@ -189,9 +190,7 @@ class ExperimentEventHub:
             # Native evaluators may provide richer inclusive/child profiles;
             # retain every field while keeping the live phase totals current.
             self._supplied_profile.update(
-                {
-                    str(key): _json_safe(value) for key, value in supplied.items()
-                }
+                {str(key): _json_safe(value) for key, value in supplied.items()}
             )
         if self._supplied_profile:
             supplied_profile = dict(self._supplied_profile)

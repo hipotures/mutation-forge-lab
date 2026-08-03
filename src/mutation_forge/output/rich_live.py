@@ -52,6 +52,7 @@ class RichLiveSink:
         self._last_activity_monotonic: float | None = None
         self._last_activity_label = "waiting"
         self._usage_seen: set[tuple[str, str, str]] = set()
+        self._event_keys: set[str] = set()
         self._source_lines = 0
         self.live = Live(
             self._render(),
@@ -77,6 +78,12 @@ class RichLiveSink:
             self._write(event)
 
     def _write(self, event: Event) -> None:
+        raw_idempotency_key = event.payload.get("idempotency_key")
+        if isinstance(raw_idempotency_key, str):
+            idempotency_key = f"{event.event_type}:{raw_idempotency_key}"
+            if idempotency_key in self._event_keys:
+                return
+            self._event_keys.add(idempotency_key)
         if event.event_type == "generation_started":
             self._slot_details.clear()
             self.state["slot_states"] = {}
@@ -84,9 +91,7 @@ class RichLiveSink:
         self.state["latest_event"] = event.event_type
         self.state["run_id"] = event.run_id
         if event.event_type in {"provider_turn_started", "provider_turn_activity"}:
-            self.state["phase"] = (
-                "repair" if event.payload.get("phase") == "repair" else "provider"
-            )
+            self.state["phase"] = "repair" if event.payload.get("phase") == "repair" else "provider"
         elif event.event_type == "repair_started":
             self.state["phase"] = "repair"
         elif event.event_type in {
@@ -126,12 +131,21 @@ class RichLiveSink:
             "selection_started",
             "selection_completed",
             "budget_boundary_reached",
+            "experiment_exhausted",
             "experiment_completed",
             "experiment_interrupted",
             "experiment_failed",
+            "counterexample_candidate_found",
+            "counterexample_primary_verification_started",
+            "counterexample_primary_verification_completed",
+            "counterexample_independent_verification_started",
+            "counterexample_independent_verification_completed",
+            "counterexample_verification_conflict",
+            "counterexample_verified",
         }
         if native_event:
             self.state["native"] = True
+            self._update_counterexample(event)
             self._update_native_counters(event)
             self._update_native_slot(event)
             self._record_recent_event(event)
@@ -140,13 +154,16 @@ class RichLiveSink:
             self.state["state"] = "running"
         elif event.event_type == "experiment_completed":
             self.state["state"] = "completed"
+        elif event.event_type == "experiment_exhausted":
+            self.state["state"] = "exhausted"
         elif event.event_type == "experiment_interrupted":
             self.state["state"] = "interrupted"
         elif event.event_type == "experiment_failed":
             self.state["state"] = "failed"
-        elif event.event_type == "budget_boundary_reached" and event.payload.get(
-            "state"
-        ) in {"idle", "budget_exhausted"}:
+        elif event.event_type == "budget_boundary_reached" and event.payload.get("state") in {
+            "idle",
+            "budget_exhausted",
+        }:
             self.state["state"] = "idle"
         if event.event_type == "baseline_started":
             self.state["stage"] = "baseline"
@@ -159,8 +176,11 @@ class RichLiveSink:
             "run_completed",
             "run_failed",
             "experiment_completed",
+            "experiment_exhausted",
             "experiment_interrupted",
             "experiment_failed",
+            "counterexample_verified",
+            "counterexample_verification_conflict",
         } or (
             event.event_type == "budget_boundary_reached"
             and event.payload.get("state") in {"idle", "budget_exhausted"}
@@ -312,6 +332,42 @@ class RichLiveSink:
         if self._session_started_monotonic is not None:
             return max(0.0, time.monotonic() - self._session_started_monotonic)
         return 0.0
+
+    def _update_counterexample(self, event: Event) -> None:
+        payload = event.payload
+        event_type = event.event_type
+        if event_type == "counterexample_candidate_found":
+            self.state["counterexample_state"] = "candidate"
+            self.state["counterexample_candidate"] = payload.get("candidate_id")
+            self.state["counterexample_order"] = payload.get("order")
+            self.state["counterexample_edges"] = payload.get("edge_count")
+            self.state["counterexample_minimum_degree"] = payload.get("minimum_degree")
+            self.state["counterexample_lengths"] = payload.get("target_forbidden_lengths")
+            self.state["phase"] = "exact verification"
+        elif event_type == "counterexample_primary_verification_started":
+            self.state["counterexample_state"] = "primary_verifying"
+            self.state["counterexample_primary"] = "running"
+        elif event_type == "counterexample_primary_verification_completed":
+            self.state["counterexample_primary"] = (
+                f"{payload.get('status', 'UNKNOWN')} · "
+                f"{'complete' if payload.get('complete') is True else 'incomplete'}"
+            )
+            if payload.get("status") == "VERIFIED" and payload.get("complete") is True:
+                self.state["counterexample_state"] = "primary_verified"
+        elif event_type == "counterexample_independent_verification_started":
+            self.state["counterexample_state"] = "independent_verifying"
+            self.state["counterexample_independent"] = "running"
+        elif event_type == "counterexample_independent_verification_completed":
+            self.state["counterexample_independent"] = (
+                f"{payload.get('status', 'UNKNOWN')} · "
+                f"{'complete' if payload.get('complete') is True else 'incomplete'}"
+            )
+        elif event_type == "counterexample_verification_conflict":
+            self.state["counterexample_state"] = "conflict"
+        elif event_type == "counterexample_verified":
+            self.state["counterexample_state"] = "verified"
+            self.state["counterexample_candidate"] = payload.get("candidate_id")
+            self.state["counterexample_certificate"] = payload.get("certificate")
 
     def _update_native_counters(self, event: Event) -> None:
         """Accumulate counters when an event carries only a local delta."""
@@ -507,9 +563,7 @@ class RichLiveSink:
                         self.state[key] = payload[key]
             completed = payload.get("completed")
             if isinstance(completed, int) and not isinstance(completed, bool):
-                self.state["episodes_completed"] = max(
-                    integer("episodes_completed"), completed
-                )
+                self.state["episodes_completed"] = max(integer("episodes_completed"), completed)
             total = payload.get("total")
             if isinstance(total, int) and not isinstance(total, bool):
                 self.state["episodes_total"] = total
@@ -624,11 +678,7 @@ class RichLiveSink:
             slots[slot] = state
         validation_codes = payload.get("validation_codes")
         if isinstance(validation_codes, list):
-            codes = [
-                str(code)
-                for code in validation_codes
-                if isinstance(code, str) and code
-            ]
+            codes = [str(code) for code in validation_codes if isinstance(code, str) and code]
             if codes:
                 detail["error"] = ",".join(codes)
         if event_type in {
@@ -684,8 +734,16 @@ class RichLiveSink:
             "checkpoint_written",
             "budget_boundary_reached",
             "experiment_completed",
+            "experiment_exhausted",
             "experiment_interrupted",
             "experiment_failed",
+            "counterexample_candidate_found",
+            "counterexample_primary_verification_started",
+            "counterexample_primary_verification_completed",
+            "counterexample_independent_verification_started",
+            "counterexample_independent_verification_completed",
+            "counterexample_verification_conflict",
+            "counterexample_verified",
         }
         if event.event_type not in meaningful:
             return
@@ -762,10 +820,12 @@ class RichLiveSink:
         show_tokens = bool(token_line) and height >= 14
         show_heartbeat = bool(heartbeat) and height >= 12
         show_profile = profile_line is not None and height >= 18
+        counterexample_line = self._native_counterexample_line(width - 4)
         activity_limit = 3 if height >= 16 else 1
         fixed = (
             1
             + 1
+            + (1 if counterexample_line else 0)
             + len(progress_lines)
             + (1 if show_metrics else 0)
             + (1 if show_tokens else 0)
@@ -778,6 +838,14 @@ class RichLiveSink:
         details = self._native_slot_rows()
         max_rows = max(0, min(len(details), height - 2 - fixed - 1))
         parts: list[Text | Table] = [Text(self._native_header(width), style="bold")]
+        if counterexample_line:
+            verified = self.state.get("counterexample_state") == "verified"
+            parts.append(
+                Text(
+                    counterexample_line,
+                    style="bold bright_green" if verified else "bold yellow",
+                )
+            )
         summary = self._native_summary_line()
         if summary:
             parts.append(Text(summary))
@@ -794,8 +862,10 @@ class RichLiveSink:
             parts.append(Text("Slots  waiting for generation"))
         activity = self._recent_events[-activity_limit:]
         if activity:
-            parts.extend(Text(f"Activity  {item}" if index == 0 else f"          {item}")
-                         for index, item in enumerate(activity))
+            parts.extend(
+                Text(f"Activity  {item}" if index == 0 else f"          {item}")
+                for index, item in enumerate(activity)
+            )
         else:
             parts.append(Text("Activity  waiting for native events"))
         if show_profile and profile_line is not None:
@@ -803,9 +873,37 @@ class RichLiveSink:
         return Panel(
             Group(*parts),
             title="Mutation Forge Lab · Native experiment",
-            border_style="cyan",
+            border_style=(
+                "bright_green"
+                if self.state.get("counterexample_state") == "verified"
+                else "yellow"
+                if self.state.get("counterexample_state") not in {None, "none"}
+                else "cyan"
+            ),
             padding=(0, 1),
             expand=True,
+        )
+
+    def _native_counterexample_line(self, width: int) -> str:
+        state = self.state.get("counterexample_state")
+        if state in {None, "none"}:
+            return ""
+        candidate = self.state.get("counterexample_candidate", "—")
+        order = self.state.get("counterexample_order")
+        edges = self.state.get("counterexample_edges")
+        minimum_degree = self.state.get("counterexample_minimum_degree")
+        lengths = self.state.get("counterexample_lengths")
+        length_text = ",".join(str(item) for item in lengths) if isinstance(lengths, list) else "—"
+        if state == "verified":
+            label = "COUNTEREXAMPLE VERIFIED"
+        elif state == "conflict":
+            label = "COUNTEREXAMPLE VERIFICATION CONFLICT"
+        else:
+            label = "COUNTEREXAMPLE CANDIDATE"
+        return self._fit(
+            f"{label} · {candidate} · order {order or '—'} · "
+            f"edges {edges or '—'} · δ {minimum_degree or '—'} · lengths {length_text}",
+            width,
         )
 
     def _native_header(self, width: int) -> str:
@@ -821,8 +919,11 @@ class RichLiveSink:
         add("state", state.get("state", state.get("stage")))
         generation = state.get("generation")
         generation_limit = state.get("generation_limit")
-        if generation is not None and generation_limit is not None:
-            add("gen", f"{generation}/{generation_limit}")
+        if generation is not None:
+            add(
+                "gen",
+                generation if generation_limit is None else f"{generation}/{generation_limit}",
+            )
         model = state.get("model")
         effort = state.get("effort")
         if model not in (None, "-"):
@@ -874,14 +975,9 @@ class RichLiveSink:
         phase_item = next((item for item in narrow_values if item.startswith("phase ")), None)
         if phase_item is not None and phase_item not in compact:
             compact = [
-                item
-                for item in compact
-                if not item.startswith(("state ", "model ", "workers "))
+                item for item in compact if not item.startswith(("state ", "model ", "workers "))
             ]
-            while (
-                len(" · ".join([*compact, phase_item])) > available
-                and len(compact) > 3
-            ):
+            while len(" · ".join([*compact, phase_item])) > available and len(compact) > 3:
                 compact.pop()
             if len(" · ".join([*compact, phase_item])) <= available:
                 compact.append(phase_item)
@@ -935,9 +1031,17 @@ class RichLiveSink:
         available = max(36, width)
         bar_width = 10 if available >= 130 else 7 if available >= 90 else 5
         segments = [
-            segment("Gen", generation, bar_width=bar_width),
+            (
+                f"Gen {integer('generation')} · current"
+                if integer("generation") is not None and state.get("generation_limit") is None
+                else segment("Gen", generation, bar_width=bar_width)
+            ),
             segment("Slots", slots, bar_width=bar_width),
-            segment("Turns", turns, bar_width=bar_width),
+            (
+                f"Turns {turns_current} cumulative"
+                if turns_total is None
+                else segment("Turns", turns, bar_width=bar_width)
+            ),
             segment("Eval", episodes, bar_width=bar_width),
             segment("Time", wall, bar_width=bar_width),
         ]
@@ -978,9 +1082,7 @@ class RichLiveSink:
         def value(source: dict[str, JsonValue], name: str) -> str:
             current = source.get(name)
             return (
-                str(current)
-                if isinstance(current, int) and not isinstance(current, bool)
-                else "?"
+                str(current) if isinstance(current, int) and not isinstance(current, bool) else "?"
             )
 
         quality = cumulative.get("quality", "unknown")
@@ -1024,8 +1126,7 @@ class RichLiveSink:
         thread = operation.get("thread") or operation.get("turn")
         thread_text = f" · id {thread}" if isinstance(thread, str) and thread else ""
         text = (
-            warning
-            + f"{str(operation.get('phase', 'work')).upper()} "
+            warning + f"{str(operation.get('phase', 'work')).upper()} "
             f"{operation.get('slot', '?')} · {elapsed:.1f}s elapsed"
             f"{timeout_text}{age_text}{thread_text}"
         )
@@ -1219,9 +1320,13 @@ class RichLiveSink:
         if not isinstance(phases, dict):
             return None
         top = sorted(
-            ((name, seconds) for name, seconds in phases.items()
-             if isinstance(name, str) and isinstance(seconds, int | float)
-             and not isinstance(seconds, bool)),
+            (
+                (name, seconds)
+                for name, seconds in phases.items()
+                if isinstance(name, str)
+                and isinstance(seconds, int | float)
+                and not isinstance(seconds, bool)
+            ),
             key=lambda item: float(item[1]),
             reverse=True,
         )[:3]
@@ -1318,12 +1423,19 @@ class RichLiveSink:
             ("Evaluations", self.state.get("evaluations", 0)),
             ("Evaluations/s", self._rate(self.state.get("evaluations_per_second"))),
             ("Initial score", self.state.get("initial_total", "-")),
-            ("Current / best", f"{self.state.get('current_total', '-')} / "
-             f"{self.state.get('best_total', '-')}"),
-            ("Legal / invalid", f"{self.state.get('legal_proposals', 0)} / "
-             f"{self.state.get('invalid_proposals', 0)}"),
-            ("Timeouts / crashes", f"{self.state.get('timeouts', 0)} / "
-             f"{self.state.get('crashes', 0)}"),
+            (
+                "Current / best",
+                f"{self.state.get('current_total', '-')} / {self.state.get('best_total', '-')}",
+            ),
+            (
+                "Legal / invalid",
+                f"{self.state.get('legal_proposals', 0)} / "
+                f"{self.state.get('invalid_proposals', 0)}",
+            ),
+            (
+                "Timeouts / crashes",
+                f"{self.state.get('timeouts', 0)} / {self.state.get('crashes', 0)}",
+            ),
             ("Profile top / unattributed", self._profile_summary()),
             ("Latest event", self.state.get("latest_event", "none")),
         ]
@@ -1375,25 +1487,17 @@ class RichLiveSink:
             panels.append(
                 Panel(
                     deep_profile_table,
-                    title=(
-                        "Deep operator profile · "
-                        f"{profiled_episodes} episodes"
-                    ),
+                    title=(f"Deep operator profile · {profiled_episodes} episodes"),
                 )
             )
         if deep_score_profile_table is not None:
             deep_score_profile = self.state["deep_score_profile"]
             assert isinstance(deep_score_profile, dict)
-            profiled_episodes = deep_score_profile.get(
-                "profiled_episodes", "-"
-            )
+            profiled_episodes = deep_score_profile.get("profiled_episodes", "-")
             panels.append(
                 Panel(
                     deep_score_profile_table,
-                    title=(
-                        "Deep score profile · "
-                        f"{profiled_episodes} episodes"
-                    ),
+                    title=(f"Deep score profile · {profiled_episodes} episodes"),
                 )
             )
         return Group(*panels)
@@ -1404,10 +1508,9 @@ class RichLiveSink:
         state = self.state
         slot_states = state.get("slot_states")
         if isinstance(slot_states, dict):
-            slot_summary = ", ".join(
-                f"{slot}={value}"
-                for slot, value in sorted(slot_states.items())
-            ) or "-"
+            slot_summary = (
+                ", ".join(f"{slot}={value}" for slot, value in sorted(slot_states.items())) or "-"
+            )
         else:
             slot_summary = "-"
         usage = state.get("usage")
@@ -1450,13 +1553,11 @@ class RichLiveSink:
             ),
             (
                 "Provider turns",
-                f"{value('provider_turns_completed', 0)} / "
-                f"{value('provider_turns_attempted', 0)}",
+                f"{value('provider_turns_completed', 0)} / {value('provider_turns_attempted', 0)}",
             ),
             (
                 "Cumulative provider turns / evaluations",
-                f"{value('cumulative_provider_turns', 0)} / "
-                f"{value('cumulative_evaluations', 0)}",
+                f"{value('cumulative_provider_turns', 0)} / {value('cumulative_evaluations', 0)}",
             ),
             ("Repair turns", value("repair_turns", 0)),
             ("Remaining max_model_turns", value("remaining_model_turns")),
@@ -1562,9 +1663,7 @@ class RichLiveSink:
         raw_children = profile.get("phase_children_seconds")
         if isinstance(raw_children, dict):
             for parent, raw_phase_children in raw_children.items():
-                if not isinstance(parent, str) or not isinstance(
-                    raw_phase_children, dict
-                ):
+                if not isinstance(parent, str) or not isinstance(raw_phase_children, dict):
                     continue
                 children_by_phase[parent] = [
                     (child, float(seconds))
@@ -1580,9 +1679,7 @@ class RichLiveSink:
             calls_by_phase = {
                 phase: calls
                 for phase, calls in raw_phase_calls.items()
-                if isinstance(phase, str)
-                and isinstance(calls, int)
-                and not isinstance(calls, bool)
+                if isinstance(phase, str) and isinstance(calls, int) and not isinstance(calls, bool)
             }
 
         child_calls_by_phase: dict[str, dict[str, int | None]] = {}
@@ -1595,22 +1692,14 @@ class RichLiveSink:
                     child: calls
                     for child, calls in raw_calls.items()
                     if isinstance(child, str)
-                    and (
-                        calls is None
-                        or (
-                            isinstance(calls, int)
-                            and not isinstance(calls, bool)
-                        )
-                    )
+                    and (calls is None or (isinstance(calls, int) and not isinstance(calls, bool)))
                 }
 
         grandchildren_by_phase: dict[tuple[str, str], list[tuple[str, float]]] = {}
         raw_grandchildren = profile.get("phase_grandchildren_seconds")
         if isinstance(raw_grandchildren, dict):
             for phase, raw_phase_children in raw_grandchildren.items():
-                if not isinstance(phase, str) or not isinstance(
-                    raw_phase_children, dict
-                ):
+                if not isinstance(phase, str) or not isinstance(raw_phase_children, dict):
                     continue
                 for child, raw_grandchildren_by_child in raw_phase_children.items():
                     if not isinstance(child, str) or not isinstance(
@@ -1650,9 +1739,7 @@ class RichLiveSink:
         table.add_column(Text("Wall [s]"), justify="right", no_wrap=True)
         table.add_column("Of parent", justify="right", no_wrap=True)
         table.add_column("Of episode", justify="right", no_wrap=True)
-        for phase, seconds in sorted(
-            numeric_phases, key=lambda item: item[1], reverse=True
-        ):
+        for phase, seconds in sorted(numeric_phases, key=lambda item: item[1], reverse=True):
             phase_children = children_by_phase.get(phase, [])
             table.add_row(
                 phase,
@@ -1770,16 +1857,11 @@ class RichLiveSink:
             connector: str,
         ) -> None:
             seconds = node.get("seconds")
-            if (
-                not isinstance(seconds, int | float)
-                or isinstance(seconds, bool)
-            ):
+            if not isinstance(seconds, int | float) or isinstance(seconds, bool):
                 return
             calls = node.get("calls")
             call_text = (
-                f"{calls:,}"
-                if isinstance(calls, int) and not isinstance(calls, bool)
-                else "—"
+                f"{calls:,}" if isinstance(calls, int) and not isinstance(calls, bool) else "—"
             )
             details = ""
             counters = node.get("counters")
@@ -1824,9 +1906,7 @@ class RichLiveSink:
                     parent_seconds=float(seconds),
                     operator_seconds=operator_seconds,
                     prefix=child_prefix,
-                    connector=(
-                        "└─" if index == len(child_items) - 1 else "├─"
-                    ),
+                    connector=("└─" if index == len(child_items) - 1 else "├─"),
                 )
 
         operator_items = [
@@ -1836,10 +1916,7 @@ class RichLiveSink:
         ]
         for index, (operator, node) in enumerate(operator_items):
             seconds = node.get("seconds")
-            if (
-                not isinstance(seconds, int | float)
-                or isinstance(seconds, bool)
-            ):
+            if not isinstance(seconds, int | float) or isinstance(seconds, bool):
                 continue
             if index:
                 table.add_section()
@@ -1861,10 +1938,7 @@ class RichLiveSink:
         prepared = profile.get("prepared_graph")
         counters = profile.get("counters")
         assembly = profile.get("score_assembly")
-        if not all(
-            isinstance(value, dict)
-            for value in (worker, prepared, counters, assembly)
-        ):
+        if not all(isinstance(value, dict) for value in (worker, prepared, counters, assembly)):
             return None
         assert isinstance(worker, dict)
         assert isinstance(prepared, dict)
@@ -1891,8 +1965,7 @@ class RichLiveSink:
             "worker_roundtrip",
             (
                 f"{worker_calls:,}"
-                if isinstance(worker_calls, int)
-                and not isinstance(worker_calls, bool)
+                if isinstance(worker_calls, int) and not isinstance(worker_calls, bool)
                 else "—"
             ),
             f"{worker_seconds:.3f}",
@@ -1913,9 +1986,7 @@ class RichLiveSink:
                     f"  {'└─' if index == len(child_items) - 1 else '├─'} {name}",
                     (
                         f"{calls:,}"
-                        if isinstance(calls, int)
-                        and not isinstance(calls, bool)
-                        and calls
+                        if isinstance(calls, int) and not isinstance(calls, bool) and calls
                         else "—"
                     ),
                     f"{seconds:.3f}",
@@ -1935,11 +2006,7 @@ class RichLiveSink:
             calls = prepared_node.get("calls")
             table.add_row(
                 label,
-                (
-                    f"{calls:,}"
-                    if isinstance(calls, int) and not isinstance(calls, bool)
-                    else "—"
-                ),
+                (f"{calls:,}" if isinstance(calls, int) and not isinstance(calls, bool) else "—"),
                 f"{seconds:.3f}",
                 "",
                 "prepared graph work",
@@ -1950,8 +2017,7 @@ class RichLiveSink:
             "score_assembly",
             (
                 f"{assembly_calls:,}"
-                if isinstance(assembly_calls, int)
-                and not isinstance(assembly_calls, bool)
+                if isinstance(assembly_calls, int) and not isinstance(assembly_calls, bool)
                 else "—"
             ),
             f"{assembly_seconds:.3f}",

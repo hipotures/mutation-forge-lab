@@ -365,6 +365,52 @@ def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> N
     assert evaluated.evaluations_completed == 7
 
 
+def test_counterexample_lifecycle_is_idempotent_and_terminal() -> None:
+    state = DashboardState()
+    candidate = _event(
+        "counterexample_candidate_found",
+        candidate_id="cx-" + "a" * 64,
+        order=30,
+        target_forbidden_lengths=[4, 8, 16],
+        idempotency_key="candidate",
+    )
+    state = reduce_dashboard_event(state, candidate)
+    repeated = reduce_dashboard_event(state, candidate)
+    assert repeated == state
+    assert state.counterexample_state == "candidate"
+    assert state.counterexample_lengths == (4, 8, 16)
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "counterexample_primary_verification_completed",
+            status="VERIFIED",
+            complete=True,
+            idempotency_key="primary",
+        ),
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "counterexample_independent_verification_completed",
+            status="VERIFIED",
+            complete=True,
+            idempotency_key="independent",
+        ),
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "counterexample_verified",
+            candidate_id="cx-" + "a" * 64,
+            certificate="/tmp/certificate.json",
+            idempotency_key="verified",
+        ),
+    )
+    assert state.counterexample_state == "verified"
+    assert state.experiment_state == "completed"
+
+
 def test_recovered_slot_hydrates_usage_without_changing_aggregate_totals() -> None:
     state = _running_state()
     recovered = reduce_dashboard_event(
@@ -702,10 +748,7 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
         ).print(sink._slot_matrix(width, "full"))
         assert "provider turn" not in matrix_output.getvalue().lower()
         assert "/home/user/" not in rendered
-        assert (
-            "workspace/dashboard-run/artifacts/native-generation-checkpoint.json"
-            in rendered
-        )
+        assert "workspace/dashboard-run/artifacts/native-generation-checkpoint.json" in rendered
         assert "experiment" in rendered
         assert "session" in rendered
         assert "usage" in rendered
@@ -849,9 +892,7 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     footer = sink._footer(150)
     assert "[n/N] view gen" in footer.plain
     top_span = next(
-        span
-        for span in footer.spans
-        if footer.plain[span.start : span.end] == "[t] top"
+        span for span in footer.spans if footer.plain[span.start : span.end] == "[t] top"
     )
     assert "dim" in str(top_span.style)
     sink.close()
@@ -888,9 +929,7 @@ def test_quick_view_explains_objective_sparkline_direction(
 
 
 def test_key_decoder_handles_navigation_and_detail_keys() -> None:
-    keys, remaining = _decode_keys(
-        b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F\x1b[Z\r\t\x7f"
-    )
+    keys, remaining = _decode_keys(b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F\x1b[Z\r\t\x7f")
     assert remaining == b""
     assert keys == [
         "UP",
@@ -927,9 +966,7 @@ def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parsed_default = cli.build_parser().parse_args(["experiment", "run"])
-    parsed_dashboard = cli.build_parser().parse_args(
-        ["experiment", "run", "--dashboard"]
-    )
+    parsed_dashboard = cli.build_parser().parse_args(["experiment", "run", "--dashboard"])
     assert parsed_default.dashboard is False
     assert parsed_dashboard.dashboard is True
 
@@ -987,7 +1024,11 @@ def test_until_complete_continues_after_wall_budget(monkeypatch: pytest.MonkeyPa
         return (
             {"status": "completed", "state": "completed"}
             if calls == 2
-            else {"status": "completed", "state": "idle", "stop_reason": "budget_exhausted"}
+            else {
+                "status": "idle",
+                "state": "idle",
+                "stop_reason": "session_wall_seconds",
+            }
         )
 
     monkeypatch.setattr(cli, "load_experiment_config", lambda _path: config)
@@ -1128,26 +1169,14 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "5281e791b1941e68a652bfc3861c0201369e6054e09ba38855131abcce0fa37f"
+        "da23bd14c44aa2574b7f9f7773189ab1aab8d9729cabda84a5689e36dd370bc1"
     ),
-    "evaluation_active": (
-        "317b2a37b780b4d952ebd6e863c0a96d8c3158c7d41e9aa3324c792921e6e549"
-    ),
-    "validation_details": (
-        "11b8a56852a9d28c25f309d738d838e4bf665140f54fc3363ccd2519e048ce93"
-    ),
-    "completed": (
-        "1f3215174dc57055b32d67c9a711ea36ca74909f99d72fef21ea66df1b3251fd"
-    ),
-    "profiling_disabled": (
-        "25f80d608621fc078553ed17da95cb4a1ed4057d97174abcecda12d97ee3090c"
-    ),
-    "compact": (
-        "f53d4ef30ba02171323e436f6a0e8ad4be5514bbe045f8a26b2ed9963da7bd4c"
-    ),
-    "minimal": (
-        "f26c8c0a01a9e0ac70691efbf6382bda2bd360ee9bdfb05773874728c291016a"
-    ),
+    "evaluation_active": ("9c2e71564a666ab052ae72b1ba48477da239aaf24cf90b9336090a5d6509a3a9"),
+    "validation_details": ("ac7640aeafd4e81cfa3f883983d4b08b5620e982be45a5f32edaf7dec36b328f"),
+    "completed": ("36f4ffbc14833ded8be8187592fa9a967e29325b789affd849f04d966a931b88"),
+    "profiling_disabled": ("7b35fbeb8150652ee9c7ee4268298be9ddca4e8966d955f3d1f53384d075159e"),
+    "compact": ("d219b26e3ebf7bc938e2849ea4f12df2d9a395936ef77add4013f5bbf5eafa0c"),
+    "minimal": ("22a3e8de7e835ddae4dc194a165e67bbb7fc34857059e39c077232212c641b22"),
 }
 
 

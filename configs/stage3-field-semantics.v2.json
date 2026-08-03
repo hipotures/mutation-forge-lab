@@ -1,7 +1,7 @@
 {
-  "schema_version": "stage3.field_semantics.v1",
-  "context_schema_sha256": "091ecf83a4adb2c5c581df6af82964830776c2ed7eeaf7fdb643cde3e97a51e7",
-  "proposal_schema_sha256": "e55041142ae230f488b126cba8b16f24ed579d4da83adcb869d7a07cc55e9e12",
+  "schema_version": "stage3.field_semantics.v2",
+  "context_schema_sha256": "08d0c5a83b9a7bc6e330f6074bf3b8f9c017e6212273b1bc21f3e47c1ec78e34",
+  "proposal_schema_sha256": "f24d966adda8fd0fc78bea234d9ff4439e7c808b57f24f027e38278cf37897ca",
   "decision_problem": {
     "objective": "Select legal graph rewrites likely to reduce forbidden-cycle witnesses as early as possible in a bounded search trajectory.",
     "pool_protocol": "For one current graph, the host creates a bounded pool of already-legal k-switch proposals and calls priority(ctx, proposal) separately for every proposal.",
@@ -37,7 +37,7 @@
     "ctx": {
       "schema_version": {
         "scope": "pool_constant",
-        "semantics": "Fixed context contract literal stage2b.context.v1.",
+        "semantics": "Fixed context contract literal mforge.scientific_context.v2.",
         "direction": "provenance_only"
       },
       "order": {
@@ -94,7 +94,7 @@
     "proposal": {
       "schema_version": {
         "scope": "contract_constant",
-        "semantics": "Fixed proposal contract literal stage2b.proposal.v1.",
+        "semantics": "Fixed proposal contract literal mforge.scientific_proposal.v2.",
         "direction": "provenance_only"
       },
       "proposal_id": {

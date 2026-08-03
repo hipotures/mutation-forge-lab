@@ -284,7 +284,7 @@ def _strip_timing(value: Any) -> Any:
 
 def _probe_inputs() -> tuple[ScientificContext, tuple[ScientificProposal, ...]]:
     context: ScientificContext = {
-        "schema_version": "stage2b.context.v1",
+        "schema_version": "mforge.scientific_context.v2",
         "order": 10,
         "forbidden_lengths": [4, 5],
         "capped_cycle_counts": [2, 1],
@@ -299,7 +299,7 @@ def _probe_inputs() -> tuple[ScientificContext, tuple[ScientificProposal, ...]]:
 
     def p(index: int, risk: int, broken: int, k: int) -> ScientificProposal:
         return {
-            "schema_version": "stage2b.proposal.v1",
+            "schema_version": "mforge.scientific_proposal.v2",
             "proposal_id": f"{index:064x}",
             "k": k,
             "operator_family": f"legal_{k}_switch",
@@ -476,9 +476,7 @@ class OneShotGenerator:
                 request.get("protocol_version", self.config.protocol_version)
                 != self.config.protocol_version
             ):
-                raise ValueError(
-                    f"{slot} request protocol does not match the frozen protocol"
-                )
+                raise ValueError(f"{slot} request protocol does not match the frozen protocol")
         self._active = self._max_active = self._attempts = self._completed = (
             self._accepted_turns
         ) = 0
@@ -738,9 +736,7 @@ class OneShotGenerator:
                         )
             for slot in SLOTS:
                 if slot in initial:
-                    results[slot] = self._assess(
-                        slot, initial[slot], request=self._request(slot)
-                    )
+                    results[slot] = self._assess(slot, initial[slot], request=self._request(slot))
                     if (
                         results[slot].status == "failed"
                         and initial[slot].status == "completed"

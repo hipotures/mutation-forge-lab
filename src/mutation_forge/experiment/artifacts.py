@@ -97,11 +97,7 @@ def _text(value: object, *, redact_value: bool = True) -> bytes:
         except UnicodeDecodeError:
             data = value
         else:
-            data = (
-                str(redact(text)).encode("utf-8")
-                if redact_value
-                else value
-            )
+            data = str(redact(text)).encode("utf-8") if redact_value else value
     elif isinstance(value, str):
         data = (str(redact(value)) if redact_value else value).encode("utf-8")
     else:
@@ -561,7 +557,7 @@ class TurnArtifactStore:
                 blocking_missing.add("usage.json")
 
         manifest = {
-            "schema_version": "mforge.experiment.turn-manifest.v1",
+            "schema_version": "mforge.experiment.turn-manifest.v2",
             "generation": generation,
             "slot": str(slot) if str(slot).startswith("slot-") else f"slot-{int(slot):02d}",
             "phase": phase,
@@ -780,7 +776,7 @@ class TurnArtifactStore:
                     missing[name] = "turn finalization did not retain this evidence"
                     blocking.add(name)
         manifest: dict[str, Any] = {
-            "schema_version": "mforge.experiment.turn-manifest.v1",
+            "schema_version": "mforge.experiment.turn-manifest.v2",
             "generation": generation,
             "slot": slot_text,
             "phase": phase,
@@ -793,13 +789,9 @@ class TurnArtifactStore:
             "request_accepted": request_accepted,
             "usage_final_exact": usage_complete(usage),
             "usage_quality": usage_quality(usage),
-            "charged": (
-                result.get("charged") if isinstance(result.get("charged"), bool) else None
-            ),
+            "charged": (result.get("charged") if isinstance(result.get("charged"), bool) else None),
             "uncharged": (
-                result.get("uncharged")
-                if isinstance(result.get("uncharged"), bool)
-                else None
+                result.get("uncharged") if isinstance(result.get("uncharged"), bool) else None
             ),
             "content_received": content_received,
             "response_projection_valid": bool(projection_valid),
@@ -873,7 +865,7 @@ class TurnArtifactStore:
             raise ArtifactIncompleteError(f"cannot read turn manifest: {manifest_path}") from exc
         if (
             not isinstance(manifest, Mapping)
-            or manifest.get("schema_version") != "mforge.experiment.turn-manifest.v1"
+            or manifest.get("schema_version") != "mforge.experiment.turn-manifest.v2"
         ):
             raise ArtifactIncompleteError("invalid turn manifest schema")
         if manifest.get("artifact_complete") is not True:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,11 @@ from mutation_forge.backends.base import (
     ScoreProfileRecorder,
 )
 from mutation_forge.backends.toy import ToyBackend
+from mutation_forge.counterexamples import (
+    CounterexampleDecision,
+    CounterexamplePipeline,
+    CounterexampleVerified,
+)
 from mutation_forge.evaluation.episode import run_episode
 from mutation_forge.models import (
     ExactVerification,
@@ -153,9 +159,7 @@ def test_episode_profiling_preserves_trajectory_and_accounts_time() -> None:
         profiling_enabled=False,
     )
 
-    assert profiled.as_dict(include_timing=False) == unprofiled.as_dict(
-        include_timing=False
-    )
+    assert profiled.as_dict(include_timing=False) == unprofiled.as_dict(include_timing=False)
     assert unprofiled.timing_profile is None
     assert "timing_profile" not in unprofiled.as_dict()
     assert profiled.timing_profile is not None
@@ -252,24 +256,34 @@ def test_episode_score_cache_does_not_cache_failures() -> None:
     assert counters["score_result_failures"] == 1
 
 
-def test_episode_disables_cutoff_for_zero_incumbent() -> None:
+def test_episode_disables_cutoff_for_zero_incumbent(tmp_path: Path) -> None:
     backend = ZeroScoreBackend()
-    result = run_episode(
-        backend=backend,
-        initial_graph=backend.generate_seed(order=30, seed=101),
-        entry_id="zero-cutoff",
-        graph_seed=101,
-        policy_seed=1,
-        baseline=HEG_UNIFORM_TWO_SWITCH,
-        evaluations=1,
-        witness_cap=64,
-        deadline=time.monotonic() + 30,
-    )
+    with pytest.raises(CounterexampleVerified) as captured:
+        run_episode(
+            backend=backend,
+            initial_graph=backend.generate_seed(order=30, seed=101),
+            entry_id="zero-cutoff",
+            graph_seed=101,
+            policy_seed=1,
+            baseline=HEG_UNIFORM_TWO_SWITCH,
+            evaluations=1,
+            witness_cap=64,
+            deadline=time.monotonic() + 30,
+            counterexample_pipeline=CounterexamplePipeline(
+                backend=backend,
+                artifact_root=tmp_path,
+                independent_verifier=lambda _: ExactVerification(
+                    "VERIFIED",
+                    True,
+                    "test independent verifier",
+                    "test-independent",
+                ),
+            ),
+        )
 
-    assert backend.cutoffs == [None, None]
+    assert backend.cutoffs == [None]
     assert backend.exact_calls == 1
-    assert result.exact_zero_submissions == 1
-    assert result.exact_verified_count == 1
+    assert captured.value.outcome.decision is CounterexampleDecision.STOP_VERIFIED
 
 
 def test_episode_stops_at_wall_deadline() -> None:

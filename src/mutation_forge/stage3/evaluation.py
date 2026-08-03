@@ -8,7 +8,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -124,10 +124,20 @@ def _candidate(pool: ProposalPool, selected: str | None) -> ProposalCandidate:
     raise RuntimeError("ranker selected a proposal outside its immutable pool")
 
 
-def _pool_generator(backend: GraphBackend, config: object) -> KSwitchPoolGenerator:
+def _pool_generator(
+    backend: GraphBackend,
+    config: object,
+    *,
+    order: int,
+) -> KSwitchPoolGenerator:
     c = _stage2b(config)
     return KSwitchPoolGenerator(
-        backend, pool_limits=_get(c, "pool"), feature_limits=_get(c, "features")
+        backend,
+        pool_limits=_get(c, "pool"),
+        feature_limits=replace(
+            _get(c, "features"),
+            forbidden_lengths=backend.target_forbidden_lengths(order),
+        ),
     )
 
 
@@ -147,7 +157,7 @@ def _apply(
     context = make_scientific_context(
         state.graph,
         state.score,
-        forbidden_lengths=_get(_get(c, "features"), "forbidden_lengths", ()),
+        forbidden_lengths=backend.target_forbidden_lengths(state.graph.order),
         step=step,
         remaining_steps=horizon - step - 1,
         stagnation=state.stagnation,
@@ -340,7 +350,7 @@ def run_development_episode(
             )
             for name in names
         }
-        generator = _pool_generator(be, config)
+        generator = _pool_generator(be, config, order=graph.order)
         horizon = int(episode.get("horizon", 32))
         steps: list[dict[str, JsonValue]] = []
         divergence_step: int | None = None

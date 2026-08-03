@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mutation-forge.invalid/schemas/stage2b-context.v1.json",
-  "title": "Mutation Forge Stage 2B ranker context",
+  "$id": "https://mutation-forge.invalid/schemas/scientific-context.v2.json",
+  "title": "Mutation Forge scientific ranker context v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,7 +18,7 @@
     "recent_duplicate_rate"
   ],
   "properties": {
-    "schema_version": {"const": "stage2b.context.v1"},
+    "schema_version": {"const": "mforge.scientific_context.v2"},
     "order": {"type": "integer", "minimum": 4},
     "forbidden_lengths": {
       "type": "array",

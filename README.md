@@ -73,11 +73,11 @@ rejected.
 Create `experiment.toml` in the repository root:
 
 ```toml
-schema_version = "mforge.experiment.v1"
+schema_version = "mforge.experiment.v2"
 exp_id = "heg-ranker-search-01"
 workspace = "./workspace"
-kind = "ranker-search"
-preset = "heg-ranker-evolution-v1"
+kind = "heg"
+preset = "native"
 
 [run]
 wall_seconds = 3600
@@ -89,14 +89,14 @@ turn_timeout_base_seconds = 120
 [model]
 provider = "codex"
 name = "gpt-5.6-luna"
-effort = "high"
-concurrency = 2
-max_repairs = 3
+effort = "xhigh"
+concurrency = 8
+max_repairs = 1
 
 [search]
 population_size = 8
-max_generations = 4
-max_model_turns = 64
+max_generations = "unbounded"
+max_model_turns = "unbounded"
 selection = "elite-diversity"
 
 [evaluation]
@@ -152,14 +152,13 @@ instead of being silently ignored.
 
 Important behavior:
 
-- `population_size` must be `8`, matching the eight differentiated mutation
-  briefs in the native preset.
-- `max_generations` is a global experiment limit, not a per-session batch size.
-- `max_model_turns` is cumulative across all continuation sessions. Reaching
-  it pauses the experiment in a resumable `idle` state; it is not scientific
-  completion.
+- The production open-ended HEG configuration uses `population_size = 8`,
+  matching the eight differentiated mutation briefs.
+- `max_generations` and `max_model_turns` are required. Each accepts a positive
+  integer or the exact string `"unbounded"`.
+- Model-turn accounting remains cumulative when the limit is unbounded.
 - `wall_seconds` applies to one invocation. Reaching it pauses the experiment
-  in a resumable `idle` state.
+  in resumable `idle` with `stop_reason=session_wall_seconds`.
 - Uncharged provider infrastructure failures are retried on the same
   idempotent request, including repair turns, with a bounded exponential
   backoff. They do not consume the cumulative model-turn budget.
@@ -169,10 +168,7 @@ Important behavior:
 - `output` is either `rich` or `json`; `--json` selects JSON output for the
   current command.
 - Model, search, evaluation, and resource settings are locked when the
-  workspace is created. A run stopped at `max_model_turns` may raise only that
-  cap in the same workspace; the extension is recorded in SQLite while the
-  original lock remains immutable. Other scientific changes require a new
-  `exp_id`.
+  workspace is created. Any scientific change requires a fresh workspace.
 
 ## Lifecycle and resume
 
@@ -183,10 +179,12 @@ with the same configuration resume from the latest durable checkpoint.
 | --- | --- |
 | `not_created` | Configuration is valid, but no workspace exists yet |
 | `running` | A session currently owns the experiment |
-| `idle` | A wall or model-turn budget boundary paused the run; running again resumes work |
+| `idle` | A session wall boundary paused the run; running again resumes work |
+| `paused` | Verification or an administrative policy requires explicit continuation |
 | `interrupted` | The process was interrupted or its owner died; running again resumes |
-| `failed` | Workspace, provider, or orchestration failure requires inspection |
-| `completed` | The global generation limit was reached |
+| `exhausted` | An explicitly finite generation or model-turn range was consumed |
+| `failed` | A non-recoverable contract, verification, or orchestration failure |
+| `completed` | A counterexample was certified or the operator used `stop --final` |
 
 `Ctrl-C` records an interrupted, resumable session. A subsequent
 `experiment run` recovers completed turn artifacts and continues pending work
@@ -200,9 +198,16 @@ To keep one process running across repeated wall-budget sessions, use:
 uv run mforge experiment run --dashboard --until-complete
 ```
 
-The loop only continues after a normal `budget_exhausted` boundary. A
+The loop only continues after a normal `session_wall_seconds` boundary. A
 persistent provider infrastructure failure remains visible as a resumable
 failure requiring inspection.
+
+An ordinary `q` or `Ctrl-C` remains resumable. To make an explicit terminal
+operator decision:
+
+```console
+uv run mforge experiment stop --final
+```
 
 Use the read-only status command at any time:
 

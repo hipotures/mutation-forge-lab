@@ -17,7 +17,7 @@ def _context() -> dict[str, object]:
     return {
         "schema_version": SCIENTIFIC_CONTEXT_SCHEMA_VERSION,
         "order": 8,
-        "forbidden_lengths": [4, 5, 6],
+        "forbidden_lengths": [4, 8, 16],
         "capped_cycle_counts": [2, 0, 0],
         "weighted_penalty": 32,
         "step": 0,

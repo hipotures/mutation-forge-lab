@@ -9,10 +9,10 @@ def test_frozen_stage3_config() -> None:
     assert config.model.max_repairs == 1
     assert config.experiment.episode_count == 128
     assert config.preregistration_tag == "stage3-generation-frozen-v13"
-    assert config.semantic_glossary_path.name == "stage3-field-semantics.v1.json"
+    assert config.semantic_glossary_path.name == "stage3-field-semantics.v2.json"
     assert (
         config.identity.semantic_glossary_sha256
-        == "810b61489a9d7a426bdfa2946b97cef6e88ab92d87a7fe6f67d8365b6a0d4776"
+        == "f51c3c4b9c205a3362f6e3415ca2eb5dbc54c87031eeda479dc6ae581dd3c9fc"
     )
     assert config.app_server.sandbox_mode == "danger-full-access"
     assert config.app_server.approval_policy == "never"

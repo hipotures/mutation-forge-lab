@@ -13,11 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from .config import ExperimentConfig
+from .config import ExperimentConfig, serialize_search_limit
 from .layout import ExperimentLayout
 
-LOCK_SCHEMA_VERSION = "mforge.experiment.lock.v1"
-ARTIFACT_FORMAT_VERSION = "mforge.experiment.artifacts.v1"
+LOCK_SCHEMA_VERSION = "mforge.experiment.lock.v2"
+ARTIFACT_FORMAT_VERSION = "mforge.experiment.artifacts.v2"
 
 
 class LockError(ValueError):
@@ -142,14 +142,14 @@ def _sandbox_limits(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 _NATIVE_PRESET_ASSETS: dict[str, dict[str, str]] = {
-    "heg-ranker-evolution-v1": {
+    "native": {
         "system_prompt": "prompts/native/system.md",
         "request_prompt": "prompts/native/request.md",
         "repair_prompt": "prompts/native/repair.md",
         "output_schema": "configs/native/generated-policy.schema.json",
         "context_schema": "configs/schemas/stage2b-context.schema.json",
         "proposal_schema": "configs/schemas/stage2b-proposal.schema.json",
-        "semantic_glossary": "configs/stage3-field-semantics.v1.json",
+        "semantic_glossary": "configs/stage3-field-semantics.v2.json",
         "baseline_rankers": "configs/native/baseline-rankers.json",
         **{
             f"mutation_brief_{index:02d}": f"configs/stage3-slots/slot-{index:02d}.json"
@@ -294,8 +294,8 @@ def build_lock(
         },
         "search": {
             "population_size": config.search.population_size,
-            "max_generations": config.search.max_generations,
-            "max_model_turns": config.search.max_model_turns,
+            "max_generations": serialize_search_limit(config.search.max_generations),
+            "max_model_turns": serialize_search_limit(config.search.max_model_turns),
             "selection": config.search.selection,
         },
         "evaluation": {
@@ -324,8 +324,8 @@ def build_lock(
         },
         "generation": {
             "population_size": config.search.population_size,
-            "max_generations": config.search.max_generations,
-            "max_model_turns": config.search.max_model_turns,
+            "max_generations": serialize_search_limit(config.search.max_generations),
+            "max_model_turns": serialize_search_limit(config.search.max_model_turns),
         },
         "selection": config.search.selection,
         "preset_identity": preset_metadata,
@@ -335,11 +335,7 @@ def build_lock(
             if "proposal" in key
         },
         "context_schema_identities": {
-            **{
-                key: value
-                for key, value in prompt_identities.items()
-                if "context" in key
-            },
+            **{key: value for key, value in prompt_identities.items() if "context" in key},
             **{
                 key: value
                 for key, value in preset_metadata.get("assets", {}).items()
@@ -401,8 +397,15 @@ def load_lock(path: str | Path) -> dict[str, Any]:
         raise LockError(f"cannot read experiment lock: {lock_path}") from exc
     if not isinstance(value, dict):
         raise LockError("experiment lock must be a JSON object")
-    if value.get("schema_version") != LOCK_SCHEMA_VERSION:
-        raise LockError("unsupported experiment lock schema")
+    if (
+        value.get("schema_version") != LOCK_SCHEMA_VERSION
+        or value.get("lock_schema_version") != LOCK_SCHEMA_VERSION
+    ):
+        raise LockError(
+            f"Unsupported experiment lock schema. "
+            f"This runtime accepts only {LOCK_SCHEMA_VERSION}. "
+            "Create a fresh workspace."
+        )
     return cast(dict[str, Any], value)
 
 
@@ -426,31 +429,6 @@ def immutable_differences(
     if not isinstance(expected, Mapping):
         raise LockError("experiment lock has no immutable configuration projection")
     return _diff_values(expected, config.immutable_projection())
-
-
-def model_turn_limit_difference(
-    lock: Mapping[str, Any], config: ExperimentConfig
-) -> tuple[int, int] | None:
-    """Return ``(locked, requested)`` for the one allowed budget increase.
-
-    A larger model-turn cap is a continuation budget, not a new scientific
-    identity, but only when it is the sole immutable difference.  The caller
-    still has to prove that the existing workspace stopped at that cap.
-    """
-
-    differences = immutable_differences(lock, config)
-    if len(differences) != 1 or differences[0][0] != "search.max_model_turns":
-        return None
-    locked, requested = differences[0][1:]
-    if (
-        isinstance(locked, bool)
-        or not isinstance(locked, int)
-        or isinstance(requested, bool)
-        or not isinstance(requested, int)
-        or requested <= locked
-    ):
-        return None
-    return locked, requested
 
 
 def format_differences(differences: list[tuple[str, object, object]]) -> str:
@@ -491,7 +469,6 @@ __all__ = [
     "format_differences",
     "immutable_differences",
     "load_lock",
-    "model_turn_limit_difference",
     "sha256_file",
     "verify_lock",
     "write_lock",
