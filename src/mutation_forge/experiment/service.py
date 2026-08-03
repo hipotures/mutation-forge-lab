@@ -1043,6 +1043,8 @@ class ExperimentService:
                     effort=config.model.effort,
                     configured_concurrency=config.model.concurrency,
                     effective_concurrency=config.model.concurrency,
+                    worker_count=config.resources.workers,
+                    active_workers=0,
                     population_size=config.search.population_size,
                     generation_limit=config.search.max_generations,
                     max_model_turns=config.search.max_model_turns,

@@ -60,6 +60,8 @@ def _running_state() -> DashboardState:
             model="gpt-test",
             effort="high",
             configured_concurrency=2,
+            worker_count=8,
+            active_workers=0,
             population_size=8,
             generation_limit=4,
             max_model_turns=64,
@@ -276,6 +278,8 @@ def test_token_accounting_groups_rows_without_extra_separator_lines() -> None:
 def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> None:
     state = _running_state()
     assert state.active_provider_turns == 0
+    assert state.evaluation_workers_active == 0
+    assert state.evaluation_workers_configured == 8
     assert state.provider_turns_attempted == 14
     assert state.provider_turns_completed == 12
     assert state.cumulative_usage.total == 160
@@ -839,22 +843,22 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "62319fec6348979caff63898fb76bfb8b27273e148cd5cf7ed5a8fcf35de670d"
+        "3f3cc76ba28462a1006bd50f5d0fff585eee50c0ddb20ea91987ab23426f27a3"
     ),
     "evaluation_active": (
         "0ae52c16719b68dd481605903c62139c2ccaeac7efe93519528c135ddb4c6bad"
     ),
     "validation_details": (
-        "06c042e6db830da0254a4607bb49d3d9c945039b735dff25ecd117a9898c728c"
+        "ac721844b80bc2787485ead3f6a154fa9bdc14e073f30fb502115a2f94468988"
     ),
     "completed": (
-        "b78dc065870fda4b6cb8e72107cbbb973eb4c26e2d7ed86fd2b4f9b2c40bf982"
+        "16198807fd306a030befdf0676c1a16b55e39d3628b970ca7f55a6a1e9c8a8b7"
     ),
     "profiling_disabled": (
-        "374fd5d0bac1aa2aeed1a3577c96345fddb71bffb277c27422b4eb090ec0f117"
+        "70406b7a567fe5e3db35b190d20dcdc517160bc26ae5573ad7079fffc252722d"
     ),
     "compact": (
-        "0cf6c00f0d71a2cb148cecc0203fc12f1b77a8b402e1b7d184121f8517ca3a5d"
+        "a7cfdfddd068436640bda7d0aa977561559334ad4db1dcd40fdb5e399faed022"
     ),
     "minimal": (
         "d2be7297ac8ee3a90122ab42cd3e2273b706655b228f64dd954f79eec4d051d6"

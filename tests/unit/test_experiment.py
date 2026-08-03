@@ -104,6 +104,15 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     assert (
         root / "artifacts" / "sessions" / "session-000001" / "input-config.toml"
     ).read_bytes() == path.read_bytes()
+    events = [
+        json.loads(line)
+        for line in (
+            root / "artifacts" / "sessions" / "session-000001" / "events.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    started = next(event for event in events if event["event_type"] == "session_started")
+    assert started["worker_count"] == 1
+    assert started["active_workers"] == 0
 
 
 def test_second_run_continues_and_run_budget_is_mutable(tmp_path: Path) -> None:
