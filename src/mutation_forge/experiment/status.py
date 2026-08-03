@@ -322,7 +322,7 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
     if status.get("generation") is not None:
         lines.append(
             f"Progress: {status['generation']} completed generations "
-            f"(batch size {status['max_generations']})"
+            f"(limit {status['max_generations']})"
         )
     lines.append(
         f"Results: {status['unique_candidate_count']} accepted candidates, "

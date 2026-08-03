@@ -141,6 +141,8 @@ class ProviderResult:
     worker_telemetry: Mapping[str, Any] = field(default_factory=dict)
     canonical_response: Mapping[str, Any] = field(default_factory=dict)
     metadata_validation: Mapping[str, Any] = field(default_factory=dict)
+    response_projection_valid: bool | None = None
+    response_diagnostics: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
     def from_value(cls, value: Any) -> ProviderResult:
@@ -191,6 +193,21 @@ class ProviderResult:
                 )
                 if isinstance(value.get("metadata_validation"), Mapping)
                 else {},
+                response_projection_valid=(
+                    bool(value["response_projection_valid"])
+                    if isinstance(value.get("response_projection_valid"), bool)
+                    else None
+                ),
+                response_diagnostics=tuple(
+                    item
+                    for item in value.get("response_diagnostics", ())
+                    if isinstance(item, Mapping)
+                )
+                if isinstance(value.get("response_diagnostics"), Sequence)
+                and not isinstance(
+                    value.get("response_diagnostics"), (str, bytes, bytearray)
+                )
+                else (),
             )
         if all(hasattr(value, name) for name in ("response", "status", "usage")):
             return cls(
@@ -243,6 +260,10 @@ class ProviderResult:
             "worker_telemetry": _safe(dict(self.worker_telemetry)),
             "canonical_response": _safe(dict(self.canonical_response)),
             "metadata_validation": _safe(dict(self.metadata_validation)),
+            "response_projection_valid": self.response_projection_valid,
+            "response_diagnostics": [
+                _safe(dict(item)) for item in self.response_diagnostics
+            ],
         }
 
 
@@ -498,11 +519,18 @@ def _restore_pending_behavior_repair(
     behavior = raw.get("behavior") if isinstance(raw, Mapping) else None
     if not isinstance(behavior, Mapping) or behavior.get("status") != "failed":
         return None
+    identity = raw.get("identity") if isinstance(raw, Mapping) else None
+    if (
+        not isinstance(identity, Mapping)
+        or identity.get("probe_schema_version") != "stage2a.probe.v1"
+    ):
+        return None
     error = str(behavior.get("error", "behavior probe failed"))
     return {
         **dict(value),
         "status": "repair_pending",
         "errors": [{"code": "behavior_error", "message": error[:256]}],
+        "legacy_repair_migration": "stage2a.probe.v1",
     }
 
 
@@ -524,6 +552,7 @@ class GenerationConfig:
     max_workers: int = 8
     concurrency: int | None = None
     max_model_turns: int | None = None
+    prior_model_turns: int = 0
     max_repairs: int = 1
     model: str = "gpt-5.6-luna"
     effort: str = "high"
@@ -531,6 +560,7 @@ class GenerationConfig:
     output_schema: Mapping[str, Any] = field(default_factory=lambda: {"type": "object"})
     repair_prompt: str = "Repair the generated policy using the diagnostics."
     sandbox_limits: SandboxLimits = field(default_factory=SandboxLimits)
+    scientific_contract: bool = False
     max_repair_diagnostics: int = 8
     checkpoint_path: Path | None = None
     require_usage: bool = False
@@ -560,6 +590,12 @@ class GenerationConfig:
         ):
             raise ValueError("max_model_turns must be non-negative")
         if (
+            isinstance(self.prior_model_turns, bool)
+            or not isinstance(self.prior_model_turns, int)
+            or self.prior_model_turns < 0
+        ):
+            raise ValueError("prior_model_turns must be non-negative")
+        if (
             isinstance(self.turn_timeout_seconds, bool)
             or not isinstance(self.turn_timeout_seconds, int | float)
             or self.turn_timeout_seconds <= 0
@@ -575,13 +611,17 @@ _REPAIRABLE = frozenset(
         "invalid_json",
         "invalid_output",
         "invalid_keys",
+        "invalid_schema",
         "invalid_schema_version",
         "invalid_array",
         "duplicate_value",
         "unknown_field",
+        "used_fields_mismatch",
         "invalid_string",
         "syntax_error",
         "forbidden_syntax",
+        "forbidden_input_field",
+        "proposal_signal_required",
         "wrong_signature",
         "wrong_function_name",
         "return_contract",
@@ -853,7 +893,10 @@ class GenerationCoordinator:
                 f"## Previous generated source\n\n```python\n{repair_source}\n```\n\n"
                 f"## Repair diagnostics\n\n```json\n{diagnostics_json}\n```"
             )
-        validator_contract = render_policy_validator_contract(self.config.sandbox_limits)
+        validator_contract = render_policy_validator_contract(
+            self.config.sandbox_limits,
+            scientific=self.config.scientific_contract,
+        )
         prompt = f"{prompt.rstrip()}\n\n{validator_contract}\n"
         prompt_hash, brief_id = _hash(prompt), _hash(brief)
         key = request_idempotency_key(
@@ -1022,6 +1065,33 @@ class GenerationCoordinator:
             errors.append(
                 {"code": "turn_provenance", "message": "turn was not accepted/contentful"}
             )
+        if raw.response_diagnostics:
+            errors.extend(raw.response_diagnostics)
+        elif raw.response_projection_valid is False:
+            errors.append(
+                {
+                    "code": "invalid_output",
+                    "message": "response does not satisfy the generated-policy contract",
+                }
+            )
+        metadata_status = str(raw.metadata_validation.get("status", ""))
+        if metadata_status == "mismatch":
+            metadata_errors = raw.metadata_validation.get("errors")
+            metadata_error_added = False
+            if isinstance(metadata_errors, Sequence) and not isinstance(
+                metadata_errors, (str, bytes, bytearray)
+            ):
+                for item in metadata_errors:
+                    if isinstance(item, Mapping):
+                        errors.append(item)
+                        metadata_error_added = True
+            if not metadata_error_added:
+                errors.append(
+                    {
+                        "code": "used_fields_mismatch",
+                        "message": "declared used_fields do not match validated source",
+                    }
+                )
         response = raw.response
         if isinstance(response, (str, bytes, bytearray)):
             try:
@@ -1050,7 +1120,11 @@ class GenerationCoordinator:
                 phase=request.phase,
                 parent_id=request.parent_id,
             )
-            validation = validate_policy(source, self.config.sandbox_limits)
+            validation = validate_policy(
+                source,
+                self.config.sandbox_limits,
+                scientific=self.config.scientific_contract,
+            )
             validation_diagnostics = [
                 item.as_dict()
                 for item in validation.errors[: self.config.max_repair_diagnostics]
@@ -1169,11 +1243,18 @@ class GenerationCoordinator:
                 diagnostics=validation_diagnostics,
                 error=", ".join(validation_codes) if validation_codes else "validation failed",
             )
-        diagnostics = tuple(
-            {"code": str(item.get("code", "")), "message": str(item.get("message", ""))[:256]}
-            for item in errors
-            if str(item.get("code", "")) in _REPAIRABLE or item.get("repair_class") == "ast"
-        )[: self.config.max_repair_diagnostics]
+        diagnostics_by_identity: dict[tuple[str, str], Mapping[str, Any]] = {}
+        for item in errors:
+            code = str(item.get("code", ""))
+            message = str(item.get("message", ""))[:256]
+            if code in _REPAIRABLE or item.get("repair_class") == "ast":
+                diagnostics_by_identity.setdefault(
+                    (code, message),
+                    {"code": code, "message": message},
+                )
+        diagnostics = tuple(diagnostics_by_identity.values())[
+            : self.config.max_repair_diagnostics
+        ]
         if errors or validation is None or not validation.valid or source is None:
             return None, diagnostics
         identity = validation.identity
@@ -1480,16 +1561,45 @@ class GenerationCoordinator:
             self._save(state)
         seen: dict[str, str] = {}
         for index, source in enumerate(self.existing_sources):
-            identity = validate_policy(source, self.config.sandbox_limits).identity
+            identity = validate_policy(
+                source,
+                self.config.sandbox_limits,
+                scientific=self.config.scientific_contract,
+            ).identity
             if identity.normalized_ast_sha256:
                 seen[identity.normalized_ast_sha256] = f"existing-{index}"
         generations: list[tuple[SlotResult, ...]] = []
         unique: list[Candidate] = []
-        turns = 0
+        stored_turns = state.get("model_turns_used", 0)
+        turns = max(
+            self.config.prior_model_turns,
+            (
+                int(stored_turns)
+                if isinstance(stored_turns, int) and not isinstance(stored_turns, bool)
+                else 0
+            ),
+        )
+        live_turns = 0
         repairs = 0
         recovered = 0
         stopped = False
+        stopped_reason: str | None = None
         infrastructure_failed = False
+        state["model_turns_used"] = turns
+
+        def reserve_model_turn() -> None:
+            nonlocal turns, live_turns
+            turns += 1
+            live_turns += 1
+            state["model_turns_used"] = turns
+            self._save(state)
+
+        def release_retained_turn() -> None:
+            nonlocal turns, live_turns
+            turns = max(self.config.prior_model_turns, turns - 1)
+            live_turns = max(0, live_turns - 1)
+            state["model_turns_used"] = turns
+            self._save(state)
 
         def budget_reason() -> str | None:
             if (
@@ -1536,7 +1646,7 @@ class GenerationCoordinator:
                             collection.pop(key, None)
             self._save(state)
         state.setdefault("next_generation", first_generation)
-        generation_limit = first_generation + self.config.generations
+        generation_limit = self.config.generations
         previous_selection = state.get("selection")
         if (
             self.parent_assignments is None
@@ -1625,6 +1735,7 @@ class GenerationCoordinator:
                             request=request.as_dict(),
                         )
                         stopped = True
+                        stopped_reason = exhausted_reason
                         self._emit(
                             "budget_boundary_reached",
                             generation=generation,
@@ -1634,8 +1745,8 @@ class GenerationCoordinator:
                             completed_turns=turns,
                         )
                         continue
+                    reserve_model_turn()
                     futures[pool.submit(self._invoke, request)] = (slot, request)
-                    turns += 1
                     active_model_turns += 1
                 while futures:
                     future = next(as_completed(tuple(futures)))
@@ -1645,7 +1756,7 @@ class GenerationCoordinator:
                     finally:
                         active_model_turns = max(0, active_model_turns - 1)
                     if raw.retained:
-                        turns = max(0, turns - 1)
+                        release_retained_turn()
                         recovered += 1
                     retryable_infrastructure = (
                         self.retry_infrastructure
@@ -1659,11 +1770,11 @@ class GenerationCoordinator:
                     if retryable_infrastructure and continuously_retry:
                         exhausted_reason = budget_reason()
                         if exhausted_reason is None:
+                            reserve_model_turn()
                             futures[pool.submit(self._invoke, request)] = (
                                 slot,
                                 request,
                             )
-                            turns += 1
                             active_model_turns += 1
                             self._emit(
                                 "slot_queued",
@@ -1694,6 +1805,7 @@ class GenerationCoordinator:
                         slots_state[request.idempotency_key] = results[slot].as_dict()
                         self._save(state)
                         stopped = True
+                        stopped_reason = exhausted_reason
                         self._emit(
                             "budget_boundary_reached",
                             generation=generation,
@@ -1704,8 +1816,8 @@ class GenerationCoordinator:
                         )
                         continue
                     if retryable_infrastructure and budget_reason() is None:
+                        reserve_model_turn()
                         raw = self._invoke(request)
-                        turns += 1
                     candidate, diagnostics = self._assess(request, raw)
                     results[slot] = SlotResult(
                         generation=generation,
@@ -1779,6 +1891,7 @@ class GenerationCoordinator:
                     and turns >= self.config.max_model_turns
                 ):
                     stopped = True
+                    stopped_reason = "max_model_turns"
                 while (
                     item is not None
                     and item.status in {"repair_pending", "repair_running"}
@@ -1852,12 +1965,13 @@ class GenerationCoordinator:
                         recovered += 1
                         repaired_retained = True
                     else:
+                        reserve_model_turn()
                         raw = self._invoke(req)
                         repaired_retained = raw.retained
                         if raw.retained:
+                            release_retained_turn()
                             recovered += 1
                         else:
-                            turns += 1
                             repairs += 1
                         candidate, diagnostics = self._assess(req, raw, repair=True)
                         status = self._slot_status(
@@ -2069,6 +2183,8 @@ class GenerationCoordinator:
         status = (
             "infrastructure_failed"
             if infrastructure_failed
+            else "completed"
+            if stopped_reason == "max_model_turns"
             else "budget_exhausted"
             if stopped
             else "completed"
@@ -2082,12 +2198,22 @@ class GenerationCoordinator:
             "first_generation": first_generation,
             "generation_limit": generation_limit,
             "slots_per_generation": self.config.slots,
-            "initial_turn_count": turns - repairs,
+            "initial_turn_count": live_turns - repairs,
             "repair_turn_count": repairs,
-            "total_live_turns": turns,
+            "total_live_turns": live_turns,
+            "cumulative_model_turns": turns,
+            "remaining_model_turns": (
+                max(0, self.config.max_model_turns - turns)
+                if self.config.max_model_turns is not None
+                else None
+            ),
             "recovered_turn_count": recovered,
             "unique_count": len(unique),
             "max_model_turns": self.config.max_model_turns,
+            "stop_reason": (
+                stopped_reason
+                or ("infrastructure_failed" if infrastructure_failed else "generation_limit")
+            ),
             "checkpoint": str(self._checkpoint_file) if self._checkpoint_file else None,
         }
         state["summary"] = summary

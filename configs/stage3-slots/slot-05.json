@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-05",
-  "brief": "Test whether selector provenance can serve as a small bounded modifier of a ranker whose main evidence remains structural and proposal-specific. Do not treat selector_tags as ground truth, depend on tag ordering, or use proposal_id as a quality signal.",
+  "brief": "Construct a distance-aware ranker whose principal signal combines preexisting endpoint distance with bounded local triangle and C4 risk. Keep sampled-witness evidence as a secondary structural term and avoid all provenance fields.",
   "generation_mode": "new_strategy",
-  "focus": "selector-aware"
+  "focus": "distance-risk"
 }

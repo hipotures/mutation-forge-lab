@@ -971,18 +971,6 @@ class ExperimentService:
             # first verifies every previously committed digest.
             layout.reconcile_artifact_manifest()
             current_state = state.state()
-            if current_state == "completed" and isinstance(
-                self.adapter, NativeExperimentAdapter
-            ):
-                checkpoint = state.checkpoint()
-                state.set_state(
-                    "idle",
-                    stop_reason="generation_batch_completed",
-                    checkpoint=(
-                        str(checkpoint["checkpoint_id"]) if checkpoint is not None else None
-                    ),
-                )
-                current_state = "idle"
             if current_state == "completed":
                 result = self._record_completed_session(config, layout, state, hub=hub)
                 hub.emit(

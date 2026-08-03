@@ -326,6 +326,7 @@ class _NativeProvider:
                 ("worker_telemetry", "worker_telemetry.json"),
                 ("canonical_response", "canonical_response.json"),
                 ("metadata_validation", "metadata-validation.json"),
+                ("response_diagnostics", "response-diagnostics.json"),
             ):
                 evidence_path = directory / filename
                 if evidence_path.is_file():
@@ -413,7 +414,11 @@ class _NativeProvider:
                 else json.dumps(response, sort_keys=True, separators=(",", ":"))
             )
         if isinstance(source, str):
-            validation = validate_policy(source, self.sandbox_limits)
+            validation = validate_policy(
+                source,
+                self.sandbox_limits,
+                scientific=True,
+            )
             value["validation"] = validation.as_dict()
             value["identity"] = validation.identity.as_dict()
             value["validation_completed"] = True
@@ -455,8 +460,6 @@ class _NativeProvider:
                     ]
                 ),
             }
-            if validation.valid:
-                canonical_response["used_fields"] = extracted
             if validation.valid:
                 try:
                     behavior, telemetry = _native_behavior(source, self.sandbox_limits)
@@ -714,6 +717,7 @@ class NativeExperimentAdapter:
 
     def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
         system, schema, request, repair, context, proposal, semantic, baseline = _load_assets()
+        slot_briefs = _load_slot_briefs()
         if config.kind != "ranker-search":
             raise WorkspaceError(f"unsupported experiment kind {config.kind!r}")
         if config.preset != "heg-ranker-evolution-v1":
@@ -726,6 +730,11 @@ class NativeExperimentAdapter:
             raise WorkspaceError(f"unsupported model.effort {config.model.effort!r}")
         if config.search.selection != "elite-diversity":
             raise WorkspaceError(f"unsupported native selection policy {config.search.selection!r}")
+        if config.search.population_size != len(slot_briefs):
+            raise WorkspaceError(
+                "native preset requires population_size="
+                f"{len(slot_briefs)} for its differentiated mutation briefs"
+            )
         unsupported_baselines = set(config.evaluation.baselines).difference(
             {"random", "structural"}
         )
@@ -762,7 +771,7 @@ class NativeExperimentAdapter:
                 "proposal_schema_sha256": _sha256(proposal),
                 "semantic_descriptions_sha256": _sha256(semantic),
                 "baseline_rankers_sha256": _sha256(baseline),
-                "mutation_briefs_sha256": _sha256(_load_slot_briefs()),
+                "mutation_briefs_sha256": _sha256(slot_briefs),
             },
             "heg": {"repo": str(heg), "backend": "generic"},
         }
@@ -1477,6 +1486,7 @@ class NativeExperimentAdapter:
                     population_size=config.search.population_size,
                     concurrency=config.model.concurrency,
                     max_model_turns=config.search.max_model_turns,
+                    prior_model_turns=state.counts().get("provider_turns", 0),
                     max_repairs=config.model.max_repairs,
                     model=config.model.name,
                     effort=config.model.effort,
@@ -1484,6 +1494,7 @@ class NativeExperimentAdapter:
                     output_schema=output_schema,
                     repair_prompt=repair_prompt,
                     sandbox_limits=SandboxLimits(),
+                    scientific_contract=True,
                     checkpoint_path=layout.artifacts / "native-generation-checkpoint.json",
                     turn_timeout_seconds=config.turn_timeout_seconds,
                 )
@@ -1517,15 +1528,25 @@ class NativeExperimentAdapter:
         if not isinstance(result, Mapping):
             raise NativeExperimentError("native generation engine returned a non-object result")
         batch_completed = str(result.get("status", "completed")) == "completed"
-        outcome: dict[str, Any] = {
-            "state": "idle",
-            "stop_reason": (
-                "generation_batch_completed"
-                if batch_completed
-                else "infrastructure_failed"
+        summary = result.get("summary")
+        result_stop_reason = (
+            str(summary.get("stop_reason"))
+            if isinstance(summary, Mapping) and summary.get("stop_reason")
+            else None
+        )
+        if batch_completed:
+            outcome_state = "completed"
+            outcome_stop_reason = result_stop_reason or "generation_limit"
+        else:
+            outcome_state = "idle"
+            outcome_stop_reason = (
+                "infrastructure_failed"
                 if str(result.get("status")) == "infrastructure_failed"
                 else "budget_exhausted"
-            ),
+            )
+        outcome: dict[str, Any] = {
+            "state": outcome_state,
+            "stop_reason": outcome_stop_reason,
             "generation": int(result.get("generation", 0) or 0),
             "provider_turns": session.provider_turns_completed,
             "evaluations": [],

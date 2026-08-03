@@ -72,22 +72,22 @@
       },
       "stagnation": {
         "scope": "pool_constant",
-        "semantics": "Caller-supplied recent steps without strict accepted improvement; the retained Stage 2B path currently supplies the default zero.",
+        "semantics": "Consecutive native evaluation steps without a strict accepted improvement; initialized to zero and reset after an accepted improvement.",
         "direction": "heuristic_history_only"
       },
       "recent_best_improvement": {
         "scope": "pool_constant",
-        "semantics": "Caller-supplied finite summary of recent improvement; the retained Stage 2B path currently supplies the default 0.0.",
+        "semantics": "Largest normalized witness-count improvement over the previous eight native evaluation decisions; initialized from an empty history and updated after each decision.",
         "direction": "caller_defined_history"
       },
       "recent_acceptance_rate": {
         "scope": "pool_constant",
-        "semantics": "Caller-supplied recent accepted-move fraction in [0,1]; the retained Stage 2B path currently supplies the default 0.0.",
+        "semantics": "Accepted-move fraction over the previous eight native evaluation decisions in [0,1]; initialized from an empty history and updated after each decision.",
         "direction": "heuristic_history_only"
       },
       "recent_duplicate_rate": {
         "scope": "pool_constant",
-        "semantics": "Caller-supplied recent duplicate-proposal fraction in [0,1]; the retained Stage 2B path currently supplies the default 0.0.",
+        "semantics": "Mean duplicate-proposal fraction over the previous eight native evaluation pools in [0,1]; initialized from an empty history and updated after each pool.",
         "direction": "heuristic_history_only"
       }
     },

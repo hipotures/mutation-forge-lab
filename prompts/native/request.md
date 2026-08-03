@@ -8,5 +8,6 @@ sole ranking signal. Do not use proposal IDs, hidden state, unavailable
 post-rewrite scores, imports, tools, or randomness.
 
 Declare `used_fields` canonically as `ctx.<field>` and `proposal.<field>`.
-The host derives the authoritative list from the validated source and records
-whether the declaration matched. Return only the generated-policy JSON object.
+The host derives the authoritative list from the validated source; any mismatch
+is a validation error that must be repaired. Return only the generated-policy
+JSON object.

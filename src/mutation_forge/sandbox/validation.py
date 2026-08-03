@@ -29,26 +29,68 @@ SAFE_BUILTINS = frozenset(
     }
 )
 PARAMETERS = ("ctx", "proposal")
+FORBIDDEN_POLICY_FIELDS = frozenset(
+    {
+        "ctx.schema_version",
+        "ctx.step",
+        "ctx.remaining_steps",
+        "proposal.schema_version",
+        "proposal.proposal_id",
+        "proposal.selector_tags",
+        "proposal.anchor_forbidden_length",
+    }
+)
+PROPOSAL_SIGNAL_FIELDS = frozenset(
+    {
+        "proposal.broken_sampled_witnesses_by_length",
+        "proposal.removed_edge_load_sum_by_length",
+        "proposal.removed_edge_load_max_by_length",
+        "proposal.minimum_distance_between_removed_edges",
+        "proposal.mean_distance_between_removed_edges",
+        "proposal.minimum_preexisting_distance_for_new_edges",
+        "proposal.mean_preexisting_distance_for_new_edges",
+        "proposal.local_triangle_risk",
+        "proposal.local_c4_risk",
+        "proposal.reconnection_span",
+    }
+)
 
 
-def render_policy_validator_contract(limits: SandboxLimits | None = None) -> str:
+def render_policy_validator_contract(
+    limits: SandboxLimits | None = None,
+    *,
+    scientific: bool = False,
+) -> str:
     """Render the model-facing contract from the executable validator rules."""
 
     configured = limits or SandboxLimits()
     allowed_calls = ", ".join(f"`{name}`" for name in sorted(SAFE_BUILTINS))
-    return "\n".join(
-        (
-            f"## Sandbox contract ({VALIDATOR_VERSION})",
-            "",
-            "- The source must contain exactly one top-level function "
-            "`priority(ctx, proposal)`.",
-            "- Do not define helper or nested functions.",
-            "- Do not use imports.",
-            "- Do not use names beginning with `_`.",
-            "- Do not use attribute access or method calls.",
-            "- Read `ctx` and `proposal` only with subscription syntax such as "
-            '`ctx["field"]` and `proposal["field"]`; nested subscriptions are allowed.',
-            "- Direct `ctx` and `proposal` field names must be string literals.",
+    rules = [
+        f"## Sandbox contract ({VALIDATOR_VERSION})",
+        "",
+        "- The source must contain exactly one top-level function "
+        "`priority(ctx, proposal)`.",
+        "- Do not define helper or nested functions.",
+        "- Do not use imports.",
+        "- Do not use names beginning with `_`.",
+        "- Do not use attribute access or method calls.",
+        "- Read `ctx` and `proposal` only with subscription syntax such as "
+        '`ctx["field"]` and `proposal["field"]`; nested subscriptions are allowed.',
+        "- Direct `ctx` and `proposal` field names must be string literals.",
+    ]
+    if scientific:
+        rules.extend(
+            [
+                "- Do not read contract identifiers, trajectory counters, proposal IDs, "
+                "selector provenance, or anchor provenance: "
+                + ", ".join(f"`{name}`" for name in sorted(FORBIDDEN_POLICY_FIELDS))
+                + ".",
+                "- The returned priority must use at least one proposal-specific "
+                "structural signal; a constant or context-only ranker is invalid.",
+            ]
+        )
+    rules.extend(
+        [
             "- The function must contain exactly one `return`, and it must be the final "
             "top-level statement.",
             f"- The complete allowed-call whitelist is: {allowed_calls}.",
@@ -57,8 +99,9 @@ def render_policy_validator_contract(limits: SandboxLimits | None = None) -> str
             "inside allowed built-ins such as `sum`.",
             f"- Source size must not exceed {configured.max_source_bytes} UTF-8 bytes.",
             f"- The parsed program must not exceed {configured.max_ast_nodes} AST nodes.",
-        )
+        ]
     )
+    return "\n".join(rules)
 
 
 _ALLOWED_NODE_TYPES = (
@@ -167,10 +210,12 @@ class ValidationResult:
 
 
 class _PolicyValidator(ast.NodeVisitor):
-    def __init__(self, limits: SandboxLimits) -> None:
+    def __init__(self, limits: SandboxLimits, *, scientific: bool = False) -> None:
         self.limits = limits
+        self.scientific = scientific
         self.errors: list[ValidationError] = []
         self.local_names: set[str] = set()
+        self.accessed_input_fields: set[str] = set()
 
     def error(self, node: ast.AST, code: str, message: str) -> None:
         self.errors.append(
@@ -329,20 +374,27 @@ class _PolicyValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
-        if (
-            isinstance(node.value, ast.Name)
-            and node.value.id in PARAMETERS
-            and not (
+        if isinstance(node.value, ast.Name) and node.value.id in PARAMETERS:
+            parameter = node.value.id
+            if not (
                 isinstance(node.slice, ast.Constant)
                 and isinstance(node.slice.value, str)
                 and node.slice.value
-            )
-        ):
-            self.error(
-                node,
-                "dynamic_input_field",
-                f"{node.value.id} field names must be non-empty string literals",
-            )
+            ):
+                self.error(
+                    node,
+                    "dynamic_input_field",
+                    f"{parameter} field names must be non-empty string literals",
+                )
+            else:
+                direct_field = f"{parameter}.{node.slice.value}"
+                self.accessed_input_fields.add(direct_field)
+                if self.scientific and direct_field in FORBIDDEN_POLICY_FIELDS:
+                    self.error(
+                        node,
+                        "forbidden_input_field",
+                        f"{direct_field} is provenance-only and cannot rank proposals",
+                    )
         self.generic_visit(node)
 
     def visit_Expr(self, node: ast.Expr) -> None:
@@ -463,6 +515,8 @@ def accessed_policy_fields(source: str) -> tuple[str, ...]:
 def validate_policy(
     source: str,
     limits: SandboxLimits | None = None,
+    *,
+    scientific: bool = False,
 ) -> ValidationResult:
     applied_limits = limits or SandboxLimits()
     source_bytes = source.encode("utf-8")
@@ -498,7 +552,7 @@ def validate_policy(
             ),
         )
     node_count = sum(1 for _ in ast.walk(tree))
-    validator = _PolicyValidator(applied_limits)
+    validator = _PolicyValidator(applied_limits, scientific=scientific)
     if node_count > applied_limits.max_ast_nodes:
         validator.errors.append(
             ValidationError(
@@ -507,6 +561,15 @@ def validate_policy(
             )
         )
     validator.visit(tree)
+    if scientific and not validator.accessed_input_fields.intersection(
+        PROPOSAL_SIGNAL_FIELDS
+    ):
+        validator.errors.append(
+            ValidationError(
+                "proposal_signal_required",
+                "priority must use at least one proposal-specific structural signal",
+            )
+        )
     identity = ProgramIdentity(
         source_sha256=source_hash,
         normalized_ast_sha256=_normalized_ast_hash(tree),

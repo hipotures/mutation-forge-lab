@@ -377,7 +377,7 @@ def probe_scientific_policy(
     """Probe a generated ranker with the same contracts used by HEG evaluation."""
 
     applied_limits = limits or SandboxLimits()
-    validation = validate_policy(source, applied_limits)
+    validation = validate_policy(source, applied_limits, scientific=True)
     input_contract: dict[str, JsonValue] = {
         "context": "stage2b.context.v1",
         "proposal": "stage2b.proposal.v1",
@@ -400,6 +400,7 @@ def probe_scientific_policy(
         worker = PolicyWorker(source, applied_limits)
         probes: list[JsonValue] = []
         failure: dict[str, JsonValue] | None = None
+        discriminates_proposals = False
         for probe_id, ctx, proposals in SCIENTIFIC_PROBE_BUNDLES:
             priorities: list[dict[str, JsonValue]] = []
             for proposal in proposals:
@@ -431,6 +432,8 @@ def probe_scientific_policy(
                         "priority": call.priority,
                     }
                 )
+            if len({item["priority"] for item in priorities}) > 1:
+                discriminates_proposals = True
             ranked = sorted(priorities, key=_rank_key)
             probe: dict[str, JsonValue] = {
                 "probe_id": probe_id,
@@ -446,6 +449,15 @@ def probe_scientific_policy(
             probes.append(probe)
             if failure is not None:
                 break
+        if failure is None and not discriminates_proposals:
+            failure = {
+                "code": "policy_no_proposal_discrimination",
+                "error_type": "PolicyContractError",
+                "message": (
+                    "policy returned equal priorities for every proposal in all "
+                    "scientific probe bundles"
+                ),
+            }
         telemetry = worker.telemetry()
         result["worker_telemetry"] = telemetry
         if failure is not None:

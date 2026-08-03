@@ -1,7 +1,7 @@
 {
   "schema_version": "stage3.slot.v1",
   "slot_id": "slot-02",
-  "brief": "Construct a piecewise arithmetic ranker whose principal signals are proposal-specific. Use bounded conditionals to modulate their weights from stagnation or remaining_steps, acknowledging that retained Stage 2B trajectories currently leave recent-history fields at defaults.",
+  "brief": "Construct a piecewise arithmetic ranker whose principal signals are proposal-specific. Use bounded conditionals to modulate their weights from stagnation or the recent improvement, acceptance, and duplicate summaries maintained by native evaluation.",
   "generation_mode": "new_strategy",
   "focus": "piecewise"
 }

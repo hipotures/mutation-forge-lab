@@ -1,7 +1,7 @@
 Generate one new deterministic ranker for this frozen slot.
 Generation mode: new_strategy
 Candidate output schema version: stage3.generated_policy.v1
-Task brief: slot-02: Construct a piecewise arithmetic ranker whose principal signals are proposal-specific. Use bounded conditionals to modulate their weights from stagnation or remaining_steps, acknowledging that retained Stage 2B trajectories currently leave recent-history fields at defaults.
+Task brief: slot-02: Construct a piecewise arithmetic ranker whose principal signals are proposal-specific. Use bounded conditionals to modulate their weights from stagnation or the recent improvement, acceptance, and duplicate summaries maintained by native evaluation.
 Preregistered focus: piecewise
 
 SCIENTIFIC DECISION PROBLEM
@@ -41,16 +41,16 @@ CONTEXT FIELDS (POOL-CONSTANT)
   Number of search decisions remaining after the current step.
   Interpretation: provenance_only.
 - ctx.stagnation [integer; minimum 0; scope=pool_constant]:
-  Caller-supplied recent steps without strict accepted improvement; the retained Stage 2B path currently supplies the default zero.
+  Consecutive native evaluation steps without a strict accepted improvement; initialized to zero and reset after an accepted improvement.
   Interpretation: heuristic_history_only.
 - ctx.recent_best_improvement [number; scope=pool_constant]:
-  Caller-supplied finite summary of recent improvement; the retained Stage 2B path currently supplies the default 0.0.
+  Largest normalized witness-count improvement over the previous eight native evaluation decisions; initialized from an empty history and updated after each decision.
   Interpretation: caller_defined_history.
 - ctx.recent_acceptance_rate [number; range [0, 1]; scope=pool_constant]:
-  Caller-supplied recent accepted-move fraction in [0,1]; the retained Stage 2B path currently supplies the default 0.0.
+  Accepted-move fraction over the previous eight native evaluation decisions in [0,1]; initialized from an empty history and updated after each decision.
   Interpretation: heuristic_history_only.
 - ctx.recent_duplicate_rate [number; range [0, 1]; scope=pool_constant]:
-  Caller-supplied recent duplicate-proposal fraction in [0,1]; the retained Stage 2B path currently supplies the default 0.0.
+  Mean duplicate-proposal fraction over the previous eight native evaluation pools in [0,1]; initialized from an empty history and updated after each pool.
   Interpretation: heuristic_history_only.
 
 PROPOSAL FIELDS (CANDIDATE-SPECIFIC OR PROVENANCE)
