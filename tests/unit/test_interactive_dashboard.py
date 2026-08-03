@@ -694,10 +694,22 @@ def test_slot_detail_copy_includes_full_prompt_preview() -> None:
         start_live=False,
     )
     state = _running_state()
-    sink.state = state
+    matrix_slots = list(state.generations[0].slots)
+    full_parent = "g0001-slot-00-candidate-full-identifier"
+    matrix_slots[0] = replace(matrix_slots[0], parent=full_parent)
+    sink.state = replace(
+        state,
+        generations=(GenerationSlots(1, tuple(matrix_slots)),),
+    )
     matrix_title, matrix = sink._panel_copy_source("slots")
-    matrix_copy = dashboard.render_panel_copy_text(matrix_title, matrix, width=150)
+    matrix_copy = dashboard.render_panel_copy_text(
+        matrix_title,
+        matrix,
+        width=dashboard.PANEL_COPY_WIDTHS["slots"],
+    )
     assert "slot-00" in matrix_copy
+    assert full_parent in matrix_copy
+    assert "…" not in matrix_copy
     assert not any(character in matrix_copy for character in "╭╮╰╯│")
 
     slots = list(state.generations[0].slots)

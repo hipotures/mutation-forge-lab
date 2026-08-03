@@ -101,7 +101,7 @@ PANEL_COPY_KEYS = {
 PANEL_COPY_WIDTHS = {
     "header": 150,
     "progress": 150,
-    "slots": 150,
+    "slots": 240,
     "performance": 60,
     "tokens": 60,
     "objective": 60,
@@ -1590,19 +1590,22 @@ class InteractiveDashboardSink:
                 if item[0] in visible
             ]
         for name, justify, max_width in columns:
-            table.add_column(
-                name,
-                justify=justify,
-                no_wrap=True,
-                overflow="ellipsis",
-                max_width=max_width,
-            )
+            if mode == "copy":
+                table.add_column(name, justify=justify, no_wrap=True)
+            else:
+                table.add_column(
+                    name,
+                    justify=justify,
+                    no_wrap=True,
+                    overflow="ellipsis",
+                    max_width=max_width,
+                )
         for index, slot in enumerate(group.slots):
             selected = index == self.state.selected_index
             values = {
                 "": "▶" if selected else "",
                 "slot": slot.slot,
-                "parent": _compact(slot.parent, 11),
+                "parent": slot.parent if mode == "copy" else _compact(slot.parent, 11),
                 "phase": slot.phase,
                 "state": Text(slot.state, style=STATE_STYLES.get(slot.state, "")),
                 "elapsed": _duration(self._slot_elapsed(slot)),
