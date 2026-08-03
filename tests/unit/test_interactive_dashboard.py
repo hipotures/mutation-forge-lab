@@ -271,6 +271,7 @@ def test_token_accounting_groups_rows_without_extra_separator_lines() -> None:
     assert "total" in rendered
     assert "input" in rendered
     assert "quality" in rendered
+    assert "reasoning (in output)" in rendered
     assert len(rendered.splitlines()) == 13
     sink.close()
 
@@ -386,11 +387,20 @@ def test_recovered_slot_hydrates_usage_without_changing_aggregate_totals() -> No
                 "quality": "exact",
             },
             usage_quality="exact",
+            candidate_id="g0001-slot-02",
+            validation_status="passed",
+            probe_status="passed",
+            charged=False,
         ),
         monotonic=124.0,
     )
 
     slot = recovered.generations[0].slots[2]
+    assert slot.state == "accepted"
+    assert slot.candidate == "g0001-slot-02"
+    assert slot.validation == "pass"
+    assert slot.probe == "pass"
+    assert slot.charged is False
     assert slot.usage == TokenUsage(
         input=101,
         cached=11,
@@ -401,6 +411,147 @@ def test_recovered_slot_hydrates_usage_without_changing_aggregate_totals() -> No
     )
     assert recovered.cumulative_usage == state.cumulative_usage
     assert recovered.session_usage == state.session_usage
+
+
+def test_successful_repair_clears_superseded_error() -> None:
+    state = _running_state()
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "repair_started",
+            generation=1,
+            slot="slot-01",
+            phase="repair",
+            repair_attempt=1,
+        ),
+        monotonic=120.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "provider_turn_completed",
+            generation=1,
+            slot="slot-01",
+            phase="repair",
+            accepted=True,
+            status="completed",
+        ),
+        monotonic=121.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "validation_completed",
+            generation=1,
+            slot="slot-01",
+            phase="repair",
+            valid=True,
+        ),
+        monotonic=122.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "behavior_probe_completed",
+            generation=1,
+            slot="slot-01",
+            phase="repair",
+            valid=True,
+        ),
+        monotonic=123.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "repair_completed",
+            generation=1,
+            slot="slot-01",
+            phase="repair",
+            status="accepted",
+            repairs=1,
+        ),
+        monotonic=124.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "candidate_archived",
+            generation=1,
+            slot="slot-01",
+            candidate_id="g0001-slot-01",
+            status="accepted",
+        ),
+        monotonic=125.0,
+    )
+
+    slot = state.generations[0].slots[1]
+    assert slot.state == "accepted"
+    assert slot.error == ""
+    assert slot.candidate == "g0001-slot-01"
+    assert slot.validation == "pass"
+    assert slot.probe == "pass"
+
+
+def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> None:
+    state = replace(_running_state(), elapsed_seconds=360.0)
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_started",
+            generation=1,
+            slot="slot-02",
+            phase="development",
+            evaluation_id="g0001-slot-02:development",
+            evaluation_total=128,
+        ),
+        monotonic=120.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_progress",
+            generation=1,
+            slot="slot-02",
+            phase="replay",
+            evaluation_id="g0001-slot-02:development",
+            completed=29,
+            total=128,
+            order=12,
+            graph_seed=403,
+            policy_seed=4009,
+            evaluations_per_second=2.5,
+            elapsed_seconds=11.0,
+            **{"pass": "replay"},
+        ),
+        monotonic=131.0,
+    )
+    active = state.generations[0].slots[2]
+    assert state.elapsed_seconds == 360.0
+    assert active.started_monotonic == 120.0
+    assert active.evaluation_completed == 29
+    assert active.evaluation_total == 128
+    assert active.evaluation_pass == "replay"
+    assert active.evaluation_order == 12
+    assert active.graph_seed == 403
+    assert active.policy_seed == 4009
+    assert active.evaluation_rate == 2.5
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_completed",
+            generation=1,
+            slot="slot-02",
+            phase="development",
+            evaluation_id="g0001-slot-02:development",
+            elapsed_seconds=12.5,
+        ),
+        monotonic=132.5,
+    )
+    completed = state.generations[0].slots[2]
+    assert state.elapsed_seconds == 360.0
+    assert completed.started_monotonic is None
+    assert completed.elapsed_seconds == 12.5
 
 
 def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> None:
@@ -441,6 +592,7 @@ def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> 
     state, _ = reduce_dashboard_key(state, "N")
     assert state.displayed_generation == 0
     assert state.generation == 1
+    assert state.status_message == "Viewing generation 1"
     state, _ = reduce_dashboard_key(state, "n")
     assert state.displayed_generation == 1
     assert state.generation == 1
@@ -502,7 +654,7 @@ def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() ->
     (
         (150, 55, ("SLOT MATRIX", "Performance & IR", "Quick View")),
         (120, 35, ("SLOT MATRIX", "Token Accounting", "Recent Activity")),
-        (90, 24, ("SELECTED SLOT", "Slots Complete", "Recent Activity")),
+        (90, 24, ("SELECTED SLOT", "Slots resolved", "Recent Activity")),
     ),
 )
 def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
@@ -604,6 +756,104 @@ def test_detail_view_and_profiling_disabled_are_truthful(
         color_system=None,
     ).print(sink.render())
     assert "Profiling" not in output.getvalue()
+    sink.close()
+
+
+def test_evaluation_overview_uses_per_slot_fields_and_hides_provider_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 130.0)
+    state = _running_state()
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_started",
+            generation=1,
+            slot="slot-02",
+            phase="development",
+            evaluation_id="g0001-slot-02:development",
+            evaluation_total=128,
+        ),
+        monotonic=120.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_progress",
+            generation=1,
+            slot="slot-02",
+            phase="replay",
+            evaluation_id="g0001-slot-02:development",
+            completed=29,
+            total=128,
+            order=12,
+            graph_seed=403,
+            policy_seed=4009,
+            evaluations_per_second=2.5,
+            **{"pass": "replay"},
+        ),
+        monotonic=125.0,
+    )
+    sink = InteractiveDashboardSink(
+        console=Console(
+            file=io.StringIO(),
+            width=150,
+            height=55,
+            force_terminal=False,
+        ),
+        start_live=False,
+    )
+    sink.state = replace(state, selected_index=2, view="details")
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        height=55,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink.render())
+    rendered = output.getvalue()
+    assert "evaluation ID" in rendered
+    assert "29 / 128" in rendered
+    assert "replay" in rendered
+    assert "403" in rendered
+    assert "4009" in rendered
+    assert "2.500/s" in rendered
+    assert "provider request" not in rendered
+    assert "provider thread" not in rendered
+    sink.close()
+
+
+def test_human_generation_numbers_and_truthful_footer_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 130.0)
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    sink.state = replace(_running_state(), profiling_enabled=True, timing_profile=None)
+
+    output = io.StringIO()
+    console = Console(file=output, width=150, force_terminal=False, color_system=None)
+    console.print(sink._header(150))
+    console.print(sink._progress(150, horizontal=True))
+    console.print(sink._slot_matrix(150, "full"))
+    console.print(sink._quick_view_panel("full"))
+    rendered = output.getvalue()
+    assert "Gen 2/4" in rendered
+    assert "generation 2" in rendered
+    assert "2 / 14 / 8" in rendered
+    assert "Slots resolved" in rendered
+
+    footer = sink._footer(150)
+    assert "[n/N] view gen" in footer.plain
+    top_span = next(
+        span
+        for span in footer.spans
+        if footer.plain[span.start : span.end] == "[t] top"
+    )
+    assert "dim" in str(top_span.style)
     sink.close()
 
 
@@ -843,25 +1093,25 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "3f3cc76ba28462a1006bd50f5d0fff585eee50c0ddb20ea91987ab23426f27a3"
+        "5281e791b1941e68a652bfc3861c0201369e6054e09ba38855131abcce0fa37f"
     ),
     "evaluation_active": (
-        "0ae52c16719b68dd481605903c62139c2ccaeac7efe93519528c135ddb4c6bad"
+        "317b2a37b780b4d952ebd6e863c0a96d8c3158c7d41e9aa3324c792921e6e549"
     ),
     "validation_details": (
-        "ac721844b80bc2787485ead3f6a154fa9bdc14e073f30fb502115a2f94468988"
+        "11b8a56852a9d28c25f309d738d838e4bf665140f54fc3363ccd2519e048ce93"
     ),
     "completed": (
-        "16198807fd306a030befdf0676c1a16b55e39d3628b970ca7f55a6a1e9c8a8b7"
+        "1f3215174dc57055b32d67c9a711ea36ca74909f99d72fef21ea66df1b3251fd"
     ),
     "profiling_disabled": (
-        "70406b7a567fe5e3db35b190d20dcdc517160bc26ae5573ad7079fffc252722d"
+        "25f80d608621fc078553ed17da95cb4a1ed4057d97174abcecda12d97ee3090c"
     ),
     "compact": (
-        "a7cfdfddd068436640bda7d0aa977561559334ad4db1dcd40fdb5e399faed022"
+        "f53d4ef30ba02171323e436f6a0e8ad4be5514bbe045f8a26b2ed9963da7bd4c"
     ),
     "minimal": (
-        "d2be7297ac8ee3a90122ab42cd3e2273b706655b228f64dd954f79eec4d051d6"
+        "f26c8c0a01a9e0ac70691efbf6382bda2bd360ee9bdfb05773874728c291016a"
     ),
 }
 

@@ -485,6 +485,11 @@ def test_native_recovery_event_replays_authoritative_usage(tmp_path: Path) -> No
     assert recovered["reasoningOutputTokens"] == 0
     assert recovered["totalTokens"] == 2
     assert recovered["usage_quality"] == "exact"
+    assert recovered["recovered_status"] == "accepted"
+    assert recovered["candidate_id"] == "g0000-slot-00"
+    assert recovered["validation_status"] == "passed"
+    assert recovered["probe_status"] == "passed"
+    assert recovered["charged"] is True
 
 
 def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path) -> None:

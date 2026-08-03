@@ -1440,8 +1440,27 @@ class GenerationCoordinator:
                 error = str(evidence["error"])
         if error is None and result.status == "invalid":
             error = "invalid candidate"
+        candidate_id = (
+            f"g{result.generation:04d}-{result.slot}"
+            if result.candidate is not None
+            else None
+        )
+        charged = (
+            evidence.get("charged")
+            if isinstance(evidence, Mapping)
+            and isinstance(evidence.get("charged"), bool)
+            else None
+        )
         return {
             "error": error,
+            "candidate_id": candidate_id,
+            "validation_status": (
+                "passed" if result.candidate is not None else "unknown"
+            ),
+            "probe_status": (
+                "passed" if result.candidate is not None else "unknown"
+            ),
+            "charged": charged,
             **GenerationCoordinator._usage_payload(provider_result),
             "content": (
                 evidence.get("content")

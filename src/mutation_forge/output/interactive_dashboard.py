@@ -151,6 +151,14 @@ class DashboardSlot:
     objective: float | None = None
     retryable: bool = False
     charged: bool | None = None
+    evaluation_id: str | None = None
+    evaluation_completed: int = 0
+    evaluation_total: int | None = None
+    evaluation_pass: str | None = None
+    evaluation_order: int | None = None
+    graph_seed: int | None = None
+    policy_seed: int | None = None
+    evaluation_rate: float | None = None
     lifecycle: tuple[LifecycleStep, ...] = ()
     artifacts: tuple[str, ...] = ()
     prompt_preview: str = ""
@@ -382,6 +390,15 @@ def _diagnostic(payload: Mapping[str, JsonValue]) -> tuple[str, str]:
     return ", ".join(code_values), "; ".join(messages)
 
 
+def _restored_gate_status(value: JsonValue | None) -> str:
+    status = str(value or "").lower()
+    if status in {"valid", "pass", "passed"}:
+        return "pass"
+    if status in {"invalid", "fail", "failed"}:
+        return "fail"
+    return "unknown"
+
+
 def _retryable_provider_failure(payload: Mapping[str, JsonValue]) -> bool:
     status = str(payload.get("status", "")).lower()
     usage = payload.get("usage")
@@ -470,7 +487,12 @@ def _event_activity(event: Event) -> ActivityEntry | None:
     )
 
 
-def _global_payload(state: DashboardState, payload: Mapping[str, JsonValue]) -> DashboardState:
+def _global_payload(
+    state: DashboardState,
+    payload: Mapping[str, JsonValue],
+    *,
+    include_elapsed: bool,
+) -> DashboardState:
     values: dict[str, Any] = {}
     mappings = {
         "session_id": "session_id",
@@ -502,12 +524,13 @@ def _global_payload(state: DashboardState, payload: Mapping[str, JsonValue]) -> 
             values[target] = integer_value
     numbers = {
         "configured_wall_seconds": "wall_seconds",
-        "elapsed_seconds": "elapsed_seconds",
         "evaluations_per_second": "evaluation_rate",
         "episodes_per_second": "episode_rate",
         "ir": "improvement_rate",
         "improvement_rate": "improvement_rate",
     }
+    if include_elapsed:
+        numbers["elapsed_seconds"] = "elapsed_seconds"
     for source, target in numbers.items():
         number_value = _number(payload.get(source))
         if number_value is not None:
@@ -532,8 +555,19 @@ def reduce_dashboard_event(
 
     now = time.monotonic() if monotonic is None else monotonic
     payload = event.payload
-    state = _global_payload(replace(state, run_id=event.run_id), payload)
     event_type = event.event_type
+    state = _global_payload(
+        replace(state, run_id=event.run_id),
+        payload,
+        include_elapsed=event_type
+        in {
+            "session_started",
+            "budget_boundary_reached",
+            "experiment_completed",
+            "experiment_interrupted",
+            "experiment_failed",
+        },
+    )
     if event_type == "session_started":
         cumulative = _usage(payload.get("usage"))
         session = _usage(payload.get("session_usage"))
@@ -736,6 +770,14 @@ def reduce_dashboard_event(
         error = slot.error
         validation, validation_message = slot.validation, slot.validation_message
         probe, probe_message = slot.probe, slot.probe_message
+        evaluation_id = slot.evaluation_id
+        evaluation_completed = slot.evaluation_completed
+        evaluation_total = slot.evaluation_total
+        evaluation_pass = slot.evaluation_pass
+        evaluation_order = slot.evaluation_order
+        graph_seed = slot.graph_seed
+        policy_seed = slot.policy_seed
+        evaluation_rate = slot.evaluation_rate
         if event_type == "slot_queued":
             lifecycle_phase = "queued"
             lifecycle_status = "pass"
@@ -743,6 +785,12 @@ def reduce_dashboard_event(
                 slot_state = "retrying"
                 error = ""
                 retryable = False
+            elif payload.get("recovered") is True:
+                slot_state = _text(payload.get("recovered_status")) or slot_state
+                validation = _restored_gate_status(payload.get("validation_status"))
+                probe = _restored_gate_status(payload.get("probe_status"))
+                if slot_state in {"accepted", "duplicate"}:
+                    error = ""
         elif event_type == "provider_turn_started":
             slot_state = "repair" if phase == "repair" else "model"
             lifecycle_phase = "provider"
@@ -752,6 +800,10 @@ def reduce_dashboard_event(
             lifecycle_phase = "response"
             lifecycle_status = "pass" if payload.get("accepted") is True else "fail"
             elapsed = max(0.0, now - started) if started is not None else elapsed
+            started = None
+            if payload.get("accepted") is True:
+                error = ""
+                retryable = False
         elif event_type == "provider_turn_failed":
             slot_state = "failed"
             lifecycle_phase = "response"
@@ -759,47 +811,114 @@ def reduce_dashboard_event(
             retryable = _retryable_provider_failure(payload)
             error = _text(payload.get("error")) or "provider turn failed"
             elapsed = max(0.0, now - started) if started is not None else elapsed
+            started = None
         elif event_type == "repair_started":
             slot_state = "repair"
             lifecycle_phase = "provider"
             started = now
+        elif event_type == "repair_completed":
+            lifecycle_phase = "response"
+            if slot_state == "accepted":
+                lifecycle_status = "pass"
+                error = ""
+                retryable = False
+            else:
+                lifecycle_status = "fail"
         elif event_type == "validation_started":
             slot_state = "validating"
             lifecycle_phase = "schema"
+            started = now
         elif event_type == "validation_completed":
             valid = payload.get("valid") is True
             slot_state = "probing" if valid else "invalid"
             lifecycle_phase = "schema"
             lifecycle_status = "pass" if valid else "fail"
+            elapsed = max(0.0, now - started) if started is not None else elapsed
+            started = None
             code, message = _diagnostic(payload)
             validation = "pass" if valid else code or "fail"
             validation_message = message
-            if not valid:
-                error = code or message or "validation failed"
+            error = "" if valid else code or message or "validation failed"
         elif event_type == "behavior_probe_started":
             slot_state = "probing"
             lifecycle_phase = "probe"
+            started = now
         elif event_type == "behavior_probe_completed":
             valid = payload.get("valid") is True
             slot_state = "evaluating" if valid else "invalid"
             lifecycle_phase = "probe"
             lifecycle_status = "pass" if valid else "fail"
+            elapsed = max(0.0, now - started) if started is not None else elapsed
+            started = None
             code, message = _diagnostic(payload)
             probe = "pass" if valid else code or "fail"
             probe_message = message
-            if not valid:
-                error = code or message or "probe failed"
+            error = "" if valid else code or message or "probe failed"
         elif event_type == "evaluation_started":
             slot_state = "evaluating"
             lifecycle_phase = "evaluation"
+            started = now
+            elapsed = None
+            evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
+            evaluation_completed = 0
+            evaluation_total = (
+                _integer(payload.get("evaluation_total")) or evaluation_total
+            )
+            evaluation_pass = _text(payload.get("pass")) or phase
+            evaluation_order = None
+            graph_seed = None
+            policy_seed = None
+            evaluation_rate = None
+        elif event_type == "evaluation_progress":
+            slot_state = "evaluating"
+            lifecycle_phase = "evaluation"
+            evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
+            completed_value = _integer(payload.get("completed"))
+            if completed_value is not None:
+                evaluation_completed = max(evaluation_completed, completed_value)
+            evaluation_total = (
+                _integer(payload.get("total"))
+                or _integer(payload.get("evaluation_total"))
+                or evaluation_total
+            )
+            evaluation_pass = _text(payload.get("pass")) or evaluation_pass
+            evaluation_order = _integer(payload.get("order"))
+            graph_seed = _integer(payload.get("graph_seed"))
+            policy_seed = _integer(payload.get("policy_seed"))
+            rate_value = _number(payload.get("evaluations_per_second"))
+            if rate_value is not None:
+                evaluation_rate = rate_value
         elif event_type == "evaluation_completed":
             slot_state = "accepted"
             lifecycle_phase = "evaluation"
             lifecycle_status = "pass"
+            event_elapsed = _number(payload.get("elapsed_seconds"))
+            elapsed = (
+                event_elapsed
+                if event_elapsed is not None
+                else max(0.0, now - started)
+                if started is not None
+                else elapsed
+            )
+            started = None
+            evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
+            if evaluation_total is not None:
+                evaluation_completed = evaluation_total
+            error = ""
         elif event_type == "evaluation_failed":
             slot_state = "failed"
             lifecycle_phase = "evaluation"
             lifecycle_status = "fail"
+            event_elapsed = _number(payload.get("elapsed_seconds"))
+            elapsed = (
+                event_elapsed
+                if event_elapsed is not None
+                else max(0.0, now - started)
+                if started is not None
+                else elapsed
+            )
+            started = None
+            evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
             error = _text(payload.get("error")) or "evaluation failed"
         elif event_type == "candidate_archived":
             archived_state = _text(payload.get("status"))
@@ -811,6 +930,8 @@ def reduce_dashboard_event(
                 slot_state = archived_state or slot_state
             lifecycle_phase = "archived"
             lifecycle_status = "pass" if slot_state in {"accepted", "duplicate"} else "fail"
+            if slot_state in {"accepted", "duplicate"}:
+                error = ""
         usage = (
             _usage(payload.get("usage"), quality=payload.get("usage_quality"))
             if isinstance(payload.get("usage"), Mapping)
@@ -851,6 +972,14 @@ def reduce_dashboard_event(
             objective=objective,
             retryable=retryable,
             charged=charged,
+            evaluation_id=evaluation_id,
+            evaluation_completed=evaluation_completed,
+            evaluation_total=evaluation_total,
+            evaluation_pass=evaluation_pass,
+            evaluation_order=evaluation_order,
+            graph_seed=graph_seed,
+            policy_seed=policy_seed,
+            evaluation_rate=evaluation_rate,
             lifecycle=_lifecycle(slot, lifecycle_phase, lifecycle_status, elapsed),
             artifacts=artifacts,
             prompt_preview=_text(payload.get("prompt_preview")) or slot.prompt_preview,
@@ -949,7 +1078,7 @@ def reduce_dashboard_key(
             displayed_generation=target,
             selected_index=0,
             view="matrix",
-            status_message=f"Viewing generation {target}",
+            status_message=f"Viewing generation {_human_generation(target)}",
         ), None
     if key == "q":
         return (
@@ -1280,7 +1409,7 @@ class InteractiveDashboardSink:
                     self._slot_details(PANEL_COPY_WIDTHS[panel_name], "copy"),
                 )
             return (
-                f"Slot matrix · generation {self.state.displayed_generation}",
+                f"Slot matrix · generation {_human_generation(self.state.displayed_generation)}",
                 self._slot_matrix(PANEL_COPY_WIDTHS[panel_name], "copy"),
             )
         if panel_name == "performance":
@@ -1461,7 +1590,8 @@ class InteractiveDashboardSink:
                 ("State", self.state.experiment_state.upper(), state_style),
                 (
                     "Gen",
-                    f"{self.state.generation}/{_show(self.state.generation_limit)}",
+                    f"{_human_generation(self.state.generation)}/"
+                    f"{_show(self.state.generation_limit)}",
                     None,
                 ),
                 ("Phase", self.state.phase, None),
@@ -1510,8 +1640,12 @@ class InteractiveDashboardSink:
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
         values = (
-            ("Generation", self.state.generation, self.state.generation_limit),
-            ("Slots Complete", self.state.completed_slots, self.state.population_size),
+            (
+                "Generation",
+                _human_generation(self.state.generation),
+                self.state.generation_limit,
+            ),
+            ("Slots resolved", self.state.completed_slots, self.state.population_size),
             (
                 "Model Turn Budget",
                 self.state.provider_turns_attempted,
@@ -1619,7 +1753,10 @@ class InteractiveDashboardSink:
             }
             style = "bold on grey15" if selected else "bold" if slot.state in ACTIVE_STATES else ""
             table.add_row(*(values[name] for name, _, _ in columns), style=style)
-        title = f"SLOT MATRIX ({len(group.slots)} total) · generation {group.generation}"
+        title = (
+            f"SLOT MATRIX ({len(group.slots)} total) · "
+            f"generation {_human_generation(group.generation)}"
+        )
         if self.state.search_query:
             title += f" · filter {self.state.search_query!r}"
         return Panel(table, title=title, border_style="cyan", padding=(0, 0))
@@ -1647,21 +1784,76 @@ class InteractiveDashboardSink:
         tabs = Text("  ".join(f"[{name}]" if name == tab else name for name in DETAIL_TABS))
         body: RenderableType
         if tab == "Overview":
-            body = _key_value_grid(
-                (
-                    ("slot", slot.slot),
-                    ("parent/root", slot.parent),
-                    ("generation", slot.generation),
-                    ("state", slot.state),
-                    ("current phase", slot.phase),
-                    ("operation elapsed", _duration(self._slot_elapsed(slot))),
-                    ("timeout", _duration(slot.timeout_seconds)),
-                    ("provider request", slot.provider_request_id or "—"),
-                    ("provider thread", slot.provider_thread_id or "—"),
-                    ("provider turn", slot.provider_turn_id or "—"),
-                    ("repairs", slot.repairs),
-                    ("next action", _next_action(slot)),
+            rows: list[tuple[str, object]] = [
+                ("slot", slot.slot),
+                ("parent/root", slot.parent),
+                ("generation", _human_generation(slot.generation)),
+                ("state", slot.state),
+                ("current phase", slot.phase),
+                ("operation elapsed", _duration(self._slot_elapsed(slot))),
+            ]
+            if slot.evaluation_id is not None or slot.state == "evaluating":
+                progress = (
+                    f"{slot.evaluation_completed} / {slot.evaluation_total}"
+                    if slot.evaluation_total is not None
+                    else f"{slot.evaluation_completed} / —"
                 )
+                eta = None
+                if (
+                    slot.evaluation_total is not None
+                    and slot.evaluation_rate is not None
+                    and slot.evaluation_rate > 0
+                ):
+                    eta = max(
+                        0.0,
+                        (slot.evaluation_total - slot.evaluation_completed)
+                        / slot.evaluation_rate,
+                    )
+                rows.extend(
+                    (
+                        ("evaluation ID", slot.evaluation_id or "—"),
+                        ("pass", slot.evaluation_pass or "—"),
+                        ("progress", progress),
+                        ("order", slot.evaluation_order),
+                        ("graph seed", slot.graph_seed),
+                        ("policy seed", slot.policy_seed),
+                        (
+                            "evaluations/s",
+                            f"{slot.evaluation_rate:.3f}/s"
+                            if slot.evaluation_rate is not None
+                            else "—",
+                        ),
+                        ("ETA", _duration(eta)),
+                    )
+                )
+            elif (
+                slot.state in {"model", "repair"}
+                or slot.provider_request_id is not None
+                or slot.provider_thread_id is not None
+                or slot.provider_turn_id is not None
+            ):
+                rows.extend(
+                    (
+                        ("timeout", _duration(slot.timeout_seconds)),
+                        ("provider request", slot.provider_request_id or "—"),
+                        ("provider thread", slot.provider_thread_id or "—"),
+                        ("provider turn", slot.provider_turn_id or "—"),
+                        ("repairs", slot.repairs),
+                    )
+                )
+            elif slot.validation != "—" or slot.probe != "—":
+                rows.extend(
+                    (
+                        ("validation", slot.validation),
+                        ("probe", slot.probe),
+                        ("repairs", slot.repairs),
+                    )
+                )
+            rows.append(("next action", _next_action(slot)))
+            body = (
+                _paired_key_value_grid(rows)
+                if width >= 110
+                else _key_value_grid(rows)
             )
         elif tab == "Lifecycle":
             table = Table.grid(expand=True)
@@ -1783,12 +1975,12 @@ class InteractiveDashboardSink:
             ("", "input", cumulative.input),
             ("", "cached", cumulative.cached),
             ("", "output", cumulative.output),
-            ("", "reasoning", cumulative.reasoning),
+            ("", "reasoning (in output)", cumulative.reasoning),
             ("session", "total", session.total),
             ("", "input", session.input),
             ("", "cached", session.cached),
             ("", "output", session.output),
-            ("", "reasoning", session.reasoning),
+            ("", "reasoning (in output)", session.reasoning),
             ("usage", "quality", cumulative.quality),
         ]
         if compact:
@@ -1797,7 +1989,7 @@ class InteractiveDashboardSink:
                 rows[5],
                 ("", "input", session.input),
                 ("", "output", session.output),
-                ("", "reasoning", session.reasoning),
+                ("", "reasoning (in output)", session.reasoning),
                 rows[10],
             ]
             rows = compact_rows[: row_limit or 1]
@@ -1918,7 +2110,7 @@ class InteractiveDashboardSink:
         rows: tuple[tuple[str, object], ...] = (
             (
                 "Gen / Turn / Slots",
-                f"{self.state.displayed_generation} / "
+                f"{_human_generation(self.state.displayed_generation)} / "
                 f"{self.state.provider_turns_attempted} / {len(group.slots)}",
             ),
             ("Best objective", _objective(self.state.best_objective)),
@@ -1982,7 +2174,8 @@ class InteractiveDashboardSink:
                 "  Tab/Shift+Tab detail tab\n\n"
                 "Actions\n"
                 "  q graceful stop         p pause/resume scheduling\n"
-                "  n/Shift+N generation    r confirmed retryable slot\n"
+                "  n/N view next/previous generation\n"
+                "  r confirmed retryable slot\n"
                 "  c config  l logs  t top  / search  h help\n\n"
                 "Panel copy\n"
                 "  1–8 copy the numbered panel to OSC 52 and /tmp\n\n"
@@ -2010,7 +2203,7 @@ class InteractiveDashboardSink:
                 "[1–8] copy",
                 "[q] quit",
                 "[p] pause/resume",
-                "[n] next gen",
+                "[n/N] view gen",
                 "[r] retry failed",
                 "[c] config",
                 "[l] logs",
@@ -2023,7 +2216,7 @@ class InteractiveDashboardSink:
                 "[1–8] copy",
                 "[q]quit",
                 "[p]pause",
-                "[n]gen",
+                "[n/N]gen",
                 "[r]retry",
                 "[c]config",
                 "[l]logs",
@@ -2039,7 +2232,13 @@ class InteractiveDashboardSink:
             disabled = (
                 (label.startswith("[p]") and self.capabilities.pause is None)
                 or (label.startswith("[r]") and self.capabilities.retry is None)
-                or (label.startswith("[t]") and not self.state.profiling_enabled)
+                or (
+                    label.startswith("[t]")
+                    and (
+                        not self.state.profiling_enabled
+                        or self.state.timing_profile is None
+                    )
+                )
             )
             footer.append(label, style="reverse dim" if disabled else "reverse")
         status = f" · {self.state.status_message}" if self.state.status_message else ""
@@ -2230,13 +2429,31 @@ def _key_value_grid(rows: Sequence[tuple[str, object]]) -> Table:
     return table
 
 
+def _paired_key_value_grid(rows: Sequence[tuple[str, object]]) -> Table:
+    table = Table.grid(expand=True, padding=(0, 1))
+    table.add_column(style="dim", no_wrap=True)
+    table.add_column(justify="right", overflow="ellipsis")
+    table.add_column(style="dim", no_wrap=True)
+    table.add_column(justify="right", overflow="ellipsis")
+    for index in range(0, len(rows), 2):
+        left_label, left_value = rows[index]
+        right_label, right_value = rows[index + 1] if index + 1 < len(rows) else ("", "")
+        table.add_row(
+            left_label,
+            _show(left_value),
+            right_label,
+            _show(right_value),
+        )
+    return table
+
+
 def _token_grid(usage: TokenUsage, *, charged: bool | None) -> Table:
     return _key_value_grid(
         (
             ("input", usage.input),
             ("cached input", usage.cached),
             ("output", usage.output),
-            ("reasoning", usage.reasoning),
+            ("reasoning (in output)", usage.reasoning),
             ("authoritative total", usage.total),
             ("usage quality", usage.quality),
             ("charged", "yes" if charged is True else "no" if charged is False else "—"),
@@ -2250,6 +2467,10 @@ def _show(value: object) -> str:
     if isinstance(value, float):
         return f"{value:.3f}"
     return str(value)
+
+
+def _human_generation(generation: int) -> int:
+    return generation + 1
 
 
 def _ratio(active: int | None, configured: int | None) -> str:
