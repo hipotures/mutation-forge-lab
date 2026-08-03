@@ -492,9 +492,20 @@ class _NativeProvider:
                 isinstance(candidate_manifest, Mapping)
                 and candidate_manifest.get("request_idempotency_key") == key
             ):
-                directory = candidate_directory
-                manifest = candidate_manifest
-                break
+                exact_is_terminal = (
+                    candidate_manifest.get("artifact_complete") is True
+                    and (
+                        candidate_manifest.get("terminal_status") == "completed"
+                        or candidate_manifest.get("charged") is True
+                    )
+                )
+                if exact_is_terminal:
+                    directory = candidate_directory
+                    manifest = candidate_manifest
+                    break
+                # An unfinished/uncharged exact attempt must not hide an older
+                # complete response for the same stable slot identity.
+                continue
             if not isinstance(candidate_manifest, Mapping):
                 continue
             if (
