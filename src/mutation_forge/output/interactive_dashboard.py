@@ -1759,7 +1759,7 @@ class InteractiveDashboardSink:
         if not compact:
             rows.extend(
                 (
-                    ("wall/user/sys", f"{elapsed:.1f}/{user:.1f}/{system:.1f}s"),
+                    ("wall/user/sys", f"{int(elapsed)}/{int(user)}/{int(system)}s"),
                     ("active slots", sum(
                         slot.state in ACTIVE_STATES
                         for slot in _generation_slots(
@@ -1778,30 +1778,36 @@ class InteractiveDashboardSink:
     ) -> Panel:
         cumulative = self.state.cumulative_usage
         session = self.state.session_usage
-        rows: list[tuple[str, object]] = [
-            ("experiment total", _show(cumulative.total)),
-            ("experiment input", _show(cumulative.input)),
-            ("experiment cached", _show(cumulative.cached)),
-            ("experiment output", _show(cumulative.output)),
-            ("experiment reasoning", _show(cumulative.reasoning)),
-            ("session total", _show(session.total)),
-            ("session input", _show(session.input)),
-            ("session cached", _show(session.cached)),
-            ("session output", _show(session.output)),
-            ("session reasoning", _show(session.reasoning)),
-            ("usage quality", cumulative.quality),
+        rows: list[tuple[str, str, object]] = [
+            ("experiment", "total", cumulative.total),
+            ("", "input", cumulative.input),
+            ("", "cached", cumulative.cached),
+            ("", "output", cumulative.output),
+            ("", "reasoning", cumulative.reasoning),
+            ("session", "total", session.total),
+            ("", "input", session.input),
+            ("", "cached", session.cached),
+            ("", "output", session.output),
+            ("", "reasoning", session.reasoning),
+            ("usage", "quality", cumulative.quality),
         ]
         if compact:
             compact_rows = [
                 rows[0],
                 rows[5],
-                rows[6],
-                rows[8],
-                rows[9],
+                ("", "input", session.input),
+                ("", "output", session.output),
+                ("", "reasoning", session.reasoning),
                 rows[10],
             ]
             rows = compact_rows[: row_limit or 1]
-        return Panel(_key_value_grid(rows), title="Token Accounting", border_style="cyan")
+        table = Table.grid(expand=True)
+        table.add_column(style="bold cyan", no_wrap=True)
+        table.add_column(style="dim", no_wrap=True)
+        table.add_column(justify="right", overflow="ellipsis")
+        for section, metric, value in rows:
+            table.add_row(section, metric, _show(value))
+        return Panel(table, title="Token Accounting", border_style="cyan")
 
     def _objective_panel(
         self,

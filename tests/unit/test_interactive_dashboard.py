@@ -224,6 +224,55 @@ def test_header_zebra_and_horizontal_progress_keep_parameter_groups_together() -
     assert len(lines[1].rstrip()) < 25
 
 
+def test_performance_times_use_whole_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 1047.4)
+    monkeypatch.setattr(
+        dashboard.resource,
+        "getrusage",
+        lambda _scope: SimpleNamespace(ru_utime=296.7, ru_stime=245.4),
+    )
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        start_live=False,
+    )
+    sink.state = _running_state()
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=60,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._performance_panel())
+    assert "947/296/245s" in output.getvalue()
+    sink.close()
+
+
+def test_token_accounting_groups_rows_without_extra_separator_lines() -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        start_live=False,
+    )
+    sink.state = _running_state()
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=60,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._tokens_panel())
+    rendered = output.getvalue()
+    assert rendered.count("experiment") == 1
+    assert rendered.count("session") == 1
+    assert rendered.count("usage") == 1
+    assert "total" in rendered
+    assert "input" in rendered
+    assert "quality" in rendered
+    assert len(rendered.splitlines()) == 13
+    sink.close()
+
+
 def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> None:
     state = _running_state()
     assert state.active_provider_turns == 0
@@ -501,11 +550,12 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
             "workspace/dashboard-run/artifacts/native-generation-checkpoint.json"
             in rendered
         )
-        assert "experiment input" in rendered
-        assert "session total" in rendered
+        assert "experiment" in rendered
+        assert "session" in rendered
+        assert "usage" in rendered
         assert "[1–8] copy" in rendered
     elif width >= 110:
-        assert "session total" in rendered
+        assert "session" in rendered
         assert "[1–8] copy" in rendered
     sink.close()
 
@@ -715,7 +765,10 @@ def test_pending_panel_copy_writes_fallback_and_expires_notice(
     path = tmp_path / "panel-tokens-dashboard-run.txt"
     copied = path.read_text(encoding="utf-8")
     assert copied.startswith("# Token Accounting\n\n")
-    assert "experiment input" in copied
+    assert "experiment" in copied
+    assert "session" in copied
+    assert "usage" in copied
+    assert "input" in copied
     assert "\x1b" not in copied
     assert not any(character in copied for character in "╭╮╰╯│")
     clipboard.assert_called_once_with(copied)
@@ -786,22 +839,22 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "7336f7b895aaf85677c60f7c22bb7c8f526cdacf8d9f7f02bc2ba53cc1e24020"
+        "62319fec6348979caff63898fb76bfb8b27273e148cd5cf7ed5a8fcf35de670d"
     ),
     "evaluation_active": (
-        "f3fb148ffe9914e76f6b3746f56337d763a9cd9749e1c5d8ef1820a7d12ef1be"
+        "0ae52c16719b68dd481605903c62139c2ccaeac7efe93519528c135ddb4c6bad"
     ),
     "validation_details": (
-        "e9a81c732e5430b25bede66962f4eaea57d8736fcbef8bb0785cdef51d473e5c"
+        "06c042e6db830da0254a4607bb49d3d9c945039b735dff25ecd117a9898c728c"
     ),
     "completed": (
-        "a69a542d2a1ebe2c04f93cb3bb142aa6226691fbf399b71d15a2fa7596a526f9"
+        "b78dc065870fda4b6cb8e72107cbbb973eb4c26e2d7ed86fd2b4f9b2c40bf982"
     ),
     "profiling_disabled": (
-        "701f45bbaa72d1d6ea1604ef65bceb671aefb0938b9ad0c32a8daa812bc7a54c"
+        "374fd5d0bac1aa2aeed1a3577c96345fddb71bffb277c27422b4eb090ec0f117"
     ),
     "compact": (
-        "3e1ddc05ff2e5bf7267c3ac86163e55c6d03a8bf68c7527b6dc328ae5d6a8894"
+        "0cf6c00f0d71a2cb148cecc0203fc12f1b77a8b402e1b7d184121f8517ca3a5d"
     ),
     "minimal": (
         "d2be7297ac8ee3a90122ab42cd3e2273b706655b228f64dd954f79eec4d051d6"
