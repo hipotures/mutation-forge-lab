@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
+
+import pytest
 
 from mutation_forge.experiment import evaluation
 from mutation_forge.models import GraphScore, GraphState, RewritePlan
@@ -89,7 +92,7 @@ def test_rank_failure_is_recorded_without_aborting_evaluation(
     monkeypatch.setattr(evaluation, "KSwitchPoolGenerator", _PoolGenerator)
 
     result = evaluation._trajectory(
-        _Backend(),
+        cast(Any, _Backend()),
         _TimedOutRanker(),
         {
             "horizon": 1,
@@ -110,3 +113,80 @@ def test_rank_failure_is_recorded_without_aborting_evaluation(
     assert trace[0]["error"] == "ranker did not select a pool proposal"
     assert trace[0]["rank"]["timeout"] is True
     assert trace[0]["rank"]["error"]["code"] == "worker_timeout"
+
+
+def test_run_once_resumes_from_last_completed_episode(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class Ranker:
+        source = "def priority(ctx, proposal):\n    return 0\n"
+
+        def rank(self, _context: Any, _pool: Any) -> None:
+            return None
+
+    settings = {
+        "orders": (4,),
+        "graph_seeds": (1,),
+        "policy_seeds": (10, 11),
+        "horizon": 1,
+        "proposal_pool_size": 1,
+        "baselines": (),
+        "workers": 1,
+        "thread_count": 1,
+        "witness_cap": 64,
+    }
+    first_calls: list[int] = []
+
+    def interrupted(*_args: Any, policy_seed: int, **_kwargs: Any) -> dict[str, Any]:
+        first_calls.append(policy_seed)
+        if policy_seed == 11:
+            raise KeyboardInterrupt
+        return {
+            "order": 4,
+            "graph_seed": 1,
+            "policy_seed": policy_seed,
+            "policies": {"candidate": {"auc": 0.25}},
+        }
+
+    monkeypatch.setattr(evaluation, "_trajectory", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        evaluation._run_once(
+            {},
+            "candidate",
+            Ranker(),
+            settings,
+            backend=cast(Any, object()),
+            limits=cast(Any, object()),
+            checkpoint_root=tmp_path,
+        )
+    assert first_calls == [10, 11]
+
+    resumed_calls: list[int] = []
+
+    def resumed(*_args: Any, policy_seed: int, **_kwargs: Any) -> dict[str, Any]:
+        resumed_calls.append(policy_seed)
+        return {
+            "order": 4,
+            "graph_seed": 1,
+            "policy_seed": policy_seed,
+            "policies": {"candidate": {"auc": 0.5}},
+        }
+
+    progress: list[dict[str, Any]] = []
+    monkeypatch.setattr(evaluation, "_trajectory", resumed)
+    result = evaluation._run_once(
+        {},
+        "candidate",
+        Ranker(),
+        settings,
+        backend=cast(Any, object()),
+        limits=cast(Any, object()),
+        checkpoint_root=tmp_path,
+        progress=lambda payload: progress.append(dict(payload)),
+    )
+
+    assert resumed_calls == [11]
+    assert len(cast(list[Any], result["episodes"])) == 2
+    assert progress[0]["restored"] is True
+    assert progress[1]["restored"] is False

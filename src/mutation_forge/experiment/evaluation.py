@@ -44,6 +44,7 @@ from mutation_forge.stage2b.rankers import SourceRanker
 SCHEMA_VERSION = "mforge.experiment.evaluation.v2"
 DEVELOPMENT_ARTIFACT_VERSION = "mforge.experiment.evaluation.development.v2"
 REPLAY_ARTIFACT_VERSION = "mforge.experiment.evaluation.replay.v2"
+EPISODE_CHECKPOINT_VERSION = "mforge.experiment.evaluation.episode.v2"
 DEFAULT_WITNESS_CAP = 64
 _THREAD_ENVIRONMENT = {
     name: "1"
@@ -143,6 +144,97 @@ def _write_json(path: Path, value: object) -> None:
         + b"\n"
     )
     temporary.replace(path)
+
+
+def _load_completed_pass(
+    path: Path,
+    *,
+    candidate_id: str,
+    source: Any,
+    settings: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not path.is_file() or not isinstance(source, str):
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    source_identity = value.get("source_identity")
+    observed_settings = value.get("settings")
+    if (
+        value.get("schema_version") != SCHEMA_VERSION
+        or value.get("status") != "completed"
+        or value.get("candidate_id") != candidate_id
+        or not isinstance(source_identity, Mapping)
+        or source_identity.get("source_sha256")
+        != hashlib.sha256(source.encode("utf-8")).hexdigest()
+        or not isinstance(observed_settings, Mapping)
+    ):
+        return None
+    scientific_settings = {
+        key: list(item) if isinstance(item, tuple) else item
+        for key, item in settings.items()
+        if key not in {"workers", "thread_count"}
+    }
+    if any(
+        observed_settings.get(key) != item
+        for key, item in scientific_settings.items()
+    ):
+        return None
+    return value
+
+
+def _episode_checkpoint_identity(
+    candidate_id: str,
+    source_identity: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    pass_name: str,
+) -> str:
+    scientific_settings = {
+        key: list(item) if isinstance(item, tuple) else item
+        for key, item in settings.items()
+        if key not in {"workers", "thread_count"}
+    }
+    return _hash(
+        {
+            "candidate_id": candidate_id,
+            "source_identity": dict(source_identity),
+            "settings": scientific_settings,
+            "pass": pass_name,
+        }
+    )
+
+
+def _load_episode_checkpoint(
+    path: Path,
+    *,
+    identity: str,
+    index: int,
+    order: int,
+    graph_seed: int,
+    policy_seed: int,
+) -> dict[str, JsonValue] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"evaluation episode checkpoint is unreadable: {path}") from exc
+    episode = value.get("episode") if isinstance(value, Mapping) else None
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != EPISODE_CHECKPOINT_VERSION
+        or value.get("identity") != identity
+        or value.get("index") != index
+        or not isinstance(episode, dict)
+        or episode.get("order") != order
+        or episode.get("graph_seed") != graph_seed
+        or episode.get("policy_seed") != policy_seed
+    ):
+        raise ValueError(f"evaluation episode checkpoint does not match request: {path}")
+    return cast(dict[str, JsonValue], episode)
 
 
 def _artifact_root(config: object, artifact_root: str | Path | None) -> Path:
@@ -580,8 +672,16 @@ def _run_once(
     profiling_enabled: bool = False,
     pass_name: str = "development",
     counterexample_pipeline: CounterexamplePipeline | None = None,
+    checkpoint_root: Path | None = None,
 ) -> dict[str, JsonValue]:
     source_text, ranker, owned_ranker = _source_and_ranker(candidate_id, source, limits)
+    source_identity = _identity(source_text, ranker)
+    checkpoint_identity = _episode_checkpoint_identity(
+        candidate_id,
+        source_identity,
+        settings,
+        pass_name,
+    )
     started = time.monotonic()
     phase_seconds: dict[str, float] = {}
     phase_calls: dict[str, int] = {}
@@ -595,16 +695,48 @@ def _run_once(
             order_started = time.monotonic()
             for graph_seed in settings["graph_seeds"]:
                 for policy_seed in settings["policy_seeds"]:
-                    episode = _trajectory(
-                        backend,
-                        ranker,
-                        settings,
-                        order=order,
-                        graph_seed=graph_seed,
-                        policy_seed=policy_seed,
-                        candidate_id=candidate_id,
-                        counterexample_pipeline=counterexample_pipeline,
+                    episode_path = (
+                        checkpoint_root
+                        / pass_name
+                        / candidate_id
+                        / f"episode-{completed:06d}.json"
+                        if checkpoint_root is not None
+                        else None
                     )
+                    episode = (
+                        _load_episode_checkpoint(
+                            episode_path,
+                            identity=checkpoint_identity,
+                            index=completed,
+                            order=order,
+                            graph_seed=graph_seed,
+                            policy_seed=policy_seed,
+                        )
+                        if episode_path is not None
+                        else None
+                    )
+                    restored = episode is not None
+                    if episode is None:
+                        episode = _trajectory(
+                            backend,
+                            ranker,
+                            settings,
+                            order=order,
+                            graph_seed=graph_seed,
+                            policy_seed=policy_seed,
+                            candidate_id=candidate_id,
+                            counterexample_pipeline=counterexample_pipeline,
+                        )
+                        if episode_path is not None:
+                            _write_json(
+                                episode_path,
+                                {
+                                    "schema_version": EPISODE_CHECKPOINT_VERSION,
+                                    "identity": checkpoint_identity,
+                                    "index": completed,
+                                    "episode": episode,
+                                },
+                            )
                     episodes.append(episode)
                     completed += 1
                     if progress is not None:
@@ -618,6 +750,7 @@ def _run_once(
                             "total": total,
                             "evaluations": completed,
                             "evaluations_per_second": completed / elapsed,
+                            "restored": restored,
                             "pass": pass_name,
                             "pass_progress": completed / max(total, 1),
                             "development_progress": (
@@ -649,7 +782,7 @@ def _run_once(
         "schema_version": SCHEMA_VERSION,
         "status": "completed",
         "candidate_id": candidate_id,
-        "source_identity": _identity(source_text, ranker),
+        "source_identity": source_identity,
         "settings": {
             key: list(value) if isinstance(value, tuple) else value
             for key, value in settings.items()
@@ -761,18 +894,28 @@ def evaluate_candidate(
         event_callback=counterexample_event_callback,
     )
     try:
-        primary = _run_once(
-            config,
-            candidate_id,
-            source,
-            settings,
-            backend=primary_backend,
-            limits=limits,
-            progress=progress,
-            profiling_enabled=profiling_enabled,
-            pass_name="development",
-            counterexample_pipeline=pipeline,
+        development_path = root / "evaluations" / "development" / f"{candidate_id}.json"
+        primary = _load_completed_pass(
+            development_path,
+            candidate_id=candidate_id,
+            source=source,
+            settings=settings,
         )
+        primary_recovered = primary is not None
+        if primary is None:
+            primary = _run_once(
+                config,
+                candidate_id,
+                source,
+                settings,
+                backend=primary_backend,
+                limits=limits,
+                progress=progress,
+                profiling_enabled=profiling_enabled,
+                pass_name="development",
+                counterexample_pipeline=pipeline,
+                checkpoint_root=root / "evaluations" / "episodes",
+            )
         backend_repo = getattr(primary_backend, "repo", None)
         observed_repo = (
             Path(backend_repo) if backend_repo is not None else _repo_path(config, heg_repo)
@@ -796,32 +939,40 @@ def evaluate_candidate(
             "network_calls": 0,
             "backend_injected": injected,
         }
-        primary["provenance"] = provenance
-        development_path = root / "evaluations" / "development" / f"{candidate_id}.json"
-        _write_json(development_path, primary)
+        if not primary_recovered:
+            primary["provenance"] = provenance
+            _write_json(development_path, primary)
         result = dict(primary)
         result["artifacts"] = {"development": str(development_path)}
         if settings["replay"]:
-            replay_backend = make_backend()
-            try:
-                replay = _run_once(
-                    config,
-                    candidate_id,
-                    source,
-                    settings,
-                    backend=replay_backend,
-                    limits=limits,
-                    progress=progress,
-                    profiling_enabled=profiling_enabled,
-                    pass_name="replay",
-                    counterexample_pipeline=None,
-                )
-            finally:
-                if replay_backend is not primary_backend and backend is None:
-                    replay_backend.close()
-            replay["provenance"] = provenance
             replay_path = root / "evaluations" / "replay" / f"{candidate_id}.json"
-            _write_json(replay_path, replay)
+            replay = _load_completed_pass(
+                replay_path,
+                candidate_id=candidate_id,
+                source=source,
+                settings=settings,
+            )
+            if replay is None:
+                replay_backend = make_backend()
+                try:
+                    replay = _run_once(
+                        config,
+                        candidate_id,
+                        source,
+                        settings,
+                        backend=replay_backend,
+                        limits=limits,
+                        progress=progress,
+                        profiling_enabled=profiling_enabled,
+                        pass_name="replay",
+                        counterexample_pipeline=None,
+                        checkpoint_root=root / "evaluations" / "episodes",
+                    )
+                finally:
+                    if replay_backend is not primary_backend and backend is None:
+                        replay_backend.close()
+                replay["provenance"] = provenance
+                _write_json(replay_path, replay)
             result["replay"] = {
                 "enabled": True,
                 "exact": _hash(primary) == _hash(replay),
