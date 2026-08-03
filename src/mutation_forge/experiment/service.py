@@ -1057,7 +1057,7 @@ class ExperimentService:
                     cumulative_candidates=counts.get("candidate_count", 0),
                     archive_size=counts.get("candidate_count", 0),
                     cumulative_tokens=cumulative.get("total_tokens", 0),
-                    usage={"totalTokens": cumulative.get("total_tokens", 0)},
+                    usage=state.token_usage(),
                     session_usage={
                         "inputTokens": 0,
                         "cachedInputTokens": 0,

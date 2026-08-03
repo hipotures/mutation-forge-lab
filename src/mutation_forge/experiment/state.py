@@ -660,6 +660,49 @@ class ExperimentStateStore:
             "compute_seconds": float(row["cumulative_runtime_seconds"]),
         }
 
+    def token_usage(self) -> dict[str, int | str]:
+        totals = {field: 0 for field in _USAGE_FIELDS}
+        qualities: set[str] = set()
+        charged_failed_turns = 0
+        rows = self.connection.execute(
+            "SELECT state,usage_json FROM provider_turns"
+        ).fetchall()
+        for row in rows:
+            try:
+                usage = json.loads(str(row["usage_json"]))
+            except json.JSONDecodeError:
+                usage = {}
+            if not isinstance(usage, Mapping):
+                continue
+            for field in _USAGE_FIELDS:
+                value = usage.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    totals[field] += value
+            quality = usage.get("quality")
+            if isinstance(quality, str):
+                qualities.add(quality)
+            turn_total = usage.get("totalTokens")
+            if (
+                row["state"] == "failed"
+                and isinstance(turn_total, int)
+                and not isinstance(turn_total, bool)
+                and turn_total > 0
+            ):
+                charged_failed_turns += 1
+        quality = (
+            "unknown"
+            if not qualities or qualities == {"unknown"}
+            else "exact"
+            if qualities == {"exact"}
+            else "partial"
+        )
+        totals["totalTokens"] = int(self.experiment()["cumulative_tokens"])
+        return {
+            **totals,
+            "quality": quality,
+            "chargedFailedTurns": charged_failed_turns,
+        }
+
     get_experiment = experiment
     get_session = session
     latest_checkpoint = checkpoint

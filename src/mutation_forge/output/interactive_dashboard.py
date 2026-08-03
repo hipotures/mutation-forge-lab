@@ -11,6 +11,7 @@ import time
 import tty
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import PurePath
 from typing import Any, Literal, TextIO
 
 from rich import box
@@ -458,7 +459,6 @@ def _global_payload(state: DashboardState, payload: Mapping[str, JsonValue]) -> 
     integers = {
         "generation": "generation",
         "generation_limit": "generation_limit",
-        "completed_slots": "completed_slots",
         "population_size": "population_size",
         "max_model_turns": "max_model_turns",
         "configured_concurrency": "configured_provider_concurrency",
@@ -540,6 +540,17 @@ def reduce_dashboard_event(
             view="matrix" if state.view == "details" else state.view,
         )
         state = _replace_generation(state, generation, _empty_slots(generation, count))
+    elif event_type in {"slot_queued", "generation_completed"}:
+        event_generation = _integer(payload.get("generation"))
+        completed = _integer(payload.get("completed_slots"))
+        if event_generation == state.generation and completed is not None:
+            state = replace(
+                state,
+                completed_slots=min(
+                    state.population_size,
+                    max(state.completed_slots, completed),
+                ),
+            )
     elif event_type == "provider_turn_started":
         state = replace(
             state,
@@ -1178,6 +1189,7 @@ class InteractiveDashboardSink:
 
     def _render_full_or_compact(self, width: int, height: int, mode: str) -> Layout:
         root = Layout(name="root")
+        metric_rows = 1
         if mode == "full":
             root.split_column(
                 Layout(self._header(width), name="header", size=5),
@@ -1188,11 +1200,13 @@ class InteractiveDashboardSink:
                 Layout(self._footer(width), name="footer", size=1),
             )
         else:
+            metrics_size = min(13, max(3, height - 29))
+            metric_rows = max(1, metrics_size - 2)
             root.split_column(
                 Layout(self._header(width, compact=True), name="header", size=4),
                 Layout(self._progress(width, horizontal=False), name="progress", size=7),
                 Layout(name="main", size=13),
-                Layout(name="metrics", size=3),
+                Layout(name="metrics", size=metrics_size),
                 Layout(name="bottom"),
                 Layout(self._footer(width), name="footer", size=1),
             )
@@ -1212,9 +1226,18 @@ class InteractiveDashboardSink:
             root["metrics"].split_row(*panels)
         else:
             root["metrics"].split_row(
-                Layout(self._performance_panel(compact=True), ratio=1),
-                Layout(self._tokens_panel(compact=True), ratio=1),
-                Layout(self._objective_panel(compact=True), ratio=1),
+                Layout(
+                    self._performance_panel(compact=True, row_limit=metric_rows),
+                    ratio=1,
+                ),
+                Layout(
+                    self._tokens_panel(compact=True, row_limit=metric_rows),
+                    ratio=1,
+                ),
+                Layout(
+                    self._objective_panel(compact=True, row_limit=metric_rows),
+                    ratio=1,
+                ),
             )
         root["bottom"].split_row(
             Layout(self._activity_panel(mode), ratio=3),
@@ -1268,12 +1291,17 @@ class InteractiveDashboardSink:
             "stopping": "bold yellow",
         }.get(self.state.experiment_state, "bold cyan")
         elapsed = self._elapsed()
-        first = Text()
-        first.append(f"Run {self.state.run_id}  ")
-        first.append(self.state.experiment_state.upper(), style=state_style)
-        first.append(
-            f"  Gen {self.state.generation}/{_show(self.state.generation_limit)}"
-            f"  Phase {self.state.phase}"
+        first = _parameter_line(
+            (
+                ("Run", self.state.run_id, None),
+                ("State", self.state.experiment_state.upper(), state_style),
+                (
+                    "Gen",
+                    f"{self.state.generation}/{_show(self.state.generation_limit)}",
+                    None,
+                ),
+                ("Phase", self.state.phase, None),
+            )
         )
         if minimal:
             return Panel(first, title="Mutation Forge Lab · Native experiment", border_style="cyan")
@@ -1285,10 +1313,14 @@ class InteractiveDashboardSink:
             self.state.active_provider_turns,
             self.state.configured_provider_concurrency,
         )
-        second = Text(
-            f"Session {self.state.session_id}  Mode {self.state.run_mode}  "
-            f"Model {self.state.model}/{self.state.effort}  "
-            f"Eval workers {evaluation_workers}  Provider {provider_concurrency}"
+        second = _parameter_line(
+            (
+                ("Session", self.state.session_id, None),
+                ("Mode", self.state.run_mode, None),
+                ("Model", f"{self.state.model}/{self.state.effort}", None),
+                ("Eval workers", evaluation_workers, None),
+                ("Provider", provider_concurrency, None),
+            )
         )
         if compact:
             return Panel(
@@ -1297,9 +1329,13 @@ class InteractiveDashboardSink:
                 border_style="cyan",
                 padding=(0, 1),
             )
-        third = Text(
-            f"Checkpoint {self.state.checkpoint}  Started {self.state.started_at}  "
-            f"Uptime {_duration(elapsed)}  Wall budget {_duration(self.state.wall_seconds)}"
+        third = _parameter_line(
+            (
+                ("Checkpoint", _safe_display_path(self.state.checkpoint), None),
+                ("Started", self.state.started_at, None),
+                ("Uptime", _duration(elapsed), None),
+                ("Wall budget", _duration(self.state.wall_seconds), None),
+            )
         )
         return Panel(
             Group(Align.center(first), Align.center(second), Align.center(third)),
@@ -1360,18 +1396,17 @@ class InteractiveDashboardSink:
         columns: list[tuple[str, Literal["left", "right"], int]] = [
             ("", "left", 1),
             ("slot", "left", 7),
-            ("parent", "left", 11),
-            ("phase", "left", 9),
+            ("parent", "left", 13),
+            ("phase", "left", 10),
             ("state", "left", 10),
             ("elapsed", "right", 7),
-            ("provider turn", "left", 12),
             ("in", "right", 7),
             ("out", "right", 7),
             ("total", "right", 7),
-            ("validation", "left", 12),
-            ("probe", "left", 10),
-            ("candidate / error", "left", 18),
-            ("objective ↑", "right", 10),
+            ("validation", "left", 22),
+            ("probe", "left", 14),
+            ("candidate / error", "left", 24),
+            ("objective ↑", "right", 12),
         ]
         if mode == "compact":
             visible = {
@@ -1407,7 +1442,6 @@ class InteractiveDashboardSink:
                 "phase": slot.phase,
                 "state": Text(slot.state, style=STATE_STYLES.get(slot.state, "")),
                 "elapsed": _duration(self._slot_elapsed(slot)),
-                "provider turn": slot.provider_turn_id or "—",
                 "in": _show(slot.usage.input),
                 "out": _show(slot.usage.output),
                 "total": _show(slot.usage.total),
@@ -1487,7 +1521,12 @@ class InteractiveDashboardSink:
         elif tab == "Tokens":
             body = _token_grid(slot.usage, charged=slot.charged)
         elif tab == "Artifacts":
-            body = Text("\n".join(slot.artifacts) if slot.artifacts else "—", style="dim")
+            body = Text(
+                "\n".join(_safe_display_path(item) for item in slot.artifacts)
+                if slot.artifacts
+                else "—",
+                style="dim",
+            )
         elif tab == "Prompt preview":
             body = Text(
                 _bounded_preview(slot.prompt_preview, 8 if mode == "full" else 5),
@@ -1504,7 +1543,12 @@ class InteractiveDashboardSink:
             border_style="cyan",
         )
 
-    def _performance_panel(self, *, compact: bool = False) -> Panel:
+    def _performance_panel(
+        self,
+        *,
+        compact: bool = False,
+        row_limit: int | None = None,
+    ) -> Panel:
         elapsed = max(self._elapsed(), 0.001)
         try:
             usage = resource.getrusage(resource.RUSAGE_SELF)
@@ -1532,7 +1576,7 @@ class InteractiveDashboardSink:
             ),
         ]
         if compact:
-            rows = rows[:1]
+            rows = rows[: row_limit or 1]
         if not compact:
             rows.extend(
                 (
@@ -1547,23 +1591,45 @@ class InteractiveDashboardSink:
             )
         return Panel(_key_value_grid(rows), title="Performance & IR", border_style="cyan")
 
-    def _tokens_panel(self, *, compact: bool = False) -> Panel:
+    def _tokens_panel(
+        self,
+        *,
+        compact: bool = False,
+        row_limit: int | None = None,
+    ) -> Panel:
         cumulative = self.state.cumulative_usage
         session = self.state.session_usage
         rows: list[tuple[str, object]] = [
-            ("cumulative total", _show(cumulative.total)),
-            ("session delta", _show(session.total)),
-            ("input", _show(cumulative.input)),
-            ("cached input", _show(cumulative.cached)),
-            ("output", _show(cumulative.output)),
-            ("reasoning", _show(cumulative.reasoning)),
-            ("quality", cumulative.quality),
+            ("experiment total", _show(cumulative.total)),
+            ("experiment input", _show(cumulative.input)),
+            ("experiment cached", _show(cumulative.cached)),
+            ("experiment output", _show(cumulative.output)),
+            ("experiment reasoning", _show(cumulative.reasoning)),
+            ("session total", _show(session.total)),
+            ("session input", _show(session.input)),
+            ("session cached", _show(session.cached)),
+            ("session output", _show(session.output)),
+            ("session reasoning", _show(session.reasoning)),
+            ("usage quality", cumulative.quality),
         ]
         if compact:
-            rows = rows[:1]
+            compact_rows = [
+                rows[0],
+                rows[5],
+                rows[6],
+                rows[8],
+                rows[9],
+                rows[10],
+            ]
+            rows = compact_rows[: row_limit or 1]
         return Panel(_key_value_grid(rows), title="Token Accounting", border_style="cyan")
 
-    def _objective_panel(self, *, compact: bool = False) -> Panel:
+    def _objective_panel(
+        self,
+        *,
+        compact: bool = False,
+        row_limit: int | None = None,
+    ) -> Panel:
         rows: list[tuple[str, object]] = [
             ("direction", f"{self.state.objective_direction} ↑"),
             ("current", _objective(self.state.current_objective)),
@@ -1578,7 +1644,7 @@ class InteractiveDashboardSink:
             ("archive size", self.state.archive_size),
         ]
         if compact:
-            rows = rows[:1]
+            rows = rows[: row_limit or 1]
         return Panel(_key_value_grid(rows), title="Objective / Archive", border_style="cyan")
 
     def _profiling_panel(self) -> Panel:
@@ -1674,7 +1740,20 @@ class InteractiveDashboardSink:
         if not self.state.objective_history:
             chart = Text("No evaluated objective history yet", style="dim")
         else:
-            chart = Text("objective  " + _sparkline(self.state.objective_history), style="green")
+            history = self.state.objective_history
+            sparkline = _sparkline(history)
+            if mode == "compact":
+                chart = Text(
+                    f"Objective n={len(history)}: "
+                    f"{history[0]:.6f} → {history[-1]:.6f}  {sparkline}",
+                    style="green",
+                )
+            else:
+                chart = Text(
+                    f"Objective history · oldest → latest · n={len(history)}\n"
+                    f"min {min(history):.6f}  {sparkline}  max {max(history):.6f}",
+                    style="green",
+                )
         return Panel(Group(summary, chart), title="Quick View", border_style="cyan")
 
     def _overlay_panel(self, width: int, height: int) -> Panel:
@@ -1840,7 +1919,7 @@ def _progress_bar(
     )
     progress = Progress(
         *columns,
-        expand=True,
+        expand=not stacked,
     )
     if total is None:
         progress.add_task("", total=1, completed=0, ratio="—/—")
@@ -1852,6 +1931,18 @@ def _progress_bar(
             ratio=f"{current}/{total}",
         )
     return Group(Text(label), progress) if stacked else progress
+
+
+def _parameter_line(
+    groups: Sequence[tuple[str, object, str | None]],
+) -> Text:
+    line = Text()
+    for index, (label, value, semantic_style) in enumerate(groups):
+        if index:
+            line.append("  ")
+        style = semantic_style or ("grey62" if index % 2 == 0 else "")
+        line.append(f"{label} {_show(value)}", style=style)
+    return line
 
 
 def _key_value_grid(rows: Sequence[tuple[str, object]]) -> Table:
@@ -1952,5 +2043,16 @@ def _flatten_config(value: Mapping[str, object], prefix: str = "") -> str:
         if isinstance(item, Mapping):
             rows.extend(_flatten_config(item, name).splitlines())
         else:
-            rows.append(f"{name} = {item}")
+            rendered = _safe_display_path(item) if isinstance(item, str) else item
+            rows.append(f"{name} = {rendered}")
     return "\n".join(row for row in rows if row)
+
+
+def _safe_display_path(value: str) -> str:
+    path = PurePath(value)
+    if not path.is_absolute():
+        return value
+    parts = path.parts
+    if "workspace" in parts:
+        return "/".join(parts[parts.index("workspace") :])
+    return path.name

@@ -218,6 +218,15 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
             "total_tokens": 3,
             "compute_seconds": 0.0,
         }
+        assert state.token_usage() == {
+            "inputTokens": 1,
+            "cachedInputTokens": 0,
+            "outputTokens": 2,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 3,
+            "quality": "exact",
+            "chargedFailedTurns": 0,
+        }
         assert state.record_provider_turn(
             idempotency_key="turn-failed",
             generation=0,
@@ -241,6 +250,15 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
         assert failed_usage["quality"] == "partial"
         assert state.cumulative()["provider_turns"] == 1
         assert state.cumulative()["total_tokens"] == 8
+        assert state.token_usage() == {
+            "inputTokens": 5,
+            "cachedInputTokens": 0,
+            "outputTokens": 3,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 8,
+            "quality": "partial",
+            "chargedFailedTurns": 1,
+        }
 
         state.finish_session(
             "session-000001",

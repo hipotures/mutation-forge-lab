@@ -50,6 +50,10 @@ def _running_state() -> DashboardState:
             experiment_id="dashboard-run",
             session_id="session-000001",
             run_mode="fresh",
+            checkpoint=(
+                "/home/user/DEV/mutation-forge-lab/workspace/dashboard-run/"
+                "artifacts/native-generation-checkpoint.json"
+            ),
             configured_wall_seconds=7200.0,
             model="gpt-test",
             effort="high",
@@ -68,7 +72,14 @@ def _running_state() -> DashboardState:
                 "totalTokens": 160,
                 "quality": "exact",
             },
-            session_usage={"totalTokens": 0, "quality": "unknown"},
+            session_usage={
+                "inputTokens": 0,
+                "cachedInputTokens": 0,
+                "outputTokens": 0,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 0,
+                "quality": "unknown",
+            },
         ),
         monotonic=100.0,
     )
@@ -179,6 +190,38 @@ def test_responsive_mode_uses_the_stricter_dimension(
     assert _responsive_mode(width, height) == expected
 
 
+def test_header_zebra_and_horizontal_progress_keep_parameter_groups_together() -> None:
+    header = dashboard._parameter_line(
+        (
+            ("Run", "demo", None),
+            ("State", "RUNNING", "bold cyan"),
+            ("Gen", "1/4", None),
+            ("Phase", "development", None),
+        )
+    )
+    assert header.plain == "Run demo  State RUNNING  Gen 1/4  Phase development"
+    assert [str(span.style) for span in header.spans] == [
+        "grey62",
+        "bold cyan",
+        "grey62",
+    ]
+
+    output = io.StringIO()
+    Console(file=output, width=40, force_terminal=False, color_system=None).print(
+        dashboard._progress_bar(
+            "Generation",
+            1,
+            4,
+            width=8,
+            stacked=True,
+        )
+    )
+    lines = output.getvalue().splitlines()
+    assert lines[0].strip() == "Generation"
+    assert "25%" in lines[1] and "1/4" in lines[1]
+    assert len(lines[1].rstrip()) < 25
+
+
 def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> None:
     state = _running_state()
     assert state.active_provider_turns == 0
@@ -194,6 +237,30 @@ def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> N
     assert slot_01.state == "invalid"
     assert slot_01.validation == "forbidden_input_field"
     assert "forbidden input field" in slot_01.validation_message
+
+    checkpointed = reduce_dashboard_event(
+        state,
+        _event(
+            "checkpoint_written",
+            generation=1,
+            completed_slots=44,
+        ),
+        monotonic=119.0,
+    )
+    assert checkpointed.completed_slots == 0
+    state = reduce_dashboard_event(
+        checkpointed,
+        _event(
+            "slot_queued",
+            generation=1,
+            slot="slot-02",
+            status="accepted",
+            completed_slots=3,
+            population_size=8,
+        ),
+        monotonic=119.5,
+    )
+    assert state.completed_slots == 3
 
     completed = _event(
         "provider_turn_completed",
@@ -349,6 +416,27 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
     for value in expected:
         assert value in rendered
     assert "No evaluated objective history yet" in rendered or width < 110
+    if width >= 110:
+        assert "forbidden_input_f…" not in rendered
+        assert "validati…" not in rendered
+    if width >= 140:
+        matrix_output = io.StringIO()
+        Console(
+            file=matrix_output,
+            width=width,
+            force_terminal=False,
+            color_system=None,
+        ).print(sink._slot_matrix(width, "full"))
+        assert "provider turn" not in matrix_output.getvalue().lower()
+        assert "/home/user/" not in rendered
+        assert (
+            "workspace/dashboard-run/artifacts/native-generation-checkpoint.json"
+            in rendered
+        )
+        assert "experiment input" in rendered
+        assert "session total" in rendered
+    elif width >= 110:
+        assert "session total" in rendered
     sink.close()
 
 
@@ -392,6 +480,36 @@ def test_detail_view_and_profiling_disabled_are_truthful(
         color_system=None,
     ).print(sink.render())
     assert "Profiling" not in output.getvalue()
+    sink.close()
+
+
+def test_quick_view_explains_objective_sparkline_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 130.0)
+    sink = InteractiveDashboardSink(
+        console=Console(
+            file=io.StringIO(),
+            width=150,
+            height=55,
+            force_terminal=False,
+            color_system=None,
+        ),
+        start_live=False,
+    )
+    sink.state = replace(_running_state(), objective_history=(0.25, 0.75))
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        height=55,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink.render())
+    rendered = output.getvalue()
+    assert "Objective history · oldest → latest · n=2" in rendered
+    assert "min 0.250000" in rendered
+    assert "max 0.750000" in rendered
     sink.close()
 
 
@@ -520,25 +638,25 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "d3530fb7f12083eaa71a633b9d3288f844811cdfd83610fcfb120c7285fcd4de"
+        "338cfedf6b42168fb8167db61acf527dddbe73e76b371cd03225a1826bc9cc39"
     ),
     "evaluation_active": (
-        "7ce8efcb4c96c85707be7f28ba76bbb75d0189406cfe13464248d5b663188410"
+        "3848f031c27d73c404a8e5a6e6bc6db5bf9a3358e210804866a3e50b910bbcf5"
     ),
     "validation_details": (
-        "d728240e8a0a597bda03be7ee55c0897df86c3d325c8c97bb6af8b5fb19148c8"
+        "2621d8bb39fa2cc0d6fb2bf1cc0c4103b0d823a7cb140283ae8f20753cd0d491"
     ),
     "completed": (
-        "f1911c4a6cd9e01a48d470eb2b82dadf7e0d30f697f91607f74bd8bcd052fd6a"
+        "f22c5f4ba0116d402d0ab3616a8cba9096bb398095452bc19264558a5c20b578"
     ),
     "profiling_disabled": (
-        "8cab26a5e4d94ae14217da0cfb7338b0ca7c90d19c8a6a05d719db57314edf31"
+        "d86735c1b76214fff21c2130b1d45d1527dfa0c2601e08948eea7893f849c4b1"
     ),
     "compact": (
-        "a6241f4f89f6f962fe987131f350fcb457e98f6ed37149fa045726cdb4ff4856"
+        "4b32d911aba6f0597c934f647d0d275893622574d9bd8d37ccc6ad9c8cf4a4b0"
     ),
     "minimal": (
-        "5226736be73ed0a3faed1588bf7f23a1da1a9040f387e5d99a019bf00490a985"
+        "83cfdfe6cfdecc8de3e2e1c54c7c60c0ec17d5d0a026aa0b02783b039ae1e77d"
     ),
 }
 

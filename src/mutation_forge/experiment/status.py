@@ -14,12 +14,6 @@ from .lock import LockError, load_lock, verify_lock
 from .state import ExperimentStateStore, StateError, process_alive
 
 STATUS_SCHEMA_VERSION = "mforge.experiment.status.v1"
-_USAGE_FIELDS = (
-    "inputTokens",
-    "cachedInputTokens",
-    "outputTokens",
-    "reasoningOutputTokens",
-)
 
 
 def _not_created(config: ExperimentConfig, layout: ExperimentLayout) -> dict[str, Any]:
@@ -151,7 +145,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         )
         best_id = str(best["candidate_id"]) if best is not None else None
         best_metric = best["metric"] if best is not None else None
-        token_usage = _token_usage(state, total_tokens=int(current["total_tokens"]))
+        token_usage = state.token_usage()
         last_error = checkpoint_error or state.latest_error()
         session_metrics: dict[str, Any] = {}
         if session is not None:
@@ -252,52 +246,6 @@ def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
             str(candidate["candidate_id"]),
         ),
     )
-
-
-def _token_usage(
-    state: ExperimentStateStore, *, total_tokens: int
-) -> dict[str, int | str]:
-    totals = {field: 0 for field in _USAGE_FIELDS}
-    qualities: set[str] = set()
-    charged_failed_turns = 0
-    rows = state.connection.execute(
-        "SELECT state,usage_json FROM provider_turns"
-    ).fetchall()
-    for row in rows:
-        try:
-            usage = json.loads(str(row["usage_json"]))
-        except json.JSONDecodeError:
-            usage = {}
-        if not isinstance(usage, Mapping):
-            continue
-        for field in _USAGE_FIELDS:
-            value = usage.get(field)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                totals[field] += value
-        quality = usage.get("quality")
-        if isinstance(quality, str):
-            qualities.add(quality)
-        turn_total = usage.get("totalTokens")
-        if (
-            row["state"] == "failed"
-            and isinstance(turn_total, int)
-            and not isinstance(turn_total, bool)
-            and turn_total > 0
-        ):
-            charged_failed_turns += 1
-    quality = (
-        "unknown"
-        if not qualities or qualities == {"unknown"}
-        else "exact"
-        if qualities == {"exact"}
-        else "partial"
-    )
-    return {
-        **totals,
-        "totalTokens": total_tokens,
-        "quality": quality,
-        "chargedFailedTurns": charged_failed_turns,
-    }
 
 
 def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> str:
