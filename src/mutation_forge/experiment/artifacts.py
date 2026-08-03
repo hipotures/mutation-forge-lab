@@ -856,7 +856,7 @@ class TurnArtifactStore:
         manifest_path.unlink()
         return archived
 
-    def verify_turn(self, directory: str | Path) -> bool:
+    def verify_turn(self, directory: str | Path, *, allow_extra: bool = False) -> bool:
         root = Path(directory)
         manifest_path = root / ARTIFACT_MANIFEST
         try:
@@ -895,7 +895,7 @@ class TurnArtifactStore:
             ):
                 raise ArtifactIncompleteError(f"turn artifact digest mismatch: {relative}")
             expected.add(relative)
-        if actual != expected:
+        if expected.difference(actual) or (not allow_extra and actual != expected):
             raise ArtifactIncompleteError(
                 "turn artifact file set mismatch: "
                 f"missing={sorted(expected - actual)}, "

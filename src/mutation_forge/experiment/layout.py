@@ -386,13 +386,55 @@ class ExperimentLayout:
                 path.relative_to(self.artifacts.resolve())
             except ValueError as exc:
                 raise WorkspaceError("experiment artifact path escapes workspace") from exc
-            if not path.is_file():
-                raise WorkspaceError(f"experiment artifact is missing: {relative}")
-            data = path.read_bytes()
-            if (
-                entry.get("size") != len(data)
-                or entry.get("sha256") != hashlib.sha256(data).hexdigest()
-            ):
+            data = path.read_bytes() if path.is_file() else None
+            matches = (
+                data is not None
+                and entry.get("size") == len(data)
+                and entry.get("sha256") == hashlib.sha256(data).hexdigest()
+            )
+            if not matches and allow_new:
+                relocation_candidates = list(
+                    path.parent.parent.glob(f"{path.parent.name}.attempt-*/{path.name}")
+                )
+                if path.name == "turn-manifest.json":
+                    relocation_candidates.extend(
+                        path.parent.glob("turn-manifest.attempt-*.json")
+                    )
+                for candidate in sorted(relocation_candidates):
+                    if not candidate.is_file():
+                        continue
+                    candidate_data = candidate.read_bytes()
+                    if (
+                        entry.get("size") == len(candidate_data)
+                        and entry.get("sha256")
+                        == hashlib.sha256(candidate_data).hexdigest()
+                    ):
+                        path = candidate
+                        data = candidate_data
+                        matches = True
+                        break
+            relative_parts = Path(relative).parts
+            session_runtime_mutable = (
+                len(relative_parts) >= 3
+                and relative_parts[0] == "sessions"
+                and (
+                    relative_parts[-1] in {"events.jsonl", "session.json"}
+                    or "logs" in relative_parts[2:-1]
+                )
+            )
+            runtime_mutable = (
+                relative == "native-generation-checkpoint.json"
+                or relative == "run-summary.json"
+                or relative == "archive/index.jsonl"
+                or relative.startswith("evaluations/development/")
+                or relative.startswith("evaluations/replay/")
+                or session_runtime_mutable
+            )
+            if not matches and allow_new and runtime_mutable and data is not None:
+                matches = True
+            if not matches:
+                if data is None:
+                    raise WorkspaceError(f"experiment artifact is missing: {relative}")
                 raise WorkspaceError(f"experiment artifact digest mismatch: {relative}")
             listed_paths.add(relative)
         if not allow_new:

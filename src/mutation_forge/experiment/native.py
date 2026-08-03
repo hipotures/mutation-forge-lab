@@ -32,6 +32,7 @@ from .artifacts import (
 )
 from .config import ExperimentConfig
 from .evaluation import DEFAULT_WITNESS_CAP, evaluate_candidate
+from .evaluation import SCHEMA_VERSION as EVALUATION_SCHEMA_VERSION
 from .generation import (
     GENERATION_SCHEMA_VERSION,
     Candidate,
@@ -476,6 +477,7 @@ class _NativeProvider:
         key = self._key(request)
         directory: Path | None = None
         manifest: Mapping[str, Any] | None = None
+        compatible: list[tuple[Path, Mapping[str, Any]]] = []
         for candidate_directory in self._turn_directories(request):
             manifest_path = candidate_directory / "turn-manifest.json"
             if not manifest_path.is_file():
@@ -493,6 +495,40 @@ class _NativeProvider:
                 directory = candidate_directory
                 manifest = candidate_manifest
                 break
+            if not isinstance(candidate_manifest, Mapping):
+                continue
+            if (
+                candidate_manifest.get("artifact_complete") is not True
+                or candidate_manifest.get("terminal_status") != "completed"
+            ):
+                continue
+            slot = str(request.get("slot", "slot-00"))
+            request_path = candidate_directory / f"{slot}.request.json"
+            if not request_path.is_file():
+                request_files = sorted(candidate_directory.glob("*.request.json"))
+                request_path = request_files[-1] if request_files else request_path
+            try:
+                retained_request = json.loads(request_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(retained_request, Mapping):
+                continue
+            stable_fields = ("campaign_id", "generation", "slot", "parent_id", "phase")
+            if any(
+                retained_request.get(field_name) != request.get(field_name)
+                for field_name in stable_fields
+            ):
+                continue
+            if int(retained_request.get("repair_attempt", 0)) != int(
+                request.get("repair_attempt", 0)
+            ):
+                continue
+            compatible.append((candidate_directory, candidate_manifest))
+        if directory is None and compatible:
+            # Runtime-only changes can alter the rendered prompt and therefore
+            # the request hash.  The completed provider response is still the
+            # same durable slot result when its stable slot identity matches.
+            directory, manifest = compatible[-1]
         if directory is None or manifest is None:
             return None
         try:
@@ -553,7 +589,10 @@ class _NativeProvider:
         if retryable:
             self.turns.archive_retryable_manifest(directory)
             return None
-        self.turns.verify_turn(directory)
+        # Retry transport files can be appended after the completed attempt
+        # manifest.  The manifest-listed evidence remains authoritative and
+        # every listed digest is still checked.
+        self.turns.verify_turn(directory, allow_extra=True)
         status = str(manifest.get("terminal_status", "completed"))
         return {
             "status": status,
@@ -1481,6 +1520,84 @@ class NativeExperimentAdapter:
             summary = result.get("summary") if isinstance(result, Mapping) else None
             return dict(summary) if isinstance(summary, Mapping) else {}
 
+        def recover_completed_evaluation(
+            candidate: Candidate,
+            candidate_id: str,
+        ) -> Mapping[str, Any] | None:
+            """Recover a completed evaluation written before the DB commit."""
+
+            development_path = (
+                layout.artifacts / "evaluations" / "development" / f"{candidate_id}.json"
+            )
+            if not development_path.is_file():
+                return None
+            try:
+                development = json.loads(development_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return None
+            if not isinstance(development, Mapping):
+                return None
+            source_identity = development.get("source_identity")
+            if (
+                development.get("schema_version") != EVALUATION_SCHEMA_VERSION
+                or development.get("status") != "completed"
+                or development.get("candidate_id") != candidate_id
+                or not isinstance(source_identity, Mapping)
+                or source_identity.get("source_sha256") != candidate.source_sha256
+                or source_identity.get("normalized_ast_sha256")
+                != candidate.normalized_ast_sha256
+            ):
+                return None
+            observed_settings = development.get("settings")
+            if not isinstance(observed_settings, Mapping):
+                return None
+            expected_settings = {
+                "orders": list(config.evaluation.orders),
+                "graph_seeds": list(config.evaluation.graph_seeds),
+                "policy_seeds": list(config.evaluation.policy_seeds),
+                "horizon": config.evaluation.horizon,
+                "proposal_pool_size": config.evaluation.proposal_pool_size,
+                "baselines": list(config.evaluation.baselines),
+                "replay": config.evaluation.replay,
+                "witness_cap": DEFAULT_WITNESS_CAP,
+            }
+            if any(
+                observed_settings.get(field_name) != field_value
+                for field_name, field_value in expected_settings.items()
+            ):
+                return None
+            result = dict(development)
+            result["artifacts"] = {"development": str(development_path)}
+            if not config.evaluation.replay:
+                result["replay"] = {"enabled": False, "exact": None}
+                return result
+            replay_path = layout.artifacts / "evaluations" / "replay" / f"{candidate_id}.json"
+            if not replay_path.is_file():
+                return None
+            try:
+                replay = json.loads(replay_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return None
+            replay_identity = replay.get("source_identity") if isinstance(replay, Mapping) else None
+            if (
+                not isinstance(replay, Mapping)
+                or replay.get("schema_version") != EVALUATION_SCHEMA_VERSION
+                or replay.get("status") != "completed"
+                or replay.get("candidate_id") != candidate_id
+                or not isinstance(replay_identity, Mapping)
+                or replay_identity.get("source_sha256") != candidate.source_sha256
+                or replay_identity.get("normalized_ast_sha256")
+                != candidate.normalized_ast_sha256
+            ):
+                return None
+            result["replay"] = {
+                "enabled": True,
+                "exact": _sha256(development) == _sha256(replay),
+                "artifact": str(replay_path),
+                "sha256": _sha256(replay),
+            }
+            return result
+
         def render_search_feedback(
             _generation: int,
             _slot: str,
@@ -1684,6 +1801,16 @@ class NativeExperimentAdapter:
             identity = f"{program_id}:development"
             if state.evaluation(identity) is not None or program_id in streamed_futures:
                 return
+            recovered_evaluation = recover_completed_evaluation(candidate, program_id)
+            if recovered_evaluation is not None:
+                state.record_evaluation(
+                    identity,
+                    candidate_id=program_id,
+                    kind="development",
+                    state="completed",
+                    result=recovered_evaluation,
+                )
+                return
             streamed_futures[program_id] = submit_evaluation(
                 candidate,
                 program_id,
@@ -1744,6 +1871,20 @@ class NativeExperimentAdapter:
                 )
                 identity = f"{program_id}:development"
                 stored_evaluation = state.evaluation(identity)
+                if stored_evaluation is None:
+                    recovered_evaluation = recover_completed_evaluation(
+                        candidate,
+                        program_id,
+                    )
+                    if recovered_evaluation is not None:
+                        state.record_evaluation(
+                            identity,
+                            candidate_id=program_id,
+                            kind="development",
+                            state="completed",
+                            result=recovered_evaluation,
+                        )
+                        stored_evaluation = state.evaluation(identity)
                 prepared.append((candidate, program_id, identity, stored_evaluation))
                 if stored_evaluation is not None:
                     continue
