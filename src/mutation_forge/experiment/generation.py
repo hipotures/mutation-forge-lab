@@ -666,6 +666,7 @@ class GenerationCoordinator:
         archive: Any = None,
         parent_selector: Any = None,
         selection_callback: Any = None,
+        candidate_callback: Any = None,
         parent_sources: Mapping[str, str] | None = None,
         parent_records: Mapping[str, Any] | None = None,
         search_feedback: Any = "",
@@ -696,7 +697,11 @@ class GenerationCoordinator:
             resume_hook,
         )
         self.existing_sources, self.archive = tuple(existing_sources), archive
-        self.parent_selector, self.selection_callback = parent_selector, selection_callback
+        self.parent_selector, self.selection_callback, self.candidate_callback = (
+            parent_selector,
+            selection_callback,
+            candidate_callback,
+        )
         self.parent_sources, self.parent_records = (
             dict(parent_sources or {}),
             dict(parent_records or {}),
@@ -709,6 +714,22 @@ class GenerationCoordinator:
         self.budget_exhausted = budget_exhausted
         self.observer = observer if observer is not None else event_callback
         self._checkpoint_file = self.config.checkpoint_path
+
+    def _notify_candidate(self, generation: int, candidate: Candidate, result: SlotResult) -> None:
+        """Notify a streaming consumer as soon as a candidate is accepted.
+
+        Selection still runs only after the complete generation is assembled.  This
+        hook is intentionally separate so expensive downstream evaluation can begin
+        while the remaining slots are still being validated or repaired.
+        """
+
+        callback = self.candidate_callback
+        if not callable(callback):
+            return
+        try:
+            callback(generation, candidate, result)
+        except TypeError:
+            callback(candidate)
 
     def _emit(self, event_type: str, **payload: Any) -> None:
         """Best-effort callback at the native execution boundary.
@@ -1659,8 +1680,7 @@ class GenerationCoordinator:
         while generation_limit is None or generation < generation_limit:
             boundary = budget_reason()
             has_retained_generation_state = any(
-                isinstance(value, Mapping)
-                and value.get("generation") == generation
+                isinstance(value, Mapping) and value.get("generation") == generation
                 for value in slots_state.values()
             )
             if boundary is not None and not has_retained_generation_state:
@@ -1730,6 +1750,13 @@ class GenerationCoordinator:
                             completed_slots=len(results),
                             population_size=self.config.slots,
                         )
+                        recovered_candidate = results[slot].candidate
+                        if recovered_candidate is not None:
+                            self._notify_candidate(
+                                generation,
+                                recovered_candidate,
+                                results[slot],
+                            )
                         continue
                     exhausted_reason = budget_reason()
                     if exhausted_reason is not None:
@@ -1842,6 +1869,8 @@ class GenerationCoordinator:
                     )
                     slots_state[request.idempotency_key] = results[slot].as_dict()
                     self._save(state)
+                    if candidate is not None:
+                        self._notify_candidate(generation, candidate, results[slot])
                     self._emit(
                         "slot_queued",
                         generation=generation,
@@ -2116,6 +2145,8 @@ class GenerationCoordinator:
                     )
                     results[slot] = repaired
                     item = repaired
+                    if repaired.candidate is not None:
+                        self._notify_candidate(generation, repaired.candidate, repaired)
             ordered: list[SlotResult] = []
             generation_candidates: list[Candidate] = []
             for slot in self.slots:

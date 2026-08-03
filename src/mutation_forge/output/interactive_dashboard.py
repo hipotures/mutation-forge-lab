@@ -352,13 +352,10 @@ def load_persisted_dashboard_state(
                 and not isinstance(previous_repairs_value, bool)
                 else -1
             )
-            if (
-                previous is None
-                or (
-                    isinstance(repairs, int)
-                    and not isinstance(repairs, bool)
-                    and repairs >= int(previous_repairs)
-                )
+            if previous is None or (
+                isinstance(repairs, int)
+                and not isinstance(repairs, bool)
+                and repairs >= int(previous_repairs)
             ):
                 slot_records[key] = raw
 
@@ -387,9 +384,7 @@ def load_persisted_dashboard_state(
                 hourly_tokens_used=int(hourly.get("hourly_tokens_used", 0)),
                 hourly_limit_reached=hourly.get("hourly_limit_reached") is True,
                 hourly_retry_after=(
-                    str(hourly["hourly_retry_after"])
-                    if hourly.get("hourly_retry_after")
-                    else None
+                    str(hourly["hourly_retry_after"]) if hourly.get("hourly_retry_after") else None
                 ),
                 archive_size=counts.get("candidate_count", 0),
                 accepted_candidates=counts.get("unique_candidate_count", 0),
@@ -483,15 +478,20 @@ def load_persisted_dashboard_state(
     for (generation, slot_name), raw in slot_records.items():
         candidate_value = raw.get("candidate")
         candidate_id = (
-            f"g{generation:04d}-{slot_name}"
-            if isinstance(candidate_value, Mapping)
-            else ""
+            f"g{generation:04d}-{slot_name}" if isinstance(candidate_value, Mapping) else ""
         )
+        metric = evaluations.get(candidate_id)
         status = str(raw.get("status", "queued"))
         if status in {"repair_pending", "repair_running"}:
             display_state = "repair"
         elif status in {"failed", "invalid", "duplicate", "accepted"}:
             display_state = status
+        elif status in {"created", "queued"} and metric is not None:
+            # SQLite may contain a completed evaluation written after the last
+            # generation checkpoint.  A metric is durable evidence that this
+            # slot is accepted even when its candidate row still has the
+            # transient ``created`` status.
+            display_state = "accepted"
         else:
             display_state = "queued"
         raw_result = raw.get("raw_result")
@@ -505,7 +505,6 @@ def load_persisted_dashboard_state(
         usage_value = result_mapping.get("usage")
         if usage_value is None and isinstance(candidate_value, Mapping):
             usage_value = candidate_value.get("usage")
-        metric = evaluations.get(candidate_id)
         duration_ms = result_mapping.get("provider_duration_ms")
         duration_seconds = (
             float(duration_ms) / 1000.0
@@ -604,14 +603,10 @@ def _merge_persisted_dashboard_state(
         generations=generations,
         objective_history=history,
         best_objective=(
-            live.best_objective
-            if live.best_objective is not None
-            else persisted.best_objective
+            live.best_objective if live.best_objective is not None else persisted.best_objective
         ),
         best_candidate=(
-            live.best_candidate
-            if live.best_candidate != "—"
-            else persisted.best_candidate
+            live.best_candidate if live.best_candidate != "—" else persisted.best_candidate
         ),
         archive_size=max(live.archive_size, persisted.archive_size),
         accepted_candidates=max(live.accepted_candidates, persisted.accepted_candidates),
@@ -946,9 +941,7 @@ def reduce_dashboard_event(
     event_type = event.event_type
     raw_idempotency_key = _text(payload.get("idempotency_key"))
     idempotency_key = (
-        f"{event_type}:{raw_idempotency_key}"
-        if raw_idempotency_key is not None
-        else None
+        f"{event_type}:{raw_idempotency_key}" if raw_idempotency_key is not None else None
     )
     if idempotency_key is not None and idempotency_key in state.event_keys:
         return state
@@ -1051,8 +1044,7 @@ def reduce_dashboard_event(
                 hourly_tokens_used=state.hourly_tokens_used + (delta.total or 0),
                 hourly_limit_reached=(
                     state.hourly_token_limit is not None
-                    and state.hourly_tokens_used + (delta.total or 0)
-                    >= state.hourly_token_limit
+                    and state.hourly_tokens_used + (delta.total or 0) >= state.hourly_token_limit
                 ),
                 usage_seen=state.usage_seen | {usage_key},
             )
