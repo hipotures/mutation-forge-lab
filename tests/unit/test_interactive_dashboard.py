@@ -17,6 +17,7 @@ from rich.panel import Panel
 
 from mutation_forge import cli
 from mutation_forge.events import Event
+from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.output import interactive_dashboard as dashboard
 from mutation_forge.output.interactive_dashboard import (
     DashboardCapabilities,
@@ -646,6 +647,64 @@ def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> 
     assert state.generation == 1
 
 
+def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_path: Path) -> None:
+    root = tmp_path / "experiment"
+    state_path = root / "state.sqlite3"
+    ExperimentStateStore.initialize(
+        state_path,
+        exp_id="dashboard-run",
+        lock_hash="0" * 64,
+        root=root,
+    )
+    with ExperimentStateStore(state_path) as store:
+        store.record_candidate(
+            "g0000-slot-00",
+            generation=0,
+            slot="slot-00",
+            status="created",
+        )
+        store.record_evaluation(
+            "g0000-slot-00:development",
+            candidate_id="g0000-slot-00",
+            kind="development",
+            state="completed",
+            result={"summary": {"mean_auc": 0.75}},
+        )
+
+    checkpoint = root / "artifacts" / "native-generation-checkpoint.json"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text(
+        '{"schema_version":"mforge.experiment.generation.v2",'
+        '"generation":1,"slots":{}}\n',
+        encoding="utf-8",
+    )
+    persisted = dashboard.load_persisted_dashboard_state(
+        root,
+        run_id="dashboard-run",
+        population_size=2,
+    )
+
+    assert [item.generation for item in persisted.generations] == [0, 1]
+    assert persisted.generations[0].slots[0].objective == pytest.approx(0.75)
+    assert persisted.best_objective == pytest.approx(0.75)
+    assert persisted.best_candidate == "g0000-slot-00"
+
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=120, force_terminal=False),
+        initial_state=DashboardState(
+            generation=1,
+            displayed_generation=1,
+            generations=(GenerationSlots(1, (DashboardSlot("slot-00", 1),)),),
+        ),
+        persisted_loader=lambda: persisted,
+        start_live=False,
+    )
+    sink.handle_key("N")
+    assert sink.state.displayed_generation == 0
+    assert sink.state.generations[0].slots[0].objective == pytest.approx(0.75)
+    sink.close()
+
+
 def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     state = _running_state()
     state, _ = reduce_dashboard_key(state, "c")
@@ -927,7 +986,7 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     assert "Slots" in rendered
 
     footer = sink._footer(150)
-    assert "[n/N] view gen" in footer.plain
+    assert "[n/N] prev/next gen" in footer.plain
     top_span = next(
         span for span in footer.spans if footer.plain[span.start : span.end] == "[t] top"
     )
@@ -1250,14 +1309,14 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "268c53b2e3071a93809605940f7720e641fd5d53da2a300adb57d26b199cfb60"
+        "5fe049bde71d25106360995156c965c91daabb4ca86f6ee8785d76344d176a32"
     ),
-    "evaluation_active": ("85a5690c51ac2ff37564850022b32bfa05aeee859441a66099a47a511486678a"),
-    "validation_details": ("661e90abba3e1c3879946509edbe698bad264a9d5a34a96624315dc13910feca"),
-    "completed": ("915029dba48a02bf711745bd4edfc677a12f2d0f049f8dca563649e66e8f839d"),
-    "profiling_disabled": ("01da8e6e594f70bc6d405d7a5cd081837c5d8372f3bc09c42bd8ecc60f61470f"),
-    "compact": ("f6fd02615400514ff55254f356c9bda8ac1360179793f2a51ba835a69a482864"),
-    "minimal": ("a43735ee60c8dda4ee8dea83c601149dd1789f51a7693d547935d2e9ab18083c"),
+    "evaluation_active": ("076e2596012b58425675a1504cb925fa5150d4e5806dec79dc0d5f1cbf2146d6"),
+    "validation_details": ("a636e2384da13acf396e16c71a9e6424d105253319becf89f22f7626cc6468d5"),
+    "completed": ("af128eeccdacfafd5f03d6e78c4d27867b050538b5c821820bf3d5d674829158"),
+    "profiling_disabled": ("4549b63407a4c8f2e1aa081f8ff4f48287c843e26b09fc6b745f896d09b36112"),
+    "compact": ("9db3a42fdeb51168155e1e220a741ed4f5f2d6c006d6e81ec854dadf136d0a2f"),
+    "minimal": ("a2865872629a132d2b259f22907088ce4a3b3d929d50f702ab2e12fa100d069f"),
 }
 
 

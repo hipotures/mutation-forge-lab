@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import _thread
+import contextlib
+import json
 import os
 import resource
 import select
@@ -12,7 +14,7 @@ import tty
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePath
-from typing import Any, Literal, TextIO
+from typing import Any, Literal, TextIO, cast
 
 from rich import box
 from rich.align import Align
@@ -276,6 +278,348 @@ class DashboardCapabilities:
     pause: Callable[[bool], None] | None = None
     retry: Callable[[str], None] | None = None
     quit: Callable[[], None] | None = None
+
+
+def load_persisted_dashboard_state(
+    experiment_root: str | Path,
+    *,
+    run_id: str,
+    model: str = "—",
+    effort: str = "—",
+    generation_limit: int | None = None,
+    population_size: int = 8,
+    wall_seconds: float | None = None,
+    hourly_token_limit: int | None = None,
+) -> DashboardState:
+    """Load one durable snapshot without replaying historical events.
+
+    The live sink used to start from an empty reducer and then receive every
+    transition of the resumed session.  That made a continuation look as if
+    it was going backwards through old ``queued``/``validating`` states and
+    dropped objectives from earlier sessions.  This reader takes only the
+    checkpoint and committed SQLite rows, then live events continue from that
+    snapshot.
+    """
+
+    root = Path(experiment_root)
+    state = DashboardState(
+        run_id=run_id,
+        model=model,
+        effort=effort,
+        generation_limit=generation_limit,
+        population_size=population_size,
+        wall_seconds=wall_seconds,
+        hourly_token_limit=hourly_token_limit,
+    )
+    checkpoint: Mapping[str, Any] = {}
+    checkpoint_path = root / "artifacts" / "native-generation-checkpoint.json"
+    try:
+        value = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if isinstance(value, Mapping):
+            checkpoint = value
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        checkpoint = {}
+
+    generation_value = checkpoint.get("generation")
+    checkpoint_generation = (
+        generation_value
+        if isinstance(generation_value, int) and not isinstance(generation_value, bool)
+        else 0
+    )
+    slot_records: dict[tuple[int, str], Mapping[str, Any]] = {}
+    raw_slots = checkpoint.get("slots")
+    if isinstance(raw_slots, Mapping):
+        for raw in raw_slots.values():
+            if not isinstance(raw, Mapping):
+                continue
+            generation = raw.get("generation")
+            slot = raw.get("slot")
+            if (
+                not isinstance(generation, int)
+                or isinstance(generation, bool)
+                or not isinstance(slot, str)
+            ):
+                continue
+            key = (generation, slot)
+            previous = slot_records.get(key)
+            # Repair records supersede their initial record.  If both have the
+            # same repair count, preserve the later checkpoint object.
+            repairs = raw.get("repairs")
+            previous_repairs_value = previous.get("repairs") if previous else -1
+            previous_repairs = (
+                previous_repairs_value
+                if isinstance(previous_repairs_value, int)
+                and not isinstance(previous_repairs_value, bool)
+                else -1
+            )
+            if (
+                previous is None
+                or (
+                    isinstance(repairs, int)
+                    and not isinstance(repairs, bool)
+                    and repairs >= int(previous_repairs)
+                )
+            ):
+                slot_records[key] = raw
+
+    evaluations: dict[str, tuple[float, Mapping[str, Any]]] = {}
+    evaluation_history: list[tuple[str, float]] = []
+    store_path = root / "state.sqlite3"
+    store: Any | None = None
+    try:
+        from mutation_forge.experiment.state import ExperimentStateStore
+
+        if store_path.is_file():
+            store = ExperimentStateStore(store_path)
+            experiment = store.experiment()
+            current_session = store.session()
+            cumulative = store.cumulative()
+            counts = store.counts()
+            usage = _usage(store.token_usage())
+            hourly = store.hourly_token_usage(hourly_token_limit)
+            state = replace(
+                state,
+                experiment_state=str(experiment.get("state", state.experiment_state)),
+                checkpoint=str(experiment.get("current_checkpoint") or state.checkpoint),
+                provider_turns_attempted=int(cumulative.get("provider_turns", 0)),
+                provider_turns_completed=counts.get("provider_turns_completed", 0),
+                cumulative_usage=usage,
+                hourly_tokens_used=int(hourly.get("hourly_tokens_used", 0)),
+                hourly_limit_reached=hourly.get("hourly_limit_reached") is True,
+                hourly_retry_after=(
+                    str(hourly["hourly_retry_after"])
+                    if hourly.get("hourly_retry_after")
+                    else None
+                ),
+                archive_size=counts.get("candidate_count", 0),
+                accepted_candidates=counts.get("unique_candidate_count", 0),
+                evaluations_completed=counts.get("evaluation_count", 0),
+            )
+            if isinstance(current_session, Mapping):
+                session_id = current_session.get("session_id")
+                state = replace(
+                    state,
+                    session_id=str(session_id) if session_id else state.session_id,
+                    started_at=str(current_session.get("started_at", ""))[11:19] or "—",
+                )
+            rows = store.connection.execute(
+                "SELECT candidate_id,result_json,completed_at FROM evaluations "
+                "WHERE state='completed' ORDER BY completed_at,identity"
+            ).fetchall()
+            for row in rows:
+                candidate_id = str(row["candidate_id"] or "")
+                try:
+                    result = json.loads(str(row["result_json"]))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                summary = result.get("summary") if isinstance(result, Mapping) else None
+                metric = summary.get("mean_auc") if isinstance(summary, Mapping) else None
+                if (
+                    not candidate_id
+                    or not isinstance(metric, (int, float))
+                    or isinstance(metric, bool)
+                ):
+                    continue
+                value = float(metric)
+                evaluations[candidate_id] = (value, summary if isinstance(summary, Mapping) else {})
+                evaluation_history.append((str(row["completed_at"] or ""), value))
+
+            # The generation checkpoint is intentionally written only at a
+            # safe boundary.  A resumed run can therefore have completed
+            # candidates/evaluations newer than that file (or a checkpoint
+            # from an earlier session).  Rebuild those slot rows from the
+            # durable candidate table so a dashboard restart never loses a
+            # finished generation or its objective values.
+            candidate_rows = store.connection.execute(
+                "SELECT candidate_id,generation,slot,status,metadata_json "
+                "FROM candidates ORDER BY generation,slot,candidate_id"
+            ).fetchall()
+            for row in candidate_rows:
+                candidate_id = str(row["candidate_id"] or "")
+                generation = row["generation"]
+                slot = row["slot"]
+                if (
+                    not candidate_id
+                    or not isinstance(generation, int)
+                    or isinstance(generation, bool)
+                    or not isinstance(slot, str)
+                ):
+                    continue
+                metadata: Mapping[str, Any] = {}
+                try:
+                    raw_metadata = json.loads(str(row["metadata_json"] or "{}"))
+                    if isinstance(raw_metadata, Mapping):
+                        metadata = raw_metadata
+                except (TypeError, json.JSONDecodeError):
+                    pass
+                existing = slot_records.get((generation, slot), {})
+                existing_candidate = existing.get("candidate")
+                if isinstance(existing_candidate, Mapping):
+                    # The checkpoint contains richer provider/request data;
+                    # keep it and only use the row as a fallback.
+                    continue
+                slot_records[(generation, slot)] = {
+                    "generation": generation,
+                    "slot": slot,
+                    "parent_id": metadata.get("parent_id", "root"),
+                    "status": str(row["status"] or "accepted"),
+                    "candidate": {"candidate_id": candidate_id},
+                    "raw_result": metadata.get("raw_result", {}),
+                    "request": metadata.get("request", {}),
+                    "errors": metadata.get("errors", []),
+                    "repairs": metadata.get("repairs", 0),
+                }
+    except Exception:
+        # A dashboard must not prevent a run from starting when an old or
+        # partially-written workspace cannot be read.  The live event stream
+        # remains authoritative for the active session.
+        pass
+    finally:
+        if store is not None:
+            with contextlib.suppress(Exception):
+                store.close()
+
+    groups: dict[int, list[DashboardSlot]] = {}
+    for (generation, slot_name), raw in slot_records.items():
+        candidate_value = raw.get("candidate")
+        candidate_id = (
+            f"g{generation:04d}-{slot_name}"
+            if isinstance(candidate_value, Mapping)
+            else ""
+        )
+        status = str(raw.get("status", "queued"))
+        if status in {"repair_pending", "repair_running"}:
+            display_state = "repair"
+        elif status in {"failed", "invalid", "duplicate", "accepted"}:
+            display_state = status
+        else:
+            display_state = "queued"
+        raw_result = raw.get("raw_result")
+        result_mapping: Mapping[str, Any] = {}
+        if isinstance(raw_result, Mapping):
+            result_mapping = cast(Mapping[str, Any], raw_result)
+        else:
+            repair_value = raw.get("repair")
+            if isinstance(repair_value, Mapping):
+                result_mapping = cast(Mapping[str, Any], repair_value)
+        usage_value = result_mapping.get("usage")
+        if usage_value is None and isinstance(candidate_value, Mapping):
+            usage_value = candidate_value.get("usage")
+        metric = evaluations.get(candidate_id)
+        duration_ms = result_mapping.get("provider_duration_ms")
+        duration_seconds = (
+            float(duration_ms) / 1000.0
+            if isinstance(duration_ms, int) and not isinstance(duration_ms, bool)
+            else None
+        )
+        raw_errors = raw.get("errors")
+        error_message = ""
+        if isinstance(raw_errors, list) and raw_errors:
+            first_error = raw_errors[0]
+            if isinstance(first_error, Mapping):
+                error_message = str(first_error.get("message", ""))
+        groups.setdefault(generation, []).append(
+            DashboardSlot(
+                slot=slot_name,
+                generation=generation,
+                parent=str(raw.get("parent_id", "root")),
+                phase=str(raw.get("request", {}).get("phase", "initial"))
+                if isinstance(raw.get("request"), Mapping)
+                else "initial",
+                state=display_state,
+                elapsed_seconds=duration_seconds,
+                usage=_usage(usage_value),
+                validation="pass" if display_state in {"accepted", "duplicate"} else "—",
+                probe="pass" if display_state in {"accepted", "duplicate"} else "—",
+                candidate=candidate_id,
+                error=error_message,
+                objective=metric[0] if metric is not None else None,
+                repairs=(
+                    int(raw.get("repairs", 0))
+                    if isinstance(raw.get("repairs", 0), int)
+                    and not isinstance(raw.get("repairs", 0), bool)
+                    else 0
+                ),
+                lifecycle=(
+                    (LifecycleStep("evaluation", "pass", 0.0),)
+                    if metric is not None
+                    else (LifecycleStep("archived", "pass", 0.0),)
+                ),
+            )
+        )
+    groups.setdefault(
+        checkpoint_generation,
+        list(_empty_slots(checkpoint_generation, population_size)),
+    )
+    generation_groups = tuple(
+        GenerationSlots(generation, tuple(sorted(slots, key=lambda item: item.slot)))
+        for generation, slots in sorted(groups.items())
+    )
+    metrics = [value for _, value in evaluation_history]
+    best_candidate = max(evaluations.items(), key=lambda item: item[1][0], default=None)
+    return replace(
+        state,
+        generation=checkpoint_generation,
+        displayed_generation=checkpoint_generation,
+        generations=generation_groups,
+        current_objective=metrics[-1] if metrics else None,
+        best_objective=best_candidate[1][0] if best_candidate else None,
+        best_candidate=best_candidate[0] if best_candidate else "—",
+        objective_history=tuple(metrics[-60:]),
+    )
+
+
+def _merge_persisted_dashboard_state(
+    live: DashboardState,
+    persisted: DashboardState,
+) -> DashboardState:
+    """Add durable generations to a live reducer without rewinding it."""
+
+    by_generation: dict[int, dict[str, DashboardSlot]] = {}
+    for source in (persisted, live):
+        for group in source.generations:
+            slots = by_generation.setdefault(group.generation, {})
+            for slot in group.slots:
+                existing = slots.get(slot.slot)
+                if (
+                    existing is None
+                    or slot.objective is not None
+                    or slot.state in ACTIVE_STATES
+                    or existing.objective is None
+                ):
+                    slots[slot.slot] = slot
+    generations = tuple(
+        GenerationSlots(
+            generation,
+            tuple(sorted(slots.values(), key=lambda item: item.slot)),
+        )
+        for generation, slots in sorted(by_generation.items())
+    )
+    if live.objective_history and persisted.objective_history:
+        history = tuple((*persisted.objective_history, *live.objective_history)[-60:])
+    else:
+        history = live.objective_history or persisted.objective_history
+    return replace(
+        live,
+        generations=generations,
+        objective_history=history,
+        best_objective=(
+            live.best_objective
+            if live.best_objective is not None
+            else persisted.best_objective
+        ),
+        best_candidate=(
+            live.best_candidate
+            if live.best_candidate != "—"
+            else persisted.best_candidate
+        ),
+        archive_size=max(live.archive_size, persisted.archive_size),
+        accepted_candidates=max(live.accepted_candidates, persisted.accepted_candidates),
+        evaluations_completed=max(
+            live.evaluations_completed,
+            persisted.evaluations_completed,
+        ),
+    )
 
 
 def _integer(value: object) -> int | None:
@@ -1211,12 +1555,16 @@ def reduce_dashboard_key(
         return replace(state, detail_tab=(state.detail_tab + 1) % len(DETAIL_TABS)), None
     if key == "SHIFT_TAB" and state.view == "details":
         return replace(state, detail_tab=(state.detail_tab - 1) % len(DETAIL_TABS)), None
-    if key in {"n", "N"}:
+    if key in {"n", "N", "PAGE_UP", "PAGE_DOWN"}:
         generations = [item.generation for item in state.generations]
         if not generations:
             return replace(state, status_message="No retained generation"), None
-        current = generations.index(state.displayed_generation)
-        delta = -1 if key == "N" else 1
+        current = (
+            generations.index(state.displayed_generation)
+            if state.displayed_generation in generations
+            else len(generations) - 1
+        )
+        delta = -1 if key in {"N", "PAGE_UP"} else 1
         target = generations[(current + delta) % len(generations)]
         return replace(
             state,
@@ -1398,12 +1746,15 @@ class InteractiveDashboardSink:
         input_stream: TextIO = sys.stdin,
         locked_config: Mapping[str, object] | None = None,
         capabilities: DashboardCapabilities | None = None,
+        initial_state: DashboardState | None = None,
+        persisted_loader: Callable[[], DashboardState] | None = None,
         start_live: bool = True,
     ) -> None:
         self.console = console or Console()
         self.locked_config = dict(locked_config or {})
         self.capabilities = capabilities or DashboardCapabilities()
-        self.state = DashboardState()
+        self.state = initial_state or DashboardState()
+        self._persisted_loader = persisted_loader
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._dirty = threading.Event()
@@ -1443,6 +1794,12 @@ class InteractiveDashboardSink:
 
     def handle_key(self, key: str) -> None:
         with self._lock:
+            if key in {"n", "N", "PAGE_UP", "PAGE_DOWN"} and self._persisted_loader:
+                with contextlib.suppress(Exception):
+                    self.state = _merge_persisted_dashboard_state(
+                        self.state,
+                        self._persisted_loader(),
+                    )
             state, action = reduce_dashboard(
                 self.state,
                 DashboardKey(key),
@@ -2390,7 +2747,7 @@ class InteractiveDashboardSink:
                 "  Tab/Shift+Tab detail tab\n\n"
                 "Actions\n"
                 "  q safe interrupt        p pause/resume scheduling\n"
-                "  n/N view next/previous generation\n"
+                "  n/N view next/previous generation (PageDown/PageUp also work)\n"
                 "  r confirmed retryable slot\n"
                 "  c config  l logs  t top  / search  h help\n\n"
                 "Panel copy\n"
@@ -2419,7 +2776,7 @@ class InteractiveDashboardSink:
                 "[1–8] copy",
                 "[q] interrupt",
                 "[p] pause/resume",
-                "[n/N] view gen",
+                "[n/N] prev/next gen",
                 "[r] retry failed",
                 "[c] config",
                 "[l] logs",
@@ -2432,7 +2789,7 @@ class InteractiveDashboardSink:
                 "[1–8] copy",
                 "[q]interrupt",
                 "[p]pause",
-                "[n/N]gen",
+                "[n/N]prev/next",
                 "[r]retry",
                 "[c]config",
                 "[l]logs",

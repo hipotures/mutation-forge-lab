@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,7 +28,11 @@ from mutation_forge.experiment.config import load_experiment_config
 from mutation_forge.experiment.service import final_stop_experiment, run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
-from mutation_forge.output.interactive_dashboard import InteractiveDashboardSink
+from mutation_forge.output.interactive_dashboard import (
+    DashboardState,
+    InteractiveDashboardSink,
+    load_persisted_dashboard_state,
+)
 from mutation_forge.output.rich_live import ProgressLineSink, RichLiveSink
 from mutation_forge.sandbox.config import load_policy_config
 from mutation_forge.sandbox.policy import evaluate_policy, probe_policy
@@ -286,10 +290,46 @@ def _experiment_run(
                 "config_path": str(config.config_path),
                 "immutable_config_sha256": config.immutable_config_sha256(),
             }
+            persisted_state = None
+            persisted_loader: Callable[[], DashboardState] | None = None
+            experiment_root = getattr(config, "experiment_root", None)
+            if experiment_root is not None:
+                model_config = getattr(config, "model", None)
+                search_config = getattr(config, "search", None)
+                run_config = getattr(config, "run", None)
+                run_id = str(config.exp_id)
+                model_name = str(getattr(model_config, "name", "—"))
+                model_effort = str(getattr(model_config, "effort", "—"))
+                generation_limit = cast(
+                    int | None,
+                    getattr(search_config, "max_generations", None),
+                )
+                population_size = int(getattr(search_config, "population_size", 8))
+                wall_seconds = cast(float | None, getattr(run_config, "wall_seconds", None))
+                hourly_token_limit = cast(
+                    int | None,
+                    getattr(run_config, "max_total_tokens_per_hour", None),
+                )
+
+                def persisted_loader() -> DashboardState:
+                    return load_persisted_dashboard_state(
+                        experiment_root,
+                        run_id=run_id,
+                        model=model_name,
+                        effort=model_effort,
+                        generation_limit=generation_limit,
+                        population_size=population_size,
+                        wall_seconds=wall_seconds,
+                        hourly_token_limit=hourly_token_limit,
+                    )
+
+                persisted_state = persisted_loader()
             sinks = [
                 InteractiveDashboardSink(
                     console=Console(file=sys.stdout),
                     locked_config=locked_config,
+                    initial_state=persisted_state,
+                    persisted_loader=persisted_loader,
                 )
             ]
         else:
