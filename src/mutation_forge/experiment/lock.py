@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from .config import ExperimentConfig, serialize_search_limit
+from .config import ExperimentConfig, mutable_runtime_fields_removed, serialize_search_limit
 from .layout import ExperimentLayout
 
 LOCK_SCHEMA_VERSION = "mforge.experiment.lock.v2"
@@ -428,12 +428,11 @@ def immutable_differences(
     expected = lock.get("normalized_immutable_config")
     if not isinstance(expected, Mapping):
         raise LockError("experiment lock has no immutable configuration projection")
-    expected_projection = dict(expected)
-    expected_model = expected_projection.get("model")
-    if isinstance(expected_model, Mapping):
-        expected_projection["model"] = {
-            key: value for key, value in expected_model.items() if key != "effort"
-        }
+    # Older v2 locks included runtime controls in their stored projection.
+    # Filter both sides before comparison so changing those controls does not
+    # require a new experiment, while the lock's own digest remains validated
+    # against the bytes that were originally written.
+    expected_projection = mutable_runtime_fields_removed(expected)
     return _diff_values(expected_projection, config.immutable_projection())
 
 

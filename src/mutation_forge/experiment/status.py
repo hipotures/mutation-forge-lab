@@ -103,6 +103,11 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         # from before the manifest update; defer the strict verdict until the
         # owner/state row is available instead of reporting a false FAILED.
         manifest_error = str(error)
+    runtime_schema_error: str | None = None
+    try:
+        layout.verify_runtime_schemas()
+    except WorkspaceError as error:
+        runtime_schema_error = str(error)
     try:
         state = ExperimentStateStore(layout.state)
     except StateError as error:
@@ -137,12 +142,12 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         current_state = state.state()
         owner = state.owner()
         owner_active = owner is not None and process_alive(int(owner["pid"]))
-        if manifest_error is not None and not owner_active:
+        if (manifest_error is not None or runtime_schema_error is not None) and not owner_active:
             return {
                 **_not_created(config, layout),
                 "state": "failed",
                 "resumable": False,
-                "last_error": manifest_error,
+                "last_error": manifest_error or runtime_schema_error,
             }
         if (
             current_state == "running"

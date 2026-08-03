@@ -201,12 +201,7 @@ class ExperimentConfig:
     def immutable_projection(self) -> dict[str, Any]:
         """Return the canonical projection used by ``experiment.lock.json``."""
 
-        value = copy.deepcopy(dict(self.raw))
-        value.pop("run", None)
-        model = value.get("model")
-        if isinstance(model, dict):
-            model.pop("effort", None)
-        return cast(dict[str, Any], _canonicalize_paths(value, self.source_dir))
+        return mutable_runtime_fields_removed(self.raw, self.source_dir)
 
     @property
     def immutable_config(self) -> dict[str, Any]:
@@ -255,6 +250,28 @@ def _canonicalize_paths(value: object, base: Path) -> object:
     if isinstance(value, list):
         return [_canonicalize_paths(item, base) for item in value]
     return value
+
+
+def mutable_runtime_fields_removed(
+    raw: Mapping[str, Any], base: Path | None = None
+) -> dict[str, Any]:
+    """Return the lock projection without per-session execution controls.
+
+    The lock identifies an experiment and its scientific inputs.  It must not
+    prevent an operator from changing the knobs that control how a session is
+    run (parallelism, model effort, repair count, or session limits).  Keep
+    this filtering in one place so lock validation and the stored root config
+    use exactly the same semantics.
+    """
+
+    value = copy.deepcopy(dict(raw))
+    value.pop("run", None)
+    value.pop("resources", None)
+    model = value.get("model")
+    if isinstance(model, dict):
+        for field_name in ("effort", "concurrency", "max_repairs"):
+            model.pop(field_name, None)
+    return cast(dict[str, Any], _canonicalize_paths(value, base or Path.cwd()))
 
 
 def _reject_credentials(value: object, path: str = "") -> None:

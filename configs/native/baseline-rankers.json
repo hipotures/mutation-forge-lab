@@ -1,5 +1,5 @@
 {
-  "schema_version": "mforge.native.baseline_rankers.v1",
+  "schema_version": "mforge.native.baseline_rankers.v2",
   "rankers": [
     {
       "policy_id": "native_random",

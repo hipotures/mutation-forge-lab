@@ -444,6 +444,8 @@ class CounterexamplePipeline:
         result: ExactVerification,
         target_lengths: tuple[int, ...],
     ) -> CounterexampleVerificationRecord:
+        configuration = dict(result.configuration)
+        configuration.setdefault("target_forbidden_lengths", list(target_lengths))
         payload = {
             "schema_version": VERIFICATION_SCHEMA_VERSION,
             "candidate_id": candidate.candidate_id,
@@ -456,7 +458,7 @@ class CounterexamplePipeline:
             "witnesses": [[kind, list(vertices)] for kind, vertices in result.witnesses],
             "elapsed_seconds": result.elapsed_seconds,
             "implementation_sha256": result.implementation_sha256,
-            "configuration": dict(result.configuration),
+            "configuration": configuration,
             "candidate_graph6_sha256": _sha256(candidate.graph_path.read_bytes()),
             "attempted_at": datetime.now(UTC).isoformat(),
         }
@@ -493,6 +495,57 @@ class CounterexamplePipeline:
             artifact_path,
             result.message,
         )
+
+    @staticmethod
+    def _validated_verification(
+        result: ExactVerification,
+        expected_lengths: tuple[int, ...],
+        *,
+        role: str,
+    ) -> ExactVerification:
+        """Normalize verifier output before it becomes immutable evidence."""
+
+        known = {"VERIFIED", "REJECTED", "UNKNOWN", "INVALID"}
+        configuration = dict(result.configuration)
+        configured_lengths = configuration.get("target_forbidden_lengths")
+        if configured_lengths is not None and configured_lengths != list(expected_lengths):
+            return ExactVerification(
+                "INVALID",
+                True,
+                f"{role} verifier target lengths mismatch",
+                result.implementation,
+                implementation_sha256=result.implementation_sha256,
+                configuration={
+                    **configuration,
+                    "target_forbidden_lengths": list(expected_lengths),
+                },
+            )
+        if result.status not in known or not isinstance(result.complete, bool):
+            return ExactVerification(
+                "INVALID",
+                True,
+                f"{role} verifier returned an invalid status contract",
+                result.implementation,
+                implementation_sha256=result.implementation_sha256,
+                configuration={
+                    **configuration,
+                    "target_forbidden_lengths": list(expected_lengths),
+                },
+            )
+        if result.status == "UNKNOWN" and result.complete:
+            return ExactVerification(
+                "INVALID",
+                True,
+                f"{role} verifier marked UNKNOWN as complete",
+                result.implementation,
+                implementation_sha256=result.implementation_sha256,
+                configuration={
+                    **configuration,
+                    "target_forbidden_lengths": list(expected_lengths),
+                },
+            )
+        configuration["target_forbidden_lengths"] = list(expected_lengths)
+        return replace(result, configuration=configuration)
 
     def _load_verification(
         self,
@@ -762,13 +815,33 @@ class CounterexamplePipeline:
         if witness_cap <= 0:
             raise EvaluationContractError("witness_cap must be positive")
         lengths = self.backend.target_forbidden_lengths(graph.order)
+        if (
+            not lengths
+            or len(lengths) != len(set(lengths))
+            or any(
+                isinstance(length, bool)
+                or not isinstance(length, int)
+                or length < 1
+                or length > graph.order
+                for length in lengths
+            )
+        ):
+            raise EvaluationContractError("backend returned invalid target forbidden lengths")
         observed = tuple(length for length, _ in score.capped_cycle_counts)
         counts = tuple(count for _, count in score.capped_cycle_counts)
+        if not isinstance(score.valid, bool) or not isinstance(score.complete, bool):
+            raise EvaluationContractError("authoritative score boolean fields are invalid")
         if observed != lengths:
             raise EvaluationContractError(
                 f"score lengths {observed!r} do not match target lengths {lengths!r}"
             )
-        if len(observed) != len(set(observed)) or any(count < 0 for count in counts):
+        if len(observed) != len(set(observed)) or any(
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            or count > witness_cap
+            for count in counts
+        ):
             raise EvaluationContractError("invalid authoritative score count vector")
         if sum(counts) != score.total_capped_witnesses:
             raise EvaluationContractError("authoritative score total mismatch")
@@ -815,7 +888,11 @@ class CounterexamplePipeline:
             primary = self._verification_record(
                 candidate,
                 "primary",
-                self.backend.exact_verify(reread),
+                self._validated_verification(
+                    self.backend.exact_verify(reread),
+                    lengths,
+                    role="primary",
+                ),
                 lengths,
             )
         self._emit(
@@ -872,7 +949,11 @@ class CounterexamplePipeline:
             independent = self._verification_record(
                 candidate,
                 "independent",
-                self._run_independent(candidate.graph_path, lengths),
+                self._validated_verification(
+                    self._run_independent(candidate.graph_path, lengths),
+                    lengths,
+                    role="independent",
+                ),
                 lengths,
             )
         self._emit(

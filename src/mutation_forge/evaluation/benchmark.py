@@ -431,6 +431,14 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             idempotency_key=f"{summary['candidate_id']}:verified",
         )
         bus.emit(
+            "experiment_completed",
+            status="completed",
+            stop_reason="counterexample_verified",
+            checkpoint=summary["terminal_checkpoint"],
+            run_path=str(artifacts.path),
+            idempotency_key=f"{summary['candidate_id']}:experiment-completed",
+        )
+        bus.emit(
             "run_completed",
             status="completed",
             stop_reason="counterexample_verified",

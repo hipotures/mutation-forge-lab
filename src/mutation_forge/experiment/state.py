@@ -235,6 +235,19 @@ class ExperimentStateStore:
                 );
                 """
             )
+            existing_schema = connection.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()
+            if existing_schema is not None and existing_schema[0] != STATE_SCHEMA_VERSION:
+                raise StateError(
+                    f"Unsupported experiment state schema: {existing_schema[0]!r}. "
+                    f"This runtime accepts only {STATE_SCHEMA_VERSION}. Create a fresh workspace."
+                )
+            existing_experiment = connection.execute(
+                "SELECT 1 FROM experiment LIMIT 1"
+            ).fetchone()
+            if existing_experiment is not None:
+                raise StateError("experiment state database is already initialized")
             now = _now()
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
@@ -266,6 +279,36 @@ class ExperimentStateStore:
         integrity = self.connection.execute("PRAGMA integrity_check").fetchone()
         if integrity is None or integrity[0] != "ok":
             raise StateError(f"state database integrity check failed: {self.path}")
+        for row in self.connection.execute(
+            "SELECT session_id,summary_json FROM sessions WHERE summary_json != '{}'"
+        ):
+            try:
+                summary = json.loads(str(row["summary_json"]))
+            except json.JSONDecodeError as exc:
+                raise StateError(
+                    f"session {row['session_id']} has an unreadable summary"
+                ) from exc
+            if not isinstance(summary, Mapping) or summary.get(
+                "schema_version"
+            ) != "mforge.experiment.session.v2":
+                observed = summary.get("schema_version") if isinstance(summary, Mapping) else None
+                raise StateError(
+                    f"Unsupported session summary schema: {observed!r}. "
+                    "This runtime accepts only mforge.experiment.session.v2. "
+                    "Create a fresh workspace."
+                )
+        for row in self.connection.execute("SELECT payload_json FROM events"):
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError as exc:
+                raise StateError("experiment event payload is unreadable") from exc
+            schema = payload.get("schema_version") if isinstance(payload, Mapping) else None
+            if schema is not None and schema != "mforge.experiment.events.v2":
+                raise StateError(
+                    f"Unsupported experiment event schema: {schema!r}. "
+                    "This runtime accepts only mforge.experiment.events.v2. "
+                    "Create a fresh workspace."
+                )
 
     def close(self) -> None:
         self.connection.close()
@@ -298,6 +341,13 @@ class ExperimentStateStore:
     ) -> None:
         if state not in VALID_STATES:
             raise ValueError(f"invalid experiment state: {state!r}")
+        if state == "completed" and stop_reason not in {
+            "counterexample_verified",
+            "operator_final_stop",
+        }:
+            raise StateError(
+                "COMPLETED requires counterexample_verified or operator_final_stop"
+            )
         self.connection.execute(
             "UPDATE experiment SET state=?,updated_at=?,last_error=?,"
             "terminal_stop_reason=?,current_checkpoint=?",
@@ -468,9 +518,14 @@ class ExperimentStateStore:
         return dict(row) if row is not None else None
 
     def write_event(
-        self, event_type: str, payload: Mapping[str, Any], *, session_id: str | None = None
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        session_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> int:
-        raw_key = payload.get("idempotency_key")
+        raw_key = idempotency_key if idempotency_key is not None else payload.get("idempotency_key")
         idempotency_key = raw_key if isinstance(raw_key, str) and raw_key else None
         cursor = self.connection.execute(
             "INSERT OR IGNORE INTO events("
@@ -486,6 +541,13 @@ class ExperimentStateStore:
             (idempotency_key,),
         ).fetchone()
         return int(row[0]) if row is not None else 0
+
+    def event_exists(self, idempotency_key: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM events WHERE idempotency_key=? LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        return row is not None
 
     def record_provider_turn(
         self,

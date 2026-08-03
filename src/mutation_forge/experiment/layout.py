@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -275,6 +276,61 @@ class ExperimentLayout:
         if missing:
             raise WorkspaceError(f"experiment workspace is incomplete: {', '.join(missing)}")
 
+    def verify_runtime_schemas(self) -> None:
+        """Reject any persisted runtime artifact outside the v2 contract.
+
+        The artifact manifest proves bytes and paths, but it deliberately does
+        not interpret the contents of session and counterexample records.  A
+        continuation must therefore validate those records before opening a
+        new session; otherwise a v1 history could be silently mixed into a v2
+        run.
+        """
+
+        _verify_toml_schema(self.experiment_config, "mforge.experiment.v2")
+        for session in sorted(self.sessions.glob("session-*")):
+            if not session.is_dir():
+                continue
+            for name in ("session.json", "summary.json"):
+                path = session / name
+                if path.is_file():
+                    _verify_json_schema(
+                        path,
+                        "mforge.experiment.session.v2",
+                        f"session {path}",
+                    )
+            input_config = session / "input-config.toml"
+            if input_config.is_file():
+                _verify_toml_schema(input_config, "mforge.experiment.v2")
+            events = session / "events.jsonl"
+            if events.is_file():
+                _verify_event_stream(events)
+
+        known_root_artifacts = {
+            "run_summary.json": "mforge.experiment.run.v2",
+            "native-generation-checkpoint.json": "mforge.experiment.generation.v2",
+        }
+        for name, schema in known_root_artifacts.items():
+            path = self.artifacts / name
+            if path.is_file():
+                _verify_json_schema(path, schema, f"artifact {path}")
+
+        counterexamples = self.artifacts / "counterexamples"
+        if counterexamples.is_dir():
+            for path in sorted(item for item in counterexamples.rglob("*.json") if item.is_file()):
+                if path.name == "candidate.json":
+                    schema = "mforge.counterexample.candidate.v2"
+                elif path.name in {
+                    "verification.json",
+                    "verification-primary.json",
+                    "verification-independent.json",
+                }:
+                    schema = "mforge.counterexample.verification.v2"
+                elif path.name == "certificate.json":
+                    schema = "mforge.counterexample.certificate.v2"
+                else:
+                    continue
+                _verify_json_schema(path, schema, f"counterexample artifact {path}")
+
     def write_artifact_manifest(self) -> dict[str, Any]:
         manifest = _artifact_manifest(self.artifacts)
         _atomic_write(
@@ -415,6 +471,62 @@ def _artifact_manifest(root: Path) -> dict[str, Any]:
             )
         ).hexdigest(),
     }
+
+
+def _read_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise WorkspaceError(f"{label} is unreadable: {path}") from exc
+    if not isinstance(value, dict):
+        raise WorkspaceError(f"{label} must be a JSON object: {path}")
+    return value
+
+
+def _verify_json_schema(path: Path, expected: str, label: str) -> None:
+    value = _read_object(path, label)
+    if value.get("schema_version") != expected:
+        raise WorkspaceError(
+            f"Unsupported {label} schema: {value.get('schema_version')!r}. "
+            f"This runtime accepts only {expected}. Create a fresh workspace."
+        )
+
+
+def _verify_toml_schema(path: Path, expected: str) -> None:
+    try:
+        value = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise WorkspaceError(f"experiment configuration is unreadable: {path}") from exc
+    if value.get("schema_version") != expected:
+        raise WorkspaceError(
+            f"Unsupported experiment schema in {path}: {value.get('schema_version')!r}. "
+            f"This runtime accepts only {expected}. Create a fresh workspace."
+        )
+
+
+def _verify_event_stream(path: Path) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise WorkspaceError(f"experiment event stream is unreadable: {path}") from exc
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise WorkspaceError(
+                f"experiment event stream line {number} is invalid: {path}"
+            ) from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != "mforge.experiment.events.v2"
+        ):
+            observed = value.get("schema_version") if isinstance(value, dict) else None
+            raise WorkspaceError(
+                f"Unsupported experiment event schema at {path}:{number}: {observed!r}. "
+                "This runtime accepts only mforge.experiment.events.v2. Create a fresh workspace."
+            )
 
 
 __all__ = ["ExperimentLayout", "WorkspaceError", "WorkspaceLayout"]

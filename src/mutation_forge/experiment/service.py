@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from .checkpoints import CheckpointStore
-from .config import ExperimentConfig, load_experiment_config
+from .config import ExperimentConfig, load_experiment_config, mutable_runtime_fields_removed
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import (
     LockError,
@@ -185,6 +185,7 @@ class ExperimentService:
             # first verifies every previously committed digest.
             layout.verify_artifact_manifest(allow_new=True)
             layout.reconcile_artifact_manifest()
+            layout.verify_runtime_schemas()
             current_state = state.state()
             experiment = state.experiment()
             last_stop_reason = str(experiment.get("terminal_stop_reason") or "")
@@ -563,20 +564,18 @@ class ExperimentService:
     ) -> dict[str, Any]:
         outcome = dict(result or {})
         requested_state = str(outcome.get("state", "idle"))
-        state = (
-            requested_state
-            if requested_state
-            in {
-                "running",
-                "idle",
-                "paused",
-                "interrupted",
-                "failed",
-                "exhausted",
-                "completed",
-            }
-            else "idle"
-        )
+        valid_states = {
+            "running",
+            "idle",
+            "paused",
+            "interrupted",
+            "failed",
+            "exhausted",
+            "completed",
+        }
+        if requested_state not in valid_states:
+            raise StateError(f"adapter returned invalid experiment state: {requested_state!r}")
+        state = requested_state
         if session.budget_exhausted() and state == "running":
             state = "idle"
         outcome["state"] = state
@@ -586,16 +585,26 @@ class ExperimentService:
         for field in ("completed_slots", "provider_turns", "evaluations"):
             if not isinstance(outcome.get(field), list):
                 outcome[field] = []
-        outcome.setdefault(
-            "stop_reason",
-            "session_wall_seconds"
-            if state == "idle"
-            else "generation_limit"
-            if state == "exhausted"
-            else "counterexample_verified"
-            if state == "completed"
-            else state,
-        )
+        if "stop_reason" not in outcome or not isinstance(outcome.get("stop_reason"), str):
+            defaults = {
+                "idle": "session_wall_seconds",
+                "exhausted": "generation_limit",
+                "interrupted": "interrupted",
+                "paused": "paused",
+                "failed": "failed",
+            }
+            if state == "completed":
+                raise StateError(
+                    "adapter must provide an explicit terminal stop reason for COMPLETED"
+                )
+            outcome["stop_reason"] = defaults.get(state, state)
+        if state == "completed" and outcome["stop_reason"] not in {
+            "counterexample_verified",
+            "operator_final_stop",
+        }:
+            raise StateError(
+                "COMPLETED requires counterexample_verified or operator_final_stop"
+            )
         return outcome
 
     @staticmethod
@@ -678,16 +687,9 @@ def _same_immutable_config(
         import tomllib
 
         raw = tomllib.loads(stored_bytes.decode("utf-8"))
-        current_raw = dict(current.raw)
-        raw.pop("run", None)
-        current_raw.pop("run", None)
-        for value in (raw, current_raw):
-            model = value.get("model")
-            if isinstance(model, dict):
-                value["model"] = {
-                    key: item for key, item in model.items() if key != "effort"
-                }
-        return raw == current_raw
+        return mutable_runtime_fields_removed(
+            raw, current.source_dir
+        ) == current.immutable_projection()
     except (UnicodeError, tomllib.TOMLDecodeError):
         return False
 
@@ -719,6 +721,7 @@ def final_stop_experiment(
     lock = load_lock(layout.lock)
     verify_lock(lock, config, layout)
     layout.verify_artifact_manifest(allow_new=True)
+    layout.verify_runtime_schemas()
     state = ExperimentStateStore(layout.state)
     try:
         owner = state.owner()

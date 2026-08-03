@@ -36,6 +36,8 @@ def test_unfinished_generation_does_not_deduplicate_its_own_archive(
     checkpoint_path.write_text(
         json.dumps(
             {
+                "schema_version": "mforge.experiment.generation.v2",
+                "campaign_id": "native-test",
                 "slots": {
                     "generation-0": {"candidate": _candidate(0, "slot-00")},
                     "generation-1": {"candidate": _candidate(1, "slot-00")},

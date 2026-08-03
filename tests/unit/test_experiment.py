@@ -297,6 +297,38 @@ def test_second_run_continues_and_invocation_fields_are_mutable(tmp_path: Path) 
     ).is_dir()
 
 
+def test_second_run_allows_runtime_parallelism_changes(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    ExperimentService(adapter=NullExperimentAdapter()).run(path)
+    path.write_text(
+        _config()
+        .replace('effort = "high"', 'effort = "xhigh"')
+        .replace("concurrency = 1", "concurrency = 2")
+        .replace("max_repairs = 0", "max_repairs = 1")
+        .replace("workers = 1", "workers = 8")
+        .replace("thread_count = 1", "thread_count = 2"),
+        encoding="utf-8",
+    )
+    seen: list[tuple[str, int, int, int, int]] = []
+
+    class Adapter:
+        def run(self, config: Any, *_: object) -> dict[str, str]:
+            seen.append(
+                (
+                    config.model.effort,
+                    config.model.concurrency,
+                    config.model.max_repairs,
+                    config.resources.workers,
+                    config.resources.thread_count,
+                )
+            )
+            return {"state": "idle", "stop_reason": "session_wall_seconds"}
+
+    result = ExperimentService(adapter=Adapter()).run(path)
+    assert result["state"] == "idle"
+    assert seen == [("xhigh", 2, 1, 8, 2)]
+
+
 def test_immutable_change_fails_before_adapter(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
     ExperimentService(adapter=NullExperimentAdapter()).run(path)

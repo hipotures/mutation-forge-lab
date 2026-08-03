@@ -38,6 +38,13 @@ class CheckpointStore:
         # must repair/report the durable evidence rather than silently
         # creating a new valid-looking branch.
         existing = self.list()
+        supplied_schema = value.get("schema_version")
+        if supplied_schema is not None and supplied_schema != CHECKPOINT_SCHEMA_VERSION:
+            raise CheckpointIntegrityError(
+                f"Unsupported checkpoint schema: {supplied_schema!r}. "
+                f"This runtime accepts only {CHECKPOINT_SCHEMA_VERSION}. "
+                "Create a fresh workspace."
+            )
         sequence = int(value.get("sequence", 0)) or (
             existing[-1]["sequence"] + 1 if existing else 1
         )

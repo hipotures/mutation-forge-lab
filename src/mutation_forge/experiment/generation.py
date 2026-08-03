@@ -107,9 +107,22 @@ class GenerationProvider(Protocol):
 def _safe(value: Any) -> Any:
     try:
         json.dumps(value, allow_nan=False)
-        return value
     except Exception:
         return repr(value)
+    return value
+
+
+def _validate_generation_state(value: Mapping[str, Any]) -> None:
+    if value.get("schema_version") != GENERATION_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported native generation checkpoint schema: {value.get('schema_version')!r}. "
+            f"This runtime accepts only {GENERATION_SCHEMA_VERSION}. Create a fresh workspace."
+        )
+    if not isinstance(value.get("campaign_id"), str) or not value.get("campaign_id"):
+        raise ValueError("native generation checkpoint campaign_id is required")
+    for name in ("slots", "callbacks"):
+        if not isinstance(value.get(name), Mapping):
+            raise ValueError(f"native generation checkpoint {name} must be an object")
 
 
 def _hash(value: Any) -> str:
@@ -674,6 +687,8 @@ class GenerationCoordinator:
         retry_infrastructure: bool = False,
         budget_exhausted: Callable[[], bool | str | None] | None = None,
         behavior_evaluator: Any = None,
+        resume_slot_validator: Callable[[GenerationRequest, Mapping[str, Any]], bool]
+        | None = None,
         observer: Any = None,
         event_callback: Any = None,
     ) -> None:
@@ -711,6 +726,7 @@ class GenerationCoordinator:
             retry_infrastructure,
             behavior_evaluator,
         )
+        self.resume_slot_validator = resume_slot_validator
         self.budget_exhausted = budget_exhausted
         self.observer = observer if observer is not None else event_callback
         self._checkpoint_file = self.config.checkpoint_path
@@ -1326,8 +1342,7 @@ class GenerationCoordinator:
             if not isinstance(value, Mapping):
                 raise ValueError("native generation resume state must be an object")
             state = dict(value)
-            if state.get("schema_version") != GENERATION_SCHEMA_VERSION:
-                raise ValueError("unsupported native generation checkpoint schema")
+            _validate_generation_state(state)
             return state
         if self._checkpoint_file is not None and self._checkpoint_file.exists():
             try:
@@ -1336,8 +1351,7 @@ class GenerationCoordinator:
                 raise ValueError("cannot read native generation checkpoint") from exc
             if not isinstance(value, dict):
                 raise ValueError("native generation checkpoint must be an object")
-            if value.get("schema_version") != GENERATION_SCHEMA_VERSION:
-                raise ValueError("unsupported native generation checkpoint schema")
+            _validate_generation_state(value)
             return value
         return {
             "schema_version": GENERATION_SCHEMA_VERSION,
@@ -1351,14 +1365,13 @@ class GenerationCoordinator:
         if self.checkpoint_hook is not None:
             self.checkpoint_hook(payload)
         if self.checkpoint_store is not None:
-            with suppress(Exception):
-                self.checkpoint_store.save(
-                    {
-                        "generation": payload.get("generation", 0),
-                        "slots": payload.get("slots", {}),
-                        "summary": payload.get("summary", {}),
-                    }
-                )
+            self.checkpoint_store.save(
+                {
+                    "generation": payload.get("generation", 0),
+                    "slots": payload.get("slots", {}),
+                    "summary": payload.get("summary", {}),
+                }
+            )
         if self._checkpoint_file is None:
             return
         self._checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1727,6 +1740,12 @@ class GenerationCoordinator:
                     cached = slots_state.get(request.idempotency_key)
                     if (
                         isinstance(cached, Mapping)
+                        and self.resume_slot_validator is not None
+                        and not self.resume_slot_validator(request, cached)
+                    ):
+                        cached = None
+                    if (
+                        isinstance(cached, Mapping)
                         and cached.get("status") not in {"pending", "budget_exhausted"}
                         and not _slot_failure_is_retryable(cached)
                     ):
@@ -1986,6 +2005,12 @@ class GenerationCoordinator:
                         retained=resuming_repair,
                     )
                     cached = slots_state.get(req.idempotency_key)
+                    if (
+                        isinstance(cached, Mapping)
+                        and self.resume_slot_validator is not None
+                        and not self.resume_slot_validator(req, cached)
+                    ):
+                        cached = None
                     if isinstance(cached, Mapping) and cached.get("status") not in {
                         "pending",
                         "repair_pending",

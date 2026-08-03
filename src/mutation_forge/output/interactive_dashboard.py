@@ -29,6 +29,7 @@ from rich.table import Table
 from rich.text import Text
 
 from mutation_forge.events import Event
+from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.models import JsonValue
 from mutation_forge.output.panel_copy import (
     copy_text_to_clipboard_osc52,
@@ -314,12 +315,24 @@ def load_persisted_dashboard_state(
     )
     checkpoint: Mapping[str, Any] = {}
     checkpoint_path = root / "artifacts" / "native-generation-checkpoint.json"
-    try:
-        value = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        if isinstance(value, Mapping):
-            checkpoint = value
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        checkpoint = {}
+    if checkpoint_path.is_file():
+        try:
+            value = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise WorkspaceError(
+                f"native generation checkpoint is unreadable: {checkpoint_path}"
+            ) from exc
+        if not isinstance(value, Mapping):
+            raise WorkspaceError(
+                f"native generation checkpoint must be an object: {checkpoint_path}"
+            )
+        if value.get("schema_version") != "mforge.experiment.generation.v2":
+            raise WorkspaceError(
+                "Unsupported native generation checkpoint schema: "
+                f"{value.get('schema_version')!r}. This runtime accepts only "
+                "mforge.experiment.generation.v2. Create a fresh workspace."
+            )
+        checkpoint = value
 
     generation_value = checkpoint.get("next_generation", checkpoint.get("generation"))
     checkpoint_generation = (
@@ -1185,6 +1198,8 @@ def reduce_dashboard_event(
     elif event_type == "counterexample_primary_verification_completed":
         if state.counterexample_state in {"verified", "conflict"}:
             return state
+        if state.counterexample_state not in {"candidate", "primary_verifying"}:
+            return state
         state = replace(
             state,
             counterexample_state=(
@@ -1200,6 +1215,8 @@ def reduce_dashboard_event(
     elif event_type == "counterexample_independent_verification_started":
         if state.counterexample_state in {"verified", "conflict"}:
             return state
+        if state.counterexample_state not in {"primary_verified", "independent_verifying"}:
+            return state
         state = replace(
             state,
             counterexample_state="independent_verifying",
@@ -1209,8 +1226,15 @@ def reduce_dashboard_event(
     elif event_type == "counterexample_independent_verification_completed":
         if state.counterexample_state in {"verified", "conflict"}:
             return state
+        if state.counterexample_state not in {"primary_verified", "independent_verifying"}:
+            return state
         state = replace(
             state,
+            counterexample_state=(
+                "independent_verified"
+                if payload.get("status") == "VERIFIED" and payload.get("complete") is True
+                else state.counterexample_state
+            ),
             counterexample_independent=(
                 f"{payload.get('status', 'UNKNOWN')} · "
                 f"{'complete' if payload.get('complete') is True else 'incomplete'}"
@@ -1218,6 +1242,8 @@ def reduce_dashboard_event(
         )
     elif event_type == "counterexample_verification_conflict":
         if state.counterexample_state == "verified":
+            return state
+        if state.counterexample_state not in {"primary_verified", "independent_verifying"}:
             return state
         state = replace(
             state,
@@ -1227,6 +1253,8 @@ def reduce_dashboard_event(
         )
     elif event_type == "counterexample_verified":
         if state.counterexample_state == "conflict":
+            return state
+        if state.counterexample_state != "independent_verified":
             return state
         state = replace(
             state,
@@ -1805,11 +1833,10 @@ class InteractiveDashboardSink:
     def handle_key(self, key: str) -> None:
         with self._lock:
             if key in {"n", "N", "PAGE_UP", "PAGE_DOWN"} and self._persisted_loader:
-                with contextlib.suppress(Exception):
-                    self.state = _merge_persisted_dashboard_state(
-                        self.state,
-                        self._persisted_loader(),
-                    )
+                self.state = _merge_persisted_dashboard_state(
+                    self.state,
+                    self._persisted_loader(),
+                )
             state, action = reduce_dashboard(
                 self.state,
                 DashboardKey(key),

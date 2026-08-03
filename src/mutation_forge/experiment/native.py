@@ -32,7 +32,13 @@ from .artifacts import (
 )
 from .config import ExperimentConfig
 from .evaluation import DEFAULT_WITNESS_CAP, evaluate_candidate
-from .generation import Candidate, GenerationConfig, GenerationCoordinator, SlotResult
+from .generation import (
+    GENERATION_SCHEMA_VERSION,
+    Candidate,
+    GenerationConfig,
+    GenerationCoordinator,
+    SlotResult,
+)
 from .layout import ExperimentLayout, WorkspaceError
 from .provider import LocalCodexAppServerProvider
 from .sessions import SessionContext
@@ -41,6 +47,9 @@ from .state import ExperimentStateStore
 
 class NativeExperimentError(RuntimeError):
     """A native experiment could not complete its current safe boundary."""
+
+
+BASELINE_SCHEMA_VERSION = "mforge.native.baseline_rankers.v2"
 
 
 class _NativeSessionBudgetExpired(KeyboardInterrupt):
@@ -173,6 +182,27 @@ def _load_assets() -> tuple[
         parsed[name] = dict(value)
     if not request.strip() or not repair.strip():
         raise NativeExperimentError("native request and repair prompts must be non-empty")
+    expected_versions = {
+        "context": "mforge.scientific_context.v2",
+        "proposal": "mforge.scientific_proposal.v2",
+        "baseline": BASELINE_SCHEMA_VERSION,
+    }
+    for name, expected in expected_versions.items():
+        asset = parsed[name]
+        if name in {"context", "proposal"}:
+            properties = asset.get("properties")
+            version = (
+                properties.get("schema_version", {}).get("const")
+                if isinstance(properties, Mapping)
+                else None
+            )
+        else:
+            version = asset.get("schema_version")
+        if version != expected:
+            raise NativeExperimentError(
+                f"native {name} asset has unsupported schema "
+                f"{version!r}; expected {expected}"
+            )
     return (
         system,
         parsed["schema"],
@@ -306,6 +336,14 @@ def _unfinished_generation_program_ids(checkpoint_path: Path) -> set[str]:
         raise NativeExperimentError("cannot read native generation checkpoint") from error
     if not isinstance(checkpoint, Mapping):
         raise NativeExperimentError("native generation checkpoint must be an object")
+    if checkpoint.get("schema_version") != GENERATION_SCHEMA_VERSION:
+        raise NativeExperimentError(
+            f"Unsupported native generation checkpoint schema: "
+            f"{checkpoint.get('schema_version')!r}. This runtime accepts only "
+            f"{GENERATION_SCHEMA_VERSION}. Create a fresh workspace."
+        )
+    if not isinstance(checkpoint.get("campaign_id"), str) or not checkpoint.get("campaign_id"):
+        raise NativeExperimentError("native generation checkpoint campaign_id is required")
     slots = checkpoint.get("slots")
     callbacks = checkpoint.get("callbacks")
     if not isinstance(slots, Mapping) or not isinstance(callbacks, Mapping):
@@ -406,6 +444,21 @@ class _NativeProvider:
         )
         return value
 
+    def _turn_directories(self, request: Mapping[str, Any]) -> tuple[Path, ...]:
+        base = self.layout.generation_slot_phase(
+            int(request.get("generation", 0)),
+            str(request.get("slot", "slot-00")),
+            self._phase(request),
+        )
+        archived = tuple(
+            sorted(
+                path
+                for path in base.parent.glob(f"{base.name}.attempt-*")
+                if path.is_dir()
+            )
+        )
+        return (base, *archived)
+
     @staticmethod
     def _key(request: Mapping[str, Any]) -> str:
         value = request.get("idempotency_key", request.get("request_idempotency_key"))
@@ -421,19 +474,28 @@ class _NativeProvider:
 
     def _retained(self, request: Mapping[str, Any]) -> Mapping[str, Any] | None:
         key = self._key(request)
-        row = self.state.provider_turn(key)
-        directory = self.layout.generation_slot_phase(
-            int(request.get("generation", 0)),
-            str(request.get("slot", "slot-00")),
-            self._phase(request),
-        )
-        manifest_path = directory / "turn-manifest.json"
-        if row is None and not manifest_path.is_file():
-            return None
-        if not manifest_path.is_file():
+        directory: Path | None = None
+        manifest: Mapping[str, Any] | None = None
+        for candidate_directory in self._turn_directories(request):
+            manifest_path = candidate_directory / "turn-manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                candidate_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ArtifactIncompleteError(
+                    "retained native provider evidence is unreadable"
+                ) from exc
+            if (
+                isinstance(candidate_manifest, Mapping)
+                and candidate_manifest.get("request_idempotency_key") == key
+            ):
+                directory = candidate_directory
+                manifest = candidate_manifest
+                break
+        if directory is None or manifest is None:
             return None
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             slot = str(request.get("slot", "slot-00"))
             response_path = directory / f"{slot}.response.json"
             if not response_path.is_file():
@@ -478,8 +540,6 @@ class _NativeProvider:
             raise ArtifactIncompleteError(
                 "retained native provider evidence is unreadable"
             ) from exc
-        if not isinstance(manifest, Mapping):
-            return None
         usage_total = usage.get("totalTokens") if isinstance(usage, Mapping) else None
         retryable = manifest.get("artifact_complete") is not True or (
             str(manifest.get("terminal_status", "completed")) != "completed"
@@ -516,6 +576,33 @@ class _NativeProvider:
             "error": manifest.get("error"),
             **retained_evidence,
         }
+
+    def has_retained(self, request: Mapping[str, Any]) -> bool:
+        return self._retained(request) is not None
+
+    def _archive_conflicting_turn(self, directory: Path, key: str) -> None:
+        manifest_path = directory / "turn-manifest.json"
+        if not manifest_path.is_file():
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ArtifactIncompleteError(
+                "existing native provider evidence is unreadable"
+            ) from exc
+        if not isinstance(manifest, Mapping):
+            raise ArtifactIncompleteError("existing native provider manifest is invalid")
+        if manifest.get("request_idempotency_key") == key:
+            return
+        suffix = _sha256({"request_idempotency_key": key})[:16]
+        archived = directory.with_name(f"{directory.name}.attempt-{suffix}")
+        attempt = 1
+        while archived.exists():
+            archived = directory.with_name(
+                f"{directory.name}.attempt-{suffix}-{attempt:02d}"
+            )
+            attempt += 1
+        os.replace(directory, archived)
 
     def _evidence(self, result: Mapping[str, Any]) -> dict[str, Any]:
         value = dict(result)
@@ -636,6 +723,13 @@ class _NativeProvider:
         retained_manifest: Any = None
         if manifest_path.is_file():
             retained_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(retained_manifest, Mapping)
+                or retained_manifest.get("request_idempotency_key")
+                != self._key(request)
+            ):
+                self._archive_conflicting_turn(directory, self._key(request))
+                retained_manifest = None
         if directory.exists() and (
             not isinstance(retained_manifest, Mapping)
             or retained_manifest.get("artifact_complete") is not True
@@ -741,11 +835,10 @@ class _NativeProvider:
                 result=value,
             )
             self.turns.verify_turn(directory)
-        # The transport logger may flush stream files after the session
-        # observer has indexed the workspace. Refresh the experiment manifest
-        # after the complete turn artifact is durable so continuation does not
-        # reject a valid turn for a stale stream digest.
-        self.layout.write_artifact_manifest()
+        # The turn directory is fsynced by TurnArtifactStore.  The workspace
+        # manifest is reconciled at the session boundary; rebuilding it here
+        # would recursively hash every prior transport artifact after every
+        # provider turn.
         with self._lock:
             self.state.record_provider_turn(
                 idempotency_key=self._key(request),
@@ -867,10 +960,20 @@ class NativeExperimentAdapter:
 
         ledger_turns = int(state.cumulative().get("provider_turns", 0))
         checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
+        if not checkpoint_path.is_file():
+            return ledger_turns
         try:
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return ledger_turns
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise NativeExperimentError("cannot read native generation checkpoint") from error
+        if not isinstance(checkpoint, Mapping):
+            raise NativeExperimentError("native generation checkpoint must be an object")
+        if checkpoint.get("schema_version") != GENERATION_SCHEMA_VERSION:
+            raise NativeExperimentError(
+                f"Unsupported native generation checkpoint schema: "
+                f"{checkpoint.get('schema_version')!r}. This runtime accepts only "
+                f"{GENERATION_SCHEMA_VERSION}. Create a fresh workspace."
+            )
         reserved_turns = (
             checkpoint.get("model_turns_used") if isinstance(checkpoint, Mapping) else None
         )
@@ -1889,6 +1992,9 @@ class NativeExperimentAdapter:
                     archive_context=render_archive_context,
                     behavior_evaluator=_native_behavior,
                     candidate_callback=stream_candidate,
+                    resume_slot_validator=(
+                        lambda request, _cached: wrapped.has_retained(request.as_dict())
+                    ),
                     retry_infrastructure=True,
                     budget_exhausted=lambda: (
                         "wall_seconds"

@@ -152,6 +152,17 @@ class SessionManager:
         )
 
     def event(self, session: SessionContext, event_type: str, **payload: Any) -> None:
+        raw_key = payload.get("idempotency_key")
+        storage_key = (
+            f"{event_type}:{raw_key}"
+            if isinstance(raw_key, str) and raw_key
+            else None
+        )
+        if storage_key is not None and (
+            self.state.event_exists(storage_key)
+            or self.state.event_exists(str(raw_key))
+        ):
+            return
         # Count provider work at the event boundary as well as in the durable
         # provider-turn ledger.  A Ctrl-C can arrive while the provider is
         # blocked, before a terminal turn artifact exists; recording the start
@@ -172,12 +183,19 @@ class SessionManager:
             "event_type": event_type,
             **payload,
         }
+        self.state.write_event(
+            event_type,
+            payload,
+            session_id=session.session_id,
+            idempotency_key=storage_key,
+        )
         with (session.directory / "events.jsonl").open("ab") as handle:
             handle.write(_canonical(event) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-        self.state.write_event(event_type, payload, session_id=session.session_id)
-        self.layout.write_artifact_manifest()
+        # The manifest is reconciled at session boundaries.  Rebuilding it for
+        # every heartbeat would recursively hash the complete artifact tree and
+        # can dominate CPU time during a long provider turn.
 
     def log(self, session: SessionContext, stream: str, text: str) -> None:
         if stream not in {"stdout", "stderr"}:
@@ -186,7 +204,6 @@ class SessionManager:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        self.layout.write_artifact_manifest()
 
     def finish(
         self,
