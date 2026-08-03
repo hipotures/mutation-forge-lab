@@ -1589,6 +1589,68 @@ class GenerationCoordinator:
         )
         slots_state = cast(dict[str, Any], state.setdefault("slots", {}))
         callbacks = cast(dict[str, Any], state.setdefault("callbacks", {}))
+
+        def cached_requires_provider(value: Mapping[str, Any]) -> bool:
+            """Return whether cached state still needs a provider artifact.
+
+            A terminal slot result is already a durable scientific result in
+            the generation checkpoint.  It must be recoverable even when an
+            older provider manifest used a different idempotency key.  Only
+            in-flight/retryable states need the provider-artifact validator;
+            otherwise a safe resume would redo completed slots.
+            """
+
+            status = str(value.get("status", ""))
+            return status in {
+                "pending",
+                "repair_running",
+            } or _slot_failure_is_retryable(value)
+
+        def cached_for_request(request: GenerationRequest) -> Mapping[str, Any] | None:
+            """Find durable slot state even when a mutable prompt changed.
+
+            Runtime controls are intentionally mutable.  They are included in
+            the rendered prompt, so changing (for example) ``thread_count``
+            changes the request hash even though the completed slot result is
+            still valid.  Prefer the exact key, then match the durable slot
+            identity from the checkpoint rather than regenerating the turn.
+            """
+
+            direct = slots_state.get(request.idempotency_key)
+            if isinstance(direct, Mapping):
+                return direct
+            matches: list[Mapping[str, Any]] = []
+            for value in slots_state.values():
+                if not isinstance(value, Mapping):
+                    continue
+                if value.get("generation") != request.generation:
+                    continue
+                if str(value.get("slot", "")) != request.slot:
+                    continue
+                if str(value.get("parent_id", "")) != request.parent_id:
+                    continue
+                stored_request = value.get("initial_request")
+                if not isinstance(stored_request, Mapping):
+                    stored_request = value.get("request")
+                if isinstance(stored_request, Mapping) and str(
+                    stored_request.get("phase", "initial")
+                ) != request.phase:
+                    continue
+                matches.append(value)
+            if not matches:
+                return None
+            ranks = {
+                "accepted": 100,
+                "duplicate": 90,
+                "invalid": 80,
+                "failed": 70,
+                "repair_pending": 60,
+                "repair_running": 40,
+                "pending": 10,
+            }
+            matches.sort(key=lambda item: ranks.get(str(item.get("status", "")), 0), reverse=True)
+            return matches[0]
+
         seen: dict[str, str] = {}
         for index, source in enumerate(self.existing_sources):
             identity = validate_policy(
@@ -1737,9 +1799,10 @@ class GenerationCoordinator:
                         completed_slots=len(results),
                         population_size=self.config.slots,
                     )
-                    cached = slots_state.get(request.idempotency_key)
+                    cached = cached_for_request(request)
                     if (
                         isinstance(cached, Mapping)
+                        and cached_requires_provider(cached)
                         and self.resume_slot_validator is not None
                         and not self.resume_slot_validator(request, cached)
                     ):
@@ -2004,9 +2067,10 @@ class GenerationCoordinator:
                         remaining_repairs=max(0, self.config.max_repairs - repair_attempt),
                         retained=resuming_repair,
                     )
-                    cached = slots_state.get(req.idempotency_key)
+                    cached = cached_for_request(req)
                     if (
                         isinstance(cached, Mapping)
+                        and cached_requires_provider(cached)
                         and self.resume_slot_validator is not None
                         and not self.resume_slot_validator(req, cached)
                     ):
