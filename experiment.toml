@@ -1,0 +1,42 @@
+schema_version = "mforge.experiment.v1"
+
+exp_id = "heg_llm_live_5"
+workspace = "./workspace"
+
+kind = "ranker-search"
+preset = "heg-ranker-evolution-v1"
+
+[run]
+wall_seconds = 3600
+turn_timeout_base_seconds = 120
+
+[model]
+provider = "codex"
+name = "gpt-5.6-luna"
+effort = "xhigh"
+concurrency = 1
+max_repairs = 3
+
+[search]
+population_size = 8
+max_generations = 4
+max_model_turns = 64
+selection = "elite-diversity"
+
+[evaluation]
+orders = [10, 12]
+graph_seeds = [401, 402, 403, 404]
+policy_seeds = [
+  4001, 4002, 4003, 4004,
+  4005, 4006, 4007, 4008,
+  4009, 4010, 4011, 4012,
+  4013, 4014, 4015, 4016,
+]
+horizon = 32
+proposal_pool_size = 12
+baselines = ["random", "structural"]
+replay = true
+
+[resources]
+workers = 8
+thread_count = 2
