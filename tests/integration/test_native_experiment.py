@@ -28,6 +28,7 @@ from mutation_forge.experiment.native import (
     NativeExperimentAdapter,
     _evaluate_candidate_process,
     _resume_parent_assignments,
+    _set_evaluation_process_name,
 )
 from mutation_forge.experiment.service import ExperimentService
 from mutation_forge.experiment.state import ExperimentStateStore
@@ -448,6 +449,24 @@ def test_native_evaluation_runs_in_spawned_process(tmp_path: Path) -> None:
     assert result["status"] == "completed"
     assert elapsed > 0
     assert any(kind == "progress" for kind, _payload in messages)
+
+
+def test_native_evaluation_worker_has_mforge_process_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class LibC:
+        def prctl(self, *args: object) -> None:
+            calls.append(args)
+
+    monkeypatch.setattr("mutation_forge.experiment.native.ctypes.CDLL", lambda *_a, **_k: LibC())
+    monkeypatch.setattr("mutation_forge.experiment.native.sys.platform", "linux")
+
+    name = _set_evaluation_process_name("g0003-slot-07")
+
+    assert name == "mforge-eval-07"
+    assert calls == [(15, b"mforge-eval-07", 0, 0, 0)]
 
 
 def test_native_slot_events_do_not_report_queued_turns_as_active() -> None:

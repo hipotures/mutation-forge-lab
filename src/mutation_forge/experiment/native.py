@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import hashlib
 import inspect
 import json
 import multiprocessing
 import os
+import sys
 import threading
 import time
 from collections.abc import Collection, Mapping, Sequence
@@ -69,6 +71,15 @@ class _ProcessCounterexampleOutcome:
     outcome: CounterexampleOutcome
 
 
+def _set_evaluation_process_name(candidate_id: str) -> str:
+    slot_suffix = candidate_id.rsplit("-slot-", 1)[-1]
+    process_name = f"mforge-eval-{slot_suffix}"[:15]
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(15, process_name.encode("utf-8"), 0, 0, 0)
+    return process_name
+
+
 def _evaluate_candidate_process(
     config: ExperimentConfig,
     candidate_id: str,
@@ -80,6 +91,7 @@ def _evaluate_candidate_process(
 ) -> tuple[Mapping[str, Any] | _ProcessCounterexampleOutcome, float]:
     """Run one CPU-bound native evaluation outside the coordinator process."""
 
+    _set_evaluation_process_name(candidate_id)
     started = time.monotonic()
 
     def send(kind: str, payload: Mapping[str, Any]) -> None:
@@ -1855,6 +1867,7 @@ class NativeExperimentAdapter:
         evaluation_progress_connections: list[Any] = []
         streamed_futures: dict[str, Any] = {}
         published_evaluations: set[str] = set()
+        evaluation_completion_lock = threading.Lock()
 
         def evaluation_progress_for(
             candidate: Candidate,
@@ -1987,6 +2000,96 @@ class NativeExperimentAdapter:
             )
             published_evaluations.add(program_id)
 
+        def publish_completed_evaluation(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+            result: Mapping[str, Any],
+            evaluation_elapsed: float,
+        ) -> None:
+            nonlocal best_objective, best_candidate_id, last_ir, last_timing_profile
+            with evaluation_completion_lock:
+                if program_id in published_evaluations:
+                    return
+                state.record_evaluation(
+                    identity,
+                    candidate_id=program_id,
+                    kind="development",
+                    state="completed",
+                    result=result,
+                )
+                session.evaluations_completed += 1
+                summary = result.get("summary")
+                summary = summary if isinstance(summary, Mapping) else {}
+                evaluation_summary_cache[program_id] = dict(summary)
+                metric = summary.get("mean_auc")
+                if (
+                    isinstance(metric, (int, float))
+                    and not isinstance(metric, bool)
+                    and (best_objective is None or float(metric) > best_objective)
+                ):
+                    best_objective = float(metric)
+                    best_candidate_id = program_id
+                timing_profile = result.get("timing_profile")
+                if isinstance(timing_profile, Mapping):
+                    last_timing_profile = dict(timing_profile)
+                raw_ir = result.get("ir")
+                if raw_ir is None:
+                    raw_ir = summary.get("ir", summary.get("improvement_rate"))
+                if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
+                    last_ir = float(raw_ir)
+                replay = result.get("replay")
+                active = sum(
+                    1
+                    for item in streamed_futures.values()
+                    if hasattr(item, "done") and not item.done()
+                )
+                published_evaluations.add(program_id)
+                emit(
+                    "evaluation_completed",
+                    generation=candidate.generation,
+                    slot=candidate.slot,
+                    candidate_id=program_id,
+                    phase="development",
+                    evaluation_id=identity,
+                    status="completed",
+                    evaluations_active=active,
+                    evaluations_completed=session.evaluations_completed,
+                    evaluation_count=state.counts().get("evaluation_count", 0),
+                    mean_auc=metric,
+                    best_auc=summary.get("best_auc"),
+                    elapsed_seconds=evaluation_elapsed,
+                    timing_profile=timing_profile,
+                    development_progress=1.0,
+                    replay_progress=(
+                        1.0
+                        if isinstance(replay, Mapping) and replay.get("enabled") is True
+                        else 0.0
+                    ),
+                    current_objective=metric,
+                    best_objective=best_objective,
+                    best_candidate_id=best_candidate_id,
+                    best_score=best_objective,
+                    baseline_comparison=summary.get("baseline_auc"),
+                    ir=last_ir,
+                    worker_count=evaluation_worker_count,
+                    active_workers=active,
+                )
+                metadata = {
+                    "search_metrics": {"pooled_median_auc": metric}
+                    if isinstance(metric, (int, float))
+                    else {}
+                }
+                state.record_candidate(
+                    program_id,
+                    source_sha256=candidate.source_sha256,
+                    archive_path=str(archive.sources / f"{program_id}.py"),
+                    generation=candidate.generation,
+                    slot=candidate.slot,
+                    status="created",
+                    metadata=metadata,
+                )
+
         def submit_evaluation(
             candidate: Candidate,
             program_id: str,
@@ -2048,7 +2151,7 @@ class NativeExperimentAdapter:
                 progress_thread.start()
                 evaluation_progress_threads.append(progress_thread)
                 evaluation_progress_connections.append(send_progress)
-                return evaluation_executor.submit(
+                future = evaluation_executor.submit(
                     _evaluate_candidate_process,
                     config,
                     program_id,
@@ -2058,6 +2161,34 @@ class NativeExperimentAdapter:
                     profiling_enabled,
                     send_progress,
                 )
+                def evaluation_finished(done: Any) -> None:
+                    try:
+                        process_result, evaluation_elapsed = done.result()
+                    except BaseException as error:
+                        emit(
+                            "evaluation_failed",
+                            generation=candidate.generation,
+                            slot=candidate.slot,
+                            candidate_id=program_id,
+                            phase="development",
+                            evaluation_id=identity,
+                            status="failed",
+                            evaluations_active=0,
+                            error=f"{type(error).__name__}: {error}",
+                        )
+                        return
+                    if isinstance(process_result, _ProcessCounterexampleOutcome):
+                        return
+                    publish_completed_evaluation(
+                        candidate,
+                        program_id,
+                        identity,
+                        process_result,
+                        evaluation_elapsed,
+                    )
+
+                future.add_done_callback(evaluation_finished)
+                return future
             return run_evaluation(candidate, program_id, identity, progress)
 
         def stream_candidate(
@@ -2185,81 +2316,12 @@ class NativeExperimentAdapter:
                             if hasattr(pending, "cancel"):
                                 pending.cancel()
                         raise
-                    state.record_evaluation(
-                        identity,
-                        candidate_id=program_id,
-                        kind="development",
-                        state="completed",
-                        result=result,
-                    )
-                    session.evaluations_completed += 1
-                    summary = result.get("summary")
-                    summary = summary if isinstance(summary, Mapping) else {}
-                    evaluation_summary_cache[program_id] = dict(summary)
-                    metric = summary.get("mean_auc")
-                    if (
-                        isinstance(metric, (int, float))
-                        and not isinstance(metric, bool)
-                        and (best_objective is None or float(metric) > best_objective)
-                    ):
-                        best_objective = float(metric)
-                        best_candidate_id = program_id
-                    timing_profile = result.get("timing_profile")
-                    if isinstance(timing_profile, Mapping):
-                        last_timing_profile = dict(timing_profile)
-                    raw_ir = result.get("ir")
-                    if raw_ir is None:
-                        raw_ir = summary.get("ir", summary.get("improvement_rate"))
-                    if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
-                        last_ir = float(raw_ir)
-                    replay = result.get("replay")
-                    baseline_comparison = summary.get("baseline_auc")
-                    active = sum(
-                        1 for item in futures.values() if hasattr(item, "done") and not item.done()
-                    )
-                    emit(
-                        "evaluation_completed",
-                        generation=generation,
-                        slot=candidate.slot,
-                        candidate_id=program_id,
-                        phase="development",
-                        evaluation_id=identity,
-                        status="completed",
-                        evaluations_active=active,
-                        evaluations_completed=session.evaluations_completed,
-                        evaluation_count=state.counts().get("evaluation_count", 0),
-                        mean_auc=metric,
-                        best_auc=summary.get("best_auc"),
-                        elapsed_seconds=evaluation_elapsed,
-                        timing_profile=timing_profile,
-                        development_progress=1.0,
-                        replay_progress=(
-                            1.0
-                            if isinstance(replay, Mapping) and replay.get("enabled") is True
-                            else 0.0
-                        ),
-                        current_objective=metric,
-                        best_objective=best_objective,
-                        best_candidate_id=best_candidate_id,
-                        best_score=best_objective,
-                        baseline_comparison=baseline_comparison,
-                        ir=last_ir,
-                        worker_count=evaluation_worker_count,
-                        active_workers=active,
-                    )
-                    metadata = {
-                        "search_metrics": {"pooled_median_auc": metric}
-                        if isinstance(metric, (int, float))
-                        else {}
-                    }
-                    state.record_candidate(
+                    publish_completed_evaluation(
+                        candidate,
                         program_id,
-                        source_sha256=candidate.source_sha256,
-                        archive_path=str(archive.sources / f"{program_id}.py"),
-                        generation=candidate.generation,
-                        slot=candidate.slot,
-                        status="created",
-                        metadata=metadata,
+                        identity,
+                        result,
+                        evaluation_elapsed,
                     )
                 else:
                     restored_summary = stored_evaluation_summary(program_id)
