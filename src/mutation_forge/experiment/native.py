@@ -1163,21 +1163,29 @@ class NativeExperimentAdapter:
                 },
                 "target": "erdos_gyarfas",
                 "target_forbidden_lengths_by_order": (target_forbidden_lengths_by_order),
+                "target_feature_limits_by_order": {
+                    str(order): FeatureLimits(
+                        forbidden_lengths=tuple(lengths)
+                    ).as_dict()
+                    for order, lengths in target_forbidden_lengths_by_order.items()
+                },
                 "resources": {
                     "workers": config.resources.workers,
                     "thread_count": config.resources.thread_count,
                 },
             }
-            prompt_lengths = tuple(
-                sorted(
-                    {
-                        length
-                        for lengths in target_forbidden_lengths_by_order.values()
-                        for length in lengths
-                    }
-                )
-            )
-            feature_limits = FeatureLimits(forbidden_lengths=prompt_lengths)
+            feature_limits_by_order = {
+                int(order): FeatureLimits(forbidden_lengths=tuple(lengths))
+                for order, lengths in target_forbidden_lengths_by_order.items()
+            }
+            witness_caps_by_order = {
+                str(order): limits.witness_sample_cap
+                for order, limits in feature_limits_by_order.items()
+            }
+            local_risk_budgets_by_order = {
+                str(order): limits.local_risk_budget
+                for order, limits in feature_limits_by_order.items()
+            }
             sandbox_limits = SandboxLimits()
             numeric_scales = {
                 "ctx.order": {
@@ -1215,15 +1223,17 @@ class NativeExperimentAdapter:
                 "proposal.k": {"values": [2, 3, 4]},
                 "proposal.broken_sampled_witnesses_by_length": {
                     "per_item_minimum": 0,
-                    "per_item_maximum": feature_limits.witness_sample_cap,
+                    "per_item_maximum_by_order": witness_caps_by_order,
                 },
                 "proposal.removed_edge_load_sum_by_length": {
                     "per_item_minimum": 0,
-                    "per_item_maximum": (feature_limits.witness_sample_cap * 4),
+                    "per_item_maximum_by_order": {
+                        order: cap * 4 for order, cap in witness_caps_by_order.items()
+                    },
                 },
                 "proposal.removed_edge_load_max_by_length": {
                     "per_item_minimum": 0,
-                    "per_item_maximum": feature_limits.witness_sample_cap,
+                    "per_item_maximum_by_order": witness_caps_by_order,
                 },
                 "proposal.distance_fields": {
                     "minimum": 0,
@@ -1231,11 +1241,11 @@ class NativeExperimentAdapter:
                 },
                 "proposal.local_triangle_risk": {
                     "minimum": 0,
-                    "operation_budget": feature_limits.local_risk_budget,
+                    "operation_budget_by_order": local_risk_budgets_by_order,
                 },
                 "proposal.local_c4_risk": {
                     "minimum": 0,
-                    "operation_budget": feature_limits.local_risk_budget,
+                    "operation_budget_by_order": local_risk_budgets_by_order,
                 },
             }
             sections = [

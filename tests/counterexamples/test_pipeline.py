@@ -82,6 +82,9 @@ def test_pipeline_seals_candidate_and_two_verifications(tmp_path: Path) -> None:
     assert outcome.candidate is not None
     assert outcome.certificate is not None
     assert outcome.candidate.graph_path.is_file()
+    assert (outcome.candidate.artifact_directory / "verification-primary.json").is_file()
+    assert (outcome.candidate.artifact_directory / "verification-independent.json").is_file()
+    assert (outcome.candidate.artifact_directory / "certificate.json").is_file()
     assert outcome.primary is not None and outcome.primary.status == "VERIFIED"
     assert outcome.independent is not None
     assert outcome.independent.status == "VERIFIED"
@@ -195,6 +198,41 @@ def test_primary_unknown_pauses_before_independent_verification(tmp_path: Path) 
     assert outcome.primary is not None and outcome.primary.status == "UNKNOWN"
     assert outcome.independent is None
     assert independent_called is False
+
+
+def test_unknown_verification_is_retried_on_resume(tmp_path: Path) -> None:
+    class RetryBackend(ToyBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def exact_verify(self, graph: GraphState) -> ExactVerification:
+            self.calls += 1
+            if self.calls == 1:
+                return ExactVerification("UNKNOWN", False, "busy", "test-primary")
+            return ExactVerification("VERIFIED", True, "verified", "test-primary")
+
+    backend = RetryBackend()
+    pipeline = CounterexamplePipeline(
+        backend=backend,
+        artifact_root=tmp_path,
+        independent_verifier=_verified,
+    )
+    first = pipeline.inspect(
+        graph=_petersen(),
+        score=_zero_score(),
+        witness_cap=64,
+        provenance=CandidateProvenance("baseline", "first"),
+    )
+    assert first.decision is CounterexampleDecision.PAUSE_INCONCLUSIVE
+    resumed = pipeline.inspect(
+        graph=_petersen(),
+        score=_zero_score(),
+        witness_cap=64,
+        provenance=CandidateProvenance("baseline", "resume"),
+    )
+    assert resumed.decision is CounterexampleDecision.STOP_VERIFIED
+    assert backend.calls == 2
 
 
 def test_completed_verifications_are_reused_on_resume(tmp_path: Path) -> None:

@@ -169,6 +169,32 @@ def _publish_directory(path: Path, files: Mapping[str, bytes]) -> None:
             temporary.rmdir()
 
 
+def _publish_file(path: Path, payload: bytes) -> None:
+    """Create one immutable evidence file without replacing an existing file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(temporary_fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != payload:
+                raise CounterexamplePipelineError(
+                    f"immutable counterexample artifact differs: {path}"
+                ) from None
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _graph_properties(graph: GraphState) -> tuple[int, bool]:
     adjacency = [set[int]() for _ in range(graph.order)]
     for u, v in graph.edges:
@@ -369,8 +395,25 @@ class CounterexamplePipeline:
         if (
             metadata.get("schema_version") != CANDIDATE_SCHEMA_VERSION
             or metadata.get("candidate_id") != candidate.candidate_id
+            or metadata.get("target_id") != self.target_id
+            or metadata.get("target_contract_version") != self.target_contract_version
         ):
             raise CounterexamplePipelineError("candidate identity mismatch")
+        raw_lengths = metadata.get("target_forbidden_lengths")
+        if (
+            not isinstance(raw_lengths, list)
+            or any(
+                not isinstance(length, int) or isinstance(length, bool)
+                for length in raw_lengths
+            )
+        ):
+            raise CounterexamplePipelineError("candidate target lengths are invalid")
+        expected_candidate_id = self._candidate_id(
+            graph_bytes,
+            tuple(raw_lengths),
+        )
+        if expected_candidate_id != candidate.candidate_id:
+            raise CounterexamplePipelineError("candidate content identity mismatch")
         graph_sha256 = _sha256(graph_bytes)
         if (
             graph_sha256 != metadata.get("artifact_sha256")
@@ -390,7 +433,7 @@ class CounterexamplePipeline:
         if self.backend.state_hash(graph) != metadata.get("state_hash"):
             raise CounterexamplePipelineError("candidate state hash mismatch")
         expected = self.backend.target_forbidden_lengths(graph.order)
-        if list(expected) != metadata.get("target_forbidden_lengths"):
+        if list(expected) != raw_lengths:
             raise CounterexamplePipelineError("candidate target lengths mismatch")
         return graph, metadata
 
@@ -399,11 +442,13 @@ class CounterexamplePipeline:
         candidate: CounterexampleCandidate,
         role: str,
         result: ExactVerification,
+        target_lengths: tuple[int, ...],
     ) -> CounterexampleVerificationRecord:
         payload = {
             "schema_version": VERIFICATION_SCHEMA_VERSION,
             "candidate_id": candidate.candidate_id,
             "verification_role": role,
+            "target_forbidden_lengths": list(target_lengths),
             "verifier_id": result.implementation,
             "status": result.status,
             "complete": result.complete,
@@ -413,6 +458,7 @@ class CounterexamplePipeline:
             "implementation_sha256": result.implementation_sha256,
             "configuration": dict(result.configuration),
             "candidate_graph6_sha256": _sha256(candidate.graph_path.read_bytes()),
+            "attempted_at": datetime.now(UTC).isoformat(),
         }
         attempt_id = _sha256(_canonical(payload))
         directory = candidate.artifact_directory.parent / "verifications" / role / attempt_id
@@ -424,13 +470,27 @@ class CounterexamplePipeline:
                 "seal.json": _canonical({"verification.json": _sha256(record_bytes)}) + b"\n",
             },
         )
+        published_path = candidate.artifact_directory / f"verification-{role}.json"
+        if not published_path.exists():
+            _publish_file(published_path, record_bytes)
+        elif published_path.read_bytes() != record_bytes:
+            # The fixed name is the first published observation.  Retries are
+            # append-only attempts and remain at their content-addressed path;
+            # replacing the fixed file would destroy evidence from the prior
+            # state transition.
+            pass
+        artifact_path = (
+            published_path
+            if published_path.read_bytes() == record_bytes
+            else directory / "verification.json"
+        )
         return CounterexampleVerificationRecord(
             role,
             result.status,
             result.complete,
             result.implementation,
             directory,
-            directory / "verification.json",
+            artifact_path,
             result.message,
         )
 
@@ -442,9 +502,12 @@ class CounterexamplePipeline:
         root = candidate.artifact_directory.parent / "verifications" / role
         if not root.is_dir():
             return None
-        records: list[CounterexampleVerificationRecord] = []
-        signatures: set[tuple[str, bool, str, str]] = set()
+        records: list[tuple[CounterexampleVerificationRecord, str]] = []
+        signatures: set[tuple[str, str]] = set()
+        record_bytes_seen: set[bytes] = set()
         candidate_sha256 = _sha256(candidate.graph_path.read_bytes())
+        graph, _ = self._read_candidate(candidate)
+        expected_lengths = list(self.backend.target_forbidden_lengths(graph.order))
         for directory in sorted(item for item in root.iterdir() if item.is_dir()):
             artifact_path = directory / "verification.json"
             seal_path = directory / "seal.json"
@@ -461,42 +524,65 @@ class CounterexamplePipeline:
                 or payload.get("schema_version") != VERIFICATION_SCHEMA_VERSION
                 or payload.get("candidate_id") != candidate.candidate_id
                 or payload.get("verification_role") != role
+                or payload.get("target_forbidden_lengths") != expected_lengths
                 or payload.get("candidate_graph6_sha256") != candidate_sha256
                 or seal != {"verification.json": _sha256(artifact_bytes)}
             ):
                 raise CounterexamplePipelineError(
                     f"{role} verification record integrity mismatch"
                 )
+            record_bytes_seen.add(artifact_bytes)
+            published_path = candidate.artifact_directory / f"verification-{role}.json"
+            artifact_ref = (
+                published_path
+                if published_path.is_file() and published_path.read_bytes() == artifact_bytes
+                else artifact_path
+            )
             status = payload.get("status")
             complete = payload.get("complete")
             verifier_id = payload.get("verifier_id")
             message = payload.get("message", "")
+            attempted_at = payload.get("attempted_at")
             if (
                 not isinstance(status, str)
                 or not isinstance(complete, bool)
                 or not isinstance(verifier_id, str)
                 or not isinstance(message, str)
+                or not isinstance(attempted_at, str)
             ):
                 raise CounterexamplePipelineError(
                     f"{role} verification record contract mismatch"
                 )
-            signatures.add((status, complete, verifier_id, message))
+            if status != "UNKNOWN":
+                signatures.add((status, verifier_id))
             records.append(
-                CounterexampleVerificationRecord(
-                    role,
-                    status,
-                    complete,
-                    verifier_id,
-                    directory,
-                    artifact_path,
-                    message,
+                (
+                    CounterexampleVerificationRecord(
+                        role,
+                        status,
+                        complete,
+                        verifier_id,
+                        directory,
+                        artifact_ref,
+                        message,
+                    ),
+                    attempted_at,
                 )
             )
         if len(signatures) > 1:
             raise CounterexamplePipelineError(
                 f"conflicting immutable {role} verification records"
             )
-        return records[0] if records else None
+        if not records:
+            return None
+        published_path = candidate.artifact_directory / f"verification-{role}.json"
+        if published_path.is_file() and published_path.read_bytes() not in record_bytes_seen:
+            raise CounterexamplePipelineError(
+                f"{role} verification publication mismatch"
+            )
+        terminal = [item for item in records if item[0].status != "UNKNOWN"]
+        candidates = terminal if terminal else records
+        return max(candidates, key=lambda item: (item[1], item[0].artifact_directory.name))[0]
 
     def _run_independent(
         self,
@@ -510,7 +596,17 @@ class CounterexamplePipeline:
                     "independent verifier returned an invalid result"
                 )
             configuration = dict(result.configuration)
-            configuration.setdefault("target_forbidden_lengths", list(expected_lengths))
+            configured_lengths = configuration.get("target_forbidden_lengths")
+            if configured_lengths is not None and configured_lengths != list(expected_lengths):
+                return ExactVerification(
+                    "INVALID",
+                    True,
+                    "independent verifier target lengths mismatch",
+                    result.implementation,
+                    implementation_sha256=result.implementation_sha256,
+                    configuration=configuration,
+                )
+            configuration["target_forbidden_lengths"] = list(expected_lengths)
             configuration.setdefault("process_isolated", False)
             return replace(result, configuration=configuration)
         command = [
@@ -554,7 +650,7 @@ class CounterexamplePipeline:
             payload = {}
         observed_lengths = payload.get("target_forbidden_lengths")
         if (
-            payload.get("status") in {"VERIFIED", "REJECTED"}
+            payload.get("status") in {"VERIFIED", "REJECTED", "INVALID"}
             and observed_lengths != list(expected_lengths)
         ):
             return ExactVerification(
@@ -646,6 +742,7 @@ class CounterexamplePipeline:
                 "seal.json": _canonical({"certificate.json": certificate_id}) + b"\n",
             },
         )
+        _publish_file(candidate.artifact_directory / "certificate.json", certificate_bytes)
         return CounterexampleCertificate(
             candidate.candidate_id,
             certificate_id,
@@ -698,7 +795,9 @@ class CounterexamplePipeline:
         )
         reread, _ = self._read_candidate(candidate)
         primary = self._load_verification(candidate, "primary")
-        if primary is None:
+        if primary is None or primary.status == "UNKNOWN" or (
+            primary.status == "VERIFIED" and not primary.complete
+        ):
             self._emit(
                 "counterexample_primary_verification_started",
                 {
@@ -717,6 +816,7 @@ class CounterexamplePipeline:
                 candidate,
                 "primary",
                 self.backend.exact_verify(reread),
+                lengths,
             )
         self._emit(
             "counterexample_primary_verification_completed",
@@ -754,7 +854,9 @@ class CounterexamplePipeline:
             )
 
         independent = self._load_verification(candidate, "independent")
-        if independent is None:
+        if independent is None or independent.status == "UNKNOWN" or (
+            independent.status == "VERIFIED" and not independent.complete
+        ):
             self._emit(
                 "counterexample_independent_verification_started",
                 {
@@ -771,6 +873,7 @@ class CounterexamplePipeline:
                 candidate,
                 "independent",
                 self._run_independent(candidate.graph_path, lengths),
+                lengths,
             )
         self._emit(
             "counterexample_independent_verification_completed",

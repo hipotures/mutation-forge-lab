@@ -6,6 +6,7 @@ import json
 import os
 import resource
 import select
+import sqlite3
 import sys
 import termios
 import threading
@@ -464,10 +465,11 @@ def load_persisted_dashboard_state(
                     "errors": metadata.get("errors", []),
                     "repairs": metadata.get("repairs", 0),
                 }
-    except Exception:
-        # A dashboard must not prevent a run from starting when an old or
-        # partially-written workspace cannot be read.  The live event stream
-        # remains authoritative for the active session.
+    except (OSError, UnicodeError, sqlite3.DatabaseError, json.JSONDecodeError):
+        # A missing or partially-written optional snapshot can be completed by
+        # the live event stream.  Contract/schema errors intentionally escape:
+        # v1 or malformed state must be rejected, never silently rendered as a
+        # fresh experiment.
         pass
     finally:
         if store is not None:

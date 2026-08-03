@@ -148,7 +148,7 @@ instead of being silently ignored.
 | `[model]` | Codex model, reasoning effort, model concurrency, and repair limit |
 | `[search]` | Population, global generation/turn limits, and parent selection |
 | `[evaluation]` | HEG orders, seeds, horizon, proposal pools, baselines, and replay |
-| `[resources]` | Evaluation worker count and native thread count |
+| `[resources]` | Resource reservation (`workers`) and native evaluation pool (`thread_count`) |
 
 Important behavior:
 

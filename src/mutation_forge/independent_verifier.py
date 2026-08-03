@@ -133,6 +133,11 @@ def verify(path: Path) -> dict[str, Any]:
             "elapsed_seconds": time.monotonic() - started,
         }
     order = len(adjacency)
+    lengths: list[int] = []
+    length = 4
+    while length <= order:
+        lengths.append(length)
+        length *= 2
     if order == 0:
         message = "graph is empty"
     elif not _connected(adjacency):
@@ -148,14 +153,10 @@ def verify(path: Path) -> dict[str, Any]:
             "message": message,
             "implementation": IMPLEMENTATION_ID,
             "implementation_sha256": implementation_sha256,
+            "target_forbidden_lengths": lengths,
             "witnesses": [],
             "elapsed_seconds": time.monotonic() - started,
         }
-    lengths: list[int] = []
-    length = 4
-    while length <= order:
-        lengths.append(length)
-        length *= 2
     for forbidden_length in lengths:
         witness = _find_cycle(adjacency, forbidden_length)
         if witness is not None:

@@ -180,6 +180,10 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             config.run.max_total_tokens_per_hour
         )
         last_error = checkpoint_error or state.latest_error()
+        if current_state == "running" and owner_active:
+            # A stale error from an earlier resumable session must not be shown
+            # as the current failure while the owner is actively progressing.
+            last_error = None
         session_metrics: dict[str, Any] = {}
         if session is not None:
             try:
@@ -199,13 +203,29 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
             configured_model_turns = config.search.max_model_turns
         model_turns_used = int(current["provider_turns"])
         native_checkpoint = layout.artifacts / "native-generation-checkpoint.json"
+        native_state: Mapping[str, Any] = {}
         if native_checkpoint.is_file():
             try:
-                native_state = json.loads(native_checkpoint.read_text(encoding="utf-8"))
+                raw_native_state = json.loads(native_checkpoint.read_text(encoding="utf-8"))
+                if isinstance(raw_native_state, Mapping):
+                    native_state = raw_native_state
             except (OSError, UnicodeError, json.JSONDecodeError):
                 native_state = {}
+            native_generation_value = native_state.get(
+                "next_generation", native_state.get("generation")
+            )
+            if (
+                isinstance(native_generation_value, int)
+                and not isinstance(native_generation_value, bool)
+            ):
+                generation = max(generation, native_generation_value)
+            native_completed_slots = native_state.get("completed_slots")
+            if isinstance(native_completed_slots, int) and not isinstance(
+                native_completed_slots, bool
+            ):
+                completed_slots = max(completed_slots, native_completed_slots)
             checkpoint_turns = (
-                native_state.get("model_turns_used") if isinstance(native_state, Mapping) else None
+                native_state.get("model_turns_used")
             )
             if (
                 isinstance(checkpoint_turns, int)
