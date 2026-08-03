@@ -1150,14 +1150,18 @@ def reduce_dashboard_event(
             phase="budget",
         )
     elif event_type == "experiment_completed":
-        state = replace(state, experiment_state="completed", phase="completed")
+        if state.counterexample_state != "conflict":
+            state = replace(state, experiment_state="completed", phase="completed")
     elif event_type == "experiment_exhausted":
         state = replace(state, experiment_state="exhausted", phase="exhausted")
     elif event_type == "experiment_interrupted":
         state = replace(state, experiment_state="interrupted", phase="interrupted")
     elif event_type == "experiment_failed":
-        state = replace(state, experiment_state="failed", phase="failed")
+        if state.counterexample_state != "verified":
+            state = replace(state, experiment_state="failed", phase="failed")
     elif event_type == "counterexample_candidate_found":
+        if state.counterexample_state in {"verified", "conflict"}:
+            return state
         lengths = payload.get("target_forbidden_lengths")
         state = replace(
             state,
@@ -1176,6 +1180,8 @@ def reduce_dashboard_event(
             phase="exact verification",
         )
     elif event_type == "counterexample_primary_verification_started":
+        if state.counterexample_state in {"verified", "conflict"}:
+            return state
         state = replace(
             state,
             counterexample_state="primary_verifying",
@@ -1183,6 +1189,8 @@ def reduce_dashboard_event(
             phase="exact verification",
         )
     elif event_type == "counterexample_primary_verification_completed":
+        if state.counterexample_state in {"verified", "conflict"}:
+            return state
         state = replace(
             state,
             counterexample_state=(
@@ -1196,6 +1204,8 @@ def reduce_dashboard_event(
             ),
         )
     elif event_type == "counterexample_independent_verification_started":
+        if state.counterexample_state in {"verified", "conflict"}:
+            return state
         state = replace(
             state,
             counterexample_state="independent_verifying",
@@ -1203,6 +1213,8 @@ def reduce_dashboard_event(
             phase="exact verification",
         )
     elif event_type == "counterexample_independent_verification_completed":
+        if state.counterexample_state in {"verified", "conflict"}:
+            return state
         state = replace(
             state,
             counterexample_independent=(
@@ -1211,6 +1223,8 @@ def reduce_dashboard_event(
             ),
         )
     elif event_type == "counterexample_verification_conflict":
+        if state.counterexample_state == "verified":
+            return state
         state = replace(
             state,
             counterexample_state="conflict",
@@ -1218,6 +1232,8 @@ def reduce_dashboard_event(
             phase="verification conflict",
         )
     elif event_type == "counterexample_verified":
+        if state.counterexample_state == "conflict":
+            return state
         state = replace(
             state,
             counterexample_state="verified",

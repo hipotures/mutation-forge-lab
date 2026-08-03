@@ -362,10 +362,9 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
         }
         terminal_checkpoint = {
             "schema_version": "mforge.experiment.checkpoint.v2",
-            "state": "completed",
-            "stop_reason": "counterexample_verified",
+            "state": status,
+            "stop_reason": halted.outcome.stop_reason,
             "candidate_id": summary["candidate_id"],
-            "certificate_sha256": summary["certificate_sha256"],
         }
         terminal_checkpoint_path = artifacts.write_json(
             "terminal-checkpoint.json",
@@ -404,6 +403,18 @@ def run_benchmark(config: LabConfig, *, output: str | None = None) -> BenchmarkR
             "certificate_sha256": certificate.sha256 if certificate else None,
             "elapsed_seconds": elapsed,
         }
+        terminal_checkpoint = {
+            "schema_version": "mforge.experiment.checkpoint.v2",
+            "state": "completed",
+            "stop_reason": "counterexample_verified",
+            "candidate_id": summary["candidate_id"],
+            "certificate_sha256": summary["certificate_sha256"],
+        }
+        terminal_checkpoint_path = artifacts.write_json(
+            "terminal-checkpoint.json",
+            terminal_checkpoint,
+        )
+        summary["terminal_checkpoint"] = str(terminal_checkpoint_path)
         artifacts.write_json("run_summary.json", summary)
         manifest["status"] = "completed"
         manifest["stop_reason"] = "counterexample_verified"

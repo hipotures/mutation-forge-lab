@@ -31,6 +31,7 @@ from mutation_forge.policies.baselines import (
     HEG_UNIFORM_TWO_SWITCH,
 )
 from mutation_forge.proposals.k_switch import (
+    EvaluationContractError,
     FeatureLimits,
     KSwitchPoolGenerator,
     PoolLimits,
@@ -224,6 +225,25 @@ def _score(backend: GraphBackend, graph: GraphState, witness_cap: int) -> GraphS
     result = backend.score(graph, witness_cap=witness_cap, cutoff=None)
     if result is None:
         raise RuntimeError("backend returned a cutoff-dominated score without a cutoff")
+    expected = backend.target_forbidden_lengths(graph.order)
+    observed = tuple(length for length, _ in result.capped_cycle_counts)
+    counts = tuple(count for _, count in result.capped_cycle_counts)
+    if observed != expected:
+        raise EvaluationContractError(
+            f"score lengths {observed!r} do not match target lengths {expected!r}"
+        )
+    if len(observed) != len(set(observed)):
+        raise EvaluationContractError("score contains duplicate target lengths")
+    if any(count < 0 or count > witness_cap for count in counts):
+        raise EvaluationContractError(
+            f"score counts must be within [0, {witness_cap}]"
+        )
+    if sum(counts) != result.total_capped_witnesses:
+        raise EvaluationContractError("score total does not equal its count vector")
+    if result.total_capped_witnesses < 0:
+        raise EvaluationContractError("score total cannot be negative")
+    if not result.valid and result.total_capped_witnesses == 0:
+        raise EvaluationContractError("invalid score cannot report zero witnesses")
     return result
 
 

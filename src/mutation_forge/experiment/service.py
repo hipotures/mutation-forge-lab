@@ -447,9 +447,16 @@ class ExperimentService:
                         )
                     with suppress(Exception):
                         layout.reconcile_artifact_manifest()
+                # Keep the durable stop reason written above.  Calling
+                # set_state without it used to clear ``terminal_stop_reason``
+                # after Ctrl+C, so status could no longer explain why the
+                # resumable session stopped.
+                current_checkpoint = state.experiment().get("current_checkpoint")
                 state.set_state(
                     "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
                     error=f"{type(error).__name__}: {error}",
+                    stop_reason=session.stop_reason if session is not None else None,
+                    checkpoint=(str(current_checkpoint) if current_checkpoint else None),
                 )
                 hub.close()
                 raise

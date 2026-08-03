@@ -108,7 +108,7 @@ def test_config_accepts_and_serializes_unbounded_limits(tmp_path: Path) -> None:
     assert "effort" not in config.immutable_projection()["model"]
 
 
-def test_legacy_lock_allows_current_effort(tmp_path: Path) -> None:
+def test_lock_without_v2_schema_is_rejected(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
     path.write_text(
         _config().replace('effort = "high"', 'effort = "xhigh"'),
@@ -125,7 +125,8 @@ def test_legacy_lock_allows_current_effort(tmp_path: Path) -> None:
         "immutable_config_sha256": sha256_bytes(canonical_bytes(legacy_projection)),
     }
 
-    verify_lock(lock, config, layout)
+    with pytest.raises(ValueError, match="Unsupported experiment lock schema"):
+        verify_lock(lock, config, layout)
 
 
 def test_config_accepts_hourly_token_limit(tmp_path: Path) -> None:

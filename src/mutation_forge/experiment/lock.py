@@ -448,6 +448,14 @@ def format_differences(differences: list[tuple[str, object, object]]) -> str:
 def verify_lock(
     lock: Mapping[str, Any], config: ExperimentConfig, layout: ExperimentLayout
 ) -> None:
+    if (
+        lock.get("schema_version") != LOCK_SCHEMA_VERSION
+        or lock.get("lock_schema_version") != LOCK_SCHEMA_VERSION
+    ):
+        raise LockError(
+            f"Unsupported experiment lock schema. This runtime accepts only "
+            f"{LOCK_SCHEMA_VERSION}. Create a fresh workspace."
+        )
     if lock.get("exp_id") != config.exp_id:
         raise LockError("experiment lock exp_id does not match configuration")
     if Path(str(lock.get("experiment_root", ""))).resolve() != layout.root.resolve():

@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -378,6 +378,11 @@ class CounterexamplePipeline:
         ):
             raise CounterexamplePipelineError("candidate graph6 hash mismatch")
         graph = self.backend.deserialize_graph6(graph_bytes.decode("utf-8").rstrip("\n"))
+        validation = self.backend.validate(graph)
+        if not validation.valid:
+            raise CounterexamplePipelineError(
+                f"candidate graph validation failed: {validation.errors}"
+            )
         if graph.order != metadata.get("order"):
             raise CounterexamplePipelineError("candidate order mismatch")
         if [list(edge) for edge in graph.edges] != metadata.get("edges"):
@@ -499,7 +504,15 @@ class CounterexamplePipeline:
         expected_lengths: tuple[int, ...],
     ) -> ExactVerification:
         if self.independent_verifier is not None:
-            return self.independent_verifier(graph_path)
+            result = self.independent_verifier(graph_path)
+            if not isinstance(result, ExactVerification):
+                raise CounterexamplePipelineError(
+                    "independent verifier returned an invalid result"
+                )
+            configuration = dict(result.configuration)
+            configuration.setdefault("target_forbidden_lengths", list(expected_lengths))
+            configuration.setdefault("process_isolated", False)
+            return replace(result, configuration=configuration)
         command = [
             sys.executable,
             "-m",
@@ -540,7 +553,10 @@ class CounterexamplePipeline:
         if not isinstance(payload, Mapping):
             payload = {}
         observed_lengths = payload.get("target_forbidden_lengths")
-        if payload.get("status") == "VERIFIED" and observed_lengths != list(expected_lengths):
+        if (
+            payload.get("status") in {"VERIFIED", "REJECTED"}
+            and observed_lengths != list(expected_lengths)
+        ):
             return ExactVerification(
                 "INVALID",
                 True,
