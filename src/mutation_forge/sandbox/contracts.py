@@ -87,7 +87,7 @@ type RankerProposal = ProbeProposal | ScientificProposal
 @dataclass(frozen=True, slots=True)
 class SandboxLimits:
     max_source_bytes: int = 12 * 1024
-    max_ast_nodes: int = 500
+    max_ast_nodes: int = 1000
     max_static_loop_bound: int = 256
     address_space_bytes: int = 128 * 1024 * 1024
     per_call_wall_seconds: float = 0.025

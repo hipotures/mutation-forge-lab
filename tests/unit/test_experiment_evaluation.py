@@ -189,4 +189,88 @@ def test_run_once_resumes_from_last_completed_episode(
     assert resumed_calls == [11]
     assert len(cast(list[Any], result["episodes"])) == 2
     assert progress[0]["restored"] is True
+    assert "evaluations_per_second" not in progress[0]
     assert progress[1]["restored"] is False
+    assert progress[1]["executed"] == 1
+    assert progress[1]["restored_count"] == 1
+    assert cast(dict[str, Any], result["runtime"])["executed_episodes"] == 1
+    assert cast(dict[str, Any], result["runtime"])["restored_episodes"] == 1
+
+
+def test_candidate_publishes_development_objective_before_replay(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class Backend:
+        backend_id = "test"
+        commit = "a" * 40
+        dirty = False
+        repo = tmp_path
+
+        def close(self) -> None:
+            pass
+
+    config = {
+        "evaluation": {
+            "orders": [4],
+            "graph_seeds": [1],
+            "policy_seeds": [2],
+            "horizon": 1,
+            "proposal_pool_size": 1,
+            "baselines": [],
+            "replay": True,
+        },
+        "resources": {"workers": 1, "thread_count": 1},
+    }
+
+    def completed_pass(
+        _config: object,
+        candidate_id: str,
+        _source: Any,
+        settings: dict[str, Any],
+        *,
+        pass_name: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": evaluation.SCHEMA_VERSION,
+            "status": "completed",
+            "candidate_id": candidate_id,
+            "source_identity": {"source_sha256": "unused"},
+            "settings": {
+                key: list(value) if isinstance(value, tuple) else value
+                for key, value in settings.items()
+            },
+            "episodes": [],
+            "summary": {"mean_auc": 0.25, "best_auc": 0.5, "baseline_auc": {}},
+            "runtime": {
+                "elapsed_seconds": 2.0,
+                "execution_seconds": 2.0,
+                "executed_episodes": 1,
+                "restored_episodes": 0,
+            },
+            "pass_name": pass_name,
+        }
+
+    monkeypatch.setattr(evaluation, "_run_once", completed_pass)
+    progress: list[dict[str, Any]] = []
+    evaluation.evaluate_candidate(
+        config,
+        "candidate",
+        "def priority(ctx, proposal):\n    return 0\n",
+        artifact_root=tmp_path / "artifacts",
+        backend=cast(Any, Backend()),
+        progress=lambda payload: progress.append(dict(payload)),
+    )
+
+    assert progress == [
+        {
+            "candidate_id": "candidate",
+            "pass": "development",
+            "pass_completed": True,
+            "development_progress": 1.0,
+            "replay_progress": 0.0,
+            "current_objective": 0.25,
+            "best_auc": 0.5,
+        }
+    ]

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
 import json
+import multiprocessing
 import os
 import threading
 import time
 from collections.abc import Collection, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -59,6 +61,55 @@ class _NativeSessionBudgetExpired(KeyboardInterrupt):
 
 class _NativeHourlyTokenLimit(KeyboardInterrupt):
     """Internal rolling-hour token boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessCounterexampleOutcome:
+    kind: str
+    outcome: CounterexampleOutcome
+
+
+def _evaluate_candidate_process(
+    config: ExperimentConfig,
+    candidate_id: str,
+    source: str,
+    artifact_root: Path,
+    heg_repo: Path,
+    profiling_enabled: bool,
+    progress_connection: Any,
+) -> tuple[Mapping[str, Any] | _ProcessCounterexampleOutcome, float]:
+    """Run one CPU-bound native evaluation outside the coordinator process."""
+
+    started = time.monotonic()
+
+    def send(kind: str, payload: Mapping[str, Any]) -> None:
+        with contextlib.suppress(BrokenPipeError, EOFError, OSError):
+            progress_connection.send((kind, dict(payload)))
+
+    try:
+        try:
+            result: Mapping[str, Any] | _ProcessCounterexampleOutcome = evaluate_candidate(
+                config,
+                candidate_id,
+                source,
+                artifact_root=artifact_root,
+                heg_repo=heg_repo,
+                sandbox_limits=SandboxLimits(),
+                progress=lambda payload: send("progress", payload),
+                profiling_enabled=profiling_enabled,
+                counterexample_event_callback=lambda event_type, payload: send(
+                    "counterexample",
+                    {"event_type": event_type, "payload": dict(payload)},
+                ),
+            )
+        except CounterexampleVerified as verified:
+            result = _ProcessCounterexampleOutcome("verified", verified.outcome)
+        except CounterexampleHalt as halted:
+            result = _ProcessCounterexampleOutcome("halt", halted.outcome)
+        return result, time.monotonic() - started
+    finally:
+        send("done", {})
+        progress_connection.close()
 
 
 def _counterexample_summary(outcome: CounterexampleOutcome) -> dict[str, Any]:
@@ -375,6 +426,94 @@ def _unfinished_generation_program_ids(checkpoint_path: Path) -> set[str]:
         ):
             result.add(f"g{generation:04d}-{slot}")
     return result
+
+
+def _resume_parent_assignments(
+    checkpoint_path: Path,
+    state: ExperimentStateStore,
+) -> Mapping[int, Mapping[str, str]] | None:
+    """Recover the original parent vector for an interrupted generation."""
+
+    if not checkpoint_path.is_file():
+        return None
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    slots = checkpoint.get("slots") if isinstance(checkpoint, Mapping) else None
+    if not isinstance(slots, Mapping):
+        return None
+    status_rank = {
+        "accepted": 100,
+        "duplicate": 90,
+        "invalid": 80,
+        "repair_pending": 70,
+        "repair_running": 60,
+        "failed": 40,
+        "pending": 10,
+    }
+    retained: dict[tuple[int, str], tuple[int, str]] = {}
+    for value in slots.values():
+        if not isinstance(value, Mapping):
+            continue
+        generation = value.get("generation")
+        slot = value.get("slot")
+        parent_id = value.get("parent_id")
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or not isinstance(slot, str)
+            or not isinstance(parent_id, str)
+        ):
+            continue
+        rank = status_rank.get(str(value.get("status", "")), 0)
+        key = (generation, slot)
+        previous = retained.get(key)
+        if previous is None or rank > previous[0]:
+            retained[key] = (rank, parent_id)
+    if not retained:
+        return None
+    target_generation = max(generation for generation, _slot in retained)
+    retained_parents = {
+        slot: parent
+        for (generation, slot), (_rank, parent) in retained.items()
+        if generation == target_generation
+    }
+    if not retained_parents:
+        return None
+    rows = state.connection.execute(
+        "SELECT sequence,payload_json FROM events "
+        "WHERE event_type='selection_completed' ORDER BY sequence"
+    ).fetchall()
+    best_match = 0
+    best_selection: dict[str, str] | None = None
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except json.JSONDecodeError:
+            continue
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("generation") != target_generation - 1
+        ):
+            continue
+        selected = payload.get("selected_parents")
+        if not isinstance(selected, Mapping):
+            continue
+        selection = {
+            str(slot): str(parent)
+            for slot, parent in selected.items()
+            if isinstance(slot, str) and isinstance(parent, str)
+        }
+        matches = sum(
+            selection.get(slot) == parent for slot, parent in retained_parents.items()
+        )
+        if matches > best_match:
+            best_match = matches
+            best_selection = selection
+    if best_selection is None:
+        return {target_generation: retained_parents}
+    return {target_generation: best_selection}
 
 
 class _NativeProvider:
@@ -1518,18 +1657,48 @@ class NativeExperimentAdapter:
         best_candidate_id: str | None = None
         last_ir: float | None = None
         last_timing_profile: Mapping[str, Any] | None = None
+        evaluation_summary_cache: dict[str, dict[str, Any]] = {}
 
         def stored_evaluation_summary(candidate_id: str) -> dict[str, Any]:
-            row = state.evaluation(f"{candidate_id}:development")
-            raw_result = row.get("result_json") if isinstance(row, Mapping) else None
-            if not isinstance(raw_result, str):
+            cached = evaluation_summary_cache.get(candidate_id)
+            if cached is not None:
+                return dict(cached)
+            row = state.connection.execute(
+                "SELECT json_extract(result_json,'$.summary') AS summary_json "
+                "FROM evaluations WHERE identity=?",
+                (f"{candidate_id}:development",),
+            ).fetchone()
+            raw_summary = row["summary_json"] if row is not None else None
+            if not isinstance(raw_summary, str):
                 return {}
             try:
-                result = json.loads(raw_result)
+                summary = json.loads(raw_summary)
             except json.JSONDecodeError:
                 return {}
-            summary = result.get("summary") if isinstance(result, Mapping) else None
-            return dict(summary) if isinstance(summary, Mapping) else {}
+            parsed = dict(summary) if isinstance(summary, Mapping) else {}
+            evaluation_summary_cache[candidate_id] = parsed
+            return dict(parsed)
+
+        historical_rows = state.connection.execute(
+            "SELECT candidate_id,"
+            "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
+            "FROM evaluations "
+            "WHERE state='completed' ORDER BY completed_at,candidate_id"
+        ).fetchall()
+        for historical_row in historical_rows:
+            historical_candidate_id = str(historical_row["candidate_id"] or "")
+            historical_metric = historical_row["mean_auc"]
+            if (
+                historical_candidate_id
+                and isinstance(historical_metric, (int, float))
+                and not isinstance(historical_metric, bool)
+                and (
+                    best_objective is None
+                    or float(historical_metric) > best_objective
+                )
+            ):
+                best_objective = float(historical_metric)
+                best_candidate_id = historical_candidate_id
 
         def recover_completed_evaluation(
             candidate: Candidate,
@@ -1636,7 +1805,9 @@ class NativeExperimentAdapter:
             _parent_id: str,
         ) -> str:
             rows = state.connection.execute(
-                "SELECT candidate_id FROM evaluations "
+                "SELECT candidate_id,"
+                "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
+                "FROM evaluations "
                 "WHERE state='completed' ORDER BY completed_at, candidate_id"
             ).fetchall()
             summaries = [
@@ -1673,14 +1844,17 @@ class NativeExperimentAdapter:
         # submit a valid candidate here immediately after validation, while the
         # remaining provider slots are still producing/repairing responses.
         evaluation_executor = (
-            ThreadPoolExecutor(
+            ProcessPoolExecutor(
                 max_workers=evaluation_worker_count,
-                thread_name_prefix="native-eval",
+                mp_context=multiprocessing.get_context("spawn"),
             )
             if parallel_evaluation
             else None
         )
+        evaluation_progress_threads: list[threading.Thread] = []
+        evaluation_progress_connections: list[Any] = []
         streamed_futures: dict[str, Any] = {}
+        published_evaluations: set[str] = set()
 
         def evaluation_progress_for(
             candidate: Candidate,
@@ -1761,6 +1935,58 @@ class NativeExperimentAdapter:
                 raise NativeExperimentError(f"evaluation for {program_id} did not return a mapping")
             return cast(Mapping[str, Any], result), time.monotonic() - evaluation_started
 
+        def publish_restored_evaluation(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+            result: Mapping[str, Any],
+        ) -> None:
+            nonlocal best_objective, best_candidate_id
+            state.record_evaluation(
+                identity,
+                candidate_id=program_id,
+                kind="development",
+                state="completed",
+                result=result,
+            )
+            summary = result.get("summary")
+            summary = summary if isinstance(summary, Mapping) else {}
+            evaluation_summary_cache[program_id] = dict(summary)
+            metric = summary.get("mean_auc")
+            if not isinstance(metric, (int, float)) or isinstance(metric, bool):
+                return
+            restored_value = float(metric)
+            if best_objective is None or restored_value > best_objective:
+                best_objective = restored_value
+                best_candidate_id = program_id
+            evaluation_count = state.counts().get("evaluation_count", 0)
+            emit(
+                "evaluation_completed",
+                generation=candidate.generation,
+                slot=candidate.slot,
+                candidate_id=program_id,
+                phase="development",
+                evaluation_id=identity,
+                status="completed",
+                restored=True,
+                evaluations_active=0,
+                evaluations_completed=evaluation_count,
+                evaluation_count=evaluation_count,
+                mean_auc=restored_value,
+                best_auc=summary.get("best_auc"),
+                elapsed_seconds=None,
+                development_progress=1.0,
+                replay_progress=1.0,
+                current_objective=restored_value,
+                best_objective=best_objective,
+                best_candidate_id=best_candidate_id,
+                best_score=best_objective,
+                baseline_comparison=summary.get("baseline_auc"),
+                worker_count=evaluation_worker_count,
+                active_workers=0,
+            )
+            published_evaluations.add(program_id)
+
         def submit_evaluation(
             candidate: Candidate,
             program_id: str,
@@ -1792,12 +2018,45 @@ class NativeExperimentAdapter:
                 active_workers=min(evaluation_worker_count, active_before + 1),
             )
             if evaluation_executor is not None:
+                receive_progress, send_progress = multiprocessing.Pipe(duplex=False)
+
+                def relay_progress() -> None:
+                    try:
+                        while True:
+                            kind, message = receive_progress.recv()
+                            if kind == "done":
+                                return
+                            if kind == "progress" and isinstance(message, Mapping):
+                                progress(message)
+                            elif kind == "counterexample" and isinstance(message, Mapping):
+                                event_type = message.get("event_type")
+                                event_payload = message.get("payload")
+                                if isinstance(event_type, str) and isinstance(
+                                    event_payload, Mapping
+                                ):
+                                    emit(event_type, **dict(event_payload))
+                    except (EOFError, OSError):
+                        return
+                    finally:
+                        receive_progress.close()
+
+                progress_thread = threading.Thread(
+                    target=relay_progress,
+                    name=f"native-eval-progress-{program_id}",
+                    daemon=True,
+                )
+                progress_thread.start()
+                evaluation_progress_threads.append(progress_thread)
+                evaluation_progress_connections.append(send_progress)
                 return evaluation_executor.submit(
-                    run_evaluation,
-                    candidate,
+                    _evaluate_candidate_process,
+                    config,
                     program_id,
-                    identity,
-                    progress,
+                    candidate.source,
+                    layout.artifacts,
+                    Path(cast(str | Path, backend_repo)),
+                    profiling_enabled,
+                    send_progress,
                 )
             return run_evaluation(candidate, program_id, identity, progress)
 
@@ -1814,12 +2073,11 @@ class NativeExperimentAdapter:
                 return
             recovered_evaluation = recover_completed_evaluation(candidate, program_id)
             if recovered_evaluation is not None:
-                state.record_evaluation(
+                publish_restored_evaluation(
+                    candidate,
+                    program_id,
                     identity,
-                    candidate_id=program_id,
-                    kind="development",
-                    state="completed",
-                    result=recovered_evaluation,
+                    recovered_evaluation,
                 )
                 return
             streamed_futures[program_id] = submit_evaluation(
@@ -1888,12 +2146,11 @@ class NativeExperimentAdapter:
                         program_id,
                     )
                     if recovered_evaluation is not None:
-                        state.record_evaluation(
+                        publish_restored_evaluation(
+                            candidate,
+                            program_id,
                             identity,
-                            candidate_id=program_id,
-                            kind="development",
-                            state="completed",
-                            result=recovered_evaluation,
+                            recovered_evaluation,
                         )
                         stored_evaluation = state.evaluation(identity)
                 prepared.append((candidate, program_id, identity, stored_evaluation))
@@ -1915,9 +2172,14 @@ class NativeExperimentAdapter:
                 if stored_record is None:
                     future = futures[program_id]
                     try:
-                        result, evaluation_elapsed = (
+                        process_result, evaluation_elapsed = (
                             future.result() if hasattr(future, "result") else future
                         )
+                        if isinstance(process_result, _ProcessCounterexampleOutcome):
+                            if process_result.kind == "verified":
+                                raise CounterexampleVerified(process_result.outcome)
+                            raise CounterexampleHalt(process_result.outcome)
+                        result = process_result
                     except BaseException:
                         for pending in futures.values():
                             if hasattr(pending, "cancel"):
@@ -1933,6 +2195,7 @@ class NativeExperimentAdapter:
                     session.evaluations_completed += 1
                     summary = result.get("summary")
                     summary = summary if isinstance(summary, Mapping) else {}
+                    evaluation_summary_cache[program_id] = dict(summary)
                     metric = summary.get("mean_auc")
                     if (
                         isinstance(metric, (int, float))
@@ -2008,32 +2271,33 @@ class NativeExperimentAdapter:
                         if best_objective is None or restored_value > best_objective:
                             best_objective = restored_value
                             best_candidate_id = program_id
-                        evaluation_count = state.counts().get("evaluation_count", 0)
-                        emit(
-                            "evaluation_completed",
-                            generation=generation,
-                            slot=candidate.slot,
-                            candidate_id=program_id,
-                            phase="development",
-                            evaluation_id=identity,
-                            status="completed",
-                            restored=True,
-                            evaluations_active=0,
-                            evaluations_completed=evaluation_count,
-                            evaluation_count=evaluation_count,
-                            mean_auc=restored_value,
-                            best_auc=restored_summary.get("best_auc"),
-                            elapsed_seconds=0.0,
-                            development_progress=1.0,
-                            replay_progress=1.0,
-                            current_objective=restored_value,
-                            best_objective=best_objective,
-                            best_candidate_id=best_candidate_id,
-                            best_score=best_objective,
-                            baseline_comparison=restored_summary.get("baseline_auc"),
-                            worker_count=evaluation_worker_count,
-                            active_workers=0,
-                        )
+                        if program_id not in published_evaluations:
+                            evaluation_count = state.counts().get("evaluation_count", 0)
+                            emit(
+                                "evaluation_completed",
+                                generation=generation,
+                                slot=candidate.slot,
+                                candidate_id=program_id,
+                                phase="development",
+                                evaluation_id=identity,
+                                status="completed",
+                                restored=True,
+                                evaluations_active=0,
+                                evaluations_completed=evaluation_count,
+                                evaluation_count=evaluation_count,
+                                mean_auc=restored_value,
+                                best_auc=restored_summary.get("best_auc"),
+                                elapsed_seconds=None,
+                                development_progress=1.0,
+                                replay_progress=1.0,
+                                current_objective=restored_value,
+                                best_objective=best_objective,
+                                best_candidate_id=best_candidate_id,
+                                best_score=best_objective,
+                                baseline_comparison=restored_summary.get("baseline_auc"),
+                                worker_count=evaluation_worker_count,
+                                active_workers=0,
+                            )
                         state.record_candidate(
                             program_id,
                             source_sha256=candidate.source_sha256,
@@ -2131,9 +2395,14 @@ class NativeExperimentAdapter:
                     turn_timeout_seconds=config.turn_timeout_seconds,
                     infrastructure_retry_backoff_seconds=1.0,
                 )
+                resume_parent_assignments = _resume_parent_assignments(
+                    layout.artifacts / "native-generation-checkpoint.json",
+                    state,
+                )
                 coordinator = GenerationCoordinator(
                     wrapped,
                     config=generation_config,
+                    parent_assignments=resume_parent_assignments,
                     briefs=slot_briefs,
                     parent_sources=parent_sources,
                     parent_records=parent_records,
@@ -2211,6 +2480,11 @@ class NativeExperimentAdapter:
         finally:
             if evaluation_executor is not None:
                 evaluation_executor.shutdown(wait=True, cancel_futures=True)
+            for progress_connection in evaluation_progress_connections:
+                with contextlib.suppress(OSError):
+                    progress_connection.close()
+            for progress_thread in evaluation_progress_threads:
+                progress_thread.join(timeout=1.0)
             wrapped.close()
         if not isinstance(result, Mapping):
             raise NativeExperimentError("native generation engine returned a non-object result")

@@ -1718,12 +1718,38 @@ class GenerationCoordinator:
                 and previous_generation >= 0
                 else 0
             )
+        logical_slots: dict[tuple[int, str], list[Mapping[str, Any]]] = {}
+        for value in slots_state.values():
+            if not isinstance(value, Mapping):
+                continue
+            value_generation = value.get("generation")
+            value_slot = value.get("slot")
+            if (
+                isinstance(value_generation, int)
+                and not isinstance(value_generation, bool)
+                and isinstance(value_slot, str)
+            ):
+                logical_slots.setdefault((value_generation, value_slot), []).append(value)
+        status_rank = {
+            "accepted": 100,
+            "duplicate": 90,
+            "invalid": 80,
+            "failed": 70,
+            "repair_pending": 60,
+            "repair_running": 40,
+            "pending": 10,
+        }
+        authoritative_slots = [
+            max(
+                values,
+                key=lambda item: status_rank.get(str(item.get("status", "")), 0),
+            )
+            for values in logical_slots.values()
+        ]
         retry_generations = {
-            int(value.get("generation", 0))
-            for value in slots_state.values()
-            if isinstance(value, Mapping)
-            and isinstance(value.get("generation"), int)
-            and (
+            int(value["generation"])
+            for value in authoritative_slots
+            if (
                 _slot_failure_is_retryable(value)
                 or str(value.get("status", "")) in {"repair_pending", "repair_running"}
             )
@@ -1800,6 +1826,23 @@ class GenerationCoordinator:
                         population_size=self.config.slots,
                     )
                     cached = cached_for_request(request)
+                    if (
+                        isinstance(cached, Mapping)
+                        and cached.get("status") == "repair_pending"
+                    ):
+                        retained_initial = cached.get("initial")
+                        if not isinstance(retained_initial, Mapping):
+                            retained_initial = cached.get("raw_result")
+                        if isinstance(retained_initial, Mapping):
+                            reassessed = self.run_request(
+                                request,
+                                allow_repair=False,
+                                retained_result=retained_initial,
+                            )
+                            if reassessed.status == "accepted":
+                                cached = reassessed.as_dict()
+                                slots_state[request.idempotency_key] = cached
+                                self._save(state)
                     if (
                         isinstance(cached, Mapping)
                         and cached_requires_provider(cached)

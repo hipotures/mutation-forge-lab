@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import pty
 import termios
@@ -570,6 +571,7 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
             policy_seed=4009,
             evaluations_per_second=2.5,
             elapsed_seconds=11.0,
+            current_objective=0.42,
             **{"pass": "replay"},
         ),
         monotonic=131.0,
@@ -584,6 +586,7 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
     assert active.graph_seed == 403
     assert active.policy_seed == 4009
     assert active.evaluation_rate == 2.5
+    assert active.objective == pytest.approx(0.42)
 
     state = reduce_dashboard_event(
         state,
@@ -647,6 +650,30 @@ def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> 
     assert state.generation == 1
 
 
+def test_safe_interrupt_marks_active_slots_as_stopping() -> None:
+    state = DashboardState(
+        experiment_state="running",
+        generation=1,
+        displayed_generation=1,
+        generations=(
+            GenerationSlots(
+                1,
+                (
+                    DashboardSlot("slot-00", 1, state="evaluating"),
+                    DashboardSlot("slot-01", 1, state="accepted"),
+                ),
+            ),
+        ),
+    )
+
+    state, action = reduce_dashboard_key(state, "q")
+
+    assert action is not None and action.kind == "quit"
+    assert state.experiment_state == "stopping"
+    assert state.generations[0].slots[0].state == "stopping"
+    assert state.generations[0].slots[1].state == "accepted"
+
+
 def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_path: Path) -> None:
     root = tmp_path / "experiment"
     state_path = root / "state.sqlite3"
@@ -668,7 +695,10 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
             candidate_id="g0000-slot-00",
             kind="development",
             state="completed",
-            result={"summary": {"mean_auc": 0.75}},
+            result={
+                "summary": {"mean_auc": 0.75},
+                "runtime": {"elapsed_seconds": 12.5},
+            },
         )
 
     checkpoint = root / "artifacts" / "native-generation-checkpoint.json"
@@ -686,6 +716,7 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
 
     assert [item.generation for item in persisted.generations] == [0, 1]
     assert persisted.generations[0].slots[0].objective == pytest.approx(0.75)
+    assert persisted.generations[0].slots[0].elapsed_seconds == pytest.approx(12.5)
     assert persisted.best_objective == pytest.approx(0.75)
     assert persisted.best_candidate == "g0000-slot-00"
 
@@ -705,6 +736,63 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
     sink.close()
 
 
+def test_persisted_dashboard_uses_newest_retained_slot_generation(tmp_path: Path) -> None:
+    root = tmp_path / "experiment"
+    checkpoint = root / "artifacts" / "native-generation-checkpoint.json"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": "mforge.experiment.generation.v2",
+                "generation": 1,
+                "next_generation": 2,
+                "slots": {
+                    "in-progress": {
+                        "generation": 3,
+                        "slot": "slot-00",
+                        "parent_id": "g0002-slot-04",
+                        "status": "pending",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    persisted = dashboard.load_persisted_dashboard_state(
+        root,
+        run_id="dashboard-run",
+        population_size=2,
+    )
+
+    assert persisted.generation == 3
+    assert persisted.displayed_generation == 3
+
+
+def test_live_generation_cannot_lower_historical_best_objective() -> None:
+    state = replace(
+        _running_state(),
+        best_objective=0.286023644324426,
+        best_candidate="g0000-slot-06",
+    )
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_completed",
+            generation=2,
+            slot="slot-00",
+            current_objective=0.00355113636,
+            best_objective=0.00355113636,
+            best_candidate_id="g0002-slot-00",
+        ),
+    )
+
+    assert state.current_objective == pytest.approx(0.00355113636)
+    assert state.best_objective == pytest.approx(0.286023644324426)
+    assert state.best_candidate == "g0000-slot-06"
+
+
 def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     state = _running_state()
     state, _ = reduce_dashboard_key(state, "c")
@@ -720,6 +808,11 @@ def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     state, _ = reduce_dashboard_key(state, "ENTER")
     assert state.search_query == "slot-01"
     assert state.search_editing is False
+
+    state = replace(state, search_query="accidental terminal text")
+    state, _ = reduce_dashboard_key(state, "ESC")
+    assert state.search_query == ""
+    assert state.status_message == "Filter cleared"
 
     state, action = reduce_dashboard_key(state, "p")
     assert action is None

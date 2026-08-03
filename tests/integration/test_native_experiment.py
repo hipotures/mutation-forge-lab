@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import multiprocessing
 import re
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,11 @@ from mutation_forge.experiment.generation import (
     ProviderResult,
 )
 from mutation_forge.experiment.layout import ExperimentLayout
-from mutation_forge.experiment.native import NativeExperimentAdapter
+from mutation_forge.experiment.native import (
+    NativeExperimentAdapter,
+    _evaluate_candidate_process,
+    _resume_parent_assignments,
+)
 from mutation_forge.experiment.service import ExperimentService
 from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.experiment.status import experiment_status
@@ -400,6 +406,48 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     assert request_envelope["prompt"] == prompt
     assert (turn / "slot-00.system-prompt.md").is_file()
     assert (turn / "slot-00.output-schema.json").is_file()
+
+
+def test_native_evaluation_runs_in_spawned_process(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        population=1,
+        generations=1,
+        max_turns=1,
+        thread_count=2,
+    )
+    config = load_experiment_config(config_path)
+    receive_progress, send_progress = multiprocessing.Pipe(duplex=False)
+    heg_repo = Path(__file__).resolve().parents[3] / "heg"
+    with ProcessPoolExecutor(
+        max_workers=1,
+        mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
+        future = executor.submit(
+            _evaluate_candidate_process,
+            config,
+            "process-canary",
+            VALID_SOURCE,
+            tmp_path / "artifacts",
+            heg_repo,
+            False,
+            send_progress,
+        )
+        messages: list[tuple[str, Mapping[str, Any]]] = []
+        while True:
+            kind, payload = receive_progress.recv()
+            if kind == "done":
+                break
+            if isinstance(payload, Mapping):
+                messages.append((kind, payload))
+        result, elapsed = future.result(timeout=30)
+    send_progress.close()
+    receive_progress.close()
+
+    assert result["status"] == "completed"
+    assert elapsed > 0
+    assert any(kind == "progress" for kind, _payload in messages)
 
 
 def test_native_slot_events_do_not_report_queued_turns_as_active() -> None:
@@ -900,6 +948,174 @@ def test_uncharged_infrastructure_failure_retries_same_generation(
     assert second.summary["first_generation"] == 0
     assert second.summary["completed_generation_count"] == 1
     assert len(successful_provider.calls) == 1
+
+
+def test_stale_retry_attempt_does_not_rewind_completed_generation(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "native-checkpoint.json"
+    first_provider = RecordingProvider()
+    GenerationCoordinator(
+        first_provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=2,
+            max_repairs=0,
+            checkpoint_path=checkpoint,
+        ),
+        selection_callback=lambda *_args: {"slot-00": "g0000-slot-00"},
+    ).run()
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    accepted = next(
+        value for value in saved["slots"].values() if value.get("status") == "accepted"
+    )
+    saved["slots"]["stale-retry"] = {
+        **accepted,
+        "status": "repair_pending",
+        "candidate": None,
+    }
+    checkpoint.write_text(json.dumps(saved), encoding="utf-8")
+
+    resumed_provider = RecordingProvider()
+    result = GenerationCoordinator(
+        resumed_provider,
+        config=GenerationConfig(
+            generations=2,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=4,
+            max_repairs=0,
+            checkpoint_path=checkpoint,
+        ),
+    ).run()
+
+    assert result.summary["first_generation"] == 1
+    assert len(resumed_provider.calls) == 1
+
+
+def test_resume_revalidates_repair_pending_source_under_current_limits(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "native-checkpoint.json"
+    retained_provider = RecordingProvider()
+    restrictive = GenerationCoordinator(
+        retained_provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=1,
+            max_repairs=1,
+            checkpoint_path=checkpoint,
+            sandbox_limits=SandboxLimits(max_ast_nodes=2),
+        ),
+    )
+    request = restrictive.build_request(0, "slot-00", "parent-0-slot-00")
+    retained_response = retained_provider.generate(request.as_dict())
+    pending = restrictive.run_request(
+        request,
+        allow_repair=False,
+        retained_result=retained_response,
+    )
+    assert pending.status == "repair_pending"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": "mforge.experiment.generation.v2",
+                "campaign_id": "native",
+                "slots": {request.idempotency_key: pending.as_dict()},
+                "callbacks": {},
+                "next_generation": 0,
+                "model_turns_used": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class NoCallProvider:
+        def generate(self, _request: Mapping[str, Any]) -> Mapping[str, Any]:
+            raise AssertionError("retained source must be revalidated without a model call")
+
+    resumed = GenerationCoordinator(
+        NoCallProvider(),
+        config=GenerationConfig(
+            campaign_id="native",
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=2,
+            prior_model_turns=1,
+            max_repairs=1,
+            checkpoint_path=checkpoint,
+            sandbox_limits=SandboxLimits(max_ast_nodes=1000),
+        ),
+    ).run()
+
+    assert resumed.status == "completed"
+    assert resumed.generations[0][0].status == "accepted"
+    assert resumed.generations[0][0].candidate is not None
+
+
+def test_resume_parent_assignments_match_retained_generation(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    ExperimentStateStore.initialize(
+        state_path,
+        exp_id="resume-parents",
+        lock_hash="0" * 64,
+        root=tmp_path,
+    )
+    checkpoint = tmp_path / "native-checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": "mforge.experiment.generation.v2",
+                "campaign_id": "resume-parents",
+                "slots": {
+                    "old-slot": {
+                        "generation": 3,
+                        "slot": "slot-00",
+                        "parent_id": "g0002-slot-04",
+                        "status": "accepted",
+                    },
+                    "new-slot": {
+                        "generation": 3,
+                        "slot": "slot-00",
+                        "parent_id": "native-baseline",
+                        "status": "failed",
+                    },
+                },
+                "callbacks": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    original = {
+        "slot-00": "g0002-slot-04",
+        "slot-01": "g0002-slot-06",
+    }
+    with ExperimentStateStore(state_path) as store:
+        store.write_event(
+            "selection_completed",
+            {"generation": 2, "selected_parents": original},
+        )
+        store.write_event(
+            "selection_completed",
+            {
+                "generation": 2,
+                "selected_parents": {
+                    "slot-00": "native-baseline",
+                    "slot-01": "native-baseline",
+                },
+            },
+        )
+
+        recovered = _resume_parent_assignments(checkpoint, store)
+
+    assert recovered == {3: original}
 
 
 def test_unbounded_generation_canary_crosses_finite_defaults(

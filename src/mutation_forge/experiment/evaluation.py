@@ -687,6 +687,9 @@ def _run_once(
     phase_calls: dict[str, int] = {}
     try:
         episodes: list[dict[str, JsonValue]] = []
+        executed_episodes = 0
+        restored_episodes = 0
+        execution_seconds = 0.0
         total = (
             len(settings["orders"]) * len(settings["graph_seeds"]) * len(settings["policy_seeds"])
         )
@@ -717,6 +720,7 @@ def _run_once(
                     )
                     restored = episode is not None
                     if episode is None:
+                        episode_started = time.monotonic()
                         episode = _trajectory(
                             backend,
                             ranker,
@@ -727,6 +731,8 @@ def _run_once(
                             candidate_id=candidate_id,
                             counterexample_pipeline=counterexample_pipeline,
                         )
+                        execution_seconds += time.monotonic() - episode_started
+                        executed_episodes += 1
                         if episode_path is not None:
                             _write_json(
                                 episode_path,
@@ -737,10 +743,11 @@ def _run_once(
                                     "episode": episode,
                                 },
                             )
+                    else:
+                        restored_episodes += 1
                     episodes.append(episode)
                     completed += 1
                     if progress is not None:
-                        elapsed = max(time.monotonic() - started, 1e-9)
                         progress_fields: dict[str, JsonValue] = {
                             "candidate_id": candidate_id,
                             "order": order,
@@ -749,8 +756,9 @@ def _run_once(
                             "completed": completed,
                             "total": total,
                             "evaluations": completed,
-                            "evaluations_per_second": completed / elapsed,
                             "restored": restored,
+                            "executed": executed_episodes,
+                            "restored_count": restored_episodes,
                             "pass": pass_name,
                             "pass_progress": completed / max(total, 1),
                             "development_progress": (
@@ -760,6 +768,10 @@ def _run_once(
                                 completed / max(total, 1) if pass_name == "replay" else 0.0
                             ),
                         }
+                        if executed_episodes:
+                            progress_fields["evaluations_per_second"] = (
+                                executed_episodes / max(execution_seconds, 1e-9)
+                            )
                         progress(progress_fields)
             phase_seconds[f"order_{order}"] = time.monotonic() - order_started
             phase_calls[f"order_{order}"] = len(settings["graph_seeds"]) * len(
@@ -793,6 +805,12 @@ def _run_once(
             "mean_auc": sum(aucs) / len(aucs) if aucs else 0.0,
             "best_auc": max(aucs, default=0.0),
             "baseline_auc": baseline_auc,
+        },
+        "runtime": {
+            "elapsed_seconds": max(time.monotonic() - started, 0.0),
+            "execution_seconds": execution_seconds,
+            "executed_episodes": executed_episodes,
+            "restored_episodes": restored_episodes,
         },
         "provider_calls": 0,
         "model_calls": 0,
@@ -944,6 +962,20 @@ def evaluate_candidate(
             _write_json(development_path, primary)
         result = dict(primary)
         result["artifacts"] = {"development": str(development_path)}
+        if progress is not None:
+            summary = primary.get("summary")
+            if isinstance(summary, Mapping):
+                progress(
+                    {
+                        "candidate_id": candidate_id,
+                        "pass": "development",
+                        "pass_completed": True,
+                        "development_progress": 1.0,
+                        "replay_progress": 0.0,
+                        "current_objective": cast(JsonValue, summary.get("mean_auc")),
+                        "best_auc": cast(JsonValue, summary.get("best_auc")),
+                    }
+                )
         if settings["replay"]:
             replay_path = root / "evaluations" / "replay" / f"{candidate_id}.json"
             replay = _load_completed_pass(

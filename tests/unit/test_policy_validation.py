@@ -60,6 +60,10 @@ def test_source_and_ast_limits_are_structured() -> None:
     assert any(error.code == "ast_too_large" for error in node_result.errors)
 
 
+def test_default_ast_limit_is_1000() -> None:
+    assert SandboxLimits().max_ast_nodes == 1000
+
+
 def test_versioned_probe_json_schema_is_well_formed(project_root: Path) -> None:
     schema = json.loads(
         (

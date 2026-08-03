@@ -73,6 +73,7 @@ STATE_STYLES = {
     "validating": "blue",
     "probing": "magenta",
     "evaluating": "dark_orange",
+    "stopping": "yellow",
     "accepted": "green",
     "duplicate": "dim blue",
     "invalid": "red",
@@ -373,7 +374,7 @@ def load_persisted_dashboard_state(
             ):
                 slot_records[key] = raw
 
-    evaluations: dict[str, tuple[float, Mapping[str, Any]]] = {}
+    evaluations: dict[str, tuple[float, Mapping[str, Any], float | None]] = {}
     evaluation_history: list[tuple[str, float]] = []
     store_path = root / "state.sqlite3"
     store: Any | None = None
@@ -412,16 +413,18 @@ def load_persisted_dashboard_state(
                     started_at=str(current_session.get("started_at", ""))[11:19] or "—",
                 )
             rows = store.connection.execute(
-                "SELECT candidate_id,result_json,completed_at FROM evaluations "
+                "SELECT candidate_id,completed_at,"
+                "json_extract(result_json,'$.summary') AS summary_json,"
+                "json_extract(result_json,'$.runtime.elapsed_seconds') AS elapsed_seconds "
+                "FROM evaluations "
                 "WHERE state='completed' ORDER BY completed_at,identity"
             ).fetchall()
             for row in rows:
                 candidate_id = str(row["candidate_id"] or "")
                 try:
-                    result = json.loads(str(row["result_json"]))
+                    summary = json.loads(str(row["summary_json"]))
                 except (TypeError, json.JSONDecodeError):
                     continue
-                summary = result.get("summary") if isinstance(result, Mapping) else None
                 metric = summary.get("mean_auc") if isinstance(summary, Mapping) else None
                 if (
                     not candidate_id
@@ -430,7 +433,11 @@ def load_persisted_dashboard_state(
                 ):
                     continue
                 value = float(metric)
-                evaluations[candidate_id] = (value, summary if isinstance(summary, Mapping) else {})
+                evaluations[candidate_id] = (
+                    value,
+                    summary if isinstance(summary, Mapping) else {},
+                    _number(row["elapsed_seconds"]),
+                )
                 evaluation_history.append((str(row["completed_at"] or ""), value))
 
             # The generation checkpoint is intentionally written only at a
@@ -489,6 +496,11 @@ def load_persisted_dashboard_state(
             with contextlib.suppress(Exception):
                 store.close()
 
+    if slot_records:
+        checkpoint_generation = max(
+            checkpoint_generation,
+            max(generation for generation, _slot in slot_records),
+        )
     groups: dict[int, list[DashboardSlot]] = {}
     for (generation, slot_name), raw in slot_records.items():
         candidate_value = raw.get("candidate")
@@ -521,11 +533,13 @@ def load_persisted_dashboard_state(
         if usage_value is None and isinstance(candidate_value, Mapping):
             usage_value = candidate_value.get("usage")
         duration_ms = result_mapping.get("provider_duration_ms")
-        duration_seconds = (
+        provider_duration_seconds = (
             float(duration_ms) / 1000.0
             if isinstance(duration_ms, int) and not isinstance(duration_ms, bool)
             else None
         )
+        evaluation_elapsed = metric[2] if metric is not None else None
+        duration_seconds = evaluation_elapsed if metric is not None else provider_duration_seconds
         raw_errors = raw.get("errors")
         error_message = ""
         if isinstance(raw_errors, list) and raw_errors:
@@ -537,9 +551,13 @@ def load_persisted_dashboard_state(
                 slot=slot_name,
                 generation=generation,
                 parent=str(raw.get("parent_id", "root")),
-                phase=str(raw.get("request", {}).get("phase", "initial"))
-                if isinstance(raw.get("request"), Mapping)
-                else "initial",
+                phase=(
+                    "development"
+                    if metric is not None
+                    else str(raw.get("request", {}).get("phase", "initial"))
+                    if isinstance(raw.get("request"), Mapping)
+                    else "initial"
+                ),
                 state=display_state,
                 elapsed_seconds=duration_seconds,
                 usage=_usage(usage_value),
@@ -613,16 +631,17 @@ def _merge_persisted_dashboard_state(
         history = tuple((*persisted.objective_history, *live.objective_history)[-60:])
     else:
         history = live.objective_history or persisted.objective_history
+    live_best = live.best_objective
+    persisted_best = persisted.best_objective
+    use_persisted_best = persisted_best is not None and (
+        live_best is None or persisted_best > live_best
+    )
     return replace(
         live,
         generations=generations,
         objective_history=history,
-        best_objective=(
-            live.best_objective if live.best_objective is not None else persisted.best_objective
-        ),
-        best_candidate=(
-            live.best_candidate if live.best_candidate != "—" else persisted.best_candidate
-        ),
+        best_objective=persisted_best if use_persisted_best else live_best,
+        best_candidate=persisted.best_candidate if use_persisted_best else live.best_candidate,
         archive_size=max(live.archive_size, persisted.archive_size),
         accepted_candidates=max(live.accepted_candidates, persisted.accepted_candidates),
         evaluations_completed=max(
@@ -1122,11 +1141,18 @@ def reduce_dashboard_event(
         history = state.objective_history
         if current is not None and event_type == "evaluation_completed":
             history = (*history[-59:], current)
+        best_improves = best is not None and (
+            state.best_objective is None or best > state.best_objective
+        )
         state = replace(
             state,
             current_objective=current if current is not None else state.current_objective,
-            best_objective=best if best is not None else state.best_objective,
-            best_candidate=_text(payload.get("best_candidate_id")) or state.best_candidate,
+            best_objective=best if best_improves else state.best_objective,
+            best_candidate=(
+                _text(payload.get("best_candidate_id")) or state.best_candidate
+                if best_improves
+                else state.best_candidate
+            ),
             baseline_random=random_baseline,
             baseline_structural=structural_baseline,
             objective_history=history,
@@ -1558,7 +1584,15 @@ def reduce_dashboard_key(
         )
     if state.search_editing:
         if key == "ESC":
-            return replace(state, search_editing=False, status_message="Search cancelled"), None
+            return (
+                replace(
+                    state,
+                    search_editing=False,
+                    search_query="",
+                    status_message="Filter cleared",
+                ),
+                None,
+            )
         if key == "ENTER":
             return replace(state, search_editing=False, status_message="Filter applied"), None
         if key == "BACKSPACE":
@@ -1587,6 +1621,8 @@ def reduce_dashboard_key(
         return replace(state, selected_index=index, retry_confirmation=False), None
     if key in {"ENTER", "RIGHT"}:
         return replace(state, view="details", status_message=""), None
+    if key == "ESC" and state.search_query:
+        return replace(state, search_query="", status_message="Filter cleared"), None
     if key in {"ESC", "LEFT"}:
         return replace(state, view="matrix", retry_confirmation=False), None
     if key == "TAB" and state.view == "details":
@@ -1612,8 +1648,25 @@ def reduce_dashboard_key(
             status_message=f"Viewing generation {_human_generation(target)}",
         ), None
     if key == "q":
+        stopping_generations = tuple(
+            replace(
+                group,
+                slots=tuple(
+                    replace(slot, state="stopping")
+                    if slot.state in ACTIVE_STATES
+                    else slot
+                    for slot in group.slots
+                ),
+            )
+            for group in state.generations
+        )
         return (
-            replace(state, experiment_state="stopping", status_message="Graceful stop requested"),
+            replace(
+                state,
+                experiment_state="stopping",
+                generations=stopping_generations,
+                status_message="Graceful stop requested",
+            ),
             DashboardAction("quit"),
         )
     if key == "p":
@@ -1657,7 +1710,15 @@ def reduce_dashboard_key(
             return replace(state, status_message="Profiling unavailable"), None
         return replace(state, view="top", status_message="Profiling top view"), None
     if key == "/":
-        return replace(state, search_editing=True, status_message="Search presentation only"), None
+        return (
+            replace(
+                state,
+                search_editing=True,
+                search_query="",
+                status_message="Search presentation only",
+            ),
+            None,
+        )
     if key == "h":
         return replace(state, view="help", status_message="Help"), None
     return state, None
