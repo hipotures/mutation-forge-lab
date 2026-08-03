@@ -8,7 +8,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -213,14 +213,62 @@ class _NativeArchive:
                 os.replace(temporary, record_path)
         return record
 
-    def existing_sources(self) -> tuple[str, ...]:
+    def existing_sources(
+        self,
+        *,
+        exclude_program_ids: Collection[str] = (),
+    ) -> tuple[str, ...]:
+        excluded = set(exclude_program_ids)
         result: list[str] = []
         for path in sorted(self.sources.glob("*.py")):
+            if path.stem in excluded:
+                continue
             try:
                 result.append(path.read_text(encoding="utf-8"))
             except OSError:
                 continue
         return tuple(result)
+
+
+def _unfinished_generation_program_ids(checkpoint_path: Path) -> set[str]:
+    if not checkpoint_path.is_file():
+        return set()
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise NativeExperimentError("cannot read native generation checkpoint") from error
+    if not isinstance(checkpoint, Mapping):
+        raise NativeExperimentError("native generation checkpoint must be an object")
+    slots = checkpoint.get("slots")
+    callbacks = checkpoint.get("callbacks")
+    if not isinstance(slots, Mapping) or not isinstance(callbacks, Mapping):
+        raise NativeExperimentError("native generation checkpoint is incomplete")
+    completed_generations = {
+        int(generation)
+        for generation, callback in callbacks.items()
+        if str(generation).isdigit()
+        and isinstance(callback, Mapping)
+        and callback.get("status") == "completed"
+    }
+    result: set[str] = set()
+    for slot_result in slots.values():
+        if not isinstance(slot_result, Mapping):
+            continue
+        candidate = slot_result.get("candidate")
+        if not isinstance(candidate, Mapping):
+            continue
+        generation = candidate.get("generation")
+        slot = candidate.get("slot")
+        if (
+            isinstance(generation, int)
+            and not isinstance(generation, bool)
+            and generation >= 0
+            and generation not in completed_generations
+            and isinstance(slot, str)
+            and slot
+        ):
+            result.add(f"g{generation:04d}-{slot}")
+    return result
 
 
 class _NativeProvider:
@@ -932,7 +980,12 @@ class NativeExperimentAdapter:
         )
         archive = _NativeArchive(layout.archive)
         parent_sources, parent_records = self._parent_data(state, layout)
-        baseline_sources = archive.existing_sources()
+        unfinished_program_ids = _unfinished_generation_program_ids(
+            layout.artifacts / "native-generation-checkpoint.json"
+        )
+        baseline_sources = archive.existing_sources(
+            exclude_program_ids=unfinished_program_ids
+        )
         callback = observer if observer is not None else event_callback
         profiling_enabled = (
             config.run.profiling_enabled if profiling is None else bool(profiling)
