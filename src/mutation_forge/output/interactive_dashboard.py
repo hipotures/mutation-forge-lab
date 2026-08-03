@@ -1281,7 +1281,7 @@ class InteractiveDashboardSink:
                 )
             return (
                 f"Slot matrix · generation {self.state.displayed_generation}",
-                self._slot_matrix(PANEL_COPY_WIDTHS[panel_name], "full"),
+                self._slot_matrix(PANEL_COPY_WIDTHS[panel_name], "copy"),
             )
         if panel_name == "performance":
             return "Performance & IR", self._performance_panel()
@@ -1551,7 +1551,7 @@ class InteractiveDashboardSink:
     def _slot_matrix(self, width: int, mode: str) -> Panel:
         group = _generation_slots(self.state, self.state.displayed_generation)
         table = Table(
-            box=box.MINIMAL_HEAVY_HEAD,
+            box=None if mode == "copy" else box.MINIMAL_HEAVY_HEAD,
             expand=True,
             padding=(0, 1),
             show_lines=False,
@@ -1712,7 +1712,9 @@ class InteractiveDashboardSink:
                 style="" if slot.response_preview else "dim",
             )
         return Panel(
-            Group(tabs, Rule(style="cyan"), body),
+            Group(tabs, body)
+            if mode == "copy"
+            else Group(tabs, Rule(style="cyan"), body),
             title=f"▶ SLOT DETAILS · {slot.slot}",
             border_style="cyan",
         )
@@ -2100,7 +2102,7 @@ class _NumberedPanel:
             else min(options.max_width, self.panel.width)
         )
         title = _numbered_panel_title(self.panel.title, self.number, width)
-        numbered = Panel(
+        numbered = _UnpaddedTitlePanel(
             self.panel.renderable,
             box=self.panel.box,
             title=title,
@@ -2119,6 +2121,23 @@ class _NumberedPanel:
         yield from console.render(numbered, options)
 
 
+class _UnpaddedTitlePanel(Panel):
+    @property
+    def _title(self) -> Text | None:
+        if not self.title:
+            return None
+        title = (
+            Text.from_markup(self.title)
+            if isinstance(self.title, str)
+            else self.title.copy()
+        )
+        title.end = ""
+        title.plain = title.plain.replace("\n", " ")
+        title.no_wrap = True
+        title.expand_tabs()
+        return title
+
+
 def _numbered_panel(panel: Panel, number: str) -> _NumberedPanel:
     return _NumberedPanel(panel, number)
 
@@ -2128,17 +2147,19 @@ def _numbered_panel_title(
     number: str,
     panel_width: int,
 ) -> Text:
-    width = max(1, panel_width - 6)
+    width = max(1, panel_width - 4)
     characters = ["─"] * width
-    characters[-1] = number
+    characters[-1] = " "
     if width >= 2:
-        characters[-2] = " "
+        characters[-2] = number
+    if width >= 3:
+        characters[-3] = " "
     if title is not None:
         plain_title = (
             title.plain if isinstance(title, Text) else Text.from_markup(title).plain
         ).strip()
         label = f" {plain_title} "
-        available = max(0, width - 3)
+        available = max(0, width - 4)
         label = _compact(label, available)
         start = max(0, min((width - len(label)) // 2, available - len(label)))
         characters[start : start + len(label)] = label

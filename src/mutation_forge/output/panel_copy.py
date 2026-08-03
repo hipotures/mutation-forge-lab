@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TextIO
 
 from rich.console import Console, RenderableType
+from rich.panel import Panel
 from rich.text import Text
 
 
@@ -48,7 +49,8 @@ def render_panel_copy_text(
         width=max(20, width),
         record=True,
     )
-    console.print(renderable)
+    content = renderable.renderable if isinstance(renderable, Panel) else renderable
+    console.print(content)
     body = Text.from_ansi(console.export_text(styles=False)).plain.expandtabs(4).rstrip()
     return f"# {title.strip()}\n\n{body}\n" if body else f"# {title.strip()}\n"
 

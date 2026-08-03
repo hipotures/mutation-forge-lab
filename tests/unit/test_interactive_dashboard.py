@@ -401,6 +401,7 @@ def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() ->
     assert len(top) == 40
     assert "Tokens" in top
     assert top.endswith(" 5 ─╮")
+    assert top.startswith("╭──")
 
 
 @pytest.mark.parametrize(
@@ -676,6 +677,7 @@ def test_pending_panel_copy_writes_fallback_and_expires_notice(
     assert copied.startswith("# Token Accounting\n\n")
     assert "experiment input" in copied
     assert "\x1b" not in copied
+    assert not any(character in copied for character in "╭╮╰╯│")
     clipboard.assert_called_once_with(copied)
     assert sink.state.status_message == f"OSC 52 unavailable · saved {path}"
 
@@ -692,6 +694,12 @@ def test_slot_detail_copy_includes_full_prompt_preview() -> None:
         start_live=False,
     )
     state = _running_state()
+    sink.state = state
+    matrix_title, matrix = sink._panel_copy_source("slots")
+    matrix_copy = dashboard.render_panel_copy_text(matrix_title, matrix, width=150)
+    assert "slot-00" in matrix_copy
+    assert not any(character in matrix_copy for character in "╭╮╰╯│")
+
     slots = list(state.generations[0].slots)
     prompt = "\n".join(f"line {index}" for index in range(12))
     slots[0] = replace(slots[0], prompt_preview=prompt)
@@ -726,25 +734,25 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "35f393716b6852a6272b521412888a98796cdf744df56b591edcc5785d87dc0b"
+        "7336f7b895aaf85677c60f7c22bb7c8f526cdacf8d9f7f02bc2ba53cc1e24020"
     ),
     "evaluation_active": (
-        "fb49725056f7cc475e84585a19ff0a26bd2f5196f293ec97aa25c58b7c4f24d1"
+        "f3fb148ffe9914e76f6b3746f56337d763a9cd9749e1c5d8ef1820a7d12ef1be"
     ),
     "validation_details": (
-        "233775d3ba84ef8bf2f34aa882c9bcca5d1c6a687582c20e6938f0aa45006e0b"
+        "e9a81c732e5430b25bede66962f4eaea57d8736fcbef8bb0785cdef51d473e5c"
     ),
     "completed": (
-        "b66219e3a02cd838dcd89efdee717738235747fd048445a1f4595117acb1afd6"
+        "a69a542d2a1ebe2c04f93cb3bb142aa6226691fbf399b71d15a2fa7596a526f9"
     ),
     "profiling_disabled": (
-        "36750d7c7473db75a1a58035486cc3a6a42a16cf40336a441259980e6df9bad0"
+        "701f45bbaa72d1d6ea1604ef65bceb671aefb0938b9ad0c32a8daa812bc7a54c"
     ),
     "compact": (
-        "675f5b8e700febc6abd3551202e1d6f330e09a560503e0e376ec81549953ce78"
+        "3e1ddc05ff2e5bf7267c3ac86163e55c6d03a8bf68c7527b6dc328ae5d6a8894"
     ),
     "minimal": (
-        "d191c1a48b1446d8e0a2420bf11c3e08d00fab9ef456617f7f25440d3964ed36"
+        "d2be7297ac8ee3a90122ab42cd3e2273b706655b228f64dd954f79eec4d051d6"
     ),
 }
 

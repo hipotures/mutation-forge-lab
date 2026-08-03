@@ -34,6 +34,7 @@ def test_render_panel_copy_text_exports_plain_rich_text() -> None:
     assert rendered.startswith("# Tokens\n\n")
     assert "exact   usage" in rendered
     assert "\x1b" not in rendered
+    assert not any(character in rendered for character in "╭╮╰╯│")
 
 
 def test_osc52_sequence_encodes_unicode_and_wraps_tmux() -> None:
