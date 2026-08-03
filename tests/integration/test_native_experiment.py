@@ -428,6 +428,65 @@ def test_native_slot_events_do_not_report_queued_turns_as_active() -> None:
     assert all("active_model_turns" not in payload for payload in slot_events)
 
 
+def test_native_recovery_event_replays_authoritative_usage(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "native-generation-checkpoint.json"
+    provider = RecordingProvider()
+
+    def interrupt_after_generation(*_args: Any) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        GenerationCoordinator(
+            provider,
+            config=GenerationConfig(
+                generations=1,
+                population_size=1,
+                concurrency=1,
+                max_model_turns=1,
+                max_repairs=0,
+                checkpoint_path=checkpoint,
+            ),
+            selection_callback=interrupt_after_generation,
+        ).run()
+
+    events: list[tuple[str, Mapping[str, Any]]] = []
+    GenerationCoordinator(
+        provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_model_turns=1,
+            max_repairs=0,
+            checkpoint_path=checkpoint,
+        ),
+        selection_callback=lambda *_args: None,
+        observer=lambda event_type, payload: events.append((event_type, payload)),
+    ).run(resume=True)
+
+    recovered = next(
+        payload
+        for event_type, payload in events
+        if event_type == "slot_queued" and payload.get("recovered") is True
+    )
+    assert len(provider.calls) == 1
+    assert recovered["usage"] == {
+        "inputTokens": 1,
+        "cachedInputTokens": 0,
+        "outputTokens": 1,
+        "reasoningOutputTokens": 0,
+        "totalTokens": 2,
+        "final": True,
+        "partial": False,
+    }
+    assert recovered["inputTokens"] == 1
+    assert recovered["cachedInputTokens"] == 0
+    assert recovered["outputTokens"] == 1
+    assert recovered["reasoningOutputTokens"] == 0
+    assert recovered["totalTokens"] == 2
+    assert recovered["usage_quality"] == "exact"
+
+
 def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path) -> None:
     config_path = _write_config(
         tmp_path / "experiment.toml",

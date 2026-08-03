@@ -1420,8 +1420,9 @@ class GenerationCoordinator:
             if result.initial
             else result.raw_result
         )
-        usage = evidence.get("usage") if isinstance(evidence, Mapping) else None
-        total_tokens = usage.get("totalTokens") if isinstance(usage, Mapping) else None
+        provider_result = ProviderResult.from_value(
+            evidence if isinstance(evidence, Mapping) else {}
+        )
         error: str | None = None
         codes = [
             str(item.get("code", ""))
@@ -1441,7 +1442,7 @@ class GenerationCoordinator:
             error = "invalid candidate"
         return {
             "error": error,
-            "totalTokens": total_tokens,
+            **GenerationCoordinator._usage_payload(provider_result),
             "content": (
                 evidence.get("content")
                 if isinstance(evidence, Mapping)

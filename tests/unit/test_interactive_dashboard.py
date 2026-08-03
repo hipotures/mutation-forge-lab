@@ -24,6 +24,7 @@ from mutation_forge.output.interactive_dashboard import (
     DashboardState,
     GenerationSlots,
     InteractiveDashboardSink,
+    TokenUsage,
     _decode_keys,
     _responsive_mode,
     _TerminalInput,
@@ -308,6 +309,45 @@ def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> N
         monotonic=124.0,
     )
     assert evaluated.evaluations_completed == 7
+
+
+def test_recovered_slot_hydrates_usage_without_changing_aggregate_totals() -> None:
+    state = _running_state()
+    recovered = reduce_dashboard_event(
+        state,
+        _event(
+            "slot_queued",
+            generation=1,
+            slot="slot-02",
+            parent_id="g0000-slot-01",
+            phase="initial",
+            status="recovered",
+            recovered=True,
+            recovered_status="accepted",
+            usage={
+                "inputTokens": 101,
+                "cachedInputTokens": 11,
+                "outputTokens": 53,
+                "reasoningOutputTokens": 47,
+                "totalTokens": 154,
+                "quality": "exact",
+            },
+            usage_quality="exact",
+        ),
+        monotonic=124.0,
+    )
+
+    slot = recovered.generations[0].slots[2]
+    assert slot.usage == TokenUsage(
+        input=101,
+        cached=11,
+        output=53,
+        reasoning=47,
+        total=154,
+        quality="exact",
+    )
+    assert recovered.cumulative_usage == state.cumulative_usage
+    assert recovered.session_usage == state.session_usage
 
 
 def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> None:
