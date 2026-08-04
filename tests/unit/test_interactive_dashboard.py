@@ -1261,6 +1261,32 @@ def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
     sink.close()
 
 
+def test_slot_matrix_uses_available_width_for_full_parent_id() -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    state = _running_state()
+    slots = list(state.generations[0].slots)
+    slots[0] = replace(slots[0], parent="g0004-slot-07")
+    sink.state = replace(
+        state,
+        slot_icon_mode=True,
+        generations=(GenerationSlots(1, tuple(slots)),),
+    )
+
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._slot_matrix(150, "full"))
+
+    assert "g0004-slot-07" in output.getvalue()
+    sink.close()
+
+
 def test_quick_view_explains_objective_sparkline_direction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2434,7 +2434,7 @@ class InteractiveDashboardSink:
             selected = index == self.state.selected_index
             values: dict[str, RenderableType] = {
                 "slot": f"▶{slot.slot}" if selected else f" {slot.slot}",
-                "parent": slot.parent if mode == "copy" else _compact(slot.parent, 11),
+                "parent": slot.parent,
                 "phase": PHASE_ICONS.get(slot.phase, "?") if icon_mode else slot.phase,
                 "state": Text(
                     STATE_ICONS.get(slot.state, "?") if icon_mode else slot.state,
