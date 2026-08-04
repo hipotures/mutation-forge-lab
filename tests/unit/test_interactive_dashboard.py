@@ -652,7 +652,7 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
 
 def test_slot_matrix_shows_independent_parallel_evaluation_progress() -> None:
     state = _running_state()
-    for slot, completed in (("slot-02", 176), ("slot-03", 90)):
+    for slot, completed in (("slot-02", 176), ("slot-03", 90), ("slot-04", 320)):
         state = reduce_dashboard_event(
             state,
             _event(
@@ -693,6 +693,22 @@ def test_slot_matrix_shows_independent_parallel_evaluation_progress() -> None:
 
     assert "eval 55%" in rendered
     assert "eval 28%" in rendered
+
+    sink.state = replace(state, slot_icon_mode=True)
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._slot_matrix(150, "full"))
+    rendered = output.getvalue()
+
+    assert "55%" in rendered
+    assert "28%" in rendered
+    assert "100%" in rendered
+    assert "▲" not in rendered
+    assert "eval " not in rendered
     sink.close()
 
 

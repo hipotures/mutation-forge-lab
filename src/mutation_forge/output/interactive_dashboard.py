@@ -2652,6 +2652,12 @@ class InteractiveDashboardSink:
                 "candidate / error",
             }
             columns = [item for item in columns if item[0] in visible]
+        icon_state_width = (
+            4
+            if icon_mode
+            and any(_slot_evaluation_percent(slot) is not None for slot in group.slots)
+            else 1
+        )
         for name, justify, max_width in columns:
             heading = (
                 "P"
@@ -2660,7 +2666,13 @@ class InteractiveDashboardSink:
                 if icon_mode and name == "state"
                 else name
             )
-            column_width = 1 if icon_mode and name in {"phase", "state"} else max_width
+            column_width = (
+                1
+                if icon_mode and name == "phase"
+                else icon_state_width
+                if icon_mode and name == "state"
+                else max_width
+            )
             if mode == "copy":
                 table.add_column(heading, justify=justify, no_wrap=True)
             else:
@@ -2673,6 +2685,7 @@ class InteractiveDashboardSink:
                 )
         for index, slot in enumerate(group.slots):
             selected = index == self.state.selected_index
+            evaluation_percent = _slot_evaluation_percent(slot)
             stopping_active = (
                 self.state.experiment_state == "stopping" and slot.state in ACTIVE_STATES
             )
@@ -2688,7 +2701,9 @@ class InteractiveDashboardSink:
                 "parent": compact_display_ids(slot.parent),
                 "phase": PHASE_ICONS.get(slot.phase, "?") if icon_mode else slot.phase,
                 "state": Text(
-                    STATE_ICONS.get(slot.state, "?")
+                    f"{evaluation_percent}%"
+                    if icon_mode and evaluation_percent is not None
+                    else STATE_ICONS.get(slot.state, "?")
                     if icon_mode
                     else _slot_state_label(slot),
                     style=state_style,
@@ -3548,18 +3563,22 @@ def _objective(value: float | None) -> str:
 
 
 def _slot_state_label(slot: DashboardSlot) -> str:
-    if (
-        slot.state == "evaluating"
-        and slot.evaluation_total is not None
-        and slot.evaluation_total > 0
-    ):
-        percent = round(
-            100
-            * min(slot.evaluation_completed, slot.evaluation_total)
-            / slot.evaluation_total
-        )
+    percent = _slot_evaluation_percent(slot)
+    if percent is not None:
         return f"eval {percent}%"
     return slot.state
+
+
+def _slot_evaluation_percent(slot: DashboardSlot) -> int | None:
+    if (
+        slot.state != "evaluating"
+        or slot.evaluation_total is None
+        or slot.evaluation_total <= 0
+    ):
+        return None
+    return round(
+        100 * min(slot.evaluation_completed, slot.evaluation_total) / slot.evaluation_total
+    )
 
 
 def _rate(value: float | None) -> str:
