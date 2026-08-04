@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import os
+import random
 import re
 import tomllib
 import unicodedata
@@ -294,13 +295,18 @@ def orders_for_generation(config: object, generation: int) -> tuple[int, ...]:
             "evaluation.orders_per_generation must not exceed the number "
             "of eligible graph orders"
         )
-    frontier = domain[: min(len(domain), (generation + 1) * count)]
-    if count == 1:
-        return (frontier[-1],)
-    return tuple(
-        frontier[index * (len(frontier) - 1) // (count - 1)]
-        for index in range(count)
-    )
+    graph_seeds = _evaluation_value(config, "graph_seeds")
+    if (
+        not isinstance(graph_seeds, (list, tuple))
+        or not graph_seeds
+        or any(
+            isinstance(seed, bool) or not isinstance(seed, int)
+            for seed in graph_seeds
+        )
+    ):
+        raise ValueError("evaluation.graph_seeds must be a non-empty integer sequence")
+    seed = f"{','.join(str(value) for value in graph_seeds)}:{generation}"
+    return tuple(sorted(random.Random(seed).sample(domain, count)))
 
 
 def _canonicalize_paths(value: object, base: Path) -> object:

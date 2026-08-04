@@ -183,6 +183,8 @@ def _adaptive_evaluation_config() -> dict[str, object]:
             "min_order": 22,
             "max_order": 128,
             "orders_per_generation": 5,
+            "graph_seeds": [401, 402, 403, 404],
+            "policy_seeds": list(range(4001, 4017)),
         }
     }
 
@@ -1239,6 +1241,7 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
             force_terminal=False,
             color_system=None,
         ),
+        locked_config=_adaptive_evaluation_config(),
         start_live=False,
     )
     sink.state = replace(
@@ -1250,7 +1253,7 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
         hourly_token_limit=1_000_000,
         hourly_tokens_used=27_501,
         evaluation_episodes_completed=320,
-        evaluation_episodes_total=320,
+        evaluation_episodes_total=None,
     )
     output = io.StringIO()
     Console(
@@ -1267,7 +1270,16 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
     assert "Evaluation Progress" in rendered
     assert "Wall-time Budget" in rendered
     assert "27.5k/1.0M" in rendered
+    assert "0/320" in rendered
+    assert "━" * 12 in rendered
     assert "—/—" not in rendered
+    content_lines = [
+        line
+        for line in rendered.splitlines()
+        if "Slots Complete" in line or "27.5k/1.0M" in line
+    ]
+    assert content_lines
+    assert all(line[1:-1].count("│") == 3 for line in content_lines)
     sink.close()
 
 
@@ -1466,7 +1478,11 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     assert "generation 2" in rendered
     assert "2 / 14 / 8" in rendered
     assert "Orders" in rendered
-    assert "22, 24, 26, 28, 31" in rendered
+    expected_orders = dashboard.orders_for_generation(
+        _adaptive_evaluation_config()["evaluation"],
+        1,
+    )
+    assert ", ".join(map(str, expected_orders)) in rendered
     assert "Model gpt-test:high" in rendered
     assert "gpt-test/high" not in rendered
     assert "Slots" in rendered
@@ -1620,7 +1636,11 @@ def test_quick_view_sparkline_stays_on_one_adaptive_line(width: int) -> None:
     assert "max 0.5556" in objective_lines[0]
     rendered = output.getvalue()
     assert "Orders" in rendered
-    assert "22, 24, 26, 28, 31" in rendered
+    expected_orders = dashboard.orders_for_generation(
+        _adaptive_evaluation_config()["evaluation"],
+        1,
+    )
+    assert ", ".join(map(str, expected_orders)) in rendered
     layout = sink._render_full_or_compact(  # noqa: SLF001
         width,
         60,

@@ -24,6 +24,7 @@ from rich.align import Align
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.layout import Layout
 from rich.live import Live
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from rich.rule import Rule
@@ -2453,6 +2454,10 @@ class InteractiveDashboardSink:
         )
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
+        evaluation_total = (
+            self.state.evaluation_episodes_total
+            or self._configured_evaluation_total()
+        )
         configured_values = (
             (
                 "Generation",
@@ -2477,7 +2482,7 @@ class InteractiveDashboardSink:
             (
                 "Evaluation Progress",
                 self.state.evaluation_episodes_completed,
-                self.state.evaluation_episodes_total,
+                evaluation_total,
             ),
             (
                 "Wall-time Budget",
@@ -2488,7 +2493,16 @@ class InteractiveDashboardSink:
         values = tuple(item for item in configured_values if item[2] is not None)
         horizontal = horizontal and (len(values) <= 4 or width >= 140)
         if horizontal:
-            column_width = max(1, (width - 4 - 2 * len(values)) // len(values))
+            column_width = max(
+                1,
+                (
+                    width
+                    - 4
+                    - 2 * len(values)
+                    - max(0, len(values) - 1)
+                )
+                // len(values),
+            )
             renderables = [
                 _progress_bar(
                     _compact(label, column_width),
@@ -2496,24 +2510,26 @@ class InteractiveDashboardSink:
                     total,
                     width=max(
                         1,
-                        min(
-                            8,
-                            column_width
-                            - len(
-                                f"{_compact_count(current)}/"
-                                f"{_compact_count(cast(int, total))}"
-                            )
-                            - 6,
-                        ),
+                        column_width
+                        - len(
+                            f"{_compact_count(current)}/"
+                            f"{_compact_count(cast(int, total))}"
+                        )
+                        - 6,
                     ),
                     stacked=True,
                 )
                 for label, current, total in values
             ]
-            grid = Table.grid(expand=True, padding=(0, 1))
-            for _ in renderables:
+            grid = Table.grid(expand=True)
+            row: list[RenderableType] = []
+            for index, renderable in enumerate(renderables):
                 grid.add_column(ratio=1)
-            grid.add_row(*renderables)
+                row.append(Padding(Align.center(renderable), (0, 1)))
+                if index < len(renderables) - 1:
+                    grid.add_column(width=1, no_wrap=True)
+                    row.append(Text("│\n│", style="grey23"))
+            grid.add_row(*row)
         else:
             renderables = [
                 _progress_bar(
@@ -2546,6 +2562,25 @@ class InteractiveDashboardSink:
             else grid
         )
         return Panel(content, border_style="cyan", padding=(0, 1))
+
+    def _configured_evaluation_total(self) -> int | None:
+        evaluation = self.locked_config.get("evaluation")
+        if not isinstance(evaluation, Mapping):
+            return None
+        graph_seeds = evaluation.get("graph_seeds")
+        policy_seeds = evaluation.get("policy_seeds")
+        if (
+            not isinstance(graph_seeds, (list, tuple))
+            or not graph_seeds
+            or not isinstance(policy_seeds, (list, tuple))
+            or not policy_seeds
+        ):
+            return None
+        try:
+            orders = orders_for_generation(evaluation, self.state.generation)
+        except ValueError:
+            return None
+        return len(orders) * len(graph_seeds) * len(policy_seeds)
 
     def _slot_matrix(self, width: int, mode: str) -> Panel:
         group = _generation_slots(self.state, self.state.displayed_generation)

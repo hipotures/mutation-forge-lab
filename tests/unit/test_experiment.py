@@ -246,7 +246,7 @@ def test_config_does_not_infer_missing_search_limits(tmp_path: Path) -> None:
         load_experiment_config(path)
 
 
-def test_adaptive_order_schedule_expands_deterministically_by_generation(
+def test_adaptive_order_schedule_samples_full_range_deterministically_by_generation(
     tmp_path: Path,
 ) -> None:
     path = _write_config(tmp_path)
@@ -260,10 +260,14 @@ def test_adaptive_order_schedule_expands_deterministically_by_generation(
     assert config.evaluation.max_order == 128
     assert config.evaluation.orders_per_generation == 5
     assert scheduled_order_domain(config.evaluation) == tuple(range(22, 129))
-    assert orders_for_generation(config.evaluation, 0) == (22, 23, 24, 25, 26)
-    assert orders_for_generation(config.evaluation, 1) == (22, 24, 26, 28, 31)
-    assert orders_for_generation(config.evaluation, 21) == (22, 48, 75, 101, 128)
-    assert orders_for_generation(config.evaluation, 100) == (22, 48, 75, 101, 128)
+    generation_zero = orders_for_generation(config.evaluation, 0)
+    generation_one = orders_for_generation(config.evaluation, 1)
+    assert len(generation_zero) == len(set(generation_zero)) == 5
+    assert len(generation_one) == len(set(generation_one)) == 5
+    assert all(22 <= order <= 128 for order in generation_zero + generation_one)
+    assert generation_zero == orders_for_generation(config.evaluation, 0)
+    assert generation_zero != generation_one
+    assert max(generation_zero + generation_one) > 31
 
 
 def test_adaptive_cubic_order_schedule_uses_only_even_orders(tmp_path: Path) -> None:
@@ -279,8 +283,13 @@ def test_adaptive_cubic_order_schedule_uses_only_even_orders(tmp_path: Path) -> 
     config = load_experiment_config(path)
 
     assert scheduled_order_domain(config.evaluation) == (22, 24, 26, 28, 30, 32)
-    assert orders_for_generation(config.evaluation, 0) == (22, 24, 26)
-    assert orders_for_generation(config.evaluation, 1) == (22, 26, 32)
+    generation_zero = orders_for_generation(config.evaluation, 0)
+    generation_one = orders_for_generation(config.evaluation, 1)
+    assert len(generation_zero) == len(set(generation_zero)) == 3
+    assert len(generation_one) == len(set(generation_one)) == 3
+    assert all(order % 2 == 0 for order in generation_zero + generation_one)
+    assert generation_zero == orders_for_generation(config.evaluation, 0)
+    assert generation_zero != generation_one
 
 
 @pytest.mark.parametrize(

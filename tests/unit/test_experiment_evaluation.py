@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from mutation_forge.experiment import evaluation
+from mutation_forge.experiment.config import orders_for_generation
 from mutation_forge.experiment.json_io import write_json
 from mutation_forge.models import GraphScore, GraphState, RewritePlan
 from mutation_forge.proposals.k_switch import ProposalCandidate, ProposalPool
@@ -334,6 +335,12 @@ def test_settings_use_generation_specific_adaptive_orders() -> None:
         "resources": {"workers": 1, "thread_count": 1},
     }
 
-    assert evaluation._settings(config, 0)["orders"] == (22, 23, 24, 25, 26)
-    assert evaluation._settings(config, 1)["orders"] == (22, 24, 26, 28, 31)
-    assert evaluation._settings(config, 21)["orders"] == (22, 48, 75, 101, 128)
+    evaluation_config = cast(dict[str, object], config["evaluation"])
+    sampled = []
+    for generation in (0, 1, 21):
+        expected = orders_for_generation(evaluation_config, generation)
+        assert evaluation._settings(config, generation)["orders"] == expected
+        assert len(expected) == len(set(expected)) == 5
+        assert all(22 <= order <= 128 for order in expected)
+        sampled.append(expected)
+    assert len(set(sampled)) == 3
