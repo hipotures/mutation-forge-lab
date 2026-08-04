@@ -371,6 +371,12 @@ def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
     )
 
 
+def _display_metric(value: object) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.4f}"
+    return "not evaluated"
+
+
 def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> str:
     if json_output:
         return json.dumps(dict(status), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -388,8 +394,6 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
         lines.append(f"Session: {status['session_id']}")
     if status.get("workspace"):
         lines.append(f"Workspace: {status['workspace']}")
-    if status.get("last_checkpoint"):
-        lines.append(f"Checkpoint: {status['last_checkpoint']}")
     if status.get("generation") is not None:
         if status.get("max_generations") == "unbounded":
             lines.append(f"Progress: generation {status['generation']} · open-ended")
@@ -405,7 +409,8 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
     ranked = status.get("ranked_candidates")
     if status.get("best_program_id"):
         lines.append(
-            f"Winner: {status['best_program_id']}, primary metric {status['best_primary_metric']}"
+            f"Winner: {status['best_program_id']}, "
+            f"primary metric {_display_metric(status.get('best_primary_metric'))}"
         )
         if status.get("winner_source"):
             lines.append(f"Winner code: {status['winner_source']}")
@@ -421,7 +426,7 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
             metric = candidate.get("metric")
             lines.append(
                 f"  {index}. {candidate.get('candidate_id')} "
-                f"score={metric if metric is not None else 'not evaluated'} "
+                f"score={_display_metric(metric)} "
                 f"generation={candidate.get('generation')} "
                 f"code={candidate.get('source_path') or '-'}"
             )
@@ -462,11 +467,6 @@ def render_status(status: Mapping[str, Any], *, json_output: bool = False) -> st
         )
     else:
         lines.append(f"Model turns: {status['provider_turns']}")
-    artifacts = status.get("artifacts")
-    if isinstance(artifacts, Mapping) and artifacts:
-        lines.append("Artifacts:")
-        for label, path in artifacts.items():
-            lines.append(f"  {str(label).replace('_', ' ')}: {path}")
     if status.get("ir") is not None:
         lines.append(f"IR: {status['ir']}")
     if status.get("last_stop_reason"):

@@ -674,6 +674,7 @@ def test_generation_graceful_stop_finishes_active_provider_only(
     started = threading.Event()
     release = threading.Event()
     control = ExperimentControl()
+    events: list[str] = []
 
     class Provider:
         def __init__(self) -> None:
@@ -706,6 +707,7 @@ def test_generation_graceful_stop_finishes_active_provider_only(
         candidate_callback=lambda *_args: pytest.fail(
             "evaluation must not start after a graceful stop"
         ),
+        observer=lambda event_type, _payload: events.append(event_type),
     )
     worker = threading.Thread(target=lambda: result_box.append(coordinator.run()))
     worker.start()
@@ -717,8 +719,10 @@ def test_generation_graceful_stop_finishes_active_provider_only(
 
     assert not worker.is_alive()
     assert provider.calls == 1
+    assert "validation_started" not in events
     result = result_box[0]
-    assert result.status == "budget_exhausted"
+    assert result.status == "stopped"
+    assert {slot.status for slot in result.slots} == {"stopped"}
     assert result.summary["stop_reason"] == "operator_stop"
 
 
@@ -759,7 +763,8 @@ def test_generation_graceful_stop_finishes_validation_without_starting_probe(
         observer=observe,
     ).run()
 
-    assert result.status == "budget_exhausted"
+    assert result.status == "stopped"
+    assert {slot.status for slot in result.slots} == {"stopped"}
     assert result.summary["stop_reason"] == "operator_stop"
 
 
@@ -1054,9 +1059,11 @@ def test_status_reads_nested_stage4_search_metrics(tmp_path: Path) -> None:
         "chargedFailedTurns": 0,
     }
     rendered = render_status(status)
-    assert "Winner: program-1, primary metric 0.75" in rendered
+    assert "Winner: program-1, primary metric 0.7500" in rendered
     assert f"Winner code: {source_path}" in rendered
     assert "Best mutations:" in rendered
+    assert "score=0.7500" in rendered
+    assert "Artifacts:" not in rendered
     assert "Tokens: input 10, cached 2, output 5, reasoning 3, total 15 (exact)" in rendered
 
 

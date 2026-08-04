@@ -89,6 +89,7 @@ STATE_STYLES = {
     "budget": "yellow",
     "budget_exhausted": "yellow",
     "interrupted": "magenta",
+    "stopped": "yellow",
 }
 STATE_ICONS = {
     "queued": "…",
@@ -108,6 +109,7 @@ STATE_ICONS = {
     "budget_exhausted": "X",
     "interrupted": "■",
     "stopping": "■",
+    "stopped": "■",
 }
 PHASE_ICONS: dict[str, str] = {
     "initial": "◌",
@@ -1897,6 +1899,19 @@ def reduce_dashboard_key(
             replace(
                 state,
                 experiment_state="stopping",
+                generations=tuple(
+                    replace(
+                        group,
+                        slots=tuple(
+                            replace(slot, state="stopping")
+                            if group.generation == state.generation
+                            and slot.state == "queued"
+                            else slot
+                            for slot in group.slots
+                        ),
+                    )
+                    for group in state.generations
+                ),
                 status_message=(
                     "Graceful stop requested · active stages will finish · "
                     "press q again to interrupt"
@@ -2658,6 +2673,12 @@ class InteractiveDashboardSink:
                 )
         for index, slot in enumerate(group.slots):
             selected = index == self.state.selected_index
+            stopping_active = (
+                self.state.experiment_state == "stopping" and slot.state in ACTIVE_STATES
+            )
+            state_style = STATE_STYLES.get(slot.state, "")
+            if stopping_active:
+                state_style = f"{state_style} blink".strip()
             values: dict[str, RenderableType] = {
                 "slot": (
                     f"▶{compact_display_ids(slot.slot)}"
@@ -2670,7 +2691,7 @@ class InteractiveDashboardSink:
                     STATE_ICONS.get(slot.state, "?")
                     if icon_mode
                     else _slot_state_label(slot),
-                    style=STATE_STYLES.get(slot.state, ""),
+                    style=state_style,
                 ),
                 "elapsed": _duration(self._slot_elapsed(slot)),
                 "in": _show(slot.usage.input),

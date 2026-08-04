@@ -1150,6 +1150,8 @@ class GenerationCoordinator:
         validation: ValidationResult | None = None
         behavior: Mapping[str, Any] = {}
         if source is not None:
+            if self._graceful_stop_requested():
+                raise _GracefulStopBoundary
             self._emit(
                 "validation_started",
                 generation=request.generation,
@@ -1182,7 +1184,7 @@ class GenerationCoordinator:
                 diagnostics=validation_diagnostics,
                 error=", ".join(validation_codes) if validation_codes else None,
             )
-            if validation.valid and self._graceful_stop_requested():
+            if self._graceful_stop_requested():
                 raise _GracefulStopBoundary
             if not validation.valid:
                 errors.extend(
@@ -1277,6 +1279,8 @@ class GenerationCoordinator:
                 diagnostics=validation_diagnostics,
                 error=", ".join(validation_codes) if validation_codes else "validation failed",
             )
+        if self._graceful_stop_requested():
+            raise _GracefulStopBoundary
         diagnostics_by_identity: dict[tuple[str, str], Mapping[str, Any]] = {}
         for item in errors:
             code = str(item.get("code", ""))
@@ -1651,6 +1655,7 @@ class GenerationCoordinator:
                 "failed": 70,
                 "repair_pending": 60,
                 "repair_running": 40,
+                "stopped": 20,
                 "pending": 10,
             }
             matches.sort(key=lambda item: ranks.get(str(item.get("status", "")), 0), reverse=True)
@@ -1742,6 +1747,7 @@ class GenerationCoordinator:
             "failed": 70,
             "repair_pending": 60,
             "repair_running": 40,
+            "stopped": 20,
             "pending": 10,
         }
         authoritative_slots = [
@@ -1756,7 +1762,8 @@ class GenerationCoordinator:
             for value in authoritative_slots
             if (
                 _slot_failure_is_retryable(value)
-                or str(value.get("status", "")) in {"repair_pending", "repair_running"}
+                or str(value.get("status", ""))
+                in {"repair_pending", "repair_running", "stopped"}
             )
         }
         if retry_generations and min(retry_generations) < first_generation:
@@ -1831,7 +1838,10 @@ class GenerationCoordinator:
                         population_size=self.config.slots,
                     )
                     cached = cached_for_request(request)
-                    if isinstance(cached, Mapping) and cached.get("status") == "repair_pending":
+                    if isinstance(cached, Mapping) and cached.get("status") in {
+                        "repair_pending",
+                        "stopped",
+                    }:
                         retained_initial = cached.get("initial")
                         if not isinstance(retained_initial, Mapping):
                             retained_initial = cached.get("raw_result")
@@ -1854,7 +1864,8 @@ class GenerationCoordinator:
                         cached = None
                     if (
                         isinstance(cached, Mapping)
-                        and cached.get("status") not in {"pending", "budget_exhausted"}
+                        and cached.get("status")
+                        not in {"pending", "budget_exhausted", "stopped"}
                         and not _slot_failure_is_retryable(cached)
                     ):
                         results[slot] = self._from_slot(cached)
@@ -1891,7 +1902,11 @@ class GenerationCoordinator:
                             generation,
                             slot,
                             parents[slot],
-                            "budget_exhausted",
+                            (
+                                "stopped"
+                                if exhausted_reason == "operator_stop"
+                                else "budget_exhausted"
+                            ),
                             request=request.as_dict(),
                         )
                         stopped = True
@@ -1922,7 +1937,7 @@ class GenerationCoordinator:
                             generation=generation,
                             slot=slot,
                             parent_id=request.parent_id,
-                            status="budget_exhausted",
+                            status="stopped",
                             request=request.as_dict(),
                             initial_request=request.as_dict(),
                             remaining_repairs=self.config.max_repairs,
@@ -1980,7 +1995,11 @@ class GenerationCoordinator:
                             generation=generation,
                             slot=slot,
                             parent_id=request.parent_id,
-                            status="budget_exhausted",
+                            status=(
+                                "stopped"
+                                if exhausted_reason == "operator_stop"
+                                else "budget_exhausted"
+                            ),
                             initial=raw.as_dict(),
                             request=request.as_dict(),
                             raw_result=raw.as_dict(),
@@ -2005,7 +2024,7 @@ class GenerationCoordinator:
                             generation=generation,
                             slot=slot,
                             parent_id=request.parent_id,
-                            status="budget_exhausted",
+                            status="stopped",
                             initial=raw.as_dict(),
                             request=request.as_dict(),
                             raw_result=raw.as_dict(),
@@ -2024,7 +2043,7 @@ class GenerationCoordinator:
                             generation=generation,
                             slot=slot,
                             parent_id=request.parent_id,
-                            status="budget_exhausted",
+                            status="stopped",
                             initial=raw.as_dict(),
                             request=request.as_dict(),
                             raw_result=raw.as_dict(),
@@ -2430,7 +2449,7 @@ class GenerationCoordinator:
                             source_lines=len(candidate.source.splitlines()),
                             archive_size=len(seen),
                         )
-                elif item.status in {"failed", "invalid", "budget_exhausted"}:
+                elif item.status in {"failed", "invalid", "budget_exhausted", "stopped"}:
                     self._emit(
                         "candidate_archived",
                         generation=generation,
@@ -2533,6 +2552,8 @@ class GenerationCoordinator:
         status = (
             "infrastructure_failed"
             if infrastructure_failed
+            else "stopped"
+            if stopped_reason == "operator_stop"
             else "budget_exhausted"
             if stopped_reason == "max_model_turns"
             else "budget_exhausted"

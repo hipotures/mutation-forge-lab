@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import pty
+import re
 import termios
 import threading
 from dataclasses import replace
@@ -899,6 +900,7 @@ def test_q_arms_graceful_stop_then_requests_immediate_interrupt() -> None:
                 (
                     DashboardSlot("slot-00", 1, state="evaluating"),
                     DashboardSlot("slot-01", 1, state="accepted"),
+                    DashboardSlot("slot-02", 1, state="queued"),
                 ),
             ),
         ),
@@ -910,7 +912,25 @@ def test_q_arms_graceful_stop_then_requests_immediate_interrupt() -> None:
     assert state.experiment_state == "stopping"
     assert state.generations[0].slots[0].state == "evaluating"
     assert state.generations[0].slots[1].state == "accepted"
+    assert state.generations[0].slots[2].state == "stopping"
     assert "press q again" in state.status_message
+
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=True),
+        start_live=False,
+    )
+    sink.state = state
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=True,
+        color_system="standard",
+    ).print(sink._slot_matrix(150, "full"))
+    rendered = output.getvalue()
+    assert "stopping" in rendered
+    assert re.search(r"\x1b\[(?:\d+;)*5(?:;\d+)*m", rendered)
+    sink.close()
 
     state, action = reduce_dashboard_key(state, "q")
 
