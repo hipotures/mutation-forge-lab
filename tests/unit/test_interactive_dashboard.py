@@ -825,6 +825,65 @@ def test_resumed_generation_start_preserves_persisted_slot_objectives() -> None:
     assert slot.objective == pytest.approx(0.252683555)
 
 
+def test_newer_slot_event_advances_current_generation_when_start_event_was_missed() -> None:
+    state = DashboardState(
+        generation=3,
+        displayed_generation=3,
+        population_size=8,
+        generations=(
+            GenerationSlots(
+                3,
+                tuple(DashboardSlot(f"slot-{index:02d}", 3) for index in range(8)),
+            ),
+        ),
+    )
+
+    updated = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_progress",
+            generation=4,
+            slot="slot-01",
+            candidate_id="g0004-slot-01",
+            phase="replay",
+            completed=24,
+            total=128,
+        ),
+    )
+
+    assert updated.generation == 4
+    assert updated.displayed_generation == 4
+    generation = next(item for item in updated.generations if item.generation == 4)
+    assert generation.slots[1].candidate == "g0004-slot-01"
+
+
+def test_newer_slot_event_keeps_explicit_historical_generation_view() -> None:
+    state = DashboardState(
+        generation=3,
+        displayed_generation=2,
+        population_size=8,
+        generations=(
+            GenerationSlots(2, (DashboardSlot("slot-00", 2),)),
+            GenerationSlots(3, (DashboardSlot("slot-00", 3),)),
+        ),
+    )
+
+    updated = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_progress",
+            generation=4,
+            slot="slot-00",
+            candidate_id="g0004-slot-00",
+            completed=1,
+            total=128,
+        ),
+    )
+
+    assert updated.generation == 4
+    assert updated.displayed_generation == 2
+
+
 def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     state = _running_state()
     state, _ = reduce_dashboard_key(state, "c")

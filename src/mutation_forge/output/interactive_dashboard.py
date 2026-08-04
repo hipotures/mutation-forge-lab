@@ -973,6 +973,9 @@ def reduce_dashboard_event(
     now = time.monotonic() if monotonic is None else monotonic
     payload = event.payload
     event_type = event.event_type
+    previous_generation = state.generation
+    previous_displayed_generation = state.displayed_generation
+    was_following_current_generation = previous_displayed_generation == previous_generation
     raw_idempotency_key = _text(payload.get("idempotency_key"))
     idempotency_key = (
         f"{event_type}:{raw_idempotency_key}" if raw_idempotency_key is not None else None
@@ -997,6 +1000,17 @@ def reduce_dashboard_event(
             "experiment_failed",
         },
     )
+    if event_type != "generation_started":
+        current_generation = max(previous_generation, state.generation)
+        state = replace(
+            state,
+            generation=current_generation,
+            displayed_generation=(
+                current_generation
+                if current_generation > previous_generation and was_following_current_generation
+                else previous_displayed_generation
+            ),
+        )
     if event_type == "session_started":
         cumulative = _usage(payload.get("usage"))
         session = _usage(payload.get("session_usage"))
