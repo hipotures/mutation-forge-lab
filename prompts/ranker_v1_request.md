@@ -134,7 +134,7 @@ def priority(ctx, proposal):
 - Allowed local control flow: assignments, arithmetic, comparisons, Boolean logic, conditionals, for loops, and while loops.
 - Allowed built-ins only: abs, all, any, len, max, min, range, round, sum.
 - No imports, attributes or method calls, comprehensions, lambda, recursion, try, with, yield, async, decorators, annotations, classes, nested functions, reflection, dynamic execution, I/O, environment, process, network, database, RNG, or hidden state.
-- Source <= 12288 bytes; AST <= 500 nodes; per-call wall <= 0.025 seconds; total smoke wall <= 60.0 seconds.
+- Source <= 12288 bytes; AST <= 1000 nodes; per-call wall <= 0.025 seconds; total smoke wall <= 60.0 seconds.
 
 OUTPUT FIELD REQUIREMENTS
 
