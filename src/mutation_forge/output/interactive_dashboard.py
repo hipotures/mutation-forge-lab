@@ -2087,7 +2087,13 @@ class InteractiveDashboardSink:
         if panel_name == "activity":
             return "Recent Activity", self._activity_panel("copy")
         if panel_name == "quick-view":
-            return "Quick View", self._quick_view_panel("full")
+            return (
+                "Quick View",
+                self._quick_view_panel(
+                    "full",
+                    content_width=PANEL_COPY_WIDTHS[panel_name] - 4,
+                ),
+            )
         raise ValueError(f"Unknown panel copy target: {panel_name}")
 
     def render(self) -> Layout:
@@ -2130,9 +2136,9 @@ class InteractiveDashboardSink:
                     size=4,
                 ),
                 Layout(
-                    _numbered_panel(self._progress(width, horizontal=False), "2"),
+                    _numbered_panel(self._progress(width, horizontal=True), "2"),
                     name="progress",
-                    size=7,
+                    size=5,
                 ),
                 Layout(name="main", size=13),
                 Layout(name="metrics", size=metrics_size),
@@ -2189,9 +2195,19 @@ class InteractiveDashboardSink:
                     ratio=1,
                 ),
             )
+        quick_view_content_width = max(1, width - width // 2 - 4)
         root["bottom"].split_row(
-            Layout(_numbered_panel(self._activity_panel(mode), "7"), ratio=3),
-            Layout(_numbered_panel(self._quick_view_panel(mode), "8"), ratio=2),
+            Layout(_numbered_panel(self._activity_panel(mode), "7"), ratio=1),
+            Layout(
+                _numbered_panel(
+                    self._quick_view_panel(
+                        mode,
+                        content_width=quick_view_content_width,
+                    ),
+                    "8",
+                ),
+                ratio=1,
+            ),
         )
         return root
 
@@ -2312,79 +2328,82 @@ class InteractiveDashboardSink:
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
         values = (
             (
-                "Generation",
+                (
+                    f"Generation ({_human_generation(self.state.generation)}/"
+                    f"{self.state.generation_limit})"
+                    if self.state.generation_limit is not None
+                    else f"Generation ({_human_generation(self.state.generation)}/∞)"
+                ),
                 _human_generation(self.state.generation),
                 self.state.generation_limit,
             ),
-            ("Slots", self.state.completed_slots, self.state.population_size),
+            ("Slots Complete", self.state.completed_slots, self.state.population_size),
             (
-                "Turns",
+                "Model Turn Budget",
                 self.state.provider_turns_attempted,
                 self.state.max_model_turns,
             ),
             (
-                "Hourly tokens",
-                self.state.hourly_tokens_used,
-                self.state.hourly_token_limit,
-            ),
-            (
-                "Evaluation",
+                "Evaluation Progress",
                 self.state.evaluation_episodes_completed,
                 self.state.evaluation_episodes_total,
             ),
             (
-                "Session wall",
+                "Wall-time Budget",
                 int(self._elapsed()),
                 int(self.state.wall_seconds) if self.state.wall_seconds is not None else None,
             ),
         )
-        renderables: list[RenderableType] = []
-        for label, current, total in values:
-            if total is None and label in {"Generation", "Turns", "Hourly tokens"}:
-                suffix = (
-                    "current"
-                    if label == "Generation"
-                    else "cumulative"
-                    if label == "Turns"
-                    else "cap off"
+        if horizontal:
+            content_width = max(1, width - 4)
+            section_width = max(1, (content_width - (len(values) - 1)) // len(values))
+            grid = Table.grid(expand=True, padding=(0, 0))
+            cells: list[RenderableType] = []
+            for index, (label, current, total) in enumerate(values):
+                grid.add_column(ratio=1, no_wrap=True)
+                cells.append(
+                    _stacked_progress_metric(
+                        label,
+                        current,
+                        total,
+                        width=section_width,
+                    )
                 )
-                renderables.append(Text(f"{label}  {current} · {suffix}"))
-                continue
-            renderables.append(
+                if index < len(values) - 1:
+                    grid.add_column(width=1, no_wrap=True)
+                    cells.append(Text("│\n│", style="cyan"))
+            grid.add_row(*cells)
+        else:
+            renderables = [
                 _progress_bar(
                     label,
                     current,
                     total,
-                    width=max(8, min(24, width - 31)),
+                    width=max(4, min(12, width // 2 - 24)),
                     stacked=False,
-                    critical=label == "Hourly tokens",
                 )
-            )
-        if self.state.hourly_limit_reached and self.state.hourly_retry_after:
-            renderables.append(
-                Text(
-                    f"Retry after  {_clock_time(self.state.hourly_retry_after)}",
-                    style="bold red",
-                )
-            )
-        # Keep every metric visible in the fixed-height progress panel.  A
-        # vertical six-row layout used to be clipped after the first few
-        # rows, which made hourly tokens, evaluation, and wall time appear to
-        # disappear.  At dashboard widths, two columns fit the same metrics
-        # in three rows while retaining each bar's numeric ratio.
-        use_columns = width >= 80
-        grid = Table.grid(expand=True, padding=(0, 1) if use_columns else (0, 0))
-        if use_columns:
+                for label, current, total in values
+            ]
+            grid = Table.grid(expand=True, padding=(0, 1))
             grid.add_column(ratio=1, no_wrap=True)
             grid.add_column(ratio=1, no_wrap=True)
             for index in range(0, len(renderables), 2):
-                right = renderables[index + 1] if index + 1 < len(renderables) else Text()
-                grid.add_row(renderables[index], right)
-        else:
-            grid.add_column(no_wrap=True)
-            for renderable in renderables:
-                grid.add_row(renderable)
-        content: RenderableType = grid
+                grid.add_row(
+                    renderables[index],
+                    renderables[index + 1] if index + 1 < len(renderables) else Text(),
+                )
+        content: RenderableType = (
+            Group(
+                grid,
+                Text(
+                    f"Hourly token limit reached · retry after "
+                    f"{_clock_time(self.state.hourly_retry_after)}",
+                    style="bold red",
+                ),
+            )
+            if self.state.hourly_limit_reached and self.state.hourly_retry_after
+            else grid
+        )
         return Panel(content, border_style="cyan", padding=(0, 1))
 
     def _slot_matrix(self, width: int, mode: str) -> Panel:
@@ -2817,7 +2836,12 @@ class InteractiveDashboardSink:
             title += f" · filter {self.state.search_query!r}"
         return Panel(table, title=title, border_style="cyan")
 
-    def _quick_view_panel(self, mode: str) -> Panel:
+    def _quick_view_panel(
+        self,
+        mode: str,
+        *,
+        content_width: int | None = None,
+    ) -> Panel:
         if self.state.counterexample_state != "none":
             verified = self.state.counterexample_state == "verified"
             rows: tuple[tuple[str, object], ...] = (
@@ -2874,17 +2898,22 @@ class InteractiveDashboardSink:
             chart = Text("No evaluated objective history yet", style="dim")
         else:
             history = self.state.objective_history
-            sparkline = _sparkline(history)
+            fixed_width = len("min 0.0000    max 0.0000")
+            sparkline_width = (
+                None
+                if content_width is None
+                else max(1, content_width - fixed_width)
+            )
+            sparkline = _sparkline(history, width=sparkline_width)
+            chart_line = (
+                f"min {min(history):.4f}  {sparkline}  max {max(history):.4f}"
+            )
             if mode == "compact":
-                chart = Text(
-                    f"Objective n={len(history)}: "
-                    f"{history[0]:.6f} → {history[-1]:.6f}  {sparkline}",
-                    style="green",
-                )
+                chart = Text(chart_line, style="green")
             else:
                 chart = Text(
                     f"Objective history · oldest → latest · n={len(history)}\n"
-                    f"min {min(history):.6f}  {sparkline}  max {max(history):.6f}",
+                    f"{chart_line}",
                     style="green",
                 )
         return Panel(Group(summary, chart), title="Quick View", border_style="cyan")
@@ -3162,6 +3191,41 @@ def _progress_bar(
     return Group(Text(label), progress) if stacked else progress
 
 
+def _stacked_progress_metric(
+    label: str,
+    current: int,
+    total: int | None,
+    *,
+    width: int,
+) -> Group:
+    header = Text(
+        _compact(label, width),
+        no_wrap=True,
+        overflow="ellipsis",
+    )
+    percentage = (
+        ("0%" if current == 0 else "—")
+        if total is None
+        else f"{max(0.0, min(current / max(total, 1), 1.0)):.0%}"
+    )
+    progress = Progress(
+        BarColumn(
+            bar_width=max(1, width - 5),
+            complete_style="cyan",
+            finished_style="green",
+        ),
+        TextColumn("{task.fields[percentage]:>4}"),
+        expand=False,
+    )
+    progress.add_task(
+        "",
+        total=max(total or 1, 1),
+        completed=max(0, min(current, max(total or 1, 1))),
+        percentage=percentage,
+    )
+    return Group(header, progress)
+
+
 def _compact_count(value: int) -> str:
     if abs(value) >= 1_000_000:
         return f"{value / 1_000_000:.2f}M"
@@ -3284,7 +3348,16 @@ def _bounded_preview(value: str, lines: int) -> str:
     return "\n".join(result)
 
 
-def _sparkline(values: Sequence[float]) -> str:
+def _sparkline(values: Sequence[float], *, width: int | None = None) -> str:
+    if width is not None and len(values) > width:
+        values = (
+            (values[-1],)
+            if width == 1
+            else tuple(
+                values[round(index * (len(values) - 1) / (width - 1))]
+                for index in range(width)
+            )
+        )
     blocks = "▁▂▃▄▅▆▇█"
     low, high = min(values), max(values)
     if high == low:

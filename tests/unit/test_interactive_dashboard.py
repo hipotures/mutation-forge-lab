@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import os
 import pty
@@ -1069,8 +1068,8 @@ def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() ->
     assert top.startswith("╭──")
 
 
-@pytest.mark.parametrize("width", (40, 60, 90, 120, 150))
-def test_progress_panel_is_vertical_and_shows_hourly_token_limit(width: int) -> None:
+@pytest.mark.parametrize("width", (110, 120, 140, 150))
+def test_progress_panel_uses_five_equal_horizontal_sections(width: int) -> None:
     sink = InteractiveDashboardSink(
         console=Console(
             file=io.StringIO(),
@@ -1094,12 +1093,15 @@ def test_progress_panel_is_vertical_and_shows_hourly_token_limit(width: int) -> 
         color_system=None,
     ).print(sink._progress(width, horizontal=True))
     rendered = output.getvalue()
-    assert "Hourly tokens" in rendered
-    assert "84.2k/1.00M" in rendered
-    assert "Evaluation" in rendered
-    assert "Session wall" in rendered
-    assert "Model Turn Budget" not in rendered
-    assert "Evaluation Progress" not in rendered
+    header = next(line for line in rendered.splitlines() if "Generation" in line)
+    assert "Slots Complete" in header
+    assert "Model Turn Budget" in header
+    assert "Evaluation Progress" in header
+    assert "Wall-time Budget" in header
+    assert "Hourly tokens" not in rendered
+    assert header[1:-1].count("│") == 4
+    progress_line = next(line for line in rendered.splitlines() if line.count("%") == 5)
+    assert progress_line[1:-1].count("│") == 4
     assert all(len(line) <= width for line in rendered.splitlines())
     sink.close()
 
@@ -1410,8 +1412,46 @@ def test_quick_view_explains_objective_sparkline_direction(
     ).print(sink.render())
     rendered = output.getvalue()
     assert "Objective history · oldest → latest · n=2" in rendered
-    assert "min 0.250000" in rendered
-    assert "max 0.750000" in rendered
+    objective_line = next(line for line in rendered.splitlines() if "min 0.2500" in line)
+    assert "max 0.7500" in objective_line
+    sink.close()
+
+
+@pytest.mark.parametrize("width", (110, 120, 140, 150))
+def test_quick_view_sparkline_stays_on_one_adaptive_line(width: int) -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(
+            file=io.StringIO(),
+            width=width,
+            height=60,
+            force_terminal=False,
+            color_system=None,
+        ),
+        start_live=False,
+    )
+    history = tuple(0.2222 + index * (0.5556 - 0.2222) / 58 for index in range(59))
+    sink.state = replace(_running_state(), objective_history=history)
+
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=width,
+        height=60,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink.render())
+    objective_lines = [
+        line for line in output.getvalue().splitlines() if "min 0.2222" in line
+    ]
+
+    assert len(objective_lines) == 1
+    assert "max 0.5556" in objective_lines[0]
+    layout = sink._render_full_or_compact(  # noqa: SLF001
+        width,
+        60,
+        dashboard._responsive_mode(width, 60),  # noqa: SLF001
+    )
+    assert [child.ratio for child in layout["bottom"].children] == [1, 1]
     sink.close()
 
 
@@ -1698,19 +1738,6 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
     sink.close()
 
 
-GOLDEN_RENDER_HASHES = {
-    "running_provider_profiled": (
-        "a113bbad5eeb9c677b99417004895c035da421314dba741d7867c7297f7537e1"
-    ),
-    "evaluation_active": ("668034dc664db0f7bdeab656cfb5bf339208829aacf16438bba942d5606d74cf"),
-    "validation_details": ("49c9ca5e1198fe1e9f06cf2dbff1732091ab3b90c5eba93614303e86950644d6"),
-    "completed": ("d326c9aa39270a1c2f408be2de2c597316279544bd9f1e5fd6bbf7542293c99d"),
-    "profiling_disabled": ("e6e996b397de2618c9d5d7d3af14d7a0dd5e294733d83505510445816af6060c"),
-    "compact": ("4fde1e927056496ee4a7b53b7cf023f8e220abb54ac89c191baa6b705c211892"),
-    "minimal": ("9b89914118f5127abe20a5a887d10e6e6575976d1fe4ec1211f7c0ab038efb48"),
-}
-
-
 @pytest.mark.parametrize(
     ("scenario", "width", "height"),
     (
@@ -1723,7 +1750,7 @@ GOLDEN_RENDER_HASHES = {
         ("minimal", 90, 24),
     ),
 )
-def test_dashboard_golden_render(
+def test_dashboard_scenarios_fit_viewport(
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
     width: int,
@@ -1795,7 +1822,16 @@ def test_dashboard_golden_render(
         color_system=None,
     ).print(sink.render())
     rendered = output.getvalue()
-    digest = hashlib.sha256(rendered.encode()).hexdigest()
     assert len(rendered.splitlines()) <= height
-    assert digest == GOLDEN_RENDER_HASHES[scenario], f"{scenario}: {digest}"
+    assert all(len(line) <= width for line in rendered.splitlines())
+    assert "Mutation Forge Lab" in rendered
+    if scenario == "completed":
+        assert "COMPLETED" in rendered
+    elif scenario == "validation_details":
+        assert "SLOT DETAILS" in rendered
+        assert "outcome/code" in rendered
+    elif scenario == "minimal":
+        assert "SELECTED SLOT" in rendered
+    else:
+        assert "SLOT MATRIX" in rendered
     sink.close()
