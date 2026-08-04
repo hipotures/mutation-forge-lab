@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 STATE_SCHEMA_VERSION = "mforge.experiment.state.v2"
-TERMINAL_STATES = frozenset({"exhausted", "failed", "completed"})
-RESUMABLE_STATES = frozenset({"idle", "paused", "interrupted"})
+TERMINAL_STATES = frozenset({"exhausted", "completed"})
+RESUMABLE_STATES = frozenset({"idle", "paused", "interrupted", "failed"})
 VALID_STATES = frozenset(
     {
         "running",
@@ -375,7 +375,8 @@ class ExperimentStateStore:
             (number, session_id, _now(), wall_seconds, starting_checkpoint, current, "running"),
         )
         self.connection.execute(
-            "UPDATE experiment SET current_session_id=?,state=?,updated_at=?",
+            "UPDATE experiment SET current_session_id=?,state=?,updated_at=?,"
+            "last_error=NULL,terminal_stop_reason=NULL",
             (session_id, "running", _now()),
         )
         self.connection.commit()

@@ -352,6 +352,43 @@ def test_second_run_applies_changed_evaluation_orders_without_rewriting_history(
     assert seen_orders == [(24, 32, 42, 54)]
 
 
+def test_failed_session_is_retried_by_the_next_run(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+
+    class FailOnce:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.retry_last_error: str | None = "not observed"
+
+        def run(
+            self,
+            _config: object,
+            _layout: object,
+            state: ExperimentStateStore,
+            _session: object,
+        ) -> dict[str, str]:
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("transient failure")
+            self.retry_last_error = state.experiment()["last_error"]
+            return {"state": "idle", "stop_reason": "session_wall_seconds"}
+
+    adapter = FailOnce()
+    service = ExperimentService(adapter=adapter)
+
+    with pytest.raises(ValueError, match="transient failure"):
+        service.run(path)
+    failed_status = experiment_status(path)
+    assert failed_status["resumable"] is True
+    assert failed_status["terminal"] is False
+    result = service.run(path)
+
+    assert adapter.calls == 2
+    assert adapter.retry_last_error is None
+    assert result["session_id"] == "session-000002"
+    assert result["state"] == "idle"
+
+
 def test_completed_experiment_makes_no_adapter_call(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
 

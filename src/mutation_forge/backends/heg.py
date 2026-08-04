@@ -30,6 +30,7 @@ OPERATOR_MAP = {
     "heg_forbidden_cycle_break": "forbidden_cycle_break_switch",
 }
 PREPARED_GRAPH_CACHE_SIZE = 2
+HEG_GRAPH_MODE = "unrestricted_min_degree_3"
 
 
 @dataclass(slots=True)
@@ -51,7 +52,7 @@ class _PreparedProposal:
 
 
 class HegBackend:
-    backend_id = "heg-erdos-gyarfas-connected-cubic"
+    backend_id = "heg-erdos-gyarfas-min-degree-3"
 
     def __init__(
         self,
@@ -206,8 +207,6 @@ class HegBackend:
         started_ns = time.perf_counter_ns() if recorder is not None else 0
         result = self._plugin.validate_graph(prepared.graph)
         errors: list[str] = [] if result.valid else [result.message]
-        if any(prepared.graph.degree(vertex) != 3 for vertex in range(prepared.graph.n)):
-            errors.append("connected-cubic mode requires degree 3 at every vertex")
         prepared.validation = GraphValidation(not errors, tuple(errors))
         prepared.validation_context = self._validation_context_class(
             prepared.graph,
@@ -226,7 +225,7 @@ class HegBackend:
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
         self._prepared_proposal = None
         graph = self._plugin.generate_seed(
-            random.Random(seed), {"order": order, "mode": "cubic_first"}
+            random.Random(seed), {"order": order, "mode": HEG_GRAPH_MODE}
         )
         state = self._from_heg(graph)
         self._store_prepared(state, _PreparedGraph(graph))
@@ -634,7 +633,7 @@ class HegBackend:
             self._proposal_heg_graph = heg_graph
 
         mutation_config: dict[str, Any] = {
-            "mode": "cubic_first",
+            "mode": HEG_GRAPH_MODE,
             "mutation_operator": heg_operator,
         }
         if heg_operator == "forbidden_cycle_break_switch":

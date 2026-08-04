@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from mutation_forge.backends.base import ScoreProfileRecorder
-from mutation_forge.backends.heg import HegBackend
+from mutation_forge.backends.heg import HEG_GRAPH_MODE, HegBackend
 from mutation_forge.evaluation.episode import run_episode
 from mutation_forge.models import GraphScore, GraphState, RewritePlan
 from mutation_forge.policies.baselines import HEG_FORBIDDEN_CYCLE_BREAK
@@ -36,7 +36,7 @@ def test_heg_seed_score_and_graph6_parity(heg_repo: Path) -> None:
         assert backend.deserialize_graph6(encoded) == graph
 
         direct = backend._plugin.generate_seed(  # noqa: SLF001
-            random.Random(101), {"order": 30, "mode": "cubic_first"}
+            random.Random(101), {"order": 30, "mode": HEG_GRAPH_MODE}
         )
         assert direct.to_graph6() == encoded
         score = backend.score(graph, witness_cap=64)
@@ -52,6 +52,30 @@ def test_heg_seed_score_and_graph6_parity(heg_repo: Path) -> None:
     assert after == before
 
 
+def test_heg_unrestricted_seed_supports_odd_mixed_degree_graphs(
+    heg_repo: Path,
+) -> None:
+    backend = HegBackend(heg_repo)
+    try:
+        graph = backend.generate_seed(order=31, seed=101)
+        validation = backend.validate(graph)
+
+        assert validation.valid
+        degrees = {
+            vertex: sum(vertex in edge for edge in graph.edges)
+            for vertex in range(graph.order)
+        }
+        assert min(degrees.values()) >= 3
+        assert set(degrees.values()) == {3, 4}
+
+        direct = backend._plugin.generate_seed(  # noqa: SLF001
+            random.Random(101), {"order": 31, "mode": HEG_GRAPH_MODE}
+        )
+        assert direct.to_graph6() == backend.serialize_graph6(graph)
+    finally:
+        backend.close()
+
+
 def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
     backend = HegBackend(heg_repo)
     try:
@@ -60,6 +84,7 @@ def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
             "heg_uniform_two_switch",
             "heg_forbidden_cycle_break",
         ):
+            evaluation = 2 if operator == "heg_forbidden_cycle_break" else 1
             proposal_timings: list[tuple[str, int]] = []
             deep_profiles: list[tuple[str, dict[str, int | float | bool]]] = []
 
@@ -83,13 +108,13 @@ def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
                 graph,
                 operator_family=operator,
                 policy_seed=1,
-                evaluation=1,
+                evaluation=evaluation,
             )
             rewrite = backend.propose_rewrite(
                 graph,
                 operator_family=operator,
                 policy_seed=1,
-                evaluation=1,
+                evaluation=evaluation,
                 record_timing=record_timing,
                 record_deep_profile=record_deep_profile,
             )
@@ -293,7 +318,7 @@ def test_forbidden_witness_cache_tracks_current_graph_identity(
                     current,
                     operator_family="heg_forbidden_cycle_break",
                     policy_seed=1,
-                    evaluation=1,
+                    evaluation=2,
                     record_timing=record_timing,
                     record_deep_profile=record_deep_profile,
                 )
@@ -323,7 +348,7 @@ def test_forbidden_witness_cache_tracks_current_graph_identity(
                 uncached_graph,
                 operator_family="heg_forbidden_cycle_break",
                 policy_seed=1,
-                evaluation=1,
+                evaluation=2,
                 record_deep_profile=lambda _family, payload: (
                     uncached_profiles.append(dict(payload))
                 ),

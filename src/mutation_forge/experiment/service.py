@@ -192,13 +192,11 @@ class ExperimentService:
             if last_stop_reason == "already_completed":
                 last_stop_reason = str(state.latest_meaningful_stop_reason() or "")
             effective_model_turns = config.search.max_model_turns
-            if current_state in {"completed", "exhausted", "failed"}:
+            if current_state in {"completed", "exhausted"}:
                 result = self._terminal_result(config, layout, state)
                 hub.emit(
                     "experiment_completed"
                     if current_state == "completed"
-                    else "experiment_failed"
-                    if current_state == "failed"
                     else "experiment_exhausted",
                     experiment_id=config.exp_id,
                     workspace=str(layout.root),
