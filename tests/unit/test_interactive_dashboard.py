@@ -1330,7 +1330,7 @@ def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
     sink.close()
 
 
-def test_slot_matrix_uses_fitness_header_and_four_decimal_values() -> None:
+def test_slot_matrix_uses_six_character_goal_header_and_four_decimal_values() -> None:
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=False),
         start_live=False,
@@ -1352,7 +1352,8 @@ def test_slot_matrix_uses_fitness_header_and_four_decimal_values() -> None:
     ).print(sink._slot_matrix(150, "full"))
     rendered = output.getvalue()
 
-    assert "fitness ↑" in rendered
+    assert "goal ↑" in rendered
+    assert "fitness ↑" not in rendered
     assert "objective ↑" not in rendered
     assert "0.0769" in rendered
     assert "0.076991" not in rendered
@@ -1700,12 +1701,12 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "557367e54ca5071c8be997a1894c3e97719b2dff49f9df666d40369280e4e0b9"
+        "bb64d27d14ddd0b81002c0a00a8532617529f47ac366004e32c7899681f31e92"
     ),
-    "evaluation_active": ("d7f2d0967a61635c17a38d1ab16a0e1e6282ee8932b9d6f9dcbeb4460fcba8c5"),
+    "evaluation_active": ("f476385aa437ca4f4c53797153a1e8dee78bfe38c86dab36227ff9024c32c50a"),
     "validation_details": ("5d6111b487dfb503cca551cc4fd56d53c8a34f7495ef40a96769331a8c9e3dba"),
-    "completed": ("678576ea28c144b727401a4da115bbca9f59c5f567950f34835781e47040e79d"),
-    "profiling_disabled": ("65acdc3462845eb23a70aa97b5877f8f790bb5742d24ca7a7cedbe4facdc22c0"),
+    "completed": ("31426883b1980dbce3605c0481f1092114801e898f5350321441cdf52dfaa178"),
+    "profiling_disabled": ("144d754cb2e7f5b65efaa8fbef3daa4da960afa0f89335c874e946afc5d3caa7"),
     "compact": ("4fde1e927056496ee4a7b53b7cf023f8e220abb54ac89c191baa6b705c211892"),
     "minimal": ("9b89914118f5127abe20a5a887d10e6e6575976d1fe4ec1211f7c0ab038efb48"),
 }

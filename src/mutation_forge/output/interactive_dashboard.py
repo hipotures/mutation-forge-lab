@@ -2407,7 +2407,7 @@ class InteractiveDashboardSink:
             ("validation", "left", 22),
             ("probe", "left", 14),
             ("candidate / error", "left", 24),
-            ("fitness ↑", "right", 10),
+            ("goal ↑", "right", 6),
         ]
         if mode == "compact":
             visible = {
@@ -2457,7 +2457,7 @@ class InteractiveDashboardSink:
                 "validation": slot.validation,
                 "probe": slot.probe,
                 "candidate / error": slot.error or slot.candidate or "—",
-                "fitness ↑": _objective(slot.objective),
+                "goal ↑": _objective(slot.objective),
             }
             style = "bold on grey15" if selected else "bold" if slot.state in ACTIVE_STATES else ""
             table.add_row(*(values[name] for name, _, _ in columns), style=style)
