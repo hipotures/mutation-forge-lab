@@ -31,6 +31,7 @@ from mutation_forge.sandbox.validation import accessed_policy_fields, validate_p
 from .artifacts import (
     ArtifactIncompleteError,
     TurnArtifactStore,
+    _manifest_is_terminal,
     generated_policy_diagnostics,
     is_generated_policy,
 )
@@ -940,7 +941,7 @@ class _NativeProvider:
                 retained_manifest = None
         if directory.exists() and (
             not isinstance(retained_manifest, Mapping)
-            or retained_manifest.get("artifact_complete") is not True
+            or not _manifest_is_terminal(retained_manifest)
         ):
             artifact_prefix = self.turns.artifact_prefix(directory, value, slot)
             usage_path = directory / f"{artifact_prefix}.usage.json.gz"
