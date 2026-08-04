@@ -1012,7 +1012,10 @@ class _NativeProvider:
                 error=str(value.get("error")) if value.get("error") else None,
             )
         elif isinstance(retained_manifest, Mapping):
-            if retained_manifest.get("artifact_complete") is True:
+            if retained_manifest.get("artifact_complete") is True and (
+                retained_manifest.get("terminal_status") == "completed"
+                or retained_manifest.get("charged") is True
+            ):
                 self.turns.verify_turn(directory)
             else:
                 self.turns.record_existing_turn(

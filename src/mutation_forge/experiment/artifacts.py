@@ -28,6 +28,12 @@ _SECRET_VALUE = re.compile(
     r"\s*[:=]\s*[\"']?[^\s,;\"']+"
     r")"
 )
+
+
+def _manifest_is_terminal(value: Mapping[str, Any]) -> bool:
+    return value.get("artifact_complete") is True and (
+        value.get("terminal_status") == "completed" or value.get("charged") is True
+    )
 _PRIVATE_PATH = re.compile(r"(?:/home/[^/]+|/Users/[^/]+|[A-Za-z]:\\Users\\[^\\]+)")
 _USAGE_FIELDS = (
     "inputTokens",
@@ -635,7 +641,7 @@ class TurnArtifactStore:
             retained_manifest = read_json(manifest_path)
             if (
                 isinstance(retained_manifest, Mapping)
-                and retained_manifest.get("artifact_complete") is True
+                and _manifest_is_terminal(retained_manifest)
             ):
                 return cast(dict[str, Any], retained_manifest)
             self.archive_retryable_manifest(root)

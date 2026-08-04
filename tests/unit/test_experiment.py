@@ -1241,6 +1241,53 @@ def test_retry_archives_incomplete_turn_manifest(tmp_path: Path) -> None:
     )
 
 
+def test_retry_archives_complete_uncharged_turn_manifest(tmp_path: Path) -> None:
+    store = TurnArtifactStore(tmp_path / "artifacts")
+    initial = _full_turn_kwargs()
+    initial["request"] = {"prompt": "rendered prompt"}
+    initial.update(
+        terminal_status="infrastructure",
+        request_accepted=False,
+        charged=False,
+        uncharged=True,
+        content_received=False,
+        error="turn completed with active items",
+    )
+    store.write_turn(generation=0, slot=0, **initial)
+    directory = store.turn_directory(0, 0)
+    for path in tuple(directory.iterdir()):
+        if path.is_file() and path.name.startswith("slot-00."):
+            retry_path = directory / path.name.replace(
+                "slot-00.", "slot-00.retry-01.", 1
+            )
+            retry_path.write_bytes(path.read_bytes())
+    (directory / "slot-00.retry-01.usage.json.gz").write_bytes(
+        (directory / "usage.json.gz").read_bytes()
+    )
+
+    result = {
+        "artifact_refs": ["slot-00.retry-01.request.md"],
+        "response": initial["response"],
+        "accepted": True,
+        "content": True,
+        "status": "completed",
+        "usage": initial["usage"],
+        "validation": initial["validation"],
+    }
+    manifest = store.record_existing_turn(
+        directory,
+        generation=0,
+        slot=0,
+        phase="initial",
+        request={"prompt": "rendered prompt"},
+        result=result,
+    )
+
+    assert manifest["artifact_complete"] is True
+    assert (directory / "turn-manifest.attempt-01.json.gz").is_file()
+    assert store.verify_turn(directory)
+
+
 def test_native_transport_uses_per_turn_limit_and_retry_prefix(tmp_path: Path) -> None:
     artifact_root = tmp_path / "all-artifacts"
     turn = artifact_root / "generations" / "generation-0000" / "slot-00" / "initial"
