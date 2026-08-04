@@ -14,6 +14,7 @@ import time
 import tty
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path, PurePath
 from typing import Any, Literal, TextIO, cast
@@ -30,9 +31,11 @@ from rich.table import Table
 from rich.text import Text
 
 from mutation_forge.events import Event
+from mutation_forge.experiment.config import orders_for_generation
 from mutation_forge.experiment.json_io import read_json
 from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.models import JsonValue
+from mutation_forge.output.display_ids import compact_display_ids
 from mutation_forge.output.panel_copy import (
     copy_text_to_clipboard_osc52,
     render_panel_copy_text,
@@ -168,6 +171,7 @@ class DashboardSlot:
     phase: str = "queued"
     state: str = "queued"
     started_monotonic: float | None = None
+    phase_started_monotonic: float | None = None
     elapsed_seconds: float | None = None
     provider_request_id: str | None = None
     provider_thread_id: str | None = None
@@ -406,6 +410,7 @@ def load_persisted_dashboard_state(
 
     evaluations: dict[str, tuple[float, Mapping[str, Any], float | None]] = {}
     evaluation_history: list[tuple[str, float]] = []
+    slot_runtime_seconds: dict[tuple[int, str], float] = {}
     store_path = root / "state.sqlite3"
     store: Any | None = None
     try:
@@ -440,6 +445,41 @@ def load_persisted_dashboard_state(
                     state,
                     session_id=str(session_id) if session_id else state.session_id,
                     started_at=str(current_session.get("started_at", ""))[11:19] or "—",
+                )
+            slot_started_at: dict[tuple[int, str], datetime] = {}
+            for event_row in store.connection.execute(
+                "SELECT event_type,timestamp,payload_json FROM events "
+                "WHERE event_type IN ("
+                "'provider_turn_started','provider_turn_completed','provider_turn_failed',"
+                "'repair_started','repair_completed','validation_started',"
+                "'validation_completed','behavior_probe_started','behavior_probe_completed',"
+                "'evaluation_started','evaluation_progress','evaluation_completed',"
+                "'evaluation_failed','candidate_archived'"
+                ") ORDER BY sequence"
+            ):
+                try:
+                    event_payload = json.loads(str(event_row["payload_json"]))
+                    timestamp = datetime.fromisoformat(str(event_row["timestamp"]))
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(event_payload, Mapping):
+                    continue
+                event_generation = event_payload.get("generation")
+                event_slot = event_payload.get("slot")
+                if (
+                    not isinstance(event_generation, int)
+                    or isinstance(event_generation, bool)
+                    or not isinstance(event_slot, str)
+                ):
+                    continue
+                key = (event_generation, event_slot)
+                if key not in slot_started_at:
+                    if event_row["event_type"] != "provider_turn_started":
+                        continue
+                    slot_started_at[key] = timestamp
+                slot_runtime_seconds[key] = max(
+                    slot_runtime_seconds.get(key, 0.0),
+                    (timestamp - slot_started_at[key]).total_seconds(),
                 )
             rows = store.connection.execute(
                 "SELECT candidate_id,completed_at,"
@@ -568,7 +608,10 @@ def load_persisted_dashboard_state(
             else None
         )
         evaluation_elapsed = metric[2] if metric is not None else None
-        duration_seconds = evaluation_elapsed if metric is not None else provider_duration_seconds
+        duration_seconds = slot_runtime_seconds.get(
+            (generation, slot_name),
+            evaluation_elapsed if metric is not None else provider_duration_seconds,
+        )
         raw_errors = raw.get("errors")
         error_message = ""
         if isinstance(raw_errors, list) and raw_errors:
@@ -1358,7 +1401,9 @@ def reduce_dashboard_event(
         lifecycle_phase = phase
         lifecycle_status = "running"
         started = slot.started_monotonic
+        phase_started = slot.phase_started_monotonic
         elapsed = slot.elapsed_seconds
+        lifecycle_elapsed: float | None = None
         retryable = slot.retryable
         error = slot.error
         validation, validation_message = slot.validation, slot.validation_message
@@ -1387,20 +1432,28 @@ def reduce_dashboard_event(
         elif event_type == "provider_turn_started":
             slot_state = "repair" if phase == "repair" else "model"
             lifecycle_phase = "provider"
-            started = now
+            started = now if started is None else started
+            phase_started = now
         elif event_type == "provider_turn_completed":
             slot_state = "validating" if payload.get("accepted") is True else "failed"
             lifecycle_phase = "response"
             lifecycle_status = "pass" if payload.get("accepted") is True else "fail"
             event_elapsed = _provider_elapsed(payload)
-            elapsed = (
+            lifecycle_elapsed = (
                 event_elapsed
                 if event_elapsed is not None
-                else max(0.0, now - started)
+                else max(0.0, now - phase_started)
+                if phase_started is not None
+                else None
+            )
+            elapsed = (
+                max(0.0, now - started)
                 if started is not None
+                else lifecycle_elapsed
+                if lifecycle_elapsed is not None
                 else elapsed
             )
-            started = None
+            phase_started = None
             if payload.get("accepted") is True:
                 error = ""
                 retryable = False
@@ -1411,20 +1464,41 @@ def reduce_dashboard_event(
             retryable = _retryable_provider_failure(payload)
             error = _text(payload.get("error")) or "provider turn failed"
             event_elapsed = _provider_elapsed(payload)
-            elapsed = (
+            lifecycle_elapsed = (
                 event_elapsed
                 if event_elapsed is not None
-                else max(0.0, now - started)
+                else max(0.0, now - phase_started)
+                if phase_started is not None
+                else None
+            )
+            elapsed = (
+                max(0.0, now - started)
                 if started is not None
+                else lifecycle_elapsed
+                if lifecycle_elapsed is not None
                 else elapsed
             )
-            started = None
+            phase_started = None
         elif event_type == "repair_started":
             slot_state = "repair"
             lifecycle_phase = "provider"
-            started = now
+            started = now if started is None else started
+            phase_started = now
         elif event_type == "repair_completed":
             lifecycle_phase = "response"
+            lifecycle_elapsed = (
+                max(0.0, now - phase_started)
+                if phase_started is not None
+                else None
+            )
+            elapsed = (
+                max(0.0, now - started)
+                if started is not None
+                else lifecycle_elapsed
+                if lifecycle_elapsed is not None
+                else elapsed
+            )
+            phase_started = None
             if slot_state == "accepted":
                 lifecycle_status = "pass"
                 error = ""
@@ -1434,14 +1508,26 @@ def reduce_dashboard_event(
         elif event_type == "validation_started":
             slot_state = "validating"
             lifecycle_phase = "schema"
-            started = now
+            started = now if started is None else started
+            phase_started = now
         elif event_type == "validation_completed":
             valid = payload.get("valid") is True
             slot_state = "probing" if valid else "invalid"
             lifecycle_phase = "schema"
             lifecycle_status = "pass" if valid else "fail"
-            elapsed = max(0.0, now - started) if started is not None else elapsed
-            started = None
+            lifecycle_elapsed = (
+                max(0.0, now - phase_started)
+                if phase_started is not None
+                else None
+            )
+            elapsed = (
+                max(0.0, now - started)
+                if started is not None
+                else lifecycle_elapsed
+                if lifecycle_elapsed is not None
+                else elapsed
+            )
+            phase_started = None
             code, message = _diagnostic(payload)
             validation = "pass" if valid else code or "fail"
             validation_message = message
@@ -1449,14 +1535,26 @@ def reduce_dashboard_event(
         elif event_type == "behavior_probe_started":
             slot_state = "probing"
             lifecycle_phase = "probe"
-            started = now
+            started = now if started is None else started
+            phase_started = now
         elif event_type == "behavior_probe_completed":
             valid = payload.get("valid") is True
             slot_state = "evaluating" if valid else "invalid"
             lifecycle_phase = "probe"
             lifecycle_status = "pass" if valid else "fail"
-            elapsed = max(0.0, now - started) if started is not None else elapsed
-            started = None
+            lifecycle_elapsed = (
+                max(0.0, now - phase_started)
+                if phase_started is not None
+                else None
+            )
+            elapsed = (
+                max(0.0, now - started)
+                if started is not None
+                else lifecycle_elapsed
+                if lifecycle_elapsed is not None
+                else elapsed
+            )
+            phase_started = None
             code, message = _diagnostic(payload)
             probe = "pass" if valid else code or "fail"
             probe_message = message
@@ -1464,8 +1562,8 @@ def reduce_dashboard_event(
         elif event_type == "evaluation_started":
             slot_state = "evaluating"
             lifecycle_phase = "evaluation"
-            started = now
-            elapsed = None
+            started = now if started is None else started
+            phase_started = now
             evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
             evaluation_completed = 0
             evaluation_total = _integer(payload.get("evaluation_total")) or evaluation_total
@@ -1498,14 +1596,22 @@ def reduce_dashboard_event(
             lifecycle_phase = "evaluation"
             lifecycle_status = "pass"
             event_elapsed = _number(payload.get("elapsed_seconds"))
-            elapsed = (
+            lifecycle_elapsed = (
                 event_elapsed
                 if event_elapsed is not None
-                else max(0.0, now - started)
+                else max(0.0, now - phase_started)
+                if phase_started is not None
+                else None
+            )
+            elapsed = (
+                max(0.0, now - started)
                 if started is not None
+                else lifecycle_elapsed
+                if lifecycle_elapsed is not None
                 else elapsed
             )
             started = None
+            phase_started = None
             evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
             if evaluation_total is not None:
                 evaluation_completed = evaluation_total
@@ -1515,14 +1621,22 @@ def reduce_dashboard_event(
             lifecycle_phase = "evaluation"
             lifecycle_status = "fail"
             event_elapsed = _number(payload.get("elapsed_seconds"))
-            elapsed = (
+            lifecycle_elapsed = (
                 event_elapsed
                 if event_elapsed is not None
-                else max(0.0, now - started)
+                else max(0.0, now - phase_started)
+                if phase_started is not None
+                else None
+            )
+            elapsed = (
+                max(0.0, now - started)
                 if started is not None
+                else lifecycle_elapsed
+                if lifecycle_elapsed is not None
                 else elapsed
             )
             started = None
+            phase_started = None
             evaluation_id = _text(payload.get("evaluation_id")) or evaluation_id
             error = _text(payload.get("error")) or "evaluation failed"
         elif event_type == "candidate_archived":
@@ -1531,6 +1645,9 @@ def reduce_dashboard_event(
                 slot_state = archived_state or slot_state
             lifecycle_phase = "archived"
             lifecycle_status = "pass" if slot_state in {"accepted", "duplicate"} else "fail"
+            elapsed = max(0.0, now - started) if started is not None else elapsed
+            started = None
+            phase_started = None
             if slot_state in {"accepted", "duplicate"}:
                 error = ""
         usage = (
@@ -1555,6 +1672,7 @@ def reduce_dashboard_event(
             phase=phase,
             state=slot_state,
             started_monotonic=started,
+            phase_started_monotonic=phase_started,
             elapsed_seconds=elapsed,
             provider_request_id=(
                 _text(payload.get("provider_request_id")) or slot.provider_request_id
@@ -1581,7 +1699,12 @@ def reduce_dashboard_event(
             graph_seed=graph_seed,
             policy_seed=policy_seed,
             evaluation_rate=evaluation_rate,
-            lifecycle=_lifecycle(slot, lifecycle_phase, lifecycle_status, elapsed),
+            lifecycle=_lifecycle(
+                slot,
+                lifecycle_phase,
+                lifecycle_status,
+                lifecycle_elapsed,
+            ),
             artifacts=artifacts,
             prompt_preview=_text(payload.get("prompt_preview")) or slot.prompt_preview,
             response_preview=_text(payload.get("response_preview")) or slot.response_preview,
@@ -1631,7 +1754,7 @@ def reduce_dashboard_key(
                     replace(
                         state,
                         retry_confirmation=False,
-                        status_message=f"Retry requested for {slot.slot}",
+                        status_message=f"Retry requested for {compact_display_ids(slot.slot)}",
                     ),
                     DashboardAction("retry", slot.slot),
                 )
@@ -2069,7 +2192,11 @@ class InteractiveDashboardSink:
         if panel_name == "slots":
             if self.state.view == "details":
                 slot = _selected_slot(self.state)
-                suffix = f" · {slot.slot}" if slot is not None else ""
+                suffix = (
+                    f" · {compact_display_ids(slot.slot)}"
+                    if slot is not None
+                    else ""
+                )
                 return (
                     f"Slot details{suffix}",
                     self._slot_details(PANEL_COPY_WIDTHS[panel_name], "copy"),
@@ -2298,7 +2425,7 @@ class InteractiveDashboardSink:
             (
                 ("Session", self.state.session_id, None),
                 ("Mode", self.state.run_mode, None),
-                ("Model", f"{self.state.model}/{self.state.effort}", None),
+                ("Model", f"{self.state.model}:{self.state.effort}", None),
                 ("Eval workers", evaluation_workers, None),
                 ("Provider", provider_concurrency, None),
             )
@@ -2455,8 +2582,12 @@ class InteractiveDashboardSink:
         for index, slot in enumerate(group.slots):
             selected = index == self.state.selected_index
             values: dict[str, RenderableType] = {
-                "slot": f"▶{slot.slot}" if selected else f" {slot.slot}",
-                "parent": slot.parent,
+                "slot": (
+                    f"▶{compact_display_ids(slot.slot)}"
+                    if selected
+                    else f" {compact_display_ids(slot.slot)}"
+                ),
+                "parent": compact_display_ids(slot.parent),
                 "phase": PHASE_ICONS.get(slot.phase, "?") if icon_mode else slot.phase,
                 "state": Text(
                     STATE_ICONS.get(slot.state, "?") if icon_mode else slot.state,
@@ -2468,7 +2599,9 @@ class InteractiveDashboardSink:
                 "total": _show(slot.usage.total),
                 "validation": slot.validation,
                 "probe": slot.probe,
-                "candidate / error": slot.error or slot.candidate or "—",
+                "candidate / error": compact_display_ids(
+                    slot.error or slot.candidate or "—"
+                ),
                 "goal ↑": _objective(slot.objective),
             }
             style = "bold on grey15" if selected else "bold" if slot.state in ACTIVE_STATES else ""
@@ -2487,13 +2620,16 @@ class InteractiveDashboardSink:
             content = Text("No slot data", style="dim")
         else:
             content = Text()
-            content.append(f"▶ {slot.slot}  ")
+            content.append(f"▶ {compact_display_ids(slot.slot)}  ")
             content.append(slot.state, style=STATE_STYLES.get(slot.state, ""))
             content.append(
                 f"  {slot.phase}  {_duration(self._slot_elapsed(slot))}  "
                 f"tokens {_show(slot.usage.total)}\n"
             )
-            content.append(slot.error or slot.candidate or "No result yet", style="dim")
+            content.append(
+                compact_display_ids(slot.error or slot.candidate or "No result yet"),
+                style="dim",
+            )
         return Panel(content, title="SELECTED SLOT", border_style="cyan")
 
     def _slot_details(self, width: int, mode: str) -> Panel:
@@ -2505,12 +2641,12 @@ class InteractiveDashboardSink:
         body: RenderableType
         if tab == "Overview":
             rows: list[tuple[str, object]] = [
-                ("slot", slot.slot),
-                ("parent/root", slot.parent),
+                ("slot", compact_display_ids(slot.slot)),
+                ("parent/root", compact_display_ids(slot.parent)),
                 ("generation", _human_generation(slot.generation)),
                 ("state", slot.state),
                 ("current phase", slot.phase),
-                ("operation elapsed", _duration(self._slot_elapsed(slot))),
+                ("elapsed", _duration(self._slot_elapsed(slot))),
             ]
             if slot.evaluation_id is not None or slot.state == "evaluating":
                 progress = (
@@ -2530,7 +2666,10 @@ class InteractiveDashboardSink:
                     )
                 rows.extend(
                     (
-                        ("evaluation ID", slot.evaluation_id or "—"),
+                        (
+                            "evaluation ID",
+                            compact_display_ids(slot.evaluation_id or "—"),
+                        ),
                         ("pass", slot.evaluation_pass or "—"),
                         ("progress", progress),
                         ("order", slot.evaluation_order),
@@ -2623,7 +2762,7 @@ class InteractiveDashboardSink:
             )
         return Panel(
             Group(tabs, body) if mode == "copy" else Group(tabs, Rule(style="cyan"), body),
-            title=f"▶ SLOT DETAILS · {slot.slot}",
+            title=f"▶ SLOT DETAILS · {compact_display_ids(slot.slot)}",
             border_style="cyan",
         )
 
@@ -2737,7 +2876,7 @@ class InteractiveDashboardSink:
             ("direction", f"{self.state.objective_direction} ↑"),
             ("current", _objective(self.state.current_objective)),
             ("best", _objective(self.state.best_objective)),
-            ("best candidate", self.state.best_candidate),
+            ("best candidate", compact_display_ids(self.state.best_candidate)),
             ("random baseline", _objective(self.state.baseline_random)),
             ("structural baseline", _objective(self.state.baseline_structural)),
             ("accepted", self.state.accepted_candidates),
@@ -2804,14 +2943,25 @@ class InteractiveDashboardSink:
             if not query
             or query in item.message.lower()
             or query in item.component.lower()
-            or (item.slot is not None and query in item.slot.lower())
+            or (
+                item.slot is not None
+                and (
+                    query in item.slot.lower()
+                    or query in compact_display_ids(item.slot).lower()
+                )
+            )
         ][:limit]
         table = Table.grid(expand=True)
         table.add_column(width=8, no_wrap=True)
         table.add_column(width=10, no_wrap=True)
         table.add_column(overflow="ellipsis")
         for item in entries:
-            message = f"{item.slot} · {item.message}" if item.slot else item.message
+            message = (
+                f"{compact_display_ids(item.slot)} · "
+                f"{compact_display_ids(item.message)}"
+                if item.slot
+                else compact_display_ids(item.message)
+            )
             style = (
                 "red"
                 if item.severity == "error"
@@ -2836,7 +2986,10 @@ class InteractiveDashboardSink:
         if self.state.counterexample_state != "none":
             verified = self.state.counterexample_state == "verified"
             rows: tuple[tuple[str, object], ...] = (
-                ("Candidate", self.state.counterexample_candidate),
+                (
+                    "Candidate",
+                    compact_display_ids(self.state.counterexample_candidate),
+                ),
                 ("Order", self.state.counterexample_order),
                 ("Edges", self.state.counterexample_edges),
                 ("Minimum degree", self.state.counterexample_minimum_degree),
@@ -2871,19 +3024,28 @@ class InteractiveDashboardSink:
         queued = sum(item.state == "queued" for item in group.slots)
         failed = sum(item.state == "failed" for item in group.slots)
         invalid = sum(item.state == "invalid" for item in group.slots)
+        evaluation_config = self.locked_config.get("evaluation")
+        effective_orders: tuple[int, ...] = ()
+        if isinstance(evaluation_config, Mapping):
+            effective_orders = orders_for_generation(
+                evaluation_config,
+                self.state.displayed_generation,
+            )
+        orders = ", ".join(map(str, effective_orders)) or "—"
         rows = (
             (
                 "Gen / Turn / Slots",
                 f"{_human_generation(self.state.displayed_generation)} / "
                 f"{self.state.provider_turns_attempted} / {len(group.slots)}",
             ),
+            ("Orders", orders),
             ("Best objective", _objective(self.state.best_objective)),
             ("Active / Queued", f"{active} / {queued}"),
             ("Failed / Invalid", f"{failed} / {invalid}"),
             ("Archive", self.state.archive_size),
         )
         if mode == "compact":
-            rows = (rows[0],)
+            rows = rows[:2]
         summary = _key_value_grid(rows)
         if not self.state.objective_history:
             chart = Text("No evaluated objective history yet", style="dim")
@@ -2925,7 +3087,8 @@ class InteractiveDashboardSink:
             content = Text(
                 "\n".join(
                     f"{item.timestamp} {item.component:<10} "
-                    f"{(item.slot + ' ') if item.slot else ''}{item.message}"
+                    f"{(compact_display_ids(item.slot) + ' ') if item.slot else ''}"
+                    f"{compact_display_ids(item.message)}"
                     for item in entries[-limit:]
                 )
                 or "No canonical events yet",
@@ -3254,6 +3417,8 @@ def _show(value: object) -> str:
         return "—"
     if isinstance(value, float):
         return f"{value:.3f}"
+    if isinstance(value, str):
+        return compact_display_ids(value)
     return str(value)
 
 

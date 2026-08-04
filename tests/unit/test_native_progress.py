@@ -182,11 +182,13 @@ def test_native_rich_field_coverage_and_profile() -> None:
             "candidates 1/0/0",
             "objective 0.75 / 0.8",
             "Activity",
-            "g0000-slot-00",
+            "g0000-s00",
         ):
             assert field in rendered
         assert "Workspace" not in rendered
         assert len(rendered.splitlines()) <= 30
+        assert "model gpt-test:high" in sink._native_header(160)  # noqa: SLF001
+        assert ("Model", "gpt-test:high") in sink._native_rows()  # noqa: SLF001
         assert sink.state["usage"] == {
             "inputTokens": 10,
             "cachedInputTokens": 2,
@@ -266,7 +268,8 @@ def test_native_dashboard_fits_required_viewports_and_keeps_active_rows_visible(
             )
             rendered = output.getvalue()
             assert len(rendered.splitlines()) <= height
-            assert "slot-00" in rendered
+            assert "s00" in rendered
+            assert "slot-00" not in rendered
             assert "transport EOF" in rendered
             assert "Workspace" not in rendered
             assert "Dataset" not in rendered
@@ -378,6 +381,60 @@ def test_native_validation_and_repair_states_are_distinct() -> None:
         rendered = output.getvalue()
         assert "invalid" in rendered
         assert "forbidden_call" in rendered
+    finally:
+        sink.close()
+
+
+def test_native_slot_elapsed_covers_all_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1.0]
+    monkeypatch.setattr(
+        "mutation_forge.output.rich_live.time.monotonic",
+        lambda: now[0],
+    )
+    sink = RichLiveSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        native=True,
+    )
+    try:
+        events = (
+            (1.0, "provider_turn_started", {}),
+            (6.0, "provider_turn_completed", {"accepted": True}),
+            (7.0, "validation_started", {}),
+            (9.0, "validation_completed", {"valid": True}),
+            (10.0, "behavior_probe_started", {}),
+            (13.0, "behavior_probe_completed", {"valid": True}),
+            (14.0, "evaluation_started", {}),
+        )
+        for timestamp, event_type, extra in events:
+            now[0] = timestamp
+            sink.write(
+                _event(
+                    event_type,
+                    generation=0,
+                    slot="slot-00",
+                    phase="development",
+                    **extra,
+                )
+            )
+
+        now[0] = 20.0
+        active_row = sink._native_slot_rows()[0]  # noqa: SLF001
+        assert active_row["elapsed_seconds"] == pytest.approx(19.0)
+
+        now[0] = 24.0
+        sink.write(
+            _event(
+                "evaluation_completed",
+                generation=0,
+                slot="slot-00",
+                phase="development",
+                elapsed_seconds=10.0,
+            )
+        )
+        completed_row = sink._native_slot_rows()[0]  # noqa: SLF001
+        assert completed_row["elapsed_seconds"] == pytest.approx(23.0)
     finally:
         sink.close()
 

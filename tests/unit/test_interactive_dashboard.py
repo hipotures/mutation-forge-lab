@@ -19,6 +19,7 @@ from mutation_forge.events import Event
 from mutation_forge.experiment.json_io import write_json
 from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.output import interactive_dashboard as dashboard
+from mutation_forge.output.display_ids import compact_display_ids
 from mutation_forge.output.interactive_dashboard import (
     DashboardCapabilities,
     DashboardSlot,
@@ -172,6 +173,34 @@ def _running_state() -> DashboardState:
         monotonic=112.0,
     )
     return state
+
+
+def _adaptive_evaluation_config() -> dict[str, object]:
+    return {
+        "evaluation": {
+            "graph_mode": "unrestricted_min_degree_3",
+            "order_schedule": "adaptive",
+            "min_order": 22,
+            "max_order": 128,
+            "orders_per_generation": 5,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "displayed"),
+    (
+        ("slot-00", "s00"),
+        ("parent-0-slot-02", "p0-s02"),
+        ("g0000-slot-00", "g0000-s00"),
+        (
+            "failed while evaluating g0007-slot-12",
+            "failed while evaluating g0007-s12",
+        ),
+    ),
+)
+def test_compact_display_ids(raw: str, displayed: str) -> None:
+    assert compact_display_ids(raw) == displayed
 
 
 @pytest.mark.parametrize(
@@ -602,6 +631,69 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
     assert completed.elapsed_seconds == 12.5
 
 
+def test_slot_elapsed_covers_every_phase_from_provider_start_to_evaluation_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DashboardState()
+    events = (
+        (1.0, "provider_turn_started", {}),
+        (6.0, "provider_turn_completed", {"accepted": True}),
+        (7.0, "validation_started", {}),
+        (9.0, "validation_completed", {"valid": True}),
+        (10.0, "behavior_probe_started", {}),
+        (13.0, "behavior_probe_completed", {"valid": True}),
+        (
+            14.0,
+            "evaluation_started",
+            {"evaluation_id": "g0000-slot-00:development"},
+        ),
+    )
+    for monotonic, event_type, extra in events:
+        state = reduce_dashboard_event(
+            state,
+            _event(
+                event_type,
+                generation=0,
+                slot="slot-00",
+                phase="development",
+                **extra,
+            ),
+            monotonic=monotonic,
+        )
+
+    active = state.generations[0].slots[0]
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 20.0)
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        initial_state=state,
+        start_live=False,
+    )
+    assert sink._slot_elapsed(active) == pytest.approx(19.0)  # noqa: SLF001
+    sink.close()
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_completed",
+            generation=0,
+            slot="slot-00",
+            phase="development",
+            evaluation_id="g0000-slot-00:development",
+            elapsed_seconds=10.0,
+        ),
+        monotonic=24.0,
+    )
+    completed = state.generations[0].slots[0]
+    assert completed.elapsed_seconds == pytest.approx(23.0)
+    assert completed.started_monotonic is None
+    assert completed.phase_started_monotonic is None
+    lifecycle = {step.phase: step.elapsed_seconds for step in completed.lifecycle}
+    assert lifecycle["response"] == pytest.approx(5.0)
+    assert lifecycle["schema"] == pytest.approx(2.0)
+    assert lifecycle["probe"] == pytest.approx(3.0)
+    assert lifecycle["evaluation"] == pytest.approx(10.0)
+
+
 def test_evaluation_rate_sums_active_worker_rates() -> None:
     state = _running_state()
     for slot in ("slot-02", "slot-03"):
@@ -765,6 +857,25 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
                 "runtime": {"elapsed_seconds": 12.5},
             },
         )
+        store.write_event(
+            "provider_turn_started",
+            {"generation": 0, "slot": "slot-00"},
+            idempotency_key="slot-runtime-start",
+        )
+        store.write_event(
+            "evaluation_completed",
+            {"generation": 0, "slot": "slot-00"},
+            idempotency_key="slot-runtime-end",
+        )
+        store.connection.execute(
+            "UPDATE events SET timestamp=? WHERE idempotency_key=?",
+            ("2026-08-03T12:00:00+00:00", "slot-runtime-start"),
+        )
+        store.connection.execute(
+            "UPDATE events SET timestamp=? WHERE idempotency_key=?",
+            ("2026-08-03T12:01:00+00:00", "slot-runtime-end"),
+        )
+        store.connection.commit()
 
     checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
     checkpoint.parent.mkdir(parents=True)
@@ -784,7 +895,7 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
 
     assert [item.generation for item in persisted.generations] == [0, 1]
     assert persisted.generations[0].slots[0].objective == pytest.approx(0.75)
-    assert persisted.generations[0].slots[0].elapsed_seconds == pytest.approx(12.5)
+    assert persisted.generations[0].slots[0].elapsed_seconds == pytest.approx(60.0)
     assert persisted.best_objective == pytest.approx(0.75)
     assert persisted.best_candidate == "g0000-slot-00"
 
@@ -1210,7 +1321,7 @@ def test_detail_view_and_profiling_disabled_are_truthful(
         color_system=None,
     ).print(sink.render())
     rendered = output.getvalue()
-    assert "SLOT DETAILS · slot-01" in rendered
+    assert "SLOT DETAILS · s01" in rendered
     assert "forbidden_input_field" in rendered
     assert "policy reads a forbidden input field" in rendered
 
@@ -1298,6 +1409,7 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     monkeypatch.setattr(dashboard.time, "monotonic", lambda: 130.0)
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        locked_config=_adaptive_evaluation_config(),
         start_live=False,
     )
     sink.state = replace(_running_state(), profiling_enabled=True, timing_profile=None)
@@ -1312,6 +1424,10 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     assert "Gen 2/4" in rendered
     assert "generation 2" in rendered
     assert "2 / 14 / 8" in rendered
+    assert "Orders" in rendered
+    assert "22, 24, 26, 28, 31" in rendered
+    assert "Model gpt-test:high" in rendered
+    assert "gpt-test/high" not in rendered
     assert "Slots" in rendered
 
     footer = sink._footer(150)
@@ -1339,8 +1455,8 @@ def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
     ).print(sink._slot_matrix(150, "full"))
     rendered = output.getvalue()
 
-    assert "▶slot-00" in rendered
-    assert "▶  │ slot-00" not in rendered
+    assert "▶s00" in rendered
+    assert "▶  │ s00" not in rendered
     sink.close()
 
 
@@ -1396,7 +1512,8 @@ def test_slot_matrix_uses_available_width_for_full_parent_id() -> None:
         color_system=None,
     ).print(sink._slot_matrix(150, "full"))
 
-    assert "g0004-slot-07" in output.getvalue()
+    assert "g0004-s07" in output.getvalue()
+    assert "g0004-slot-07" not in output.getvalue()
     sink.close()
 
 
@@ -1440,6 +1557,7 @@ def test_quick_view_sparkline_stays_on_one_adaptive_line(width: int) -> None:
             force_terminal=False,
             color_system=None,
         ),
+        locked_config=_adaptive_evaluation_config(),
         start_live=False,
     )
     history = tuple(0.2222 + index * (0.5556 - 0.2222) / 58 for index in range(59))
@@ -1459,6 +1577,9 @@ def test_quick_view_sparkline_stays_on_one_adaptive_line(width: int) -> None:
 
     assert len(objective_lines) == 1
     assert "max 0.5556" in objective_lines[0]
+    rendered = output.getvalue()
+    assert "Orders" in rendered
+    assert "22, 24, 26, 28, 31" in rendered
     layout = sink._render_full_or_compact(  # noqa: SLF001
         width,
         60,
@@ -1714,8 +1835,9 @@ def test_slot_detail_copy_includes_full_prompt_preview() -> None:
         matrix,
         width=dashboard.PANEL_COPY_WIDTHS["slots"],
     )
-    assert "slot-00" in matrix_copy
-    assert full_parent in matrix_copy
+    assert "s00" in matrix_copy
+    assert "g0001-s00-candidate-full-identifier" in matrix_copy
+    assert full_parent not in matrix_copy
     assert "…" not in matrix_copy
     assert not any(character in matrix_copy for character in "╭╮╰╯│")
 

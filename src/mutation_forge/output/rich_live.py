@@ -14,6 +14,7 @@ from rich.text import Text
 
 from mutation_forge.events import Event
 from mutation_forge.models import JsonValue
+from mutation_forge.output.display_ids import compact_display_ids
 
 REFRESH_INTERVAL_SECONDS = 1.0
 
@@ -617,9 +618,10 @@ class RichLiveSink:
         event_type = event.event_type
         phase = payload.get("phase")
         state = payload.get("status")
+        now = time.monotonic()
         if event_type == "provider_turn_started":
             state = "repair_running" if phase == "repair" else "model"
-            detail["_started_at"] = time.monotonic()
+            detail.setdefault("_slot_started_at", now)
             detail.pop("error", None)
         elif event_type == "provider_turn_completed":
             state = (
@@ -633,7 +635,7 @@ class RichLiveSink:
             state = "repair_failed" if phase == "repair" else "failed"
         elif event_type == "repair_started":
             state = "repair_running"
-            detail["_started_at"] = time.monotonic()
+            detail.setdefault("_slot_started_at", now)
         elif event_type == "repair_completed":
             repair_state = payload.get("repair_state")
             final_state = payload.get("status")
@@ -646,14 +648,17 @@ class RichLiveSink:
             )
         elif event_type == "validation_started":
             state = "validating"
+            detail.setdefault("_slot_started_at", now)
         elif event_type == "validation_completed":
             state = "validating" if payload.get("valid") is True else "validation_failed"
         elif event_type == "behavior_probe_started":
             state = "probing"
+            detail.setdefault("_slot_started_at", now)
         elif event_type == "behavior_probe_completed":
             state = "probing" if payload.get("valid") is True else "failed"
         elif event_type == "evaluation_started":
             state = "evaluating"
+            detail.setdefault("_slot_started_at", now)
         elif event_type == "slot_queued" and payload.get("status") == "recovered":
             recovered_status = payload.get("recovered_status")
             state = (
@@ -689,10 +694,17 @@ class RichLiveSink:
             "behavior_probe_completed",
             "evaluation_completed",
             "evaluation_failed",
+            "candidate_archived",
         }:
-            started = detail.get("_started_at")
+            started = detail.get("_slot_started_at")
             if isinstance(started, (int, float)):
-                detail["elapsed_seconds"] = max(0.0, time.monotonic() - started)
+                detail["elapsed_seconds"] = max(0.0, now - started)
+            if event_type in {
+                "evaluation_completed",
+                "evaluation_failed",
+                "candidate_archived",
+            }:
+                detail.pop("_slot_started_at", None)
         usage = payload.get("usage")
         tokens = payload.get("totalTokens")
         if isinstance(usage, dict):
@@ -754,7 +766,7 @@ class RichLiveSink:
             return
         slot = payload.get("slot")
         timestamp = event.timestamp[11:19] if len(event.timestamp) >= 19 else ""
-        slot_label = slot if isinstance(slot, str) else "work"
+        slot_label = compact_display_ids(slot) if isinstance(slot, str) else "work"
         if event.event_type == "provider_turn_started":
             phase = payload.get("phase")
             phase_label = f" {phase}" if isinstance(phase, str) and phase else ""
@@ -774,7 +786,7 @@ class RichLiveSink:
         else:
             label = event.event_type.removeprefix("experiment_").replace("_", " ")
             if isinstance(slot, str):
-                label += f" {slot}"
+                label += f" {compact_display_ids(slot)}"
             status = payload.get("status")
             if isinstance(status, str) and status:
                 label += f" {status}"
@@ -791,12 +803,14 @@ class RichLiveSink:
                 if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
                 else ""
             )
-            waiting = f"{timestamp} response waiting {slot_label}{elapsed_label}".strip()
+            waiting = compact_display_ids(
+                f"{timestamp} response waiting {slot_label}{elapsed_label}".strip()
+            )
             if self._recent_events and "response waiting" in self._recent_events[-1]:
                 self._recent_events[-1] = waiting
                 return
             entry = waiting
-        self._recent_events.append(entry)
+        self._recent_events.append(compact_display_ids(entry))
         del self._recent_events[:-6]
 
     def _render(self) -> Group | Panel:
@@ -901,7 +915,7 @@ class RichLiveSink:
         else:
             label = "COUNTEREXAMPLE CANDIDATE"
         return self._fit(
-            f"{label} · {candidate} · order {order or '—'} · "
+            f"{label} · {compact_display_ids(candidate)} · order {order or '—'} · "
             f"edges {edges or '—'} · δ {minimum_degree or '—'} · lengths {length_text}",
             width,
         )
@@ -927,7 +941,7 @@ class RichLiveSink:
         model = state.get("model")
         effort = state.get("effort")
         if model not in (None, "-"):
-            add("model", f"{model}/{effort}" if effort not in (None, "-") else model)
+            add("model", f"{model}:{effort}" if effort not in (None, "-") else model)
         concurrency = state.get("effective_concurrency")
         if concurrency is not None:
             add("workers", concurrency)
@@ -1127,7 +1141,7 @@ class RichLiveSink:
         thread_text = f" · id {thread}" if isinstance(thread, str) and thread else ""
         text = (
             warning + f"{str(operation.get('phase', 'work')).upper()} "
-            f"{operation.get('slot', '?')} · {elapsed:.1f}s elapsed"
+            f"{compact_display_ids(operation.get('slot', '?'))} · {elapsed:.1f}s elapsed"
             f"{timeout_text}{age_text}{thread_text}"
         )
         return self._fit(text, width)
@@ -1159,7 +1173,9 @@ class RichLiveSink:
             slot = operation.get("slot")
             if isinstance(slot, str):
                 parent = self._slot_details.get(slot, {}).get("parent_id")
-                values.append(f"work {slot}/{self._compact_parent(parent)}")
+                values.append(
+                    f"work {compact_display_ids(slot)}/{self._compact_parent(parent)}"
+                )
         accepted = number("accepted_candidates")
         invalid = number("invalid_candidates")
         duplicate = number("duplicate_candidates")
@@ -1253,10 +1269,10 @@ class RichLiveSink:
                 rows = [{"slot": slot, "state": value} for slot, value in slots.items()]
         for row in rows:
             row.setdefault("slot", "?")
-            started = row.get("_started_at")
+            started = row.get("_slot_started_at")
             if isinstance(started, (int, float)) and row.get("state") in {
                 "model",
-                "repair",
+                "repair_running",
                 "validating",
                 "probing",
                 "evaluating",
@@ -1287,7 +1303,7 @@ class RichLiveSink:
             table.add_column("tokens", justify="right", no_wrap=True)
             table.add_column("result", no_wrap=True, overflow="ellipsis")
         for row in rows:
-            slot = str(row.get("slot", "?"))
+            slot = compact_display_ids(row.get("slot", "?"))
             parent = self._compact_parent(row.get("parent_id"))
             phase = str(row.get("phase", ""))
             state = self._compact_state(row.get("state", "queued"))
@@ -1300,7 +1316,10 @@ class RichLiveSink:
             )
             lines = str(row.get("source_lines", ""))
             result = self._compact_text(
-                str(row.get("error", row.get("candidate", row.get("score", "")))), 96
+                compact_display_ids(
+                    row.get("error", row.get("candidate", row.get("score", "")))
+                ),
+                96,
             )
             if width >= 120:
                 table.add_row(slot, parent, phase, state, elapsed, tokens, lines, result)
@@ -1350,9 +1369,7 @@ class RichLiveSink:
     def _compact_parent(value: JsonValue) -> str:
         if not isinstance(value, str) or not value:
             return "root"
-        if value.startswith("parent-"):
-            return "root"
-        return value[-12:]
+        return compact_display_ids(value)
 
     @staticmethod
     def _seconds_value(value: JsonValue) -> str | None:
@@ -1368,6 +1385,7 @@ class RichLiveSink:
 
     @staticmethod
     def _fit(value: str, width: int) -> str:
+        value = compact_display_ids(value)
         if len(value) <= width:
             return value
         if width <= 1:
@@ -1376,6 +1394,7 @@ class RichLiveSink:
 
     @staticmethod
     def _fit_header(value: str, width: int) -> str:
+        value = compact_display_ids(value)
         if len(value) <= width:
             return value
         if width <= 1:
@@ -1386,7 +1405,7 @@ class RichLiveSink:
 
     @staticmethod
     def _compact_text(value: str, limit: int) -> str:
-        normalized = " ".join(value.split())
+        normalized = " ".join(compact_display_ids(value).split())
         if len(normalized) <= limit:
             return normalized
         if limit <= 1:
@@ -1509,7 +1528,11 @@ class RichLiveSink:
         slot_states = state.get("slot_states")
         if isinstance(slot_states, dict):
             slot_summary = (
-                ", ".join(f"{slot}={value}" for slot, value in sorted(slot_states.items())) or "-"
+                ", ".join(
+                    f"{compact_display_ids(slot)}={value}"
+                    for slot, value in sorted(slot_states.items())
+                )
+                or "-"
             )
         else:
             slot_summary = "-"
@@ -1544,7 +1567,10 @@ class RichLiveSink:
                 f"{value('completed_slots', 0)} / {value('population_size', value('slot_count'))}",
             ),
             ("Slot states", slot_summary),
-            ("Parent / root", value("parent_id", value("parent_status"))),
+            (
+                "Parent / root",
+                compact_display_ids(value("parent_id", value("parent_status"))),
+            ),
             ("Turn phase", value("phase")),
             ("Active model turns", value("active_model_turns", 0)),
             (
@@ -1561,7 +1587,7 @@ class RichLiveSink:
             ),
             ("Repair turns", value("repair_turns", 0)),
             ("Remaining max_model_turns", value("remaining_model_turns")),
-            ("Model / effort", f"{value('model')} / {value('effort')}"),
+            ("Model", f"{value('model')}:{value('effort')}"),
             ("Input tokens", usage_value("inputTokens")),
             ("Cached input tokens", usage_value("cachedInputTokens")),
             ("Output tokens", usage_value("outputTokens")),
@@ -1598,7 +1624,11 @@ class RichLiveSink:
                 f"{value('current_objective')} / {value('best_objective')}",
             ),
             ("Baseline comparison", value("baseline_comparison")),
-            ("Best candidate", f"{value('best_candidate_id')} · {value('best_score')}"),
+            (
+                "Best candidate",
+                f"{compact_display_ids(value('best_candidate_id'))} · "
+                f"{value('best_score')}",
+            ),
             ("Workers", f"{value('active_workers')} / {value('worker_count')}"),
             ("Provider / validation error", value("error_summary")),
             ("Recovered work", value("recovered_work")),
