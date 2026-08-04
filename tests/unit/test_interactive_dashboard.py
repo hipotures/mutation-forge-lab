@@ -1069,7 +1069,11 @@ def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() ->
 
 
 @pytest.mark.parametrize("width", (110, 120, 140, 150))
-def test_progress_panel_uses_five_equal_horizontal_sections(width: int) -> None:
+def test_progress_panel_uses_historical_five_column_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+) -> None:
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 392.0)
     sink = InteractiveDashboardSink(
         console=Console(
             file=io.StringIO(),
@@ -1082,6 +1086,10 @@ def test_progress_panel_uses_five_equal_horizontal_sections(width: int) -> None:
     )
     sink.state = replace(
         _running_state(),
+        completed_slots=8,
+        provider_turns_attempted=49,
+        evaluation_episodes_completed=85,
+        evaluation_episodes_total=128,
         hourly_token_limit=1_000_000,
         hourly_tokens_used=84_200,
     )
@@ -1099,9 +1107,14 @@ def test_progress_panel_uses_five_equal_horizontal_sections(width: int) -> None:
     assert "Evaluation Progress" in header
     assert "Wall-time Budget" in header
     assert "Hourly tokens" not in rendered
-    assert header[1:-1].count("│") == 4
     progress_line = next(line for line in rendered.splitlines() if line.count("%") == 5)
-    assert progress_line[1:-1].count("│") == 4
+    assert "2/4" in progress_line
+    assert "8/8" in progress_line
+    assert "49/64" in progress_line
+    assert "85/128" in progress_line
+    assert "292/7.2k" in progress_line
+    assert header[1:-1].count("│") == 0
+    assert progress_line[1:-1].count("│") == 0
     assert all(len(line) <= width for line in rendered.splitlines())
     sink.close()
 

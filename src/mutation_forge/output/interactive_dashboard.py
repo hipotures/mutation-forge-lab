@@ -24,7 +24,7 @@ from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderR
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TextColumn
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
@@ -2328,12 +2328,7 @@ class InteractiveDashboardSink:
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
         values = (
             (
-                (
-                    f"Generation ({_human_generation(self.state.generation)}/"
-                    f"{self.state.generation_limit})"
-                    if self.state.generation_limit is not None
-                    else f"Generation ({_human_generation(self.state.generation)}/∞)"
-                ),
+                "Generation",
                 _human_generation(self.state.generation),
                 self.state.generation_limit,
             ),
@@ -2355,24 +2350,20 @@ class InteractiveDashboardSink:
             ),
         )
         if horizontal:
-            content_width = max(1, width - 4)
-            section_width = max(1, (content_width - (len(values) - 1)) // len(values))
-            grid = Table.grid(expand=True, padding=(0, 0))
-            cells: list[RenderableType] = []
-            for index, (label, current, total) in enumerate(values):
-                grid.add_column(ratio=1, no_wrap=True)
-                cells.append(
-                    _stacked_progress_metric(
-                        label,
-                        current,
-                        total,
-                        width=section_width,
-                    )
+            renderables = [
+                _progress_bar(
+                    label,
+                    current,
+                    total,
+                    width=8,
+                    stacked=True,
                 )
-                if index < len(values) - 1:
-                    grid.add_column(width=1, no_wrap=True)
-                    cells.append(Text("│\n│", style="cyan"))
-            grid.add_row(*cells)
+                for label, current, total in values
+            ]
+            grid = Table.grid(expand=True)
+            for _ in renderables:
+                grid.add_column(ratio=1)
+            grid.add_row(*renderables)
         else:
             renderables = [
                 _progress_bar(
@@ -3172,6 +3163,7 @@ def _progress_bar(
                 ),
                 finished_style="red" if critical else "green",
             ),
+            TaskProgressColumn(),
             TextColumn("{task.fields[ratio]}"),
         )
     )
@@ -3189,41 +3181,6 @@ def _progress_bar(
             ratio=f"{_compact_count(current)}/{_compact_count(total)}",
         )
     return Group(Text(label), progress) if stacked else progress
-
-
-def _stacked_progress_metric(
-    label: str,
-    current: int,
-    total: int | None,
-    *,
-    width: int,
-) -> Group:
-    header = Text(
-        _compact(label, width),
-        no_wrap=True,
-        overflow="ellipsis",
-    )
-    percentage = (
-        ("0%" if current == 0 else "—")
-        if total is None
-        else f"{max(0.0, min(current / max(total, 1), 1.0)):.0%}"
-    )
-    progress = Progress(
-        BarColumn(
-            bar_width=max(1, width - 5),
-            complete_style="cyan",
-            finished_style="green",
-        ),
-        TextColumn("{task.fields[percentage]:>4}"),
-        expand=False,
-    )
-    progress.add_task(
-        "",
-        total=max(total or 1, 1),
-        completed=max(0, min(current, max(total or 1, 1))),
-        percentage=percentage,
-    )
-    return Group(header, progress)
 
 
 def _compact_count(value: int) -> str:
