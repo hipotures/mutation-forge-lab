@@ -1801,7 +1801,15 @@ def reduce_dashboard_key(
     if key == "ESC" and state.search_query:
         return replace(state, search_query="", status_message="Filter cleared"), None
     if key == "ESC":
-        return replace(state, view="matrix", retry_confirmation=False), None
+        return (
+            replace(
+                state,
+                view="matrix",
+                retry_confirmation=False,
+                status_message="" if state.view != "matrix" else state.status_message,
+            ),
+            None,
+        )
     if key == "TAB" and state.view == "details":
         return replace(state, detail_tab=(state.detail_tab + 1) % len(DETAIL_TABS)), None
     if key == "SHIFT_TAB" and state.view == "details":
@@ -2492,7 +2500,7 @@ class InteractiveDashboardSink:
                 row.append(Padding(Align.center(renderable), (0, 1)))
                 if index < len(renderables) - 1:
                     grid.add_column(width=1, no_wrap=True)
-                    row.append(Text("│\n│", style="grey23"))
+                    row.append(Text("│\n│\n│", style="grey23"))
             grid.add_row(*row)
         else:
             renderables = [
@@ -3146,11 +3154,13 @@ class InteractiveDashboardSink:
         compact_quit_label = (
             "[q]interrupt" if self.state.experiment_state == "stopping" else "[q]stop"
         )
+        pause_label = "[p] resume" if self.state.paused else "[p] pause"
+        compact_pause_label = "[p]resume" if self.state.paused else "[p]pause"
         labels = (
             (
                 "[1–8] copy",
                 quit_label,
-                "[p] pause/resume",
+                pause_label,
                 "[←/→] gen",
                 "[i] icons/text",
                 "[r] retry failed",
@@ -3164,7 +3174,7 @@ class InteractiveDashboardSink:
             else (
                 "[1–8] copy",
                 compact_quit_label,
-                "[p]pause",
+                compact_pause_label,
                 "[←/→]gen",
                 "[i]icons",
                 "[r]retry",

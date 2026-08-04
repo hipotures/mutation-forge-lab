@@ -1090,6 +1090,10 @@ def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     state = _running_state()
     state, _ = reduce_dashboard_key(state, "c")
     assert state.view == "config"
+    assert state.status_message == "Read-only locked configuration"
+    state, _ = reduce_dashboard_key(state, "ESC")
+    assert state.view == "matrix"
+    assert state.status_message == ""
     state, _ = reduce_dashboard_key(state, "l")
     assert state.view == "logs"
     state, _ = reduce_dashboard_key(state, "h")
@@ -1301,6 +1305,9 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
     ]
     assert content_lines
     assert all(line[1:-1].count("│") == 3 for line in content_lines)
+    panel_rows = rendered.splitlines()[1:-1]
+    assert len(panel_rows) == 3
+    assert all(line[1:-1].count("│") == 3 for line in panel_rows)
     sink.close()
 
 
@@ -1564,6 +1571,11 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     assert "[←/→] gen" in footer.plain
     assert "[n/N]" not in footer.plain
     assert "[q] stop" in footer.plain
+    assert "[p] pause" in footer.plain
+    assert "[p] resume" not in footer.plain
+    sink.state = replace(sink.state, paused=True)
+    assert "[p] resume" in sink._footer(150).plain
+    assert "[p] pause" not in sink._footer(150).plain
     sink.state = replace(sink.state, experiment_state="stopping")
     assert "[q] interrupt" in sink._footer(150).plain
     top_span = next(
