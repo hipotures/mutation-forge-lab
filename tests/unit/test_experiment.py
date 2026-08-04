@@ -329,20 +329,26 @@ def test_second_run_allows_runtime_parallelism_changes(tmp_path: Path) -> None:
     assert seen == [("xhigh", 2, 1, 8, 2)]
 
 
-def test_immutable_change_fails_before_adapter(tmp_path: Path) -> None:
+def test_second_run_applies_changed_evaluation_orders_without_rewriting_history(
+    tmp_path: Path,
+) -> None:
     path = _write_config(tmp_path)
     ExperimentService(adapter=NullExperimentAdapter()).run(path)
-    path.write_text(_config().replace('selection = "elite-diversity"', 'selection = "other"'))
-    calls: list[str] = []
+    path.write_text(
+        _config().replace("orders = [10]", "orders = [24, 32, 42, 54]"),
+        encoding="utf-8",
+    )
+    seen_orders: list[tuple[int, ...]] = []
 
     class Adapter:
-        def run(self, *_: object) -> dict[str, str]:
-            calls.append("called")
-            return {"state": "completed"}
+        def run(self, config: Any, *_: object) -> dict[str, str]:
+            seen_orders.append(config.evaluation.orders)
+            return {"state": "idle", "stop_reason": "session_wall_seconds"}
 
-    with pytest.raises(ValueError, match="differs from the locked"):
-        ExperimentService(adapter=Adapter()).run(path)
-    assert calls == []
+    result = ExperimentService(adapter=Adapter()).run(path)
+
+    assert result["state"] == "idle"
+    assert seen_orders == [(24, 32, 42, 54)]
 
 
 def test_completed_experiment_makes_no_adapter_call(tmp_path: Path) -> None:
@@ -413,7 +419,7 @@ def test_verified_event_follows_terminal_checkpoint(tmp_path: Path) -> None:
     assert checkpoint_index < verified_index < completed_index
 
 
-def test_model_turn_boundary_is_exhausted_and_config_is_immutable(tmp_path: Path) -> None:
+def test_model_turn_boundary_remains_exhausted_after_config_change(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
 
     class Adapter:
@@ -440,8 +446,9 @@ def test_model_turn_boundary_is_exhausted_and_config_is_immutable(tmp_path: Path
     assert first["stop_reason"] == "max_model_turns"
 
     path.write_text(_config().replace("max_model_turns = 4", "max_model_turns = 8"))
-    with pytest.raises(ValueError, match="differs from the locked"):
-        service.run(path)
+    second = service.run(path)
+
+    assert second["state"] == "exhausted"
     assert adapter.calls == [4]
 
 

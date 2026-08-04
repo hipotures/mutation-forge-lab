@@ -1,4 +1,4 @@
-"""Immutable experiment identity locks and continuation comparison."""
+"""Experiment workspace identity and provenance locks."""
 
 from __future__ import annotations
 
@@ -465,9 +465,6 @@ def verify_lock(
     expected_hash = lock.get("immutable_config_sha256")
     if expected_hash != sha256_bytes(canonical_bytes(expected)):
         raise LockError("experiment lock immutable configuration digest is invalid")
-    differences = immutable_differences(lock, config)
-    if differences:
-        raise LockError(format_differences(differences))
 
 
 compare_lock = verify_lock

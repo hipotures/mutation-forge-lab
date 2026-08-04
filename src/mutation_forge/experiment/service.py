@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from .checkpoints import CheckpointStore
-from .config import ExperimentConfig, load_experiment_config, mutable_runtime_fields_removed
+from .config import ExperimentConfig, load_experiment_config
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import (
     LockError,
@@ -492,7 +492,7 @@ class ExperimentService:
     @staticmethod
     def _verify_root_config(
         layout: ExperimentLayout,
-        config: ExperimentConfig,
+        _config: ExperimentConfig,
         lock: Mapping[str, Any],
     ) -> None:
         try:
@@ -505,8 +505,6 @@ class ExperimentService:
 
         if hashlib.sha256(stored).hexdigest() != lock.get("source_config_sha256"):
             raise LockError("immutable root experiment.toml does not match experiment.lock.json")
-        if stored != config.source_bytes and not _same_immutable_config(stored, config):
-            raise LockError("immutable root experiment.toml differs from the locked specification")
 
     def _invoke_adapter(
         self,
@@ -677,21 +675,6 @@ class ExperimentService:
         if outcome.get("last_error"):
             result["last_error"] = outcome["last_error"]
         return result
-
-
-def _same_immutable_config(
-    stored_bytes: bytes,
-    current: ExperimentConfig,
-) -> bool:
-    try:
-        import tomllib
-
-        raw = tomllib.loads(stored_bytes.decode("utf-8"))
-        return mutable_runtime_fields_removed(
-            raw, current.source_dir
-        ) == current.immutable_projection()
-    except (UnicodeError, tomllib.TOMLDecodeError):
-        return False
 
 
 def run_experiment(
