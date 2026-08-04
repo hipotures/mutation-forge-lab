@@ -83,6 +83,31 @@ STATE_STYLES = {
     "budget_exhausted": "yellow",
     "interrupted": "magenta",
 }
+STATE_ICONS = {
+    "queued": "…",
+    "starting": "▶",
+    "model": "●",
+    "retrying": "R",
+    "repair": "✚",
+    "validating": "V",
+    "probing": "P",
+    "evaluating": "▲",
+    "accepted": "✓",
+    "duplicate": "D",
+    "invalid": "×",
+    "failed": "!",
+    "recovered": "↺",
+    "budget": "B",
+    "budget_exhausted": "X",
+    "interrupted": "■",
+    "stopping": "■",
+}
+PHASE_ICONS: dict[str, str] = {
+    "initial": "◌",
+    "repair": "↻",
+    "development": "⋆",
+    "replay": "↺",
+}
 LIFECYCLE_PHASES = (
     "queued",
     "provider",
@@ -249,6 +274,7 @@ class DashboardState:
     objective_history: tuple[float, ...] = ()
     search_query: str = ""
     search_editing: bool = False
+    slot_icon_mode: bool = False
     retry_confirmation: bool = False
     paused: bool = False
     status_message: str = ""
@@ -1625,6 +1651,18 @@ def reduce_dashboard_key(
             replace(state, status_message=f"Preparing panel {key} copy"),
             DashboardAction("copy", panel=panel),
         )
+    if key.lower() == "i":
+        enabled = not state.slot_icon_mode
+        return (
+            replace(
+                state,
+                slot_icon_mode=enabled,
+                status_message=(
+                    "Slot phase/state: icons" if enabled else "Slot phase/state: text"
+                ),
+            ),
+            None,
+        )
     if key in {"UP", "k", "DOWN", "j", "HOME", "END"}:
         group = _generation_slots(state, state.displayed_generation)
         last = max(0, len(group.slots) - 1)
@@ -2339,6 +2377,7 @@ class InteractiveDashboardSink:
 
     def _slot_matrix(self, width: int, mode: str) -> Panel:
         group = _generation_slots(self.state, self.state.displayed_generation)
+        icon_mode = self.state.slot_icon_mode and mode != "copy"
         table = Table(
             box=None if mode == "copy" else box.MINIMAL_HEAVY_HEAD,
             expand=True,
@@ -2373,23 +2412,34 @@ class InteractiveDashboardSink:
             }
             columns = [item for item in columns if item[0] in visible]
         for name, justify, max_width in columns:
+            heading = (
+                "P"
+                if icon_mode and name == "phase"
+                else "S"
+                if icon_mode and name == "state"
+                else name
+            )
+            column_width = 1 if icon_mode and name in {"phase", "state"} else max_width
             if mode == "copy":
-                table.add_column(name, justify=justify, no_wrap=True)
+                table.add_column(heading, justify=justify, no_wrap=True)
             else:
                 table.add_column(
-                    name,
+                    heading,
                     justify=justify,
                     no_wrap=True,
                     overflow="ellipsis",
-                    max_width=max_width,
+                    max_width=column_width,
                 )
         for index, slot in enumerate(group.slots):
             selected = index == self.state.selected_index
             values: dict[str, RenderableType] = {
                 "slot": f"▶{slot.slot}" if selected else f" {slot.slot}",
                 "parent": slot.parent if mode == "copy" else _compact(slot.parent, 11),
-                "phase": slot.phase,
-                "state": Text(slot.state, style=STATE_STYLES.get(slot.state, "")),
+                "phase": PHASE_ICONS.get(slot.phase, "?") if icon_mode else slot.phase,
+                "state": Text(
+                    STATE_ICONS.get(slot.state, "?") if icon_mode else slot.state,
+                    style=STATE_STYLES.get(slot.state, ""),
+                ),
                 "elapsed": _duration(self._slot_elapsed(slot)),
                 "in": _show(slot.usage.input),
                 "out": _show(slot.usage.output),
@@ -2863,7 +2913,7 @@ class InteractiveDashboardSink:
                 "  q safe interrupt        p pause/resume scheduling\n"
                 "  n/N view next/previous generation (PageDown/PageUp also work)\n"
                 "  r confirmed retryable slot\n"
-                "  c config  l logs  t top  / search  h help\n\n"
+                "  i phase/state icons  c config  l logs  t top  / search  h help\n\n"
                 "Panel copy\n"
                 "  1–8 copy the numbered panel to OSC 52 and /tmp\n\n"
                 "Metrics\n"
@@ -2891,6 +2941,7 @@ class InteractiveDashboardSink:
                 "[q] interrupt",
                 "[p] pause/resume",
                 "[n/N] prev/next gen",
+                "[i] icons/text",
                 "[r] retry failed",
                 "[c] config",
                 "[l] logs",
@@ -2904,6 +2955,7 @@ class InteractiveDashboardSink:
                 "[q]interrupt",
                 "[p]pause",
                 "[n/N]prev/next",
+                "[i]icons",
                 "[r]retry",
                 "[c]config",
                 "[l]logs",

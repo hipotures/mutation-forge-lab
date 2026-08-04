@@ -913,6 +913,68 @@ def test_key_reducer_overlays_search_and_disabled_scheduler_actions() -> None:
     assert "unavailable" in state.status_message
 
 
+def test_i_key_toggles_slot_phase_and_state_icons_without_mutating_data() -> None:
+    state = _running_state()
+    original_slot = state.generations[0].slots[0]
+
+    icon_state, action = reduce_dashboard_key(state, "i")
+
+    assert action is None
+    assert icon_state.slot_icon_mode is True
+    assert icon_state.status_message == "Slot phase/state: icons"
+    assert icon_state.generations[0].slots[0].phase == original_slot.phase
+    assert icon_state.generations[0].slots[0].state == original_slot.state
+
+    text_state, action = reduce_dashboard_key(icon_state, "i")
+
+    assert action is None
+    assert text_state.slot_icon_mode is False
+    assert text_state.status_message == "Slot phase/state: text"
+
+
+def test_slot_icon_mode_uses_narrow_headers_but_copy_remains_text() -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    state = _running_state()
+    slots = list(state.generations[0].slots)
+    slots[0] = replace(slots[0], phase="development", state="accepted")
+    sink.state = replace(
+        state,
+        slot_icon_mode=True,
+        generations=(GenerationSlots(1, tuple(slots)),),
+    )
+
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._slot_matrix(150, "full"))
+    rendered = output.getvalue()
+
+    assert " P " in rendered
+    assert " S " in rendered
+    assert "⋆" in rendered
+    assert "✓" in rendered
+    assert "development" not in rendered
+    assert "accepted" not in rendered
+
+    title, matrix = sink._panel_copy_source("slots")
+    copied = dashboard.render_panel_copy_text(
+        title,
+        matrix,
+        width=dashboard.PANEL_COPY_WIDTHS["slots"],
+    )
+    assert "phase" in copied
+    assert "state" in copied
+    assert "development" in copied
+    assert "accepted" in copied
+    sink.close()
+
+
 def test_number_keys_request_stable_panel_copies_but_remain_search_text() -> None:
     state = _running_state()
     for key, panel in dashboard.PANEL_COPY_KEYS.items():
@@ -1514,14 +1576,14 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "12fa3e63cee5966394e6cade86e842c82481933d8a0f2b3f98a781dab2c6080d"
+        "fcc92e7190bce28950a1048f9c267ac85d29810975c76bb3359af9d683951087"
     ),
-    "evaluation_active": ("79e33d02416c11b30057e2ed86d0375a774d48166d333fa409136a24577cacb7"),
-    "validation_details": ("a636e2384da13acf396e16c71a9e6424d105253319becf89f22f7626cc6468d5"),
-    "completed": ("1269fe9fdcf25bcb40da9a7d6e468aa54e70ceeb5f36b71af5b497a33288e230"),
-    "profiling_disabled": ("f23f9c2195b49cf7f0a328ee4bf1d8d7369c7c946e775d881a0bfeefed74e11b"),
-    "compact": ("b158271aa36f723fd28921a24d62a64081eef68313037b68d586f5b20a47f284"),
-    "minimal": ("a2865872629a132d2b259f22907088ce4a3b3d929d50f702ab2e12fa100d069f"),
+    "evaluation_active": ("96687bfc5aa24c45e3172504428a26836378d6f8741e751516193bb855d854e0"),
+    "validation_details": ("5d6111b487dfb503cca551cc4fd56d53c8a34f7495ef40a96769331a8c9e3dba"),
+    "completed": ("d34f2a25800da108a5e345a9d7fb75fe81892b539f722f514ceb4b211d0b3ddc"),
+    "profiling_disabled": ("eec79b573f9878e0f3c558ebc9d011b26cbdbb68ed768f421994ec591c3c4cf1"),
+    "compact": ("4fde1e927056496ee4a7b53b7cf023f8e220abb54ac89c191baa6b705c211892"),
+    "minimal": ("9b89914118f5127abe20a5a887d10e6e6575976d1fe4ec1211f7c0ab038efb48"),
 }
 
 
