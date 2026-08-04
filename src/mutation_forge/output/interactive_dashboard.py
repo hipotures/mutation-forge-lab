@@ -248,8 +248,6 @@ class DashboardState:
     active_provider_turns: int = 0
     configured_provider_concurrency: int | None = None
     evaluations_completed: int = 0
-    evaluation_episodes_completed: int = 0
-    evaluation_episodes_total: int | None = None
     evaluation_workers_active: int | None = None
     evaluation_workers_configured: int | None = None
     archive_size: int = 0
@@ -1264,21 +1262,6 @@ def reduce_dashboard_event(
                     failed_candidates=state.failed_candidates + 1,
                     failed_slots_seen=state.failed_slots_seen | {failed_key},
                 )
-    elif event_type == "evaluation_started":
-        total = _integer(payload.get("evaluation_total"))
-        state = replace(
-            state,
-            evaluation_episodes_completed=0,
-            evaluation_episodes_total=total or state.evaluation_episodes_total,
-        )
-    elif event_type == "evaluation_progress":
-        completed = _integer(payload.get("completed"))
-        total = _integer(payload.get("total")) or _integer(payload.get("evaluation_total"))
-        state = replace(
-            state,
-            evaluation_episodes_completed=max(state.evaluation_episodes_completed, completed or 0),
-            evaluation_episodes_total=total or state.evaluation_episodes_total,
-        )
     elif event_type in {"evaluation_completed", "evaluation_failed"}:
         explicit_evaluations = _integer(payload.get("evaluations_completed"))
         state = replace(
@@ -2527,9 +2510,6 @@ class InteractiveDashboardSink:
         )
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
-        evaluation_total = (
-            self.state.evaluation_episodes_total or self._configured_evaluation_total()
-        )
         configured_values = (
             (
                 "Generation",
@@ -2550,11 +2530,6 @@ class InteractiveDashboardSink:
                 "Token Budget",
                 self.state.hourly_tokens_used,
                 self.state.hourly_token_limit,
-            ),
-            (
-                "Evaluation Progress",
-                self.state.evaluation_episodes_completed,
-                evaluation_total,
             ),
             (
                 "Wall-time Budget",
@@ -2626,25 +2601,6 @@ class InteractiveDashboardSink:
         )
         return Panel(content, border_style="cyan", padding=(0, 1))
 
-    def _configured_evaluation_total(self) -> int | None:
-        evaluation = self.locked_config.get("evaluation")
-        if not isinstance(evaluation, Mapping):
-            return None
-        graph_seeds = evaluation.get("graph_seeds")
-        policy_seeds = evaluation.get("policy_seeds")
-        if (
-            not isinstance(graph_seeds, (list, tuple))
-            or not graph_seeds
-            or not isinstance(policy_seeds, (list, tuple))
-            or not policy_seeds
-        ):
-            return None
-        try:
-            orders = orders_for_generation(evaluation, self.state.generation)
-        except ValueError:
-            return None
-        return len(orders) * len(graph_seeds) * len(policy_seeds)
-
     def _slot_matrix(self, width: int, mode: str) -> Panel:
         group = _generation_slots(self.state, self.state.displayed_generation)
         icon_mode = self.state.slot_icon_mode and mode != "copy"
@@ -2711,7 +2667,9 @@ class InteractiveDashboardSink:
                 "parent": compact_display_ids(slot.parent),
                 "phase": PHASE_ICONS.get(slot.phase, "?") if icon_mode else slot.phase,
                 "state": Text(
-                    STATE_ICONS.get(slot.state, "?") if icon_mode else slot.state,
+                    STATE_ICONS.get(slot.state, "?")
+                    if icon_mode
+                    else _slot_state_label(slot),
                     style=STATE_STYLES.get(slot.state, ""),
                 ),
                 "elapsed": _duration(self._slot_elapsed(slot)),
@@ -2740,7 +2698,10 @@ class InteractiveDashboardSink:
         else:
             content = Text()
             content.append(f"▶ {compact_display_ids(slot.slot)}  ")
-            content.append(slot.state, style=STATE_STYLES.get(slot.state, ""))
+            content.append(
+                _slot_state_label(slot),
+                style=STATE_STYLES.get(slot.state, ""),
+            )
             content.append(
                 f"  {slot.phase}  {_duration(self._slot_elapsed(slot))}  "
                 f"tokens {_show(slot.usage.total)}\n"
@@ -3563,6 +3524,21 @@ def _objective(value: float | None) -> str:
         return "—"
     truncated = Decimal(str(value)).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
     return f"{truncated:.4f}"
+
+
+def _slot_state_label(slot: DashboardSlot) -> str:
+    if (
+        slot.state == "evaluating"
+        and slot.evaluation_total is not None
+        and slot.evaluation_total > 0
+    ):
+        percent = round(
+            100
+            * min(slot.evaluation_completed, slot.evaluation_total)
+            / slot.evaluation_total
+        )
+        return f"eval {percent}%"
+    return slot.state
 
 
 def _rate(value: float | None) -> str:

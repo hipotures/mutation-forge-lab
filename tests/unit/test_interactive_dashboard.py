@@ -615,6 +615,22 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
     assert active.evaluation_rate == 2.5
     assert active.objective == pytest.approx(0.42)
 
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    sink.state = state
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._slot_matrix(150, "full"))
+    assert "eval 23%" in output.getvalue()
+    assert "evaluating" not in output.getvalue()
+    sink.close()
+
     state = reduce_dashboard_event(
         state,
         _event(
@@ -631,6 +647,52 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
     assert state.elapsed_seconds == 360.0
     assert completed.started_monotonic is None
     assert completed.elapsed_seconds == 12.5
+
+
+def test_slot_matrix_shows_independent_parallel_evaluation_progress() -> None:
+    state = _running_state()
+    for slot, completed in (("slot-02", 176), ("slot-03", 90)):
+        state = reduce_dashboard_event(
+            state,
+            _event(
+                "evaluation_started",
+                generation=1,
+                slot=slot,
+                phase="development",
+                evaluation_total=320,
+            ),
+            monotonic=120.0,
+        )
+        state = reduce_dashboard_event(
+            state,
+            _event(
+                "evaluation_progress",
+                generation=1,
+                slot=slot,
+                phase="development",
+                completed=completed,
+                total=320,
+            ),
+            monotonic=125.0,
+        )
+
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    sink.state = state
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._slot_matrix(150, "full"))
+    rendered = output.getvalue()
+
+    assert "eval 55%" in rendered
+    assert "eval 28%" in rendered
+    sink.close()
 
 
 def test_slot_elapsed_covers_every_phase_from_provider_start_to_evaluation_end(
@@ -1320,8 +1382,6 @@ def test_progress_panel_uses_historical_layout_with_current_metrics(
         _running_state(),
         completed_slots=8,
         provider_turns_attempted=49,
-        evaluation_episodes_completed=85,
-        evaluation_episodes_total=128,
         hourly_token_limit=1_000_000,
         hourly_tokens_used=84_200,
     )
@@ -1338,13 +1398,13 @@ def test_progress_panel_uses_historical_layout_with_current_metrics(
         "Slots Complete",
         "Model Turn Budget",
         "Token Budget",
-        "Evaluation Progress",
         "Wall-time Budget",
     ):
         assert label in rendered
-    for ratio in ("2/4", "8/8", "49/64", "84.2k/1.0M", "85/128", "292/7.2k"):
+    assert "Evaluation Progress" not in rendered
+    for ratio in ("2/4", "8/8", "49/64", "84.2k/1.0M", "292/7.2k"):
         assert ratio in rendered
-    assert sum(line.count("%") for line in rendered.splitlines()) == 6
+    assert sum(line.count("%") for line in rendered.splitlines()) == 5
     assert all(len(line) <= width for line in rendered.splitlines())
     sink.close()
 
@@ -1371,8 +1431,6 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
         max_model_turns=None,
         hourly_token_limit=1_000_000,
         hourly_tokens_used=27_501,
-        evaluation_episodes_completed=320,
-        evaluation_episodes_total=None,
     )
     output = io.StringIO()
     Console(
@@ -1386,20 +1444,19 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
     assert "Model Turn Budget" not in rendered
     assert "Slots Complete" in rendered
     assert "Token Budget" in rendered
-    assert "Evaluation Progress" in rendered
+    assert "Evaluation Progress" not in rendered
     assert "Wall-time Budget" in rendered
     assert "27.5k/1.0M" in rendered
-    assert "0/320" in rendered
-    assert "━" * 12 in rendered
+    assert "━" in rendered
     assert "—/—" not in rendered
     content_lines = [
         line for line in rendered.splitlines() if "Slots Complete" in line or "27.5k/1.0M" in line
     ]
     assert content_lines
-    assert all(line[1:-1].count("│") == 3 for line in content_lines)
+    assert all(line[1:-1].count("│") == 2 for line in content_lines)
     panel_rows = rendered.splitlines()[1:-1]
     assert len(panel_rows) == 3
-    assert all(line[1:-1].count("│") == 3 for line in panel_rows)
+    assert all(line[1:-1].count("│") == 2 for line in panel_rows)
     sink.close()
 
 
@@ -2198,12 +2255,16 @@ def test_dashboard_scenarios_fit_viewport(
         )
     elif scenario == "evaluation_active":
         slots = list(state.generations[0].slots)
-        slots[2] = replace(slots[2], state="evaluating", phase="evaluation")
+        slots[2] = replace(
+            slots[2],
+            state="evaluating",
+            phase="evaluation",
+            evaluation_completed=24,
+            evaluation_total=64,
+        )
         state = replace(
             state,
             generations=(GenerationSlots(1, tuple(slots)),),
-            evaluation_episodes_completed=24,
-            evaluation_episodes_total=64,
             evaluation_workers_active=3,
             evaluation_workers_configured=4,
         )
