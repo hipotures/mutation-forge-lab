@@ -218,9 +218,13 @@ def _load_episode_checkpoint(
     if (
         not isinstance(value, Mapping)
         or value.get("schema_version") != EPISODE_CHECKPOINT_VERSION
-        or value.get("identity") != identity
-        or value.get("index") != index
         or not isinstance(episode, dict)
+    ):
+        raise ValueError(f"evaluation episode checkpoint does not match request: {path}")
+    if value.get("identity") != identity:
+        return None
+    if (
+        value.get("index") != index
         or episode.get("order") != order
         or episode.get("graph_seed") != graph_seed
         or episode.get("policy_seed") != policy_seed

@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 
 from mutation_forge.experiment import evaluation
+from mutation_forge.experiment.json_io import write_json
 from mutation_forge.models import GraphScore, GraphState, RewritePlan
 from mutation_forge.proposals.k_switch import ProposalCandidate, ProposalPool
 from mutation_forge.stage2b.rankers import RankResult
@@ -195,6 +196,44 @@ def test_run_once_resumes_from_last_completed_episode(
     assert progress[1]["restored_count"] == 1
     assert cast(dict[str, Any], result["runtime"])["executed_episodes"] == 1
     assert cast(dict[str, Any], result["runtime"])["restored_episodes"] == 1
+
+
+def test_stale_episode_checkpoint_is_recomputed(tmp_path: Path) -> None:
+    path = tmp_path / "episode-000000.json.gz"
+    write_json(
+        path,
+        {
+            "schema_version": evaluation.EPISODE_CHECKPOINT_VERSION,
+            "identity": "old-request",
+            "index": 0,
+            "episode": {
+                "order": 4,
+                "graph_seed": 1,
+                "policy_seed": 10,
+            },
+        },
+    )
+
+    assert (
+        evaluation._load_episode_checkpoint(
+            path,
+            identity="new-request",
+            index=0,
+            order=4,
+            graph_seed=1,
+            policy_seed=10,
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="does not match request"):
+        evaluation._load_episode_checkpoint(
+            path,
+            identity="old-request",
+            index=0,
+            order=5,
+            graph_seed=1,
+            policy_seed=10,
+        )
 
 
 def test_candidate_publishes_development_objective_before_replay(
