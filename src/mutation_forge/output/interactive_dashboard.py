@@ -14,6 +14,7 @@ import time
 import tty
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path, PurePath
 from typing import Any, Literal, TextIO, cast
 
@@ -1584,6 +1585,15 @@ def reduce_dashboard_event(
             response_preview=_text(payload.get("response_preview")) or slot.response_preview,
         )
         state = _replace_slot(state, updated)
+        active_rates = [
+            item.evaluation_rate
+            for item in _generation_slots(state, state.generation).slots
+            if item.state == "evaluating" and item.evaluation_rate is not None
+        ]
+        state = replace(
+            state,
+            evaluation_rate=sum(active_rates) if active_rates else None,
+        )
 
     activity = _event_activity(event)
     if activity is not None:
@@ -2397,7 +2407,7 @@ class InteractiveDashboardSink:
             ("validation", "left", 22),
             ("probe", "left", 14),
             ("candidate / error", "left", 24),
-            ("objective ↑", "right", 12),
+            ("fitness ↑", "right", 10),
         ]
         if mode == "compact":
             visible = {
@@ -2447,7 +2457,7 @@ class InteractiveDashboardSink:
                 "validation": slot.validation,
                 "probe": slot.probe,
                 "candidate / error": slot.error or slot.candidate or "—",
-                "objective ↑": _objective(slot.objective),
+                "fitness ↑": _objective(slot.objective),
             }
             style = "bold on grey15" if selected else "bold" if slot.state in ACTIVE_STATES else ""
             table.add_row(*(values[name] for name, _, _ in columns), style=style)
@@ -3244,7 +3254,10 @@ def _duration(value: float | int | None) -> str:
 
 
 def _objective(value: float | None) -> str:
-    return "—" if value is None else f"{value:.6f}"
+    if value is None:
+        return "—"
+    truncated = Decimal(str(value)).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+    return f"{truncated:.4f}"
 
 
 def _rate(value: float | None) -> str:

@@ -606,6 +606,75 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
     assert completed.elapsed_seconds == 12.5
 
 
+def test_evaluation_rate_sums_active_worker_rates() -> None:
+    state = _running_state()
+    for slot in ("slot-02", "slot-03"):
+        state = reduce_dashboard_event(
+            state,
+            _event(
+                "evaluation_started",
+                generation=1,
+                slot=slot,
+                phase="development",
+                evaluation_id=f"g0001-{slot}:development",
+                evaluation_total=128,
+            ),
+            monotonic=120.0,
+        )
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_progress",
+            generation=1,
+            slot="slot-02",
+            completed=10,
+            total=128,
+            evaluations_per_second=2.94,
+        ),
+        monotonic=121.0,
+    )
+    assert state.evaluation_rate == pytest.approx(2.94)
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_progress",
+            generation=1,
+            slot="slot-03",
+            completed=12,
+            total=128,
+            evaluations_per_second=1.75,
+        ),
+        monotonic=122.0,
+    )
+    assert state.evaluation_rate == pytest.approx(4.69)
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_completed",
+            generation=1,
+            slot="slot-03",
+            elapsed_seconds=20.0,
+        ),
+        monotonic=123.0,
+    )
+    assert state.evaluation_rate == pytest.approx(2.94)
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_completed",
+            generation=1,
+            slot="slot-02",
+            elapsed_seconds=21.0,
+        ),
+        monotonic=124.0,
+    )
+    assert state.evaluation_rate is None
+
+
 def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> None:
     current = GenerationSlots(
         1,
@@ -1261,6 +1330,35 @@ def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
     sink.close()
 
 
+def test_slot_matrix_uses_fitness_header_and_four_decimal_values() -> None:
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    state = _running_state()
+    slots = list(state.generations[0].slots)
+    slots[0] = replace(slots[0], objective=0.076991)
+    sink.state = replace(
+        state,
+        generations=(GenerationSlots(1, tuple(slots)),),
+    )
+
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._slot_matrix(150, "full"))
+    rendered = output.getvalue()
+
+    assert "fitness ↑" in rendered
+    assert "objective ↑" not in rendered
+    assert "0.0769" in rendered
+    assert "0.076991" not in rendered
+    sink.close()
+
+
 def test_slot_matrix_uses_available_width_for_full_parent_id() -> None:
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=False),
@@ -1602,12 +1700,12 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "fcc92e7190bce28950a1048f9c267ac85d29810975c76bb3359af9d683951087"
+        "557367e54ca5071c8be997a1894c3e97719b2dff49f9df666d40369280e4e0b9"
     ),
-    "evaluation_active": ("96687bfc5aa24c45e3172504428a26836378d6f8741e751516193bb855d854e0"),
+    "evaluation_active": ("d7f2d0967a61635c17a38d1ab16a0e1e6282ee8932b9d6f9dcbeb4460fcba8c5"),
     "validation_details": ("5d6111b487dfb503cca551cc4fd56d53c8a34f7495ef40a96769331a8c9e3dba"),
-    "completed": ("d34f2a25800da108a5e345a9d7fb75fe81892b539f722f514ceb4b211d0b3ddc"),
-    "profiling_disabled": ("eec79b573f9878e0f3c558ebc9d011b26cbdbb68ed768f421994ec591c3c4cf1"),
+    "completed": ("678576ea28c144b727401a4da115bbca9f59c5f567950f34835781e47040e79d"),
+    "profiling_disabled": ("65acdc3462845eb23a70aa97b5877f8f790bb5742d24ca7a7cedbe4facdc22c0"),
     "compact": ("4fde1e927056496ee4a7b53b7cf023f8e220abb54ac89c191baa6b705c211892"),
     "minimal": ("9b89914118f5127abe20a5a887d10e6e6575976d1fe4ec1211f7c0ab038efb48"),
 }
