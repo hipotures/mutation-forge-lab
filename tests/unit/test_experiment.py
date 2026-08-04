@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import threading
 from datetime import UTC, datetime, timedelta
@@ -397,8 +398,16 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     ).read_bytes() == path.read_bytes()
     events = [
         json.loads(line)
-        for line in (root / "artifacts" / "sessions" / "session-000001" / "events.jsonl")
-        .read_text(encoding="utf-8")
+        for line in gzip.decompress(
+            (
+                root
+                / "artifacts"
+                / "sessions"
+                / "session-000001"
+                / "events.jsonl.gz"
+            ).read_bytes()
+        )
+        .decode("utf-8")
         .splitlines()
     ]
     started = next(event for event in events if event["event_type"] == "session_started")
@@ -866,7 +875,7 @@ def test_completed_turn_accounting_is_atomic_and_finish_is_idempotent(
         )
         failed = state.provider_turn("turn-failed")
         assert failed is not None
-        failed_usage = json.loads(failed["usage_json"])
+        failed_usage = failed["usage"]
         assert failed_usage["quality"] == "partial"
         assert state.cumulative()["provider_turns"] == 2
         assert state.cumulative()["total_tokens"] == 8
@@ -933,12 +942,10 @@ def test_hourly_token_usage_is_rolling_and_idempotent(
         assert state.record_provider_turn(**values)
         assert not state.record_provider_turn(**values)
         charges = state.connection.execute(
-            "SELECT payload_json FROM events WHERE event_type='model_token_charge_recorded'"
+            "SELECT token_delta FROM token_charges"
         ).fetchall()
         assert len(charges) == 1
-        charge = json.loads(str(charges[0]["payload_json"]))
-        assert charge["token_delta"] == 1_000_000
-        assert charge["usage"]["reasoningOutputTokens"] == 200_000
+        assert charges[0]["token_delta"] == 1_000_000
         at_limit = state.hourly_token_usage(1_000_000, now=started)
         assert at_limit["hourly_tokens_used"] == 1_000_000
         assert at_limit["hourly_limit_reached"] is True
@@ -1008,14 +1015,13 @@ def test_status_reads_nested_stage4_search_metrics(tmp_path: Path) -> None:
                 generation=2,
                 slot="slot-01",
                 status="created",
-                metadata={"search_metrics": {"pooled_median_auc": 0.75}},
             )
             state.record_evaluation(
                 "program-1:development",
                 candidate_id="program-1",
                 kind="development",
                 state="completed",
-                result={"summary": {"mean_auc": 0.75}},
+                summary={"mean_auc": 0.75},
             )
             state.record_provider_turn(
                 idempotency_key="turn-1",

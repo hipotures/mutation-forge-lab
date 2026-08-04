@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping
@@ -232,6 +233,43 @@ def _load_episode_checkpoint(
     ):
         raise ValueError(f"evaluation episode checkpoint does not match request: {path}")
     return cast(dict[str, JsonValue], episode)
+
+
+def _remove_redundant_episode_checkpoints(
+    root: Path,
+    *,
+    pass_name: str,
+    candidate_id: str,
+    completed: Mapping[str, Any],
+    remove: bool = True,
+) -> int:
+    checkpoint_dir = root / "evaluations" / "episodes" / pass_name / candidate_id
+    if not checkpoint_dir.is_dir():
+        return 0
+    episodes = completed.get("episodes")
+    if not isinstance(episodes, list):
+        raise ValueError(f"completed evaluation has no episode list: {candidate_id}")
+    total_bytes = 0
+    for path in sorted(checkpoint_dir.glob("episode-*.json.gz")):
+        total_bytes += path.stat().st_size
+        try:
+            checkpoint = read_json(path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"evaluation episode checkpoint is unreadable: {path}") from exc
+        index = checkpoint.get("index") if isinstance(checkpoint, Mapping) else None
+        episode = checkpoint.get("episode") if isinstance(checkpoint, Mapping) else None
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 0
+            or index >= len(episodes)
+            or checkpoint.get("schema_version") != EPISODE_CHECKPOINT_VERSION
+            or episode != episodes[index]
+        ):
+            raise ValueError(f"evaluation episode checkpoint conflicts with result: {path}")
+    if remove:
+        shutil.rmtree(checkpoint_dir)
+    return total_bytes
 
 
 def _artifact_root(config: object, artifact_root: str | Path | None) -> Path:
@@ -968,6 +1006,23 @@ def evaluate_candidate(
         if not primary_recovered:
             primary["provenance"] = provenance
             write_json(development_path, primary, indent=2)
+            try:
+                verified_primary = read_json(development_path)
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"completed evaluation artifact failed verification: {development_path}"
+                ) from exc
+            expected_primary = json.loads(_canonical(primary))
+            if verified_primary != expected_primary:
+                raise ValueError(
+                    f"completed evaluation artifact failed verification: {development_path}"
+                )
+        _remove_redundant_episode_checkpoints(
+            root,
+            pass_name="development",
+            candidate_id=candidate_id,
+            completed=primary,
+        )
         result = dict(primary)
         result["artifacts"] = {"development": str(development_path)}
         if progress is not None:
@@ -1013,6 +1068,23 @@ def evaluate_candidate(
                         replay_backend.close()
                 replay["provenance"] = provenance
                 write_json(replay_path, replay, indent=2)
+                try:
+                    verified_replay = read_json(replay_path)
+                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        f"completed evaluation artifact failed verification: {replay_path}"
+                    ) from exc
+                expected_replay = json.loads(_canonical(replay))
+                if verified_replay != expected_replay:
+                    raise ValueError(
+                        f"completed evaluation artifact failed verification: {replay_path}"
+                    )
+            _remove_redundant_episode_checkpoints(
+                root,
+                pass_name="replay",
+                candidate_id=candidate_id,
+                completed=replay,
+            )
             result["replay"] = {
                 "enabled": True,
                 "exact": _hash(primary) == _hash(replay),

@@ -975,10 +975,8 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
             candidate_id="g0000-slot-00",
             kind="development",
             state="completed",
-            result={
-                "summary": {"mean_auc": 0.75},
-                "runtime": {"elapsed_seconds": 12.5},
-            },
+            summary={"mean_auc": 0.75},
+            elapsed_seconds=12.5,
         )
         store.write_event(
             "provider_turn_started",

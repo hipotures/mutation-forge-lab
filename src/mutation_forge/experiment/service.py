@@ -753,7 +753,7 @@ def final_stop_experiment(
         state.write_event(
             "experiment_completed",
             {
-                "schema_version": "mforge.experiment.events.v2",
+                "schema_version": "mforge.experiment.events.v3",
                 "state": "completed",
                 "stop_reason": "operator_final_stop",
                 "checkpoint": checkpoint_id,

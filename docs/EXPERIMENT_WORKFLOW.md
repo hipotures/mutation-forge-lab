@@ -7,6 +7,7 @@ commands are:
 uv run mforge experiment run [--config PATH] [--json]
 uv run mforge experiment status [--config PATH] [--json]
 uv run mforge experiment stop --final [--config PATH] [--json]
+uv run mforge experiment rebuild-state [--config PATH] [--apply] [--work-dir PATH] [--json]
 ```
 
 `experiment.toml` is authoritative. A fresh run creates an atomic
@@ -51,9 +52,19 @@ Malformed or schema-invalid responses retain `response.raw.txt` and
 `response-diagnostics.json` but do not receive a misleading `response.md`
 projection.
 
-The v2 runtime does not load, migrate, resume, or inspect v1 experiment
-workspaces. A historical schema is rejected with an instruction to create a
-fresh workspace.
+The runtime accepts only the compact v3 SQLite state schema. It does not carry
+runtime compatibility for v2. The offline `rebuild-state` command is the
+single explicit v2 importer: without `--apply` it is read-only; with `--apply`
+it requires a stopped workspace, validates canonical artifacts, creates a
+consistent SQLite online backup, builds v3 separately, and atomically switches
+the active database while retaining the v2 backup.
+
+Completed evaluation traces live once in
+`artifacts/evaluations/development/<candidate>.json.gz`. Episode files under
+`evaluations/episodes/` are crash-recovery checkpoints and are removed after
+the aggregate artifact passes read-back validation. Session event payloads
+live in `events.jsonl.gz`; SQLite keeps only the fields required by the
+dashboard, resume, idempotency, and rolling token accounting.
 
 ## Open-ended search and certification
 

@@ -488,26 +488,22 @@ def load_persisted_dashboard_state(
                 )
             slot_started_at: dict[tuple[int, str], datetime] = {}
             for event_row in store.connection.execute(
-                "SELECT event_type,timestamp,payload_json FROM events "
+                "SELECT event_type,timestamp,generation,slot FROM events "
                 "WHERE event_type IN ("
                 "'provider_turn_started','provider_turn_completed','provider_turn_failed',"
                 "'repair_started','repair_completed','validation_started',"
                 "'validation_completed','behavior_probe_started','behavior_probe_completed',"
                 "'evaluation_started','evaluation_progress','evaluation_completed',"
                 "'evaluation_failed','candidate_archived'"
-                ") AND CAST(json_extract(payload_json,'$.generation') AS INTEGER) "
-                "BETWEEN ? AND ? ORDER BY sequence",
+                ") AND generation BETWEEN ? AND ? ORDER BY sequence",
                 (page_start, page_end),
             ):
                 try:
-                    event_payload = json.loads(str(event_row["payload_json"]))
                     timestamp = datetime.fromisoformat(str(event_row["timestamp"]))
-                except (ValueError, json.JSONDecodeError):
+                except ValueError:
                     continue
-                if not isinstance(event_payload, Mapping):
-                    continue
-                event_generation = event_payload.get("generation")
-                event_slot = event_payload.get("slot")
+                event_generation = event_row["generation"]
+                event_slot = event_row["slot"]
                 if (
                     not isinstance(event_generation, int)
                     or isinstance(event_generation, bool)
@@ -525,9 +521,9 @@ def load_persisted_dashboard_state(
                 )
             rows = store.connection.execute(
                 "SELECT evaluations.candidate_id,evaluations.completed_at,"
-                "json_extract(evaluations.result_json,'$.summary') AS summary_json,"
-                "json_extract(evaluations.result_json,"
-                "'$.runtime.elapsed_seconds') AS elapsed_seconds "
+                "evaluations.episode_count,evaluations.mean_auc,evaluations.best_auc,"
+                "evaluations.baseline_auc_json,evaluations.improvement_rate,"
+                "evaluations.elapsed_seconds "
                 "FROM evaluations JOIN candidates "
                 "ON candidates.candidate_id=evaluations.candidate_id "
                 "WHERE evaluations.state='completed' "
@@ -538,10 +534,10 @@ def load_persisted_dashboard_state(
             for row in rows:
                 candidate_id = str(row["candidate_id"] or "")
                 try:
-                    summary = json.loads(str(row["summary_json"]))
+                    baseline_auc = json.loads(str(row["baseline_auc_json"]))
                 except (TypeError, json.JSONDecodeError):
-                    continue
-                metric = summary.get("mean_auc") if isinstance(summary, Mapping) else None
+                    baseline_auc = {}
+                metric = row["mean_auc"]
                 if (
                     not candidate_id
                     or not isinstance(metric, (int, float))
@@ -549,17 +545,25 @@ def load_persisted_dashboard_state(
                 ):
                     continue
                 value = float(metric)
+                summary = {
+                    "episode_count": row["episode_count"],
+                    "mean_auc": value,
+                    "best_auc": row["best_auc"],
+                    "baseline_auc": (
+                        baseline_auc if isinstance(baseline_auc, Mapping) else {}
+                    ),
+                    "improvement_rate": row["improvement_rate"],
+                }
                 evaluations[candidate_id] = (
                     value,
-                    summary if isinstance(summary, Mapping) else {},
+                    summary,
                     _number(row["elapsed_seconds"]),
                 )
 
             history_rows = store.connection.execute(
-                "SELECT completed_at,"
-                "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
+                "SELECT completed_at,mean_auc "
                 "FROM evaluations WHERE state='completed' "
-                "AND json_type(result_json,'$.summary.mean_auc') IN ('integer','real') "
+                "AND mean_auc IS NOT NULL "
                 "ORDER BY completed_at DESC,identity DESC LIMIT 60"
             ).fetchall()
             evaluation_history = [
@@ -569,10 +573,9 @@ def load_persisted_dashboard_state(
                 and not isinstance(row["mean_auc"], bool)
             ]
             best_row = store.connection.execute(
-                "SELECT candidate_id,"
-                "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
+                "SELECT candidate_id,mean_auc "
                 "FROM evaluations WHERE state='completed' "
-                "AND json_type(result_json,'$.summary.mean_auc') IN ('integer','real') "
+                "AND mean_auc IS NOT NULL "
                 "ORDER BY mean_auc DESC,candidate_id LIMIT 1"
             ).fetchone()
             if (
@@ -593,7 +596,7 @@ def load_persisted_dashboard_state(
             # durable candidate table so a dashboard restart never loses a
             # finished generation or its objective values.
             candidate_rows = store.connection.execute(
-                "SELECT candidate_id,generation,slot,status,metadata_json "
+                "SELECT candidate_id,generation,slot,parent_id,status,behavior_json "
                 "FROM candidates WHERE generation BETWEEN ? AND ? "
                 "ORDER BY generation,slot,candidate_id",
                 (page_start, page_end),
@@ -609,11 +612,11 @@ def load_persisted_dashboard_state(
                     or not isinstance(slot, str)
                 ):
                     continue
-                metadata: Mapping[str, Any] = {}
+                behavior: Mapping[str, Any] = {}
                 try:
-                    raw_metadata = json.loads(str(row["metadata_json"] or "{}"))
-                    if isinstance(raw_metadata, Mapping):
-                        metadata = raw_metadata
+                    raw_behavior = json.loads(str(row["behavior_json"] or "{}"))
+                    if isinstance(raw_behavior, Mapping):
+                        behavior = raw_behavior
                 except (TypeError, json.JSONDecodeError):
                     pass
                 existing = slot_records.get((generation, slot), {})
@@ -625,13 +628,14 @@ def load_persisted_dashboard_state(
                 slot_records[(generation, slot)] = {
                     "generation": generation,
                     "slot": slot,
-                    "parent_id": metadata.get("parent_id", "root"),
+                    "parent_id": str(row["parent_id"] or "root"),
                     "status": str(row["status"] or "accepted"),
                     "candidate": {"candidate_id": candidate_id},
-                    "raw_result": metadata.get("raw_result", {}),
-                    "request": metadata.get("request", {}),
-                    "errors": metadata.get("errors", []),
-                    "repairs": metadata.get("repairs", 0),
+                    "raw_result": {},
+                    "request": {},
+                    "errors": [],
+                    "repairs": 0,
+                    "behavior": behavior,
                 }
     except (OSError, UnicodeError, sqlite3.DatabaseError, json.JSONDecodeError):
         # A missing or partially-written optional snapshot can be completed by
