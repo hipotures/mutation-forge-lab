@@ -18,6 +18,8 @@ from mutation_forge.experiment.artifacts import (
 from mutation_forge.experiment.config import (
     MAX_EXPERIMENT_ID_BYTES,
     load_experiment_config,
+    orders_for_generation,
+    scheduled_order_domain,
     validate_experiment_id,
 )
 from mutation_forge.experiment.generation import GenerationConfig, GenerationCoordinator
@@ -63,6 +65,7 @@ selection = "elite-diversity"
 
 [evaluation]
 graph_mode = "unrestricted_min_degree_3"
+order_schedule = "static"
 orders = [10]
 graph_seeds = [401]
 policy_seeds = [4001]
@@ -82,6 +85,16 @@ def _write_config(tmp_path: Path, **kwargs: Any) -> Path:
     path.parent.mkdir()
     path.write_text(_config(**kwargs), encoding="utf-8")
     return path
+
+
+def _adaptive_config() -> str:
+    return _config().replace(
+        'order_schedule = "static"\norders = [10]',
+        'order_schedule = "adaptive"\n'
+        "min_order = 22\n"
+        "max_order = 128\n"
+        "orders_per_generation = 5",
+    )
 
 
 def test_config_resolves_workspace_relative_to_config(tmp_path: Path) -> None:
@@ -230,6 +243,98 @@ def test_config_does_not_infer_missing_search_limits(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="max_generations"):
+        load_experiment_config(path)
+
+
+def test_adaptive_order_schedule_expands_deterministically_by_generation(
+    tmp_path: Path,
+) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(_adaptive_config(), encoding="utf-8")
+
+    config = load_experiment_config(path)
+
+    assert config.evaluation.order_schedule == "adaptive"
+    assert config.evaluation.orders == ()
+    assert config.evaluation.min_order == 22
+    assert config.evaluation.max_order == 128
+    assert config.evaluation.orders_per_generation == 5
+    assert scheduled_order_domain(config.evaluation) == tuple(range(22, 129))
+    assert orders_for_generation(config.evaluation, 0) == (22, 23, 24, 25, 26)
+    assert orders_for_generation(config.evaluation, 1) == (22, 24, 26, 28, 31)
+    assert orders_for_generation(config.evaluation, 21) == (22, 48, 75, 101, 128)
+    assert orders_for_generation(config.evaluation, 100) == (22, 48, 75, 101, 128)
+
+
+def test_adaptive_cubic_order_schedule_uses_only_even_orders(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _adaptive_config()
+        .replace("unrestricted_min_degree_3", "cubic_first")
+        .replace("max_order = 128", "max_order = 32")
+        .replace("orders_per_generation = 5", "orders_per_generation = 3"),
+        encoding="utf-8",
+    )
+
+    config = load_experiment_config(path)
+
+    assert scheduled_order_domain(config.evaluation) == (22, 24, 26, 28, 30, 32)
+    assert orders_for_generation(config.evaluation, 0) == (22, 24, 26)
+    assert orders_for_generation(config.evaluation, 1) == (22, 26, 32)
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    (
+        (
+            _config().replace('order_schedule = "static"\n', ""),
+            "order_schedule",
+        ),
+        (
+            _config().replace(
+                'order_schedule = "static"',
+                'order_schedule = "adaptive"',
+            ),
+            "does not accept field 'orders'",
+        ),
+        (
+            _adaptive_config().replace("max_order = 128", "max_order = 21"),
+            "min_order must not exceed",
+        ),
+        (
+            _adaptive_config().replace("orders_per_generation = 5", "orders_per_generation = 200"),
+            "must not exceed the number",
+        ),
+        (
+            _adaptive_config()
+            .replace("unrestricted_min_degree_3", "cubic_first")
+            .replace("min_order = 22", "min_order = 3"),
+            "must be at least 4",
+        ),
+        (
+            _adaptive_config()
+            .replace("unrestricted_min_degree_3", "cubic_first")
+            .replace("max_order = 128", "max_order = 129"),
+            "must not exceed 128",
+        ),
+        (
+            _config().replace(
+                "orders = [10]",
+                "orders = [10]\nmin_order = 4",
+            ),
+            "static order schedule does not accept",
+        ),
+    ),
+)
+def test_config_rejects_invalid_order_schedules(
+    tmp_path: Path,
+    source: str,
+    message: str,
+) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
         load_experiment_config(path)
 
 

@@ -101,6 +101,7 @@ selection = "persistent-elite-weighted-diversity"
 
 [evaluation]
 graph_mode = "unrestricted_min_degree_3"
+order_schedule = "static"
 orders = [10, 12]
 graph_seeds = [401, 402, 403, 404]
 policy_seeds = [
@@ -158,6 +159,13 @@ Important behavior:
 - `max_generations` and `max_model_turns` are required. Each accepts a positive
   integer or the exact string `"unbounded"`.
 - Model-turn accounting remains cumulative when the limit is unbounded.
+- `order_schedule = "static"` requires an explicit `orders` array.
+- `order_schedule = "adaptive"` instead requires `min_order`, `max_order`, and
+  `orders_per_generation`. The first generation uses the lowest eligible
+  orders. Each later generation expands the eligible prefix by
+  `orders_per_generation` and evaluates evenly spaced orders from the minimum
+  through the current frontier. The schedule stays fixed after reaching
+  `max_order`; `cubic_first` skips odd orders.
 - `selection = "elite-diversity"` keeps the previous generation's best and
   fills the population with distinct policies. The recommended
   `selection = "persistent-elite-weighted-diversity"` allows repeated parents;

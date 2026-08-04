@@ -526,6 +526,7 @@ selection = "elite-diversity"
 
 [evaluation]
 graph_mode = "unrestricted_min_degree_3"
+order_schedule = "static"
 orders = [4]
 graph_seeds = [1]
 policy_seeds = [2]

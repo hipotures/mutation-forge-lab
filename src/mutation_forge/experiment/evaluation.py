@@ -41,6 +41,7 @@ from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.validation import ProgramIdentity
 from mutation_forge.stage2b.rankers import SourceRanker
 
+from .config import orders_for_generation
 from .json_io import read_json, write_json
 
 SCHEMA_VERSION = "mforge.experiment.evaluation.v2"
@@ -99,7 +100,7 @@ def _positive(config: object, name: str) -> int:
     return cast(int, value)
 
 
-def _settings(config: object) -> dict[str, Any]:
+def _settings(config: object, generation: int) -> dict[str, Any]:
     evaluation = _evaluation_config(config)
     baselines = _get(evaluation, "baselines", ())
     if not isinstance(baselines, (list, tuple)) or any(not isinstance(x, str) for x in baselines):
@@ -115,7 +116,7 @@ def _settings(config: object) -> dict[str, Any]:
     if isinstance(thread_count, bool) or not isinstance(thread_count, int) or thread_count <= 0:
         raise ValueError("resources.thread_count must be positive")
     return {
-        "orders": _ints(config, "orders"),
+        "orders": orders_for_generation(evaluation, generation),
         "graph_seeds": _ints(config, "graph_seeds"),
         "policy_seeds": _ints(config, "policy_seeds"),
         "horizon": _positive(config, "horizon"),
@@ -851,6 +852,7 @@ def evaluate_candidate(
     candidate_id: str,
     source: Any | None = None,
     *,
+    generation: int = 0,
     ranker_source: Any | None = None,
     artifact_root: str | Path | None = None,
     output_root: str | Path | None = None,
@@ -880,7 +882,7 @@ def evaluate_candidate(
         raise ValueError("ranker source is required")
     if artifact_root is None:
         artifact_root = output_root or _get(layout, "artifacts")
-    settings = _settings(config)
+    settings = _settings(config, generation)
     root = _artifact_root(config, artifact_root)
     limits = sandbox_limits or SandboxLimits()
     injected = backend is not None or backend_factory is not None
@@ -1021,6 +1023,7 @@ def evaluate_population(
     config: object,
     candidates: Mapping[str, Any] | None = None,
     *,
+    generation: int = 0,
     population: Mapping[str, Any] | None = None,
     artifact_root: str | Path | None = None,
     layout: Any | None = None,
@@ -1042,6 +1045,7 @@ def evaluate_population(
             config,
             candidate_id,
             candidates[candidate_id],
+            generation=generation,
             artifact_root=artifact_root,
             layout=layout,
             backend=backend,

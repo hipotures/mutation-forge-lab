@@ -251,6 +251,7 @@ def test_candidate_publishes_development_objective_before_replay(
 
     config = {
         "evaluation": {
+            "order_schedule": "static",
             "orders": [4],
             "graph_seeds": [1],
             "policy_seeds": [2],
@@ -313,3 +314,26 @@ def test_candidate_publishes_development_objective_before_replay(
             "best_auc": 0.5,
         }
     ]
+
+
+def test_settings_use_generation_specific_adaptive_orders() -> None:
+    config = {
+        "evaluation": {
+            "graph_mode": "unrestricted_min_degree_3",
+            "order_schedule": "adaptive",
+            "min_order": 22,
+            "max_order": 128,
+            "orders_per_generation": 5,
+            "graph_seeds": [1],
+            "policy_seeds": [2],
+            "horizon": 1,
+            "proposal_pool_size": 1,
+            "baselines": [],
+            "replay": False,
+        },
+        "resources": {"workers": 1, "thread_count": 1},
+    }
+
+    assert evaluation._settings(config, 0)["orders"] == (22, 23, 24, 25, 26)
+    assert evaluation._settings(config, 1)["orders"] == (22, 24, 26, 28, 31)
+    assert evaluation._settings(config, 21)["orders"] == (22, 48, 75, 101, 128)

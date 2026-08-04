@@ -23,7 +23,10 @@ from mutation_forge.backends.heg import HEG_GRAPH_MODES
 
 EXPERIMENT_SCHEMA_VERSION = "mforge.experiment.v2"
 type SearchLimit = int | Literal["unbounded"]
+type OrderSchedule = Literal["static", "adaptive"]
 MAX_EXPERIMENT_ID_BYTES = 128
+MAX_GRAPH_ORDER = 128
+ORDER_SCHEDULES = frozenset({"static", "adaptive"})
 _CREDENTIAL_KEY = re.compile(
     r"(?i)(?:token|password|secret|credential|auth[_-]?json|api[_-]?key|private[_-]?key)"
 )
@@ -142,7 +145,11 @@ class ExperimentSearchConfig:
 @dataclass(frozen=True, slots=True)
 class ExperimentEvaluationConfig:
     graph_mode: str
+    order_schedule: OrderSchedule
     orders: tuple[int, ...]
+    min_order: int | None
+    max_order: int | None
+    orders_per_generation: int | None
     graph_seeds: tuple[int, ...]
     policy_seeds: tuple[int, ...]
     horizon: int
@@ -230,6 +237,70 @@ class ExperimentConfig:
             search["max_generations"] = serialize_search_limit(self.search.max_generations)
             search["max_model_turns"] = serialize_search_limit(self.search.max_model_turns)
         return cast(dict[str, Any], _canonicalize_paths(result, self.source_dir))
+
+
+def _evaluation_value(config: object, name: str) -> object:
+    if isinstance(config, Mapping):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def scheduled_order_domain(config: object) -> tuple[int, ...]:
+    schedule = _evaluation_value(config, "order_schedule")
+    if schedule == "static":
+        orders = _evaluation_value(config, "orders")
+        if not isinstance(orders, (list, tuple)) or not orders:
+            raise ValueError("evaluation.orders must be a non-empty integer sequence")
+        if any(
+            isinstance(order, bool) or not isinstance(order, int) or order <= 0
+            for order in orders
+        ):
+            raise ValueError("evaluation.orders must contain positive integers")
+        return tuple(cast(int, order) for order in orders)
+    if schedule != "adaptive":
+        raise ValueError("evaluation.order_schedule must be 'static' or 'adaptive'")
+    min_order = _evaluation_value(config, "min_order")
+    max_order = _evaluation_value(config, "max_order")
+    if not isinstance(min_order, int) or isinstance(min_order, bool):
+        raise ValueError("evaluation.min_order must be an integer")
+    if not isinstance(max_order, int) or isinstance(max_order, bool):
+        raise ValueError("evaluation.max_order must be an integer")
+    if min_order <= 0 or max_order <= 0 or min_order > max_order:
+        raise ValueError(
+            "evaluation.min_order and evaluation.max_order must define "
+            "a positive ascending range"
+        )
+    orders = range(min_order, max_order + 1)
+    if _evaluation_value(config, "graph_mode") == "cubic_first":
+        domain = tuple(order for order in orders if order % 2 == 0)
+    else:
+        domain = tuple(orders)
+    if not domain:
+        raise ValueError("evaluation order schedule has no eligible graph orders")
+    return domain
+
+
+def orders_for_generation(config: object, generation: int) -> tuple[int, ...]:
+    if generation < 0:
+        raise ValueError("generation must be non-negative")
+    domain = scheduled_order_domain(config)
+    if _evaluation_value(config, "order_schedule") == "static":
+        return domain
+    count = _evaluation_value(config, "orders_per_generation")
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        raise ValueError("evaluation.orders_per_generation must be a positive integer")
+    if count > len(domain):
+        raise ValueError(
+            "evaluation.orders_per_generation must not exceed the number "
+            "of eligible graph orders"
+        )
+    frontier = domain[: min(len(domain), (generation + 1) * count)]
+    if count == 1:
+        return (frontier[-1],)
+    return tuple(
+        frontier[index * (len(frontier) - 1) // (count - 1)]
+        for index in range(count)
+    )
 
 
 def _canonicalize_paths(value: object, base: Path) -> object:
@@ -417,6 +488,10 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         "evaluation",
         {
             "orders",
+            "order_schedule",
+            "min_order",
+            "max_order",
+            "orders_per_generation",
             "graph_mode",
             "graph_seeds",
             "policy_seeds",
@@ -435,9 +510,54 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
             "evaluation.graph_mode must be one of "
             f"{sorted(HEG_GRAPH_MODES)!r}"
         )
+    order_schedule = evaluation_raw.get("order_schedule")
+    if order_schedule not in ORDER_SCHEDULES:
+        raise ValueError(
+            "evaluation.order_schedule must be one of "
+            f"{sorted(ORDER_SCHEDULES)!r}"
+        )
+    if order_schedule == "static":
+        adaptive_fields = {
+            "min_order",
+            "max_order",
+            "orders_per_generation",
+        }.intersection(evaluation_raw)
+        if adaptive_fields:
+            raise ValueError(
+                "evaluation static order schedule does not accept fields "
+                f"{sorted(adaptive_fields)!r}"
+            )
+        orders = _ints(evaluation_raw.get("orders"), "evaluation.orders")
+        min_order = None
+        max_order = None
+        orders_per_generation = None
+    else:
+        if "orders" in evaluation_raw:
+            raise ValueError(
+                "evaluation adaptive order schedule does not accept field 'orders'"
+            )
+        orders = ()
+        min_order = _positive_int(
+            evaluation_raw.get("min_order"),
+            "evaluation.min_order",
+        )
+        max_order = _positive_int(
+            evaluation_raw.get("max_order"),
+            "evaluation.max_order",
+        )
+        orders_per_generation = _positive_int(
+            evaluation_raw.get("orders_per_generation"),
+            "evaluation.orders_per_generation",
+        )
+        if min_order > max_order:
+            raise ValueError("evaluation.min_order must not exceed evaluation.max_order")
     evaluation = ExperimentEvaluationConfig(
         cast(str, graph_mode),
-        _ints(evaluation_raw.get("orders"), "evaluation.orders"),
+        cast(OrderSchedule, order_schedule),
+        orders,
+        min_order,
+        max_order,
+        orders_per_generation,
         _ints(evaluation_raw.get("graph_seeds"), "evaluation.graph_seeds"),
         _ints(evaluation_raw.get("policy_seeds"), "evaluation.policy_seeds"),
         _positive_int(evaluation_raw.get("horizon"), "evaluation.horizon"),
@@ -445,6 +565,37 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         _strings(evaluation_raw.get("baselines"), "evaluation.baselines"),
         replay,
     )
+    order_domain = scheduled_order_domain(evaluation)
+    minimum_order = 5 if graph_mode == "minimal_structure_mixed_degree" else 4
+    configured_min_order = (
+        cast(int, evaluation.min_order)
+        if evaluation.order_schedule == "adaptive"
+        else min(order_domain)
+    )
+    configured_max_order = (
+        cast(int, evaluation.max_order)
+        if evaluation.order_schedule == "adaptive"
+        else max(order_domain)
+    )
+    if configured_min_order < minimum_order:
+        raise ValueError(
+            f"evaluation graph orders must be at least {minimum_order} "
+            f"for graph_mode={graph_mode!r}"
+        )
+    if configured_max_order > MAX_GRAPH_ORDER:
+        raise ValueError(
+            f"evaluation graph orders must not exceed {MAX_GRAPH_ORDER}"
+        )
+    if graph_mode == "cubic_first" and any(order % 2 for order in order_domain):
+        raise ValueError("evaluation cubic_first graph orders must be even")
+    if (
+        evaluation.order_schedule == "adaptive"
+        and cast(int, evaluation.orders_per_generation) > len(order_domain)
+    ):
+        raise ValueError(
+            "evaluation.orders_per_generation must not exceed the number "
+            "of eligible graph orders"
+        )
 
     resources_raw = _table(raw, "resources")
     _reject_unknown_fields(resources_raw, "resources", {"workers", "thread_count"})

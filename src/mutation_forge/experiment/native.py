@@ -34,7 +34,7 @@ from .artifacts import (
     generated_policy_diagnostics,
     is_generated_policy,
 )
-from .config import ExperimentConfig
+from .config import ExperimentConfig, orders_for_generation, scheduled_order_domain
 from .evaluation import DEFAULT_WITNESS_CAP, evaluate_candidate
 from .evaluation import SCHEMA_VERSION as EVALUATION_SCHEMA_VERSION
 from .generation import (
@@ -91,6 +91,7 @@ def _evaluate_candidate_process(
     config: ExperimentConfig,
     candidate_id: str,
     source: str,
+    generation: int,
     artifact_root: Path,
     heg_repo: Path,
     profiling_enabled: bool,
@@ -111,6 +112,7 @@ def _evaluate_candidate_process(
                 config,
                 candidate_id,
                 source,
+                generation=generation,
                 artifact_root=artifact_root,
                 heg_repo=heg_repo,
                 sandbox_limits=SandboxLimits(),
@@ -1449,9 +1451,9 @@ class NativeExperimentAdapter:
             )
             close_target_lengths_backend = True
         try:
-            target_forbidden_lengths_by_order = {
+            all_target_forbidden_lengths_by_order = {
                 str(order): list(target_lengths_backend.target_forbidden_lengths(order))
-                for order in config.evaluation.orders
+                for order in scheduled_order_domain(config.evaluation)
             }
         finally:
             if close_target_lengths_backend:
@@ -1511,6 +1513,14 @@ class NativeExperimentAdapter:
 
         def render_prompt(**values: Any) -> str:
             generation = int(values.get("generation", 0))
+            generation_orders = orders_for_generation(
+                config.evaluation,
+                generation,
+            )
+            target_forbidden_lengths_by_order = {
+                str(order): all_target_forbidden_lengths_by_order[str(order)]
+                for order in generation_orders
+            }
             slot = str(values.get("slot", "slot-00"))
             phase = str(values.get("phase", "initial"))
             brief = str(values.get("brief", "")).strip()
@@ -1533,6 +1543,18 @@ class NativeExperimentAdapter:
             )
             feedback = str(values.get("search_feedback", "")).strip()
             archive_context = str(values.get("archive_context", "")).strip()
+            evaluation_schedule: dict[str, Any] = {
+                "order_schedule": config.evaluation.order_schedule,
+                "orders": list(generation_orders),
+            }
+            if config.evaluation.order_schedule == "adaptive":
+                evaluation_schedule.update(
+                    {
+                        "min_order": config.evaluation.min_order,
+                        "max_order": config.evaluation.max_order,
+                        "orders_per_generation": config.evaluation.orders_per_generation,
+                    }
+                )
             config_view = {
                 "experiment_id": config.exp_id,
                 "generation": generation,
@@ -1544,7 +1566,7 @@ class NativeExperimentAdapter:
                     "selection": config.search.selection,
                 },
                 "evaluation": {
-                    "orders": list(config.evaluation.orders),
+                    **evaluation_schedule,
                     "graph_seeds": list(config.evaluation.graph_seeds),
                     "policy_seeds": list(config.evaluation.policy_seeds),
                     "horizon": config.evaluation.horizon,
@@ -1580,7 +1602,7 @@ class NativeExperimentAdapter:
             sandbox_limits = SandboxLimits()
             numeric_scales = {
                 "ctx.order": {
-                    "values_in_this_experiment": list(config.evaluation.orders),
+                    "values_in_this_experiment": list(generation_orders),
                 },
                 "ctx.forbidden_lengths": {
                     "values_by_order": target_forbidden_lengths_by_order,
@@ -1834,7 +1856,12 @@ class NativeExperimentAdapter:
             if not isinstance(observed_settings, Mapping):
                 return None
             expected_settings = {
-                "orders": list(config.evaluation.orders),
+                "orders": list(
+                    orders_for_generation(
+                        config.evaluation,
+                        candidate.generation,
+                    )
+                ),
                 "graph_seeds": list(config.evaluation.graph_seeds),
                 "policy_seeds": list(config.evaluation.policy_seeds),
                 "horizon": config.evaluation.horizon,
@@ -2020,6 +2047,8 @@ class NativeExperimentAdapter:
                 evaluator_kwargs["backend"] = self.backend
             if "progress" in parameters:
                 evaluator_kwargs["progress"] = evaluation_progress
+            if "generation" in parameters:
+                evaluator_kwargs["generation"] = candidate.generation
             if "profiling_enabled" in parameters:
                 evaluator_kwargs["profiling_enabled"] = profiling_enabled
             if "counterexample_event_callback" in parameters:
@@ -2195,6 +2224,10 @@ class NativeExperimentAdapter:
             queued_count: int,
         ) -> Any:
             progress = evaluation_progress_for(candidate, program_id, identity)
+            generation_orders = orders_for_generation(
+                config.evaluation,
+                candidate.generation,
+            )
             active_before = sum(
                 1
                 for future in streamed_futures.values()
@@ -2209,7 +2242,7 @@ class NativeExperimentAdapter:
                 evaluation_id=identity,
                 evaluations_queued=queued_count,
                 evaluation_total=(
-                    len(config.evaluation.orders)
+                    len(generation_orders)
                     * len(config.evaluation.graph_seeds)
                     * len(config.evaluation.policy_seeds)
                 ),
@@ -2254,6 +2287,7 @@ class NativeExperimentAdapter:
                     config,
                     program_id,
                     candidate.source,
+                    candidate.generation,
                     layout.artifacts,
                     Path(cast(str | Path, backend_repo)),
                     profiling_enabled,

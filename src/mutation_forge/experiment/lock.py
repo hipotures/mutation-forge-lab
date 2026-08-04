@@ -12,7 +12,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from .config import ExperimentConfig, mutable_runtime_fields_removed, serialize_search_limit
+from .config import (
+    ExperimentConfig,
+    mutable_runtime_fields_removed,
+    scheduled_order_domain,
+    serialize_search_limit,
+)
 from .json_io import read_json, write_json
 from .layout import ExperimentLayout
 
@@ -265,6 +270,19 @@ def build_lock(
     project_state = _git_state(project)
     if project_state.get("commit") is None or project_state.get("dirty") is None:
         raise LockError(f"mutation-forge repository is unavailable: {project}")
+    order_schedule: dict[str, Any] = {
+        "order_schedule": config.evaluation.order_schedule,
+    }
+    if config.evaluation.order_schedule == "static":
+        order_schedule["orders"] = list(config.evaluation.orders)
+    else:
+        order_schedule.update(
+            {
+                "min_order": config.evaluation.min_order,
+                "max_order": config.evaluation.max_order,
+                "orders_per_generation": config.evaluation.orders_per_generation,
+            }
+        )
     return {
         "schema_version": LOCK_SCHEMA_VERSION,
         "lock_schema_version": LOCK_SCHEMA_VERSION,
@@ -300,7 +318,7 @@ def build_lock(
         },
         "evaluation": {
             "graph_mode": config.evaluation.graph_mode,
-            "orders": list(config.evaluation.orders),
+            **order_schedule,
             "graph_seeds": list(config.evaluation.graph_seeds),
             "policy_seeds": list(config.evaluation.policy_seeds),
             "horizon": config.evaluation.horizon,
@@ -319,7 +337,7 @@ def build_lock(
         "sandbox_limits": _sandbox_limits(raw),
         "evaluation_manifest_identities": resolved_manifest_identities,
         "seed_lists": {
-            "orders": list(config.evaluation.orders),
+            "orders": list(scheduled_order_domain(config.evaluation)),
             "graph_seeds": list(config.evaluation.graph_seeds),
             "policy_seeds": list(config.evaluation.policy_seeds),
         },

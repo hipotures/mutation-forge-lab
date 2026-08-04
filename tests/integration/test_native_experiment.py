@@ -107,6 +107,7 @@ selection = "elite-diversity"
 
 [evaluation]
 graph_mode = "unrestricted_min_degree_3"
+order_schedule = "static"
 orders = [4]
 graph_seeds = [1]
 policy_seeds = [2]
@@ -434,6 +435,7 @@ def test_native_evaluation_runs_in_spawned_process(tmp_path: Path) -> None:
             config,
             "process-canary",
             VALID_SOURCE,
+            0,
             tmp_path / "artifacts",
             heg_repo,
             False,
