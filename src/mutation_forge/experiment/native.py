@@ -55,6 +55,12 @@ class NativeExperimentError(RuntimeError):
 
 
 BASELINE_SCHEMA_VERSION = "mforge.native.baseline_rankers.v2"
+NATIVE_SELECTION_POLICIES = frozenset(
+    {
+        "elite-diversity",
+        "persistent-elite-weighted-diversity",
+    }
+)
 
 
 class _NativeSessionBudgetExpired(KeyboardInterrupt):
@@ -1202,7 +1208,7 @@ class NativeExperimentAdapter:
             )
         if config.model.effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
             raise WorkspaceError(f"unsupported model.effort {config.model.effort!r}")
-        if config.search.selection != "elite-diversity":
+        if config.search.selection not in NATIVE_SELECTION_POLICIES:
             raise WorkspaceError(f"unsupported native selection policy {config.search.selection!r}")
         unsupported_baselines = set(config.evaluation.baselines).difference(
             {"random", "structural"}
@@ -1285,21 +1291,110 @@ class NativeExperimentAdapter:
         slots: int,
         selection: str = "elite-diversity",
         _results: Sequence[SlotResult] = (),
+        *,
+        global_best_id: str | None = None,
     ) -> Mapping[str, str]:
         del generation, _results
-        if selection != "elite-diversity":
+        if selection not in NATIVE_SELECTION_POLICIES:
             raise NativeExperimentError(f"unsupported native selection policy {selection!r}")
+
+        def score(candidate: Candidate) -> float:
+            value = (
+                candidate.behavior_signature.get("score", 0.0)
+                if isinstance(candidate.behavior_signature, Mapping)
+                else 0.0
+            )
+            return (
+                float(value)
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else 0.0
+            )
+
+        def candidate_id(candidate: Candidate) -> str:
+            return f"g{candidate.generation:04d}-{candidate.slot}"
+
         ordered = sorted(
             candidates,
             key=lambda item: (
-                -float(item.behavior_signature.get("score", 0.0))
-                if isinstance(item.behavior_signature, Mapping)
-                else 0.0,
+                -score(item),
                 item.normalized_ast_sha256,
             ),
         )
         if not ordered:
             return {f"slot-{index:02d}": "native-baseline" for index in range(slots)}
+        if selection == "persistent-elite-weighted-diversity":
+            current_best = ordered[0]
+            elite_id = global_best_id or candidate_id(current_best)
+            global_count = min(slots, max(1, (3 * slots + 4) // 8))
+            slots_remaining = slots - global_count
+            current_count = min(slots_remaining, max(1, (2 * slots + 4) // 8))
+            slots_remaining -= current_count
+            diversity_count = 1 if slots_remaining else 0
+            weighted_count = slots_remaining - diversity_count
+
+            selected_ids = [elite_id] * global_count
+            selected_ids.extend([candidate_id(current_best)] * current_count)
+
+            eligible = ordered[: max(1, (len(ordered) + 1) // 2)]
+            if weighted_count:
+                weights = [max(0.0, score(candidate)) for candidate in eligible]
+                if not any(weights):
+                    weights = [1.0] * len(eligible)
+                total_weight = sum(weights)
+                quotas = [weighted_count * weight / total_weight for weight in weights]
+                counts = [int(quota) for quota in quotas]
+                leftovers = weighted_count - sum(counts)
+                remainder_order = sorted(
+                    range(len(eligible)),
+                    key=lambda index: (
+                        -(quotas[index] - counts[index]),
+                        -score(eligible[index]),
+                        candidate_id(eligible[index]),
+                    ),
+                )
+                for index in remainder_order[:leftovers]:
+                    counts[index] += 1
+                for candidate, count in zip(eligible, counts, strict=True):
+                    selected_ids.extend([candidate_id(candidate)] * count)
+
+            if diversity_count:
+                candidate_by_id = {candidate_id(candidate): candidate for candidate in eligible}
+                selected_candidates = [
+                    candidate_by_id[value] for value in selected_ids if value in candidate_by_id
+                ]
+                unused = [
+                    candidate
+                    for candidate in eligible
+                    if candidate_id(candidate) not in selected_ids
+                ]
+                diversity_pool = unused or eligible
+                diverse = max(
+                    diversity_pool,
+                    key=lambda candidate: (
+                        min(
+                            sum(
+                                left != right
+                                for left, right in zip(
+                                    candidate.normalized_ast_sha256,
+                                    parent.normalized_ast_sha256,
+                                    strict=True,
+                                )
+                            )
+                            for parent in selected_candidates
+                        )
+                        if selected_candidates
+                        else 0,
+                        score(candidate),
+                        candidate.normalized_ast_sha256,
+                    ),
+                )
+                selected_ids.append(candidate_id(diverse))
+
+            return {
+                f"slot-{index:02d}": parent_id
+                for index, parent_id in enumerate(selected_ids[:slots])
+            }
+
         selected: list[Candidate] = [ordered[0]]
         while len(selected) < min(slots, len(ordered)):
             remaining = [candidate for candidate in ordered if candidate not in selected]
@@ -2410,6 +2505,7 @@ class NativeExperimentAdapter:
                 config.search.population_size,
                 config.search.selection,
                 results,
+                global_best_id=best_candidate_id,
             )
             return selected
 

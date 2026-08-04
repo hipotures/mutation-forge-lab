@@ -30,8 +30,8 @@ For every experiment, Mutation Forge Lab:
 4. repairs eligible invalid responses within the configured repair limit;
 5. evaluates accepted policies and the random/structural baselines under
    matched HEG budgets;
-6. archives candidates, selects parents with `elite-diversity`, and continues
-   until a global generation or model-turn limit is reached;
+6. archives candidates, selects parents with the configured search strategy,
+   and continues until a session boundary or terminal outcome;
 7. retains prompts, raw responses, transport diagnostics, token usage,
    evaluations, checkpoints, and winner information.
 
@@ -97,7 +97,7 @@ max_repairs = 1
 population_size = 8
 max_generations = "unbounded"
 max_model_turns = "unbounded"
-selection = "elite-diversity"
+selection = "persistent-elite-weighted-diversity"
 
 [evaluation]
 orders = [10, 12]
@@ -157,6 +157,12 @@ Important behavior:
 - `max_generations` and `max_model_turns` are required. Each accepts a positive
   integer or the exact string `"unbounded"`.
 - Model-turn accounting remains cumulative when the limit is unbounded.
+- `selection = "elite-diversity"` keeps the previous generation's best and
+  fills the population with distinct policies. The recommended
+  `selection = "persistent-elite-weighted-diversity"` allows repeated parents;
+  for a population of eight it assigns three slots to the all-time best, two
+  to the current-generation best, two by objective-weighted allocation from
+  the current top half, and one by AST diversity from that top half.
 - `model.effort` may be changed between resumable sessions without creating a
   new experiment identity; the next provider turn uses the current value.
 - `max_total_tokens_per_hour` is optional. It accepts a positive integer or
