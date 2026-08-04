@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from mutation_forge.backends.base import GraphBackend
+from mutation_forge.backends.base import GraphBackend, ScoringBackendError
 from mutation_forge.counterexamples import (
     CandidateProvenance,
     CounterexampleDecision,
@@ -235,6 +235,8 @@ def run_episode(
                     cutoff=(current_score if current_score.total_capped_witnesses > 0 else None),
                     record_profile=record_score_profile,
                 )
+        except ScoringBackendError:
+            raise
         except (RuntimeError, TimeoutError):
             if timing is not None:
                 timing.scoring_ns += time.perf_counter_ns() - phase_started_ns

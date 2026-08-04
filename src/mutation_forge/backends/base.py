@@ -16,6 +16,10 @@ type DeepProposalProfileRecorder = Callable[[str, Mapping[str, int | float | boo
 type ScoreProfileRecorder = Callable[[str, Mapping[str, int]], None]
 
 
+class ScoringBackendError(RuntimeError):
+    """The mandatory scoring backend is unavailable or failed."""
+
+
 class GraphBackend(Protocol):
     backend_id: str
 

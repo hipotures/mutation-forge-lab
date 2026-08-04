@@ -147,9 +147,9 @@ def run_capability_audit(repo: Path) -> dict[str, JsonValue]:
         },
         {
             "contract_item": "mandatory_cpp_scorer_no_python_fallback",
-            "classification": "bounded_additive_change_required",
-            "evidence": "HEG ADR requires C++ fail-closed; sibling adapter fallback is not production-compatible",
-            "observed": {"heg_fail_closed": True, "adapter_fallback": True},
+            "classification": "exact_existing_capability",
+            "evidence": "HEG and the sibling adapter both require C++ scoring and fail closed after one restart",
+            "observed": {"heg_fail_closed": True, "adapter_fail_closed": True},
         },
     ]
     source_fingerprints = {

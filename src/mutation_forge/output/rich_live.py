@@ -2086,8 +2086,7 @@ class RichLiveSink:
             "",
             (
                 f"failures {counters.get('worker_failure_calls', 0)} · "
-                f"restarts {counters.get('worker_restart_successes', 0)} · "
-                f"fallbacks {counters.get('python_fallback_calls', 0)}"
+                f"restarts {counters.get('worker_restart_successes', 0)}"
             ),
         )
         return table

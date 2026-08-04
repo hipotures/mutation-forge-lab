@@ -36,7 +36,6 @@ DEEP_SCORE_EVENTS = frozenset(
         "worker_response",
         "worker_failure",
         "worker_restart",
-        "python_fallback",
         "score_assembly",
     }
 )

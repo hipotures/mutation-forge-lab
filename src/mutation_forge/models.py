@@ -307,7 +307,6 @@ class DeepScoreTimingProfile:
             "worker_failure_calls",
             "worker_restart_attempts",
             "worker_restart_successes",
-            "python_fallback_calls",
         )
         public_counters: dict[str, JsonValue] = {
             name: self.counters.get(name, 0) for name in counter_names
@@ -389,10 +388,6 @@ class DeepScoreTimingProfile:
             "worker_failures": self._node(
                 self.counters.get("worker_failure_elapsed_ns", 0),
                 self.counters.get("worker_failure_calls", 0),
-            ),
-            "python_fallback": self._node(
-                self.counters.get("python_fallback_elapsed_ns", 0),
-                self.counters.get("python_fallback_calls", 0),
             ),
             "cycles": cycles,
         }

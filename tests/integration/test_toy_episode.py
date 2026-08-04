@@ -9,6 +9,7 @@ from mutation_forge.backends.base import (
     DeepProposalProfileRecorder,
     ProposalTimingRecorder,
     ScoreProfileRecorder,
+    ScoringBackendError,
 )
 from mutation_forge.backends.toy import ToyBackend
 from mutation_forge.counterexamples import (
@@ -113,6 +114,29 @@ class ZeroScoreBackend(ToyBackend):
             complete=True,
             message="synthetic exact zero",
             implementation="test",
+        )
+
+
+class FailClosedScorerBackend(ToyBackend):
+    def __init__(self) -> None:
+        self.score_calls = 0
+
+    def score(
+        self,
+        graph: GraphState,
+        *,
+        witness_cap: int,
+        cutoff: GraphScore | None = None,
+        record_profile: ScoreProfileRecorder | None = None,
+    ) -> GraphScore | None:
+        self.score_calls += 1
+        if self.score_calls == 2:
+            raise ScoringBackendError("synthetic mandatory scorer failure")
+        return super().score(
+            graph,
+            witness_cap=witness_cap,
+            cutoff=cutoff,
+            record_profile=record_profile,
         )
 
 
@@ -254,6 +278,23 @@ def test_episode_score_cache_does_not_cache_failures() -> None:
     assert counters["score_cache_hits"] == 2
     assert counters["score_cache_misses"] == 2
     assert counters["score_result_failures"] == 1
+
+
+def test_episode_propagates_mandatory_scorer_failure() -> None:
+    backend = FailClosedScorerBackend()
+
+    with pytest.raises(ScoringBackendError, match="mandatory scorer failure"):
+        run_episode(
+            backend=backend,
+            initial_graph=backend.generate_seed(order=30, seed=101),
+            entry_id="fail-closed-scorer",
+            graph_seed=101,
+            policy_seed=1,
+            baseline=HEG_UNIFORM_TWO_SWITCH,
+            evaluations=4,
+            witness_cap=64,
+            deadline=time.monotonic() + 30,
+        )
 
 
 def test_episode_disables_cutoff_for_zero_incumbent(tmp_path: Path) -> None:
