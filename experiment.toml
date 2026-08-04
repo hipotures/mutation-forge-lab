@@ -24,7 +24,10 @@ max_model_turns = 64
 selection = "elite-diversity"
 
 [evaluation]
-orders = [10, 12]
+order_schedule = "adaptive"
+min_order = 22
+max_order = 128
+orders_per_generation = 5
 graph_seeds = [401, 402, 403, 404]
 policy_seeds = [
   4001, 4002, 4003, 4004,
