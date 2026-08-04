@@ -1485,11 +1485,7 @@ def reduce_dashboard_event(
             phase_started = now
         elif event_type == "repair_completed":
             lifecycle_phase = "response"
-            lifecycle_elapsed = (
-                max(0.0, now - phase_started)
-                if phase_started is not None
-                else None
-            )
+            lifecycle_elapsed = max(0.0, now - phase_started) if phase_started is not None else None
             elapsed = (
                 max(0.0, now - started)
                 if started is not None
@@ -1514,11 +1510,7 @@ def reduce_dashboard_event(
             slot_state = "probing" if valid else "invalid"
             lifecycle_phase = "schema"
             lifecycle_status = "pass" if valid else "fail"
-            lifecycle_elapsed = (
-                max(0.0, now - phase_started)
-                if phase_started is not None
-                else None
-            )
+            lifecycle_elapsed = max(0.0, now - phase_started) if phase_started is not None else None
             elapsed = (
                 max(0.0, now - started)
                 if started is not None
@@ -1541,11 +1533,7 @@ def reduce_dashboard_event(
             slot_state = "evaluating" if valid else "invalid"
             lifecycle_phase = "probe"
             lifecycle_status = "pass" if valid else "fail"
-            lifecycle_elapsed = (
-                max(0.0, now - phase_started)
-                if phase_started is not None
-                else None
-            )
+            lifecycle_elapsed = max(0.0, now - phase_started) if phase_started is not None else None
             elapsed = (
                 max(0.0, now - started)
                 if started is not None
@@ -1791,9 +1779,7 @@ def reduce_dashboard_key(
             replace(
                 state,
                 slot_icon_mode=enabled,
-                status_message=(
-                    "Slot phase/state: icons" if enabled else "Slot phase/state: text"
-                ),
+                status_message=("Slot phase/state: icons" if enabled else "Slot phase/state: text"),
             ),
             None,
         )
@@ -1830,9 +1816,7 @@ def reduce_dashboard_key(
             else len(generations) - 1
         )
         delta = -1 if key == "LEFT" else 1
-        target = generations[
-            max(0, min(len(generations) - 1, current + delta))
-        ]
+        target = generations[max(0, min(len(generations) - 1, current + delta))]
         return replace(
             state,
             displayed_generation=target,
@@ -1840,24 +1824,19 @@ def reduce_dashboard_key(
             status_message=f"Viewing generation {_human_generation(target)}",
         ), None
     if key == "q":
-        stopping_generations = tuple(
-            replace(
-                group,
-                slots=tuple(
-                    replace(slot, state="stopping")
-                    if slot.state in ACTIVE_STATES
-                    else slot
-                    for slot in group.slots
-                ),
+        if state.experiment_state == "stopping":
+            return (
+                replace(state, status_message="Immediate interrupt requested"),
+                DashboardAction("quit"),
             )
-            for group in state.generations
-        )
         return (
             replace(
                 state,
                 experiment_state="stopping",
-                generations=stopping_generations,
-                status_message="Graceful stop requested",
+                status_message=(
+                    "Graceful stop requested · active stages will finish · "
+                    "press q again to interrupt"
+                ),
             ),
             DashboardAction("quit"),
         )
@@ -2192,11 +2171,7 @@ class InteractiveDashboardSink:
         if panel_name == "slots":
             if self.state.view == "details":
                 slot = _selected_slot(self.state)
-                suffix = (
-                    f" · {compact_display_ids(slot.slot)}"
-                    if slot is not None
-                    else ""
-                )
+                suffix = f" · {compact_display_ids(slot.slot)}" if slot is not None else ""
                 return (
                     f"Slot details{suffix}",
                     self._slot_details(PANEL_COPY_WIDTHS[panel_name], "copy"),
@@ -2454,8 +2429,7 @@ class InteractiveDashboardSink:
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
         evaluation_total = (
-            self.state.evaluation_episodes_total
-            or self._configured_evaluation_total()
+            self.state.evaluation_episodes_total or self._configured_evaluation_total()
         )
         configured_values = (
             (
@@ -2494,13 +2468,7 @@ class InteractiveDashboardSink:
         if horizontal:
             column_width = max(
                 1,
-                (
-                    width
-                    - 4
-                    - 2 * len(values)
-                    - max(0, len(values) - 1)
-                )
-                // len(values),
+                (width - 4 - 2 * len(values) - max(0, len(values) - 1)) // len(values),
             )
             renderables = [
                 _progress_bar(
@@ -2510,10 +2478,7 @@ class InteractiveDashboardSink:
                     width=max(
                         1,
                         column_width
-                        - len(
-                            f"{_compact_count(current)}/"
-                            f"{_compact_count(cast(int, total))}"
-                        )
+                        - len(f"{_compact_count(current)}/{_compact_count(cast(int, total))}")
                         - 6,
                     ),
                     stacked=True,
@@ -2656,9 +2621,7 @@ class InteractiveDashboardSink:
                 "total": _show(slot.usage.total),
                 "validation": slot.validation,
                 "probe": slot.probe,
-                "candidate / error": compact_display_ids(
-                    slot.error or slot.candidate or "—"
-                ),
+                "candidate / error": compact_display_ids(slot.error or slot.candidate or "—"),
                 "goal ↑": _objective(slot.objective),
             }
             style = "bold on grey15" if selected else "bold" if slot.state in ACTIVE_STATES else ""
@@ -3001,10 +2964,7 @@ class InteractiveDashboardSink:
             or query in item.component.lower()
             or (
                 item.slot is not None
-                and (
-                    query in item.slot.lower()
-                    or query in compact_display_ids(item.slot).lower()
-                )
+                and (query in item.slot.lower() or query in compact_display_ids(item.slot).lower())
             )
         ][:limit]
         table = Table.grid(expand=True)
@@ -3013,8 +2973,7 @@ class InteractiveDashboardSink:
         table.add_column(overflow="ellipsis")
         for item in entries:
             message = (
-                f"{compact_display_ids(item.slot)} · "
-                f"{compact_display_ids(item.message)}"
+                f"{compact_display_ids(item.slot)} · {compact_display_ids(item.message)}"
                 if item.slot
                 else compact_display_ids(item.message)
             )
@@ -3112,14 +3071,10 @@ class InteractiveDashboardSink:
                 *(len(label) for label, _value in rows),
             )
             sparkline_width = (
-                None
-                if content_width is None
-                else max(1, content_width - key_width - fixed_width)
+                None if content_width is None else max(1, content_width - key_width - fixed_width)
             )
             sparkline = _sparkline(history, width=sparkline_width)
-            chart_line = (
-                f"min {min(history):.4f}  {sparkline}  max {max(history):.4f}"
-            )
+            chart_line = f"min {min(history):.4f}  {sparkline}  max {max(history):.4f}"
             chart = Text(chart_line, style="green")
         return Panel(
             _key_value_grid((*rows, ("Objective history", chart))),
@@ -3162,7 +3117,8 @@ class InteractiveDashboardSink:
                 "  ←/→ previous/next generation\n"
                 "  Tab/Shift+Tab detail tab\n\n"
                 "Actions\n"
-                "  q safe interrupt        p pause/resume scheduling\n"
+                "  q stop after active stages; q again interrupts immediately\n"
+                "                          p pause/resume scheduling\n"
                 "  r confirmed retryable slot\n"
                 "  i phase/state icons  c config  l logs  t top  / search  h help\n\n"
                 "Panel copy\n"
@@ -3186,10 +3142,14 @@ class InteractiveDashboardSink:
             )
         if self.state.retry_confirmation:
             return Text("Retry selected slot? [y/N]".ljust(width), style="reverse")
+        quit_label = "[q] interrupt" if self.state.experiment_state == "stopping" else "[q] stop"
+        compact_quit_label = (
+            "[q]interrupt" if self.state.experiment_state == "stopping" else "[q]stop"
+        )
         labels = (
             (
                 "[1–8] copy",
-                "[q] interrupt",
+                quit_label,
                 "[p] pause/resume",
                 "[←/→] gen",
                 "[i] icons/text",
@@ -3203,7 +3163,7 @@ class InteractiveDashboardSink:
             if width >= 110
             else (
                 "[1–8] copy",
-                "[q]interrupt",
+                compact_quit_label,
                 "[p]pause",
                 "[←/→]gen",
                 "[i]icons",
@@ -3532,8 +3492,7 @@ def _sparkline(values: Sequence[float], *, width: int | None = None) -> str:
             (values[-1],)
             if width == 1
             else tuple(
-                values[round(index * (len(values) - 1) / (width - 1))]
-                for index in range(width)
+                values[round(index * (len(values) - 1) / (width - 1))] for index in range(width)
             )
         )
     blocks = "▁▂▃▄▅▆▇█"

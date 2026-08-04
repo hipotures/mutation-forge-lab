@@ -12,6 +12,7 @@ from typing import Any, Protocol, cast
 
 from .checkpoints import CheckpointStore
 from .config import ExperimentConfig, load_experiment_config
+from .control import ExperimentControl
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import (
     LockError,
@@ -73,12 +74,14 @@ class ExperimentService:
         event_sinks: Sequence[Any] = (),
         observer: Any | None = None,
         profiling: bool | None = None,
+        control: ExperimentControl | None = None,
     ) -> None:
         self.adapter = adapter or NativeExperimentAdapter()
         self.event_sinks = list(event_sinks)
         if observer is not None:
             self.event_sinks.append(CallbackEventSink(observer))
         self.profiling = profiling
+        self.control = control
 
     def run(self, config_path: str | Path = "experiment.toml") -> dict[str, Any]:
         config = load_experiment_config(config_path)
@@ -378,9 +381,7 @@ class ExperimentService:
                         state=outcome["state"],
                         stop_reason="hourly_token_limit",
                         checkpoint=session.ending_checkpoint,
-                        **state.hourly_token_usage(
-                            config.run.max_total_tokens_per_hour
-                        ),
+                        **state.hourly_token_usage(config.run.max_total_tokens_per_hour),
                     )
                 hub.emit(
                     "budget_boundary_reached"
@@ -403,9 +404,7 @@ class ExperimentService:
                     evaluations_completed=session.evaluations_completed,
                     token_usage_delta=session_summary.get("token_usage_delta", 0),
                     cumulative_tokens=session_summary.get("cumulative_tokens", 0),
-                    **state.hourly_token_usage(
-                        config.run.max_total_tokens_per_hour
-                    ),
+                    **state.hourly_token_usage(config.run.max_total_tokens_per_hour),
                     recovered_work=outcome.get("recovered_work"),
                 )
                 layout.reconcile_artifact_manifest()
@@ -485,8 +484,7 @@ class ExperimentService:
             db_checkpoint.get("checkpoint_id") != file_checkpoint.get("checkpoint_id")
             or db_checkpoint.get("sha256") != file_checkpoint.get("checkpoint_sha256")
             or Path(str(db_checkpoint.get("path", ""))).resolve()
-            != checkpoints.root
-            / f"checkpoint-{int(file_checkpoint['sequence']):012d}.json.gz"
+            != checkpoints.root / f"checkpoint-{int(file_checkpoint['sequence']):012d}.json.gz"
         ):
             raise StateError("state database checkpoint digest does not match checkpoint chain")
 
@@ -505,9 +503,7 @@ class ExperimentService:
         import hashlib
 
         if hashlib.sha256(stored).hexdigest() != lock.get("source_config_sha256"):
-            raise LockError(
-                "immutable root experiment.toml does not match experiment.lock.json.gz"
-            )
+            raise LockError("immutable root experiment.toml does not match experiment.lock.json.gz")
 
     def _invoke_adapter(
         self,
@@ -537,6 +533,8 @@ class ExperimentService:
             kwargs["profiling"] = profiling
         if "effective_max_model_turns" in parameters:
             kwargs["effective_max_model_turns"] = effective_max_model_turns
+        if "control" in parameters:
+            kwargs["control"] = self.control
         if "budget" in parameters:
             kwargs["budget"] = SessionBudget(config.run.wall_seconds, session.monotonic_started)
             return run(
@@ -603,9 +601,7 @@ class ExperimentService:
             "counterexample_verified",
             "operator_final_stop",
         }:
-            raise StateError(
-                "COMPLETED requires counterexample_verified or operator_final_stop"
-            )
+            raise StateError("COMPLETED requires counterexample_verified or operator_final_stop")
         return outcome
 
     @staticmethod
@@ -687,12 +683,14 @@ def run_experiment(
     event_sinks: Sequence[Any] = (),
     observer: Any | None = None,
     profiling: bool | None = None,
+    control: ExperimentControl | None = None,
 ) -> dict[str, Any]:
     return ExperimentService(
         adapter=adapter,
         event_sinks=event_sinks,
         observer=observer,
         profiling=profiling,
+        control=control,
     ).run(config_path)
 
 

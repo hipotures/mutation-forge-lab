@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from mutation_forge.experiment.config import (
     scheduled_order_domain,
     validate_experiment_id,
 )
+from mutation_forge.experiment.control import ExperimentControl
 from mutation_forge.experiment.generation import GenerationConfig, GenerationCoordinator
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
@@ -90,10 +92,7 @@ def _write_config(tmp_path: Path, **kwargs: Any) -> Path:
 def _adaptive_config() -> str:
     return _config().replace(
         'order_schedule = "static"\norders = [10]',
-        'order_schedule = "adaptive"\n'
-        "min_order = 22\n"
-        "max_order = 128\n"
-        "orders_per_generation = 5",
+        'order_schedule = "adaptive"\nmin_order = 22\nmax_order = 128\norders_per_generation = 5',
     )
 
 
@@ -188,9 +187,7 @@ def test_config_accepts_explicit_unbounded_hourly_token_limit(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "true", '"infinite"'])
-def test_config_rejects_invalid_hourly_token_limit(
-    tmp_path: Path, value: str
-) -> None:
+def test_config_rejects_invalid_hourly_token_limit(tmp_path: Path, value: str) -> None:
     path = _write_config(tmp_path)
     path.write_text(
         _config().replace(
@@ -663,6 +660,109 @@ def test_generation_hourly_token_boundary_stops_before_provider(
     assert result.summary["stop_reason"] == "hourly_token_limit"
 
 
+def test_experiment_control_arms_once() -> None:
+    control = ExperimentControl()
+
+    assert control.request_graceful_stop()
+    assert control.graceful_stop_requested
+    assert not control.request_graceful_stop()
+
+
+def test_generation_graceful_stop_finishes_active_provider_only(
+    tmp_path: Path,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    control = ExperimentControl()
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, _request: object) -> dict[str, object]:
+            self.calls += 1
+            started.set()
+            assert release.wait(2)
+            return {
+                "response": {
+                    "schema_version": "stage4.generated_policy.v1",
+                    "source": "def priority(ctx, proposal):\n    return 1.0\n",
+                }
+            }
+
+    provider = Provider()
+    result_box: list[Any] = []
+    coordinator = GenerationCoordinator(
+        provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=3,
+            concurrency=1,
+            max_repairs=0,
+            checkpoint_path=tmp_path / "generation.json.gz",
+        ),
+        stop_requested=lambda: control.graceful_stop_requested,
+        budget_exhausted=lambda: "operator_stop" if control.graceful_stop_requested else None,
+        candidate_callback=lambda *_args: pytest.fail(
+            "evaluation must not start after a graceful stop"
+        ),
+    )
+    worker = threading.Thread(target=lambda: result_box.append(coordinator.run()))
+    worker.start()
+    assert started.wait(2)
+
+    assert control.request_graceful_stop()
+    release.set()
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert provider.calls == 1
+    result = result_box[0]
+    assert result.status == "budget_exhausted"
+    assert result.summary["stop_reason"] == "operator_stop"
+
+
+def test_generation_graceful_stop_finishes_validation_without_starting_probe(
+    tmp_path: Path,
+) -> None:
+    control = ExperimentControl()
+
+    class Provider:
+        def generate(self, _request: object) -> dict[str, object]:
+            return {
+                "response": {
+                    "schema_version": "stage4.generated_policy.v1",
+                    "source": "def priority(ctx, proposal):\n    return 1.0\n",
+                }
+            }
+
+    def observe(event_type: str, _payload: object) -> None:
+        if event_type == "validation_completed":
+            control.request_graceful_stop()
+
+    result = GenerationCoordinator(
+        Provider(),
+        config=GenerationConfig(
+            generations=1,
+            population_size=1,
+            concurrency=1,
+            max_repairs=0,
+            checkpoint_path=tmp_path / "generation.json.gz",
+        ),
+        stop_requested=lambda: control.graceful_stop_requested,
+        budget_exhausted=lambda: (
+            "operator_stop" if control.graceful_stop_requested else None
+        ),
+        behavior_evaluator=lambda *_args: pytest.fail(
+            "probe must not start after validation finishes"
+        ),
+        observer=observe,
+    ).run()
+
+    assert result.status == "budget_exhausted"
+    assert result.summary["stop_reason"] == "operator_stop"
+
+
 def test_active_owner_and_stale_recovery(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
     service = ExperimentService(adapter=NullExperimentAdapter())
@@ -825,8 +925,7 @@ def test_hourly_token_usage_is_rolling_and_idempotent(
         assert state.record_provider_turn(**values)
         assert not state.record_provider_turn(**values)
         charges = state.connection.execute(
-            "SELECT payload_json FROM events "
-            "WHERE event_type='model_token_charge_recorded'"
+            "SELECT payload_json FROM events WHERE event_type='model_token_charge_recorded'"
         ).fetchall()
         assert len(charges) == 1
         charge = json.loads(str(charges[0]["payload_json"]))
@@ -835,15 +934,14 @@ def test_hourly_token_usage_is_rolling_and_idempotent(
         at_limit = state.hourly_token_usage(1_000_000, now=started)
         assert at_limit["hourly_tokens_used"] == 1_000_000
         assert at_limit["hourly_limit_reached"] is True
-        assert at_limit["hourly_retry_after"] == (
-            started + timedelta(hours=1)
-        ).isoformat()
+        assert at_limit["hourly_retry_after"] == (started + timedelta(hours=1)).isoformat()
         expired = state.hourly_token_usage(
             1_000_000,
             now=started + timedelta(hours=1, microseconds=1),
         )
         assert expired["hourly_tokens_used"] == 0
         assert expired["hourly_limit_reached"] is False
+
 
 def test_status_is_versioned_and_read_only(tmp_path: Path) -> None:
     path = _write_config(tmp_path)

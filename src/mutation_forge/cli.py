@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import _thread
 import argparse
 import importlib
 import json
@@ -25,10 +26,12 @@ from mutation_forge.evaluation.benchmark import load_summary
 from mutation_forge.evaluation.dataset import build_dataset
 from mutation_forge.events import EventSink, JsonlSink
 from mutation_forge.experiment.config import load_experiment_config
+from mutation_forge.experiment.control import ExperimentControl
 from mutation_forge.experiment.service import final_stop_experiment, run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
 from mutation_forge.output.interactive_dashboard import (
+    DashboardCapabilities,
     DashboardState,
     InteractiveDashboardSink,
     load_persisted_dashboard_state,
@@ -279,6 +282,7 @@ def _experiment_run(
     until_complete: bool = False,
 ) -> int:
     config = load_experiment_config(config_path)
+    control = ExperimentControl()
     machine_output = json_output or config.run.output == "json"
     sinks: list[EventSink]
     if machine_output:
@@ -333,6 +337,11 @@ def _experiment_run(
                     locked_config=locked_config,
                     initial_state=persisted_state,
                     persisted_loader=persisted_loader,
+                    capabilities=DashboardCapabilities(
+                        quit=lambda: (
+                            None if control.request_graceful_stop() else _thread.interrupt_main()
+                        )
+                    ),
                 )
             ]
         else:
@@ -346,6 +355,7 @@ def _experiment_run(
                     config_path,
                     event_sinks=sinks,
                     profiling=profiling,
+                    control=control,
                 )
                 if not (
                     until_complete

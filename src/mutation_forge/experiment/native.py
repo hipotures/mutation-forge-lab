@@ -35,6 +35,7 @@ from .artifacts import (
     is_generated_policy,
 )
 from .config import ExperimentConfig, orders_for_generation, scheduled_order_domain
+from .control import ExperimentControl
 from .evaluation import DEFAULT_WITNESS_CAP, evaluate_candidate
 from .evaluation import SCHEMA_VERSION as EVALUATION_SCHEMA_VERSION
 from .generation import (
@@ -70,6 +71,25 @@ class _NativeSessionBudgetExpired(KeyboardInterrupt):
 
 class _NativeHourlyTokenLimit(KeyboardInterrupt):
     """Internal rolling-hour token boundary."""
+
+
+class _NativeOperatorStop(Exception):
+    """A graceful operator stop reached a stage boundary."""
+
+
+def _abort_evaluation_pool(executor: ProcessPoolExecutor) -> None:
+    """Cancel queued evaluations and terminate active workers."""
+
+    processes = tuple(getattr(executor, "_processes", {}).values())
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    for process in processes:
+        process.join(timeout=0.5)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=0.5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,8 +293,7 @@ def _load_assets() -> tuple[
             version = asset.get("schema_version")
         if version != expected:
             raise NativeExperimentError(
-                f"native {name} asset has unsupported schema "
-                f"{version!r}; expected {expected}"
+                f"native {name} asset has unsupported schema {version!r}; expected {expected}"
             )
     return (
         system,
@@ -512,10 +531,7 @@ def _resume_parent_assignments(
             payload = json.loads(str(row["payload_json"]))
         except json.JSONDecodeError:
             continue
-        if (
-            not isinstance(payload, Mapping)
-            or payload.get("generation") != target_generation - 1
-        ):
+        if not isinstance(payload, Mapping) or payload.get("generation") != target_generation - 1:
             continue
         selected = payload.get("selected_parents")
         if not isinstance(selected, Mapping):
@@ -525,9 +541,7 @@ def _resume_parent_assignments(
             for slot, parent in selected.items()
             if isinstance(slot, str) and isinstance(parent, str)
         }
-        matches = sum(
-            selection.get(slot) == parent for slot, parent in retained_parents.items()
-        )
+        matches = sum(selection.get(slot) == parent for slot, parent in retained_parents.items())
         if matches > best_match:
             best_match = matches
             best_selection = selection
@@ -611,11 +625,7 @@ class _NativeProvider:
             self._phase(request),
         )
         archived = tuple(
-            sorted(
-                path
-                for path in base.parent.glob(f"{base.name}.attempt-*")
-                if path.is_dir()
-            )
+            sorted(path for path in base.parent.glob(f"{base.name}.attempt-*") if path.is_dir())
         )
         return (base, *archived)
 
@@ -651,12 +661,9 @@ class _NativeProvider:
                 isinstance(candidate_manifest, Mapping)
                 and candidate_manifest.get("request_idempotency_key") == key
             ):
-                exact_is_terminal = (
-                    candidate_manifest.get("artifact_complete") is True
-                    and (
-                        candidate_manifest.get("terminal_status") == "completed"
-                        or candidate_manifest.get("charged") is True
-                    )
+                exact_is_terminal = candidate_manifest.get("artifact_complete") is True and (
+                    candidate_manifest.get("terminal_status") == "completed"
+                    or candidate_manifest.get("charged") is True
                 )
                 if exact_is_terminal:
                     directory = candidate_directory
@@ -724,9 +731,7 @@ class _NativeProvider:
                     else {}
                 )
             )
-            usage = (
-                read_json(usage_path) if usage_path.is_file() else {}
-            )
+            usage = read_json(usage_path) if usage_path.is_file() else {}
             retained_evidence: dict[str, Any] = {}
             for key_name, filename in (
                 ("validation", "validation.json.gz"),
@@ -805,9 +810,7 @@ class _NativeProvider:
         archived = directory.with_name(f"{directory.name}.attempt-{suffix}")
         attempt = 1
         while archived.exists():
-            archived = directory.with_name(
-                f"{directory.name}.attempt-{suffix}-{attempt:02d}"
-            )
+            archived = directory.with_name(f"{directory.name}.attempt-{suffix}-{attempt:02d}")
             attempt += 1
         os.replace(directory, archived)
 
@@ -930,11 +933,9 @@ class _NativeProvider:
         retained_manifest: Any = None
         if manifest_path.is_file():
             retained_manifest = read_json(manifest_path)
-            if (
-                not isinstance(retained_manifest, Mapping)
-                or retained_manifest.get("request_idempotency_key")
-                != self._key(request)
-            ):
+            if not isinstance(retained_manifest, Mapping) or retained_manifest.get(
+                "request_idempotency_key"
+            ) != self._key(request):
                 self._archive_conflicting_turn(directory, self._key(request))
                 retained_manifest = None
         if directory.exists() and (
@@ -1428,6 +1429,7 @@ class NativeExperimentAdapter:
         event_callback: Any | None = None,
         profiling: bool | None = None,
         effective_max_model_turns: int | None = None,
+        control: ExperimentControl | None = None,
     ) -> Mapping[str, Any]:
         (
             system_prompt,
@@ -1577,9 +1579,7 @@ class NativeExperimentAdapter:
                 "target": "erdos_gyarfas",
                 "target_forbidden_lengths_by_order": (target_forbidden_lengths_by_order),
                 "target_feature_limits_by_order": {
-                    str(order): FeatureLimits(
-                        forbidden_lengths=tuple(lengths)
-                    ).as_dict()
+                    str(order): FeatureLimits(forbidden_lengths=tuple(lengths)).as_dict()
                     for order, lengths in target_forbidden_lengths_by_order.items()
                 },
                 "resources": {
@@ -1813,10 +1813,7 @@ class NativeExperimentAdapter:
                 historical_candidate_id
                 and isinstance(historical_metric, (int, float))
                 and not isinstance(historical_metric, bool)
-                and (
-                    best_objective is None
-                    or float(historical_metric) > best_objective
-                )
+                and (best_objective is None or float(historical_metric) > best_objective)
             ):
                 best_objective = float(historical_metric)
                 best_candidate_id = historical_candidate_id
@@ -1828,10 +1825,7 @@ class NativeExperimentAdapter:
             """Recover a completed evaluation written before the DB commit."""
 
             development_path = (
-                layout.artifacts
-                / "evaluations"
-                / "development"
-                / f"{candidate_id}.json.gz"
+                layout.artifacts / "evaluations" / "development" / f"{candidate_id}.json.gz"
             )
             if not development_path.is_file():
                 return None
@@ -1848,8 +1842,7 @@ class NativeExperimentAdapter:
                 or development.get("candidate_id") != candidate_id
                 or not isinstance(source_identity, Mapping)
                 or source_identity.get("source_sha256") != candidate.source_sha256
-                or source_identity.get("normalized_ast_sha256")
-                != candidate.normalized_ast_sha256
+                or source_identity.get("normalized_ast_sha256") != candidate.normalized_ast_sha256
             ):
                 return None
             observed_settings = development.get("settings")
@@ -1880,12 +1873,7 @@ class NativeExperimentAdapter:
             if not config.evaluation.replay:
                 result["replay"] = {"enabled": False, "exact": None}
                 return result
-            replay_path = (
-                layout.artifacts
-                / "evaluations"
-                / "replay"
-                / f"{candidate_id}.json.gz"
-            )
+            replay_path = layout.artifacts / "evaluations" / "replay" / f"{candidate_id}.json.gz"
             if not replay_path.is_file():
                 return None
             try:
@@ -1900,8 +1888,7 @@ class NativeExperimentAdapter:
                 or replay.get("candidate_id") != candidate_id
                 or not isinstance(replay_identity, Mapping)
                 or replay_identity.get("source_sha256") != candidate.source_sha256
-                or replay_identity.get("normalized_ast_sha256")
-                != candidate.normalized_ast_sha256
+                or replay_identity.get("normalized_ast_sha256") != candidate.normalized_ast_sha256
             ):
                 return None
             result["replay"] = {
@@ -2297,6 +2284,7 @@ class NativeExperimentAdapter:
                     profiling_enabled,
                     send_progress,
                 )
+
                 def evaluation_finished(done: Any) -> None:
                     try:
                         process_result, evaluation_elapsed = done.result()
@@ -2332,7 +2320,11 @@ class NativeExperimentAdapter:
             candidate: Candidate,
             _result: SlotResult,
         ) -> None:
-            if evaluation_executor is None:
+            if (
+                evaluation_executor is None
+                or control is not None
+                and control.graceful_stop_requested
+            ):
                 return
             program_id = f"g{candidate.generation:04d}-{candidate.slot}"
             identity = f"{program_id}:development"
@@ -2547,6 +2539,8 @@ class NativeExperimentAdapter:
                         },
                     )
                 )
+            if control is not None and control.graceful_stop_requested:
+                raise _NativeOperatorStop
             selected = self._select_parents(
                 generation,
                 selection_candidates or candidates,
@@ -2557,6 +2551,7 @@ class NativeExperimentAdapter:
             )
             return selected
 
+        immediate_interrupt = False
         try:
             engine = self.engine
             if engine is not None:
@@ -2580,6 +2575,8 @@ class NativeExperimentAdapter:
                     engine_kwargs["profiling"] = profiling_enabled
                 if "max_model_turns" in engine_parameters:
                     engine_kwargs["max_model_turns"] = model_turn_limit
+                if "control" in engine_parameters:
+                    engine_kwargs["control"] = control
                 result = engine(wrapped, **engine_kwargs)
             else:
                 generation_config = GenerationConfig(
@@ -2597,8 +2594,7 @@ class NativeExperimentAdapter:
                     repair_prompt=repair_prompt,
                     sandbox_limits=SandboxLimits(),
                     scientific_contract=True,
-                    checkpoint_path=layout.artifacts
-                    / "native-generation-checkpoint.json.gz",
+                    checkpoint_path=layout.artifacts / "native-generation-checkpoint.json.gz",
                     turn_timeout_seconds=config.turn_timeout_seconds,
                     infrastructure_retry_backoff_seconds=1.0,
                 )
@@ -2624,8 +2620,13 @@ class NativeExperimentAdapter:
                         lambda request, _cached: wrapped.has_retained(request.as_dict())
                     ),
                     retry_infrastructure=True,
+                    stop_requested=(
+                        (lambda: control.graceful_stop_requested) if control is not None else None
+                    ),
                     budget_exhausted=lambda: (
-                        "wall_seconds"
+                        "operator_stop"
+                        if control is not None and control.graceful_stop_requested
+                        else "wall_seconds"
                         if session.budget_exhausted()
                         else "hourly_token_limit"
                         if wrapped._hourly_limit_reached()
@@ -2684,9 +2685,34 @@ class NativeExperimentAdapter:
                     **state.hourly_token_usage(config.run.max_total_tokens_per_hour),
                 },
             }
+        except _NativeOperatorStop:
+            generation = 0
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
+            try:
+                checkpoint = read_json(checkpoint_path)
+                if isinstance(checkpoint, Mapping):
+                    value = checkpoint.get("next_generation", checkpoint.get("generation", 0))
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        generation = value
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+            result = {
+                "status": "budget_exhausted",
+                "generation": generation,
+                "summary": {
+                    "status": "budget_exhausted",
+                    "stop_reason": "operator_stop",
+                },
+            }
+        except KeyboardInterrupt:
+            immediate_interrupt = True
+            raise
         finally:
             if evaluation_executor is not None:
-                evaluation_executor.shutdown(wait=True, cancel_futures=True)
+                if immediate_interrupt:
+                    _abort_evaluation_pool(evaluation_executor)
+                else:
+                    evaluation_executor.shutdown(wait=True, cancel_futures=True)
             for progress_connection in evaluation_progress_connections:
                 with contextlib.suppress(OSError):
                     progress_connection.close()
@@ -2733,6 +2759,9 @@ class NativeExperimentAdapter:
             elif result_stop_reason == "max_model_turns":
                 outcome_state = "exhausted"
                 outcome_stop_reason = "max_model_turns"
+            elif result_stop_reason == "operator_stop":
+                outcome_state = "interrupted"
+                outcome_stop_reason = "operator_stop"
             else:
                 outcome_state = "idle"
                 outcome_stop_reason = (

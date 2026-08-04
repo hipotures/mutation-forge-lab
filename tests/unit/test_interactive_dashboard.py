@@ -826,7 +826,7 @@ def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> 
     assert unchanged == state
 
 
-def test_safe_interrupt_marks_active_slots_as_stopping() -> None:
+def test_q_arms_graceful_stop_then_requests_immediate_interrupt() -> None:
     state = DashboardState(
         experiment_state="running",
         generation=1,
@@ -846,8 +846,14 @@ def test_safe_interrupt_marks_active_slots_as_stopping() -> None:
 
     assert action is not None and action.kind == "quit"
     assert state.experiment_state == "stopping"
-    assert state.generations[0].slots[0].state == "stopping"
+    assert state.generations[0].slots[0].state == "evaluating"
     assert state.generations[0].slots[1].state == "accepted"
+    assert "press q again" in state.status_message
+
+    state, action = reduce_dashboard_key(state, "q")
+
+    assert action is not None and action.kind == "quit"
+    assert state.status_message == "Immediate interrupt requested"
 
 
 def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_path: Path) -> None:
@@ -1291,9 +1297,7 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
     assert "━" * 12 in rendered
     assert "—/—" not in rendered
     content_lines = [
-        line
-        for line in rendered.splitlines()
-        if "Slots Complete" in line or "27.5k/1.0M" in line
+        line for line in rendered.splitlines() if "Slots Complete" in line or "27.5k/1.0M" in line
     ]
     assert content_lines
     assert all(line[1:-1].count("│") == 3 for line in content_lines)
@@ -1559,6 +1563,9 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     footer = sink._footer(150)
     assert "[←/→] gen" in footer.plain
     assert "[n/N]" not in footer.plain
+    assert "[q] stop" in footer.plain
+    sink.state = replace(sink.state, experiment_state="stopping")
+    assert "[q] interrupt" in sink._footer(150).plain
     top_span = next(
         span for span in footer.spans if footer.plain[span.start : span.end] == "[t] top"
     )
@@ -1701,9 +1708,7 @@ def test_quick_view_sparkline_stays_on_one_adaptive_line(width: int) -> None:
         force_terminal=False,
         color_system=None,
     ).print(sink.render())
-    objective_lines = [
-        line for line in output.getvalue().splitlines() if "min 0.2222" in line
-    ]
+    objective_lines = [line for line in output.getvalue().splitlines() if "min 0.2222" in line]
 
     assert len(objective_lines) == 1
     assert "max 0.5556" in objective_lines[0]
@@ -1802,6 +1807,50 @@ def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
     cli.RichLiveSink.assert_not_called()
     cli.InteractiveDashboardSink.assert_called_once()
     new_sink.close.assert_called_once()
+
+
+def test_dashboard_q_stops_gracefully_then_interrupts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TTY(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    config = SimpleNamespace(
+        run=SimpleNamespace(output="rich"),
+        config_path=Path("experiment.toml"),
+        resolved_dict=lambda: {"exp_id": "dashboard-run"},
+        immutable_config_sha256=lambda: "abc123",
+    )
+    sink = Mock()
+    interrupt = Mock()
+
+    def fake_run(*_args: object, control: object, **_kwargs: object) -> dict[str, object]:
+        capabilities = cli.InteractiveDashboardSink.call_args.kwargs["capabilities"]
+        capabilities.quit()
+        assert control.graceful_stop_requested
+        interrupt.assert_not_called()
+        capabilities.quit()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(cli, "load_experiment_config", lambda _path: config)
+    monkeypatch.setattr(cli, "InteractiveDashboardSink", Mock(return_value=sink))
+    monkeypatch.setattr(cli, "run_experiment", fake_run)
+    monkeypatch.setattr(cli, "experiment_status", lambda _path: {"state": "completed"})
+    monkeypatch.setattr(cli, "render_status", lambda _summary: "completed")
+    monkeypatch.setattr(cli._thread, "interrupt_main", interrupt)
+    monkeypatch.setattr(cli.sys, "stdout", _TTY())
+
+    assert (
+        cli._experiment_run(
+            Path("experiment.toml"),
+            json_output=False,
+            dashboard=True,
+        )
+        == 0
+    )
+    interrupt.assert_called_once_with()
+    sink.close.assert_called_once()
 
 
 def test_until_complete_continues_after_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:

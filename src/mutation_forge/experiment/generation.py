@@ -79,6 +79,10 @@ class _GeneratedPolicyError(ValueError):
         super().__init__(message)
 
 
+class _GracefulStopBoundary(Exception):
+    """Stop a slot before it starts its next stage."""
+
+
 def _parse_generated_policy(value: object) -> _GeneratedPolicy:
     if isinstance(value, (str, bytes, bytearray)):
         try:
@@ -686,9 +690,9 @@ class GenerationCoordinator:
         archive_context: Any = "",
         retry_infrastructure: bool = False,
         budget_exhausted: Callable[[], bool | str | None] | None = None,
+        stop_requested: Callable[[], bool] | None = None,
         behavior_evaluator: Any = None,
-        resume_slot_validator: Callable[[GenerationRequest, Mapping[str, Any]], bool]
-        | None = None,
+        resume_slot_validator: Callable[[GenerationRequest, Mapping[str, Any]], bool] | None = None,
         observer: Any = None,
         event_callback: Any = None,
     ) -> None:
@@ -728,8 +732,17 @@ class GenerationCoordinator:
         )
         self.resume_slot_validator = resume_slot_validator
         self.budget_exhausted = budget_exhausted
+        self.stop_requested = stop_requested
         self.observer = observer if observer is not None else event_callback
         self._checkpoint_file = self.config.checkpoint_path
+
+    def _graceful_stop_requested(self) -> bool:
+        return bool(self.stop_requested is not None and self.stop_requested())
+
+    def _invoke_before_stop(self, request: GenerationRequest) -> ProviderResult:
+        if self._graceful_stop_requested():
+            raise _GracefulStopBoundary
+        return self._invoke(request)
 
     def _notify_candidate(self, generation: int, candidate: Candidate, result: SlotResult) -> None:
         """Notify a streaming consumer as soon as a candidate is accepted.
@@ -1169,6 +1182,8 @@ class GenerationCoordinator:
                 diagnostics=validation_diagnostics,
                 error=", ".join(validation_codes) if validation_codes else None,
             )
+            if validation.valid and self._graceful_stop_requested():
+                raise _GracefulStopBoundary
             if not validation.valid:
                 errors.extend(
                     {**item.as_dict(), "repair_class": "ast"} for item in validation.errors
@@ -1621,9 +1636,10 @@ class GenerationCoordinator:
                 stored_request = value.get("initial_request")
                 if not isinstance(stored_request, Mapping):
                     stored_request = value.get("request")
-                if isinstance(stored_request, Mapping) and str(
-                    stored_request.get("phase", "initial")
-                ) != request.phase:
+                if (
+                    isinstance(stored_request, Mapping)
+                    and str(stored_request.get("phase", "initial")) != request.phase
+                ):
                     continue
                 matches.append(value)
             if not matches:
@@ -1815,10 +1831,7 @@ class GenerationCoordinator:
                         population_size=self.config.slots,
                     )
                     cached = cached_for_request(request)
-                    if (
-                        isinstance(cached, Mapping)
-                        and cached.get("status") == "repair_pending"
-                    ):
+                    if isinstance(cached, Mapping) and cached.get("status") == "repair_pending":
                         retained_initial = cached.get("initial")
                         if not isinstance(retained_initial, Mapping):
                             retained_initial = cached.get("raw_result")
@@ -1893,11 +1906,32 @@ class GenerationCoordinator:
                         )
                         continue
                     reserve_model_turn()
-                    futures[pool.submit(self._invoke, request)] = (slot, request, 0)
+                    futures[pool.submit(self._invoke_before_stop, request)] = (
+                        slot,
+                        request,
+                        0,
+                    )
                 while futures:
                     future = next(as_completed(tuple(futures)))
                     slot, request, retry_count = futures.pop(future)
-                    raw = future.result()
+                    try:
+                        raw = future.result()
+                    except _GracefulStopBoundary:
+                        release_reserved_turn()
+                        results[slot] = SlotResult(
+                            generation=generation,
+                            slot=slot,
+                            parent_id=request.parent_id,
+                            status="budget_exhausted",
+                            request=request.as_dict(),
+                            initial_request=request.as_dict(),
+                            remaining_repairs=self.config.max_repairs,
+                        )
+                        slots_state[request.idempotency_key] = results[slot].as_dict()
+                        self._save(state)
+                        stopped = True
+                        stopped_reason = "operator_stop"
+                        continue
                     if raw.retained:
                         release_reserved_turn()
                         recovered += 1
@@ -1921,7 +1955,7 @@ class GenerationCoordinator:
                             exhausted_reason = budget_reason()
                         if exhausted_reason is None:
                             reserve_model_turn()
-                            futures[pool.submit(self._invoke, request)] = (
+                            futures[pool.submit(self._invoke_before_stop, request)] = (
                                 slot,
                                 request,
                                 retry_count + 1,
@@ -1966,7 +2000,42 @@ class GenerationCoordinator:
                             completed_turns=turns,
                         )
                         continue
-                    candidate, diagnostics = self._assess(request, raw)
+                    if self._graceful_stop_requested():
+                        results[slot] = SlotResult(
+                            generation=generation,
+                            slot=slot,
+                            parent_id=request.parent_id,
+                            status="budget_exhausted",
+                            initial=raw.as_dict(),
+                            request=request.as_dict(),
+                            raw_result=raw.as_dict(),
+                            initial_request=request.as_dict(),
+                            remaining_repairs=self.config.max_repairs,
+                        )
+                        slots_state[request.idempotency_key] = results[slot].as_dict()
+                        self._save(state)
+                        stopped = True
+                        stopped_reason = "operator_stop"
+                        continue
+                    try:
+                        candidate, diagnostics = self._assess(request, raw)
+                    except _GracefulStopBoundary:
+                        results[slot] = SlotResult(
+                            generation=generation,
+                            slot=slot,
+                            parent_id=request.parent_id,
+                            status="budget_exhausted",
+                            initial=raw.as_dict(),
+                            request=request.as_dict(),
+                            raw_result=raw.as_dict(),
+                            initial_request=request.as_dict(),
+                            remaining_repairs=self.config.max_repairs,
+                        )
+                        slots_state[request.idempotency_key] = results[slot].as_dict()
+                        self._save(state)
+                        stopped = True
+                        stopped_reason = "operator_stop"
+                        continue
                     results[slot] = SlotResult(
                         generation=generation,
                         slot=slot,
@@ -1983,7 +2052,10 @@ class GenerationCoordinator:
                     )
                     slots_state[request.idempotency_key] = results[slot].as_dict()
                     self._save(state)
-                    if candidate is not None:
+                    if self._graceful_stop_requested():
+                        stopped = True
+                        stopped_reason = "operator_stop"
+                    elif candidate is not None:
                         self._notify_candidate(generation, candidate, results[slot])
                     self._emit(
                         "slot_queued",
@@ -2129,6 +2201,21 @@ class GenerationCoordinator:
                             # Uncharged failures are safe to retry and do not
                             # consume the model-turn budget.
                             release_reserved_turn()
+                        if self._graceful_stop_requested():
+                            deferred = replace(
+                                item,
+                                status="repair_running",
+                                repair=raw.as_dict(),
+                                raw_result=raw.as_dict(),
+                            )
+                            for state_key in (initial_key, *repair_keys):
+                                slots_state[state_key] = deferred.as_dict()
+                            self._save(state)
+                            results[slot] = deferred
+                            item = deferred
+                            stopped = True
+                            stopped_reason = "operator_stop"
+                            break
                         retry_count = 0
                         retry_deferred = False
                         while (
@@ -2219,7 +2306,23 @@ class GenerationCoordinator:
                                 retry_limit=self.config.infrastructure_retry_limit,
                             )
                             break
-                        candidate, diagnostics = self._assess(req, raw, repair=True)
+                        try:
+                            candidate, diagnostics = self._assess(req, raw, repair=True)
+                        except _GracefulStopBoundary:
+                            deferred = replace(
+                                item,
+                                status="repair_running",
+                                repair=raw.as_dict(),
+                                raw_result=raw.as_dict(),
+                            )
+                            for state_key in (initial_key, *repair_keys):
+                                slots_state[state_key] = deferred.as_dict()
+                            self._save(state)
+                            results[slot] = deferred
+                            item = deferred
+                            stopped = True
+                            stopped_reason = "operator_stop"
+                            break
                         status = self._slot_status(
                             candidate,
                             diagnostics,
@@ -2266,7 +2369,10 @@ class GenerationCoordinator:
                     )
                     results[slot] = repaired
                     item = repaired
-                    if repaired.candidate is not None:
+                    if self._graceful_stop_requested():
+                        stopped = True
+                        stopped_reason = "operator_stop"
+                    elif repaired.candidate is not None:
                         self._notify_candidate(generation, repaired.candidate, repaired)
             ordered: list[SlotResult] = []
             generation_candidates: list[Candidate] = []
@@ -2344,7 +2450,8 @@ class GenerationCoordinator:
                 for item in ordered
             )
             if (
-                not generation_retryable
+                not stopped
+                and not generation_retryable
                 and self.selection_callback is not None
                 and str(generation) not in callbacks
             ):
