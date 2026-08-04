@@ -2453,17 +2453,26 @@ class InteractiveDashboardSink:
         )
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
-        values = (
+        configured_values = (
             (
                 "Generation",
                 _human_generation(self.state.generation),
                 self.state.generation_limit,
             ),
-            ("Slots Complete", self.state.completed_slots, self.state.population_size),
+            (
+                "Slots Complete",
+                self.state.completed_slots,
+                self.state.population_size,
+            ),
             (
                 "Model Turn Budget",
                 self.state.provider_turns_attempted,
                 self.state.max_model_turns,
+            ),
+            (
+                "Token Budget",
+                self.state.hourly_tokens_used,
+                self.state.hourly_token_limit,
             ),
             (
                 "Evaluation Progress",
@@ -2476,18 +2485,32 @@ class InteractiveDashboardSink:
                 int(self.state.wall_seconds) if self.state.wall_seconds is not None else None,
             ),
         )
+        values = tuple(item for item in configured_values if item[2] is not None)
+        horizontal = horizontal and (len(values) <= 4 or width >= 140)
         if horizontal:
+            column_width = max(1, (width - 4 - 2 * len(values)) // len(values))
             renderables = [
                 _progress_bar(
-                    label,
+                    _compact(label, column_width),
                     current,
                     total,
-                    width=8,
+                    width=max(
+                        1,
+                        min(
+                            8,
+                            column_width
+                            - len(
+                                f"{_compact_count(current)}/"
+                                f"{_compact_count(cast(int, total))}"
+                            )
+                            - 6,
+                        ),
+                    ),
                     stacked=True,
                 )
                 for label, current, total in values
             ]
-            grid = Table.grid(expand=True)
+            grid = Table.grid(expand=True, padding=(0, 1))
             for _ in renderables:
                 grid.add_column(ratio=1)
             grid.add_row(*renderables)
@@ -3348,7 +3371,7 @@ def _progress_bar(
 
 def _compact_count(value: int) -> str:
     if abs(value) >= 1_000_000:
-        return f"{value / 1_000_000:.2f}M"
+        return f"{value / 1_000_000:.1f}M"
     if abs(value) >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)

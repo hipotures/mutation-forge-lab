@@ -1180,7 +1180,7 @@ def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() ->
 
 
 @pytest.mark.parametrize("width", (110, 120, 140, 150))
-def test_progress_panel_uses_historical_five_column_layout(
+def test_progress_panel_uses_historical_layout_with_current_metrics(
     monkeypatch: pytest.MonkeyPatch,
     width: int,
 ) -> None:
@@ -1212,21 +1212,62 @@ def test_progress_panel_uses_historical_five_column_layout(
         color_system=None,
     ).print(sink._progress(width, horizontal=True))
     rendered = output.getvalue()
-    header = next(line for line in rendered.splitlines() if "Generation" in line)
-    assert "Slots Complete" in header
-    assert "Model Turn Budget" in header
-    assert "Evaluation Progress" in header
-    assert "Wall-time Budget" in header
-    assert "Hourly tokens" not in rendered
-    progress_line = next(line for line in rendered.splitlines() if line.count("%") == 5)
-    assert "2/4" in progress_line
-    assert "8/8" in progress_line
-    assert "49/64" in progress_line
-    assert "85/128" in progress_line
-    assert "292/7.2k" in progress_line
-    assert header[1:-1].count("│") == 0
-    assert progress_line[1:-1].count("│") == 0
+    for label in (
+        "Generation",
+        "Slots Complete",
+        "Model Turn Budget",
+        "Token Budget",
+        "Evaluation Progress",
+        "Wall-time Budget",
+    ):
+        assert label in rendered
+    for ratio in ("2/4", "8/8", "49/64", "84.2k/1.0M", "85/128", "292/7.2k"):
+        assert ratio in rendered
+    assert sum(line.count("%") for line in rendered.splitlines()) == 6
     assert all(len(line) <= width for line in rendered.splitlines())
+    sink.close()
+
+
+def test_progress_panel_omits_metrics_without_real_progress_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 392.0)
+    sink = InteractiveDashboardSink(
+        console=Console(
+            file=io.StringIO(),
+            width=150,
+            force_terminal=False,
+            color_system=None,
+        ),
+        start_live=False,
+    )
+    sink.state = replace(
+        _running_state(),
+        generation=6,
+        generation_limit=None,
+        provider_turns_attempted=126,
+        max_model_turns=None,
+        hourly_token_limit=1_000_000,
+        hourly_tokens_used=27_501,
+        evaluation_episodes_completed=320,
+        evaluation_episodes_total=320,
+    )
+    output = io.StringIO()
+    Console(
+        file=output,
+        width=150,
+        force_terminal=False,
+        color_system=None,
+    ).print(sink._progress(150, horizontal=True))
+    rendered = output.getvalue()
+    assert "Generation" not in rendered
+    assert "Model Turn Budget" not in rendered
+    assert "Slots Complete" in rendered
+    assert "Token Budget" in rendered
+    assert "Evaluation Progress" in rendered
+    assert "Wall-time Budget" in rendered
+    assert "27.5k/1.0M" in rendered
+    assert "—/—" not in rendered
     sink.close()
 
 
