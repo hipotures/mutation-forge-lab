@@ -295,7 +295,7 @@ def _experiment_run(
                 "immutable_config_sha256": config.immutable_config_sha256(),
             }
             persisted_state = None
-            persisted_loader: Callable[[], DashboardState] | None = None
+            persisted_loader: Callable[[int | None], DashboardState] | None = None
             experiment_root = getattr(config, "experiment_root", None)
             if experiment_root is not None:
                 model_config = getattr(config, "model", None)
@@ -317,7 +317,9 @@ def _experiment_run(
                     getattr(run_config, "max_total_tokens_per_hour", None),
                 )
 
-                def persisted_loader() -> DashboardState:
+                def persisted_loader(
+                    generation_before: int | None = None,
+                ) -> DashboardState:
                     return load_persisted_dashboard_state(
                         experiment_root,
                         run_id=run_id,
@@ -328,9 +330,10 @@ def _experiment_run(
                         wall_seconds=wall_seconds,
                         hourly_token_limit=hourly_token_limit,
                         graph_mode=graph_mode,
+                        generation_before=generation_before,
                     )
 
-                persisted_state = persisted_loader()
+                persisted_state = persisted_loader(None)
             sinks = [
                 InteractiveDashboardSink(
                     console=Console(file=sys.stdout),

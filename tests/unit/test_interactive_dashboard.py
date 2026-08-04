@@ -931,7 +931,7 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
             displayed_generation=1,
             generations=(GenerationSlots(1, (DashboardSlot("slot-00", 1),)),),
         ),
-        persisted_loader=lambda: persisted,
+        persisted_loader=lambda _generation_before: persisted,
         start_live=False,
     )
     sink.handle_key("LEFT")
@@ -969,6 +969,98 @@ def test_persisted_dashboard_uses_newest_retained_slot_generation(tmp_path: Path
 
     assert persisted.generation == 3
     assert persisted.displayed_generation == 3
+
+
+def test_persisted_dashboard_loads_generations_in_pages_of_ten(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "experiment"
+    checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
+    checkpoint.parent.mkdir(parents=True)
+    write_json(
+        checkpoint,
+        {
+            "schema_version": "mforge.experiment.generation.v2",
+            "generation": 14,
+            "slots": {
+                f"generation-{generation}": {
+                    "generation": generation,
+                    "slot": "slot-00",
+                    "parent_id": "root",
+                    "status": "accepted",
+                    "candidate": {"source": "retained"},
+                }
+                for generation in range(15)
+            },
+        },
+    )
+
+    latest = dashboard.load_persisted_dashboard_state(
+        root,
+        run_id="dashboard-run",
+    )
+    previous = dashboard.load_persisted_dashboard_state(
+        root,
+        run_id="dashboard-run",
+        generation_before=5,
+    )
+
+    assert [group.generation for group in latest.generations] == list(range(5, 15))
+    assert latest.displayed_generation == 14
+    assert [group.generation for group in previous.generations] == list(range(5))
+    assert previous.generation == 14
+    assert previous.displayed_generation == 4
+
+
+def test_generation_navigation_loads_only_at_the_oldest_cached_page() -> None:
+    calls: list[int | None] = []
+
+    def load(generation_before: int | None) -> DashboardState:
+        calls.append(generation_before)
+        assert generation_before is not None
+        page_start = max(0, generation_before - 10)
+        return DashboardState(
+            generation=19,
+            displayed_generation=generation_before - 1,
+            generations=tuple(
+                GenerationSlots(
+                    generation,
+                    (DashboardSlot("slot-00", generation),),
+                )
+                for generation in range(page_start, generation_before)
+            ),
+        )
+
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=120, force_terminal=False),
+        initial_state=DashboardState(
+            generation=19,
+            displayed_generation=19,
+            generations=tuple(
+                GenerationSlots(
+                    generation,
+                    (DashboardSlot("slot-00", generation),),
+                )
+                for generation in range(10, 20)
+            ),
+        ),
+        persisted_loader=load,
+        start_live=False,
+    )
+
+    sink.handle_key("LEFT")
+    assert sink.state.displayed_generation == 18
+    assert calls == []
+
+    sink.state = replace(sink.state, displayed_generation=10)
+    sink.handle_key("LEFT")
+    assert sink.state.displayed_generation == 9
+    assert calls == [10]
+
+    sink.handle_key("LEFT")
+    sink.handle_key("RIGHT")
+    assert calls == [10]
+    sink.close()
 
 
 def test_live_generation_cannot_lower_historical_best_objective() -> None:

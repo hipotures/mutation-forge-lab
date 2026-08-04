@@ -44,6 +44,7 @@ from mutation_forge.output.panel_copy import (
 )
 
 REFRESH_INTERVAL_SECONDS = 1.0
+PERSISTED_GENERATION_PAGE_SIZE = 10
 COPY_NOTICE_SECONDS = 6.0
 PANEL_COPY_TMP_DIR = Path("/tmp")
 DETAIL_TABS = (
@@ -326,15 +327,17 @@ def load_persisted_dashboard_state(
     wall_seconds: float | None = None,
     hourly_token_limit: int | None = None,
     graph_mode: str = "—",
+    generation_before: int | None = None,
+    generation_page_size: int = PERSISTED_GENERATION_PAGE_SIZE,
 ) -> DashboardState:
-    """Load one durable snapshot without replaying historical events.
+    """Load one durable generation page without replaying historical events.
 
     The live sink used to start from an empty reducer and then receive every
     transition of the resumed session.  That made a continuation look as if
     it was going backwards through old ``queued``/``validating`` states and
     dropped objectives from earlier sessions.  This reader takes only the
-    checkpoint and committed SQLite rows, then live events continue from that
-    snapshot.
+    requested checkpoint/SQLite generation window, then live events continue
+    from that snapshot.
     """
 
     root = Path(experiment_root)
@@ -375,7 +378,7 @@ def load_persisted_dashboard_state(
         if isinstance(generation_value, int) and not isinstance(generation_value, bool)
         else 0
     )
-    slot_records: dict[tuple[int, str], Mapping[str, Any]] = {}
+    raw_slot_values: list[Mapping[str, Any]] = []
     raw_slots = checkpoint.get("slots")
     if isinstance(raw_slots, Mapping):
         for raw in raw_slots.values():
@@ -389,29 +392,66 @@ def load_persisted_dashboard_state(
                 or not isinstance(slot, str)
             ):
                 continue
-            key = (generation, slot)
-            previous = slot_records.get(key)
-            # Repair records supersede their initial record.  If both have the
-            # same repair count, preserve the later checkpoint object.
-            repairs = raw.get("repairs")
-            previous_repairs_value = previous.get("repairs") if previous else -1
-            previous_repairs = (
-                previous_repairs_value
-                if isinstance(previous_repairs_value, int)
-                and not isinstance(previous_repairs_value, bool)
-                else -1
-            )
-            if previous is None or (
-                isinstance(repairs, int)
-                and not isinstance(repairs, bool)
-                and repairs >= int(previous_repairs)
-            ):
-                slot_records[key] = raw
+            raw_slot_values.append(raw)
+            checkpoint_generation = max(checkpoint_generation, generation)
+
+    store_path = root / "state.sqlite3"
+    if store_path.is_file():
+        try:
+            database_uri = f"{store_path.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(database_uri, uri=True) as connection:
+                latest_row = connection.execute(
+                    "SELECT MAX(generation) FROM ("
+                    "SELECT generation FROM candidates "
+                    "UNION ALL SELECT generation FROM provider_turns"
+                    ")"
+                ).fetchone()
+            latest_value = latest_row[0] if latest_row else None
+            if isinstance(latest_value, int) and not isinstance(latest_value, bool):
+                checkpoint_generation = max(checkpoint_generation, latest_value)
+        except sqlite3.DatabaseError:
+            pass
+
+    page_size = max(1, generation_page_size)
+    page_end = (
+        checkpoint_generation
+        if generation_before is None
+        else min(checkpoint_generation, max(0, generation_before - 1))
+    )
+    page_start = max(0, page_end - page_size + 1)
+
+    slot_records: dict[tuple[int, str], Mapping[str, Any]] = {}
+    for raw in raw_slot_values:
+        generation = cast(int, raw["generation"])
+        if not page_start <= generation <= page_end:
+            continue
+        slot = cast(str, raw["slot"])
+        key = (generation, slot)
+        previous = slot_records.get(key)
+        # Repair records supersede their initial record.  If both have the
+        # same repair count, preserve the later checkpoint object.
+        repairs = raw.get("repairs")
+        previous_repairs_value = previous.get("repairs") if previous else -1
+        previous_repairs = (
+            previous_repairs_value
+            if isinstance(previous_repairs_value, int)
+            and not isinstance(previous_repairs_value, bool)
+            else -1
+        )
+        if previous is None or (
+            isinstance(repairs, int)
+            and not isinstance(repairs, bool)
+            and repairs >= int(previous_repairs)
+        ):
+            slot_records[key] = raw
 
     evaluations: dict[str, tuple[float, Mapping[str, Any], float | None]] = {}
     evaluation_history: list[tuple[str, float]] = []
+    best_candidate: tuple[
+        str,
+        tuple[float, Mapping[str, Any], float | None],
+    ] | None = None
     slot_runtime_seconds: dict[tuple[int, str], float] = {}
-    store_path = root / "state.sqlite3"
     store: Any | None = None
     try:
         from mutation_forge.experiment.state import ExperimentStateStore
@@ -455,7 +495,9 @@ def load_persisted_dashboard_state(
                 "'validation_completed','behavior_probe_started','behavior_probe_completed',"
                 "'evaluation_started','evaluation_progress','evaluation_completed',"
                 "'evaluation_failed','candidate_archived'"
-                ") ORDER BY sequence"
+                ") AND CAST(json_extract(payload_json,'$.generation') AS INTEGER) "
+                "BETWEEN ? AND ? ORDER BY sequence",
+                (page_start, page_end),
             ):
                 try:
                     event_payload = json.loads(str(event_row["payload_json"]))
@@ -482,11 +524,16 @@ def load_persisted_dashboard_state(
                     (timestamp - slot_started_at[key]).total_seconds(),
                 )
             rows = store.connection.execute(
-                "SELECT candidate_id,completed_at,"
-                "json_extract(result_json,'$.summary') AS summary_json,"
-                "json_extract(result_json,'$.runtime.elapsed_seconds') AS elapsed_seconds "
-                "FROM evaluations "
-                "WHERE state='completed' ORDER BY completed_at,identity"
+                "SELECT evaluations.candidate_id,evaluations.completed_at,"
+                "json_extract(evaluations.result_json,'$.summary') AS summary_json,"
+                "json_extract(evaluations.result_json,"
+                "'$.runtime.elapsed_seconds') AS elapsed_seconds "
+                "FROM evaluations JOIN candidates "
+                "ON candidates.candidate_id=evaluations.candidate_id "
+                "WHERE evaluations.state='completed' "
+                "AND candidates.generation BETWEEN ? AND ? "
+                "ORDER BY evaluations.completed_at,evaluations.identity",
+                (page_start, page_end),
             ).fetchall()
             for row in rows:
                 candidate_id = str(row["candidate_id"] or "")
@@ -507,7 +554,37 @@ def load_persisted_dashboard_state(
                     summary if isinstance(summary, Mapping) else {},
                     _number(row["elapsed_seconds"]),
                 )
-                evaluation_history.append((str(row["completed_at"] or ""), value))
+
+            history_rows = store.connection.execute(
+                "SELECT completed_at,"
+                "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
+                "FROM evaluations WHERE state='completed' "
+                "AND json_type(result_json,'$.summary.mean_auc') IN ('integer','real') "
+                "ORDER BY completed_at DESC,identity DESC LIMIT 60"
+            ).fetchall()
+            evaluation_history = [
+                (str(row["completed_at"] or ""), float(row["mean_auc"]))
+                for row in reversed(history_rows)
+                if isinstance(row["mean_auc"], (int, float))
+                and not isinstance(row["mean_auc"], bool)
+            ]
+            best_row = store.connection.execute(
+                "SELECT candidate_id,"
+                "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
+                "FROM evaluations WHERE state='completed' "
+                "AND json_type(result_json,'$.summary.mean_auc') IN ('integer','real') "
+                "ORDER BY mean_auc DESC,candidate_id LIMIT 1"
+            ).fetchone()
+            if (
+                best_row is not None
+                and isinstance(best_row["candidate_id"], str)
+                and isinstance(best_row["mean_auc"], (int, float))
+                and not isinstance(best_row["mean_auc"], bool)
+            ):
+                best_candidate = (
+                    best_row["candidate_id"],
+                    (float(best_row["mean_auc"]), {}, None),
+                )
 
             # The generation checkpoint is intentionally written only at a
             # safe boundary.  A resumed run can therefore have completed
@@ -517,7 +594,9 @@ def load_persisted_dashboard_state(
             # finished generation or its objective values.
             candidate_rows = store.connection.execute(
                 "SELECT candidate_id,generation,slot,status,metadata_json "
-                "FROM candidates ORDER BY generation,slot,candidate_id"
+                "FROM candidates WHERE generation BETWEEN ? AND ? "
+                "ORDER BY generation,slot,candidate_id",
+                (page_start, page_end),
             ).fetchall()
             for row in candidate_rows:
                 candidate_id = str(row["candidate_id"] or "")
@@ -565,11 +644,6 @@ def load_persisted_dashboard_state(
             with contextlib.suppress(Exception):
                 store.close()
 
-    if slot_records:
-        checkpoint_generation = max(
-            checkpoint_generation,
-            max(generation for generation, _slot in slot_records),
-        )
     groups: dict[int, list[DashboardSlot]] = {}
     for (generation, slot_name), raw in slot_records.items():
         candidate_value = raw.get("candidate")
@@ -651,20 +725,22 @@ def load_persisted_dashboard_state(
                 ),
             )
         )
-    groups.setdefault(
-        checkpoint_generation,
-        list(_empty_slots(checkpoint_generation, population_size)),
-    )
+    if page_end == checkpoint_generation:
+        groups.setdefault(
+            checkpoint_generation,
+            list(_empty_slots(checkpoint_generation, population_size)),
+        )
     generation_groups = tuple(
         GenerationSlots(generation, tuple(sorted(slots, key=lambda item: item.slot)))
         for generation, slots in sorted(groups.items())
     )
     metrics = [value for _, value in evaluation_history]
-    best_candidate = max(evaluations.items(), key=lambda item: item[1][0], default=None)
+    if best_candidate is None:
+        best_candidate = max(evaluations.items(), key=lambda item: item[1][0], default=None)
     return replace(
         state,
         generation=checkpoint_generation,
-        displayed_generation=checkpoint_generation,
+        displayed_generation=page_end,
         generations=generation_groups,
         current_objective=metrics[-1] if metrics else None,
         best_objective=best_candidate[1][0] if best_candidate else None,
@@ -699,10 +775,7 @@ def _merge_persisted_dashboard_state(
         )
         for generation, slots in sorted(by_generation.items())
     )
-    if live.objective_history and persisted.objective_history:
-        history = tuple((*persisted.objective_history, *live.objective_history)[-60:])
-    else:
-        history = live.objective_history or persisted.objective_history
+    history = live.objective_history or persisted.objective_history
     live_best = live.best_objective
     persisted_best = persisted.best_objective
     use_persisted_best = persisted_best is not None and (
@@ -2025,7 +2098,7 @@ class InteractiveDashboardSink:
         locked_config: Mapping[str, object] | None = None,
         capabilities: DashboardCapabilities | None = None,
         initial_state: DashboardState | None = None,
-        persisted_loader: Callable[[], DashboardState] | None = None,
+        persisted_loader: Callable[[int | None], DashboardState] | None = None,
         start_live: bool = True,
     ) -> None:
         self.console = console or Console()
@@ -2033,6 +2106,10 @@ class InteractiveDashboardSink:
         self.capabilities = capabilities or DashboardCapabilities()
         self.state = initial_state or DashboardState()
         self._persisted_loader = persisted_loader
+        self._history_exhausted = (
+            persisted_loader is None
+            or any(group.generation == 0 for group in self.state.generations)
+        )
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._dirty = threading.Event()
@@ -2072,11 +2149,25 @@ class InteractiveDashboardSink:
 
     def handle_key(self, key: str) -> None:
         with self._lock:
-            if key in {"LEFT", "RIGHT"} and self._persisted_loader:
+            generations = sorted(group.generation for group in self.state.generations)
+            if (
+                key == "LEFT"
+                and self._persisted_loader is not None
+                and not self._history_exhausted
+                and generations
+                and self.state.displayed_generation == generations[0]
+            ):
+                previous_oldest = generations[0]
                 self.state = _merge_persisted_dashboard_state(
                     self.state,
-                    self._persisted_loader(),
+                    self._persisted_loader(previous_oldest),
                 )
+                loaded_generations = [
+                    group.generation for group in self.state.generations
+                ]
+                loaded_oldest = min(loaded_generations, default=previous_oldest)
+                if loaded_oldest == 0 or loaded_oldest >= previous_oldest:
+                    self._history_exhausted = True
             state, action = reduce_dashboard(
                 self.state,
                 DashboardKey(key),
