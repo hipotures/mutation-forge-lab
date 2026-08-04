@@ -41,6 +41,8 @@ from mutation_forge.sandbox.contracts import SandboxLimits
 from mutation_forge.sandbox.validation import ProgramIdentity
 from mutation_forge.stage2b.rankers import SourceRanker
 
+from .json_io import read_json, write_json
+
 SCHEMA_VERSION = "mforge.experiment.evaluation.v2"
 DEVELOPMENT_ARTIFACT_VERSION = "mforge.experiment.evaluation.development.v2"
 REPLAY_ARTIFACT_VERSION = "mforge.experiment.evaluation.replay.v2"
@@ -136,16 +138,6 @@ def _hash(value: object) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _write_json(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_bytes(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False).encode()
-        + b"\n"
-    )
-    temporary.replace(path)
-
-
 def _load_completed_pass(
     path: Path,
     *,
@@ -156,7 +148,7 @@ def _load_completed_pass(
     if not path.is_file() or not isinstance(source, str):
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = read_json(path)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict):
@@ -219,7 +211,7 @@ def _load_episode_checkpoint(
     if not path.is_file():
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = read_json(path)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"evaluation episode checkpoint is unreadable: {path}") from exc
     episode = value.get("episode") if isinstance(value, Mapping) else None
@@ -702,7 +694,7 @@ def _run_once(
                         checkpoint_root
                         / pass_name
                         / candidate_id
-                        / f"episode-{completed:06d}.json"
+                        / f"episode-{completed:06d}.json.gz"
                         if checkpoint_root is not None
                         else None
                     )
@@ -734,7 +726,7 @@ def _run_once(
                         execution_seconds += time.monotonic() - episode_started
                         executed_episodes += 1
                         if episode_path is not None:
-                            _write_json(
+                            write_json(
                                 episode_path,
                                 {
                                     "schema_version": EPISODE_CHECKPOINT_VERSION,
@@ -912,7 +904,7 @@ def evaluate_candidate(
         event_callback=counterexample_event_callback,
     )
     try:
-        development_path = root / "evaluations" / "development" / f"{candidate_id}.json"
+        development_path = root / "evaluations" / "development" / f"{candidate_id}.json.gz"
         primary = _load_completed_pass(
             development_path,
             candidate_id=candidate_id,
@@ -959,7 +951,7 @@ def evaluate_candidate(
         }
         if not primary_recovered:
             primary["provenance"] = provenance
-            _write_json(development_path, primary)
+            write_json(development_path, primary, indent=2)
         result = dict(primary)
         result["artifacts"] = {"development": str(development_path)}
         if progress is not None:
@@ -977,7 +969,7 @@ def evaluate_candidate(
                     }
                 )
         if settings["replay"]:
-            replay_path = root / "evaluations" / "replay" / f"{candidate_id}.json"
+            replay_path = root / "evaluations" / "replay" / f"{candidate_id}.json.gz"
             replay = _load_completed_pass(
                 replay_path,
                 candidate_id=candidate_id,
@@ -1004,7 +996,7 @@ def evaluate_candidate(
                     if replay_backend is not primary_backend and backend is None:
                         replay_backend.close()
                 replay["provenance"] = provenance
-                _write_json(replay_path, replay)
+                write_json(replay_path, replay, indent=2)
             result["replay"] = {
                 "enabled": True,
                 "exact": _hash(primary) == _hash(replay),

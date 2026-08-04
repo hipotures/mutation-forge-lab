@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ExperimentConfig
+from .json_io import write_json
 from .layout import ExperimentLayout
 from .state import ExperimentStateStore
 
@@ -120,20 +121,17 @@ class SessionManager:
             starting_checkpoint=starting_checkpoint,
         )
         _atomic_write(directory / "input-config.toml", config.source_bytes)
-        _atomic_write(
-            directory / "session.json",
-            _canonical(
-                {
-                    "schema_version": "mforge.experiment.session.v2",
-                    "session_number": number,
-                    "session_id": session_id,
-                    "start_time": _now(),
-                    "wall_seconds": config.run.wall_seconds,
-                    "starting_checkpoint": starting_checkpoint,
-                    "starting_state": starting_state,
-                }
-            )
-            + b"\n",
+        write_json(
+            directory / "session.json.gz",
+            {
+                "schema_version": "mforge.experiment.session.v2",
+                "session_number": number,
+                "session_id": session_id,
+                "start_time": _now(),
+                "wall_seconds": config.run.wall_seconds,
+                "starting_checkpoint": starting_checkpoint,
+                "starting_state": starting_state,
+            },
         )
         for filename in ("events.jsonl", "stdout.log", "stderr.log"):
             (directory / filename).touch()
@@ -241,8 +239,8 @@ class SessionManager:
         result["stop_reason"] = stop_reason
         if summary:
             result.update(dict(summary))
-        _atomic_write(session.directory / "session.json", _canonical(result) + b"\n")
-        _atomic_write(session.directory / "summary.json", _canonical(result) + b"\n")
+        write_json(session.directory / "session.json.gz", result)
+        write_json(session.directory / "summary.json.gz", result)
         self.state.finish_session(
             session.session_id,
             status=state,

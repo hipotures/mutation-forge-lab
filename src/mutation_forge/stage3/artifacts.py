@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -170,6 +171,7 @@ class TransportLogger:
         max_line_bytes: int = 256 * 1024,
         aggregate_root: Path | None = None,
         max_aggregate_bytes: int = DEFAULT_MAX_RUN_BYTES,
+        compress_json: bool = False,
     ) -> None:
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -183,6 +185,7 @@ class TransportLogger:
         self.max_line_bytes = max_line_bytes
         self.aggregate_root = Path(aggregate_root) if aggregate_root is not None else self.directory
         self.max_aggregate_bytes = max_aggregate_bytes
+        self.compress_json = compress_json
         self.events = 0
         self.bytes = 0
         self.rpc: list[str] = []
@@ -209,20 +212,25 @@ class TransportLogger:
         )
 
     def _name(self, name: str) -> str:
+        if self.compress_json and name.endswith(".json"):
+            name = f"{name}.gz"
         return f"{self.prefix}.{name}" if self.prefix else name
 
     def _write_lines(self, name: str, lines: list[str]) -> None:
-        payload = "".join(lines)
-        if len(payload.encode()) > self.max_bytes:
+        payload = "".join(lines).encode()
+        if len(payload) > self.max_bytes:
             self.telemetry["write_failures"] += 1
             raise ValueError("transport log exceeds byte limit")
         target = _contained_path(self.directory, self._name(name))
+        stored = gzip.compress(payload, compresslevel=6, mtime=0) if target.name.endswith(
+            ".json.gz"
+        ) else payload
         with _ARTIFACT_LOCK:
             current_size = target.stat().st_size if target.is_file() else 0
             stored_size = sum(
                 path.stat().st_size for path in self.aggregate_root.rglob("*") if path.is_file()
             )
-            if stored_size - current_size + len(payload.encode()) > self.max_aggregate_bytes:
+            if stored_size - current_size + len(stored) > self.max_aggregate_bytes:
                 self.telemetry["write_failures"] += 1
                 raise ValueError("transport run exceeds aggregate byte limit")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -233,8 +241,8 @@ class TransportLogger:
             for attempt in range(2):
                 fd, tmp = tempfile.mkstemp(prefix=".log.", dir=self.directory)
                 try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        f.write(payload)
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(stored)
                         f.flush()
                         os.fsync(f.fileno())
                     os.replace(tmp, target)

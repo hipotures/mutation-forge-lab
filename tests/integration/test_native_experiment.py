@@ -23,6 +23,7 @@ from mutation_forge.experiment.generation import (
     GenerationCoordinator,
     ProviderResult,
 )
+from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.layout import ExperimentLayout
 from mutation_forge.experiment.native import (
     NativeExperimentAdapter,
@@ -291,15 +292,15 @@ def test_fresh_finite_native_experiment_exhausts_and_next_run_is_a_noop(
     assert second["stop_reason"] == "generation_limit"
     assert [request["generation"] for request in provider.calls] == [0]
     assert (root / "experiment.toml").is_file()
-    assert (root / "experiment.lock.json").is_file()
+    assert (root / "experiment.lock.json.gz").is_file()
     assert (root / "state.sqlite3").is_file()
-    assert list((root / "checkpoints").glob("checkpoint-*.json"))
+    assert list((root / "checkpoints").glob("checkpoint-*.json.gz"))
     assert (root / "artifacts" / "archive" / "programs").is_dir()
     assert (root / "artifacts" / "evaluations" / "development").is_dir()
-    assert list((root / "artifacts" / "evaluations" / "development").glob("*.json"))
+    assert list((root / "artifacts" / "evaluations" / "development").glob("*.json.gz"))
     assert not any("stage4" in str(path).lower() for path in root.rglob("*"))
     assert not (tmp_path / "runs" / "stage4-search").exists()
-    lock_text = (root / "experiment.lock.json").read_text(encoding="utf-8").lower()
+    lock_text = json.dumps(read_json(root / "experiment.lock.json.gz")).lower()
     assert "search-freeze" not in lock_text
     assert "stage4" not in lock_text
     status = experiment_status(config_path)
@@ -378,7 +379,7 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     result = _service(provider).run(config_path)
     config = load_experiment_config(config_path)
     root = ExperimentLayout.from_config(config).root
-    lock = json.loads((root / "experiment.lock.json").read_text(encoding="utf-8"))
+    lock = read_json(root / "experiment.lock.json.gz")
 
     assert result["state"] == "exhausted"
     assert len(provider.calls) == 2
@@ -397,16 +398,18 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     assert lock["search"]["population_size"] == 2
     assert lock["search"]["max_generations"] == 1
     assert lock["search"]["max_model_turns"] == 3
-    evaluation = next((root / "artifacts" / "evaluations" / "development").glob("*.json"))
-    payload = json.loads(evaluation.read_text(encoding="utf-8"))
+    evaluation = next(
+        (root / "artifacts" / "evaluations" / "development").glob("*.json.gz")
+    )
+    payload = read_json(evaluation)
     assert payload["settings"]["workers"] == 1
     assert payload["settings"]["thread_count"] == 1
     turn = root / "artifacts" / "generations" / "generation-0000" / "slot-00" / "initial"
     assert (turn / "slot-00.request.md").read_text(encoding="utf-8") == prompt
-    request_envelope = json.loads((turn / "slot-00.request.json").read_text(encoding="utf-8"))
+    request_envelope = read_json(turn / "slot-00.request.json.gz")
     assert request_envelope["prompt"] == prompt
     assert (turn / "slot-00.system-prompt.md").is_file()
-    assert (turn / "slot-00.output-schema.json").is_file()
+    assert (turn / "slot-00.output-schema.json.gz").is_file()
 
 
 def test_native_evaluation_runs_in_spawned_process(tmp_path: Path) -> None:
@@ -492,7 +495,7 @@ def test_native_slot_events_do_not_report_queued_turns_as_active() -> None:
 
 
 def test_native_recovery_event_replays_authoritative_usage(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "native-generation-checkpoint.json"
+    checkpoint = tmp_path / "native-generation-checkpoint.json.gz"
     provider = RecordingProvider()
 
     def interrupt_after_generation(*_args: Any) -> None:
@@ -570,13 +573,13 @@ def test_native_repair_persists_separate_initial_and_repair_turns(tmp_path: Path
 
     assert result["state"] == "exhausted"
     assert [request["phase"] for request in provider.calls] == ["initial", "repair"]
-    assert json.loads((initial / "validation.json").read_text(encoding="utf-8"))["valid"] is False
-    assert json.loads((repair / "validation.json").read_text(encoding="utf-8"))["valid"] is True
-    assert (initial / "turn-manifest.json").is_file()
-    assert (repair / "turn-manifest.json").is_file()
-    assert (repair / "behavior.json").is_file()
-    assert list((root / "artifacts" / "archive" / "programs").glob("*.json"))
-    assert list((root / "artifacts" / "evaluations" / "development").glob("*.json"))
+    assert read_json(initial / "validation.json.gz")["valid"] is False
+    assert read_json(repair / "validation.json.gz")["valid"] is True
+    assert (initial / "turn-manifest.json.gz").is_file()
+    assert (repair / "turn-manifest.json.gz").is_file()
+    assert (repair / "behavior.json.gz").is_file()
+    assert list((root / "artifacts" / "archive" / "programs").glob("*.json.gz"))
+    assert list((root / "artifacts" / "evaluations" / "development").glob("*.json.gz"))
 
 
 def test_invalid_final_repair_is_terminal_and_not_repeated_on_resume(
@@ -594,8 +597,8 @@ def test_invalid_final_repair_is_terminal_and_not_repeated_on_resume(
     first = service.run(config_path)
     second = service.run(config_path)
     root = tmp_path / "workspace" / "native-test"
-    checkpoint = json.loads(
-        (root / "artifacts" / "native-generation-checkpoint.json").read_text(encoding="utf-8")
+    checkpoint = read_json(
+        root / "artifacts" / "native-generation-checkpoint.json.gz"
     )
     events = [
         json.loads(line)
@@ -641,8 +644,8 @@ def test_multiple_repairs_use_distinct_durable_attempts(tmp_path: Path) -> None:
     provider = InvalidRepairProvider()
     _service(provider).run(config_path)
     root = tmp_path / "workspace" / "native-test"
-    checkpoint = json.loads(
-        (root / "artifacts" / "native-generation-checkpoint.json").read_text(encoding="utf-8")
+    checkpoint = read_json(
+        root / "artifacts" / "native-generation-checkpoint.json.gz"
     )
     slot = next(iter(checkpoint["slots"].values()))
     phases = root / "artifacts" / "generations" / "generation-0000" / "slot-00"
@@ -652,8 +655,8 @@ def test_multiple_repairs_use_distinct_durable_attempts(tmp_path: Path) -> None:
     assert slot["repairs"] == 2
     assert slot["remaining_repairs"] == 0
     assert len(slot["repair_idempotency_keys"]) == 2
-    assert (phases / "repair-01" / "turn-manifest.json").is_file()
-    assert (phases / "repair-02" / "turn-manifest.json").is_file()
+    assert (phases / "repair-01" / "turn-manifest.json.gz").is_file()
+    assert (phases / "repair-02" / "turn-manifest.json.gz").is_file()
 
 
 class _CrashAfterRepairAssessmentCoordinator(GenerationCoordinator):
@@ -697,7 +700,7 @@ class CrashAfterFailedRepairEvidenceEngine:
                 max_repairs=config.model.max_repairs,
                 model=config.model.name,
                 effort=config.model.effort,
-                checkpoint_path=layout.artifacts / "native-generation-checkpoint.json",
+                checkpoint_path=layout.artifacts / "native-generation-checkpoint.json.gz",
             ),
         ).run(resume=True)
         return {"status": generation.status, "generation": len(generation.generations)}
@@ -731,8 +734,8 @@ def test_resume_reuses_durable_failed_repair_evidence(tmp_path: Path) -> None:
         assert final_state.cumulative()["total_tokens"] == 4
     finally:
         final_state.close()
-    checkpoint = json.loads(
-        (root / "artifacts" / "native-generation-checkpoint.json").read_text(encoding="utf-8")
+    checkpoint = read_json(
+        root / "artifacts" / "native-generation-checkpoint.json.gz"
     )
 
     assert resumed["state"] == "exhausted"
@@ -799,14 +802,12 @@ def test_validator_contract_failures_use_at_most_configured_repairs(
     )
     provider = InvalidRepairProvider(source)
     _service(provider).run(config_path)
-    checkpoint = json.loads(
-        (
-            tmp_path
-            / "workspace"
-            / "native-test"
-            / "artifacts"
-            / "native-generation-checkpoint.json"
-        ).read_text(encoding="utf-8")
+    checkpoint = read_json(
+        tmp_path
+        / "workspace"
+        / "native-test"
+        / "artifacts"
+        / "native-generation-checkpoint.json.gz"
     )
     slot = next(iter(checkpoint["slots"].values()))
     codes = {item["code"] for item in slot["errors"]}
@@ -848,7 +849,7 @@ class InterruptingEngine:
                 max_repairs=config.model.max_repairs,
                 model=config.model.name,
                 effort=config.model.effort,
-                checkpoint_path=layout.artifacts / "native-generation-checkpoint.json",
+                checkpoint_path=layout.artifacts / "native-generation-checkpoint.json.gz",
             ),
             selection_callback=select,
         ).run(resume=True)
@@ -914,7 +915,7 @@ def test_charged_failed_turn_is_retained_without_replacement_call(tmp_path: Path
 def test_uncharged_infrastructure_failure_retries_same_generation(
     tmp_path: Path,
 ) -> None:
-    checkpoint = tmp_path / "native-checkpoint.json"
+    checkpoint = tmp_path / "native-checkpoint.json.gz"
 
     class InfrastructureFailureProvider:
         def __init__(self) -> None:
@@ -944,7 +945,7 @@ def test_uncharged_infrastructure_failure_retries_same_generation(
             checkpoint_path=checkpoint,
         ),
     ).run()
-    retained = json.loads(checkpoint.read_text(encoding="utf-8"))
+    retained = read_json(checkpoint)
 
     assert first.status == "infrastructure_failed"
     assert first.summary["completed_generation_count"] == 0
@@ -972,7 +973,7 @@ def test_uncharged_infrastructure_failure_retries_same_generation(
 def test_stale_retry_attempt_does_not_rewind_completed_generation(
     tmp_path: Path,
 ) -> None:
-    checkpoint = tmp_path / "native-checkpoint.json"
+    checkpoint = tmp_path / "native-checkpoint.json.gz"
     first_provider = RecordingProvider()
     GenerationCoordinator(
         first_provider,
@@ -986,7 +987,7 @@ def test_stale_retry_attempt_does_not_rewind_completed_generation(
         ),
         selection_callback=lambda *_args: {"slot-00": "g0000-slot-00"},
     ).run()
-    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    saved = read_json(checkpoint)
     accepted = next(
         value for value in saved["slots"].values() if value.get("status") == "accepted"
     )
@@ -995,7 +996,7 @@ def test_stale_retry_attempt_does_not_rewind_completed_generation(
         "status": "repair_pending",
         "candidate": None,
     }
-    checkpoint.write_text(json.dumps(saved), encoding="utf-8")
+    write_json(checkpoint, saved)
 
     resumed_provider = RecordingProvider()
     result = GenerationCoordinator(
@@ -1017,7 +1018,7 @@ def test_stale_retry_attempt_does_not_rewind_completed_generation(
 def test_resume_revalidates_repair_pending_source_under_current_limits(
     tmp_path: Path,
 ) -> None:
-    checkpoint = tmp_path / "native-checkpoint.json"
+    checkpoint = tmp_path / "native-checkpoint.json.gz"
     retained_provider = RecordingProvider()
     restrictive = GenerationCoordinator(
         retained_provider,
@@ -1039,18 +1040,16 @@ def test_resume_revalidates_repair_pending_source_under_current_limits(
         retained_result=retained_response,
     )
     assert pending.status == "repair_pending"
-    checkpoint.write_text(
-        json.dumps(
-            {
-                "schema_version": "mforge.experiment.generation.v2",
-                "campaign_id": "native",
-                "slots": {request.idempotency_key: pending.as_dict()},
-                "callbacks": {},
-                "next_generation": 0,
-                "model_turns_used": 1,
-            }
-        ),
-        encoding="utf-8",
+    write_json(
+        checkpoint,
+        {
+            "schema_version": "mforge.experiment.generation.v2",
+            "campaign_id": "native",
+            "slots": {request.idempotency_key: pending.as_dict()},
+            "callbacks": {},
+            "next_generation": 0,
+            "model_turns_used": 1,
+        },
     )
 
     class NoCallProvider:
@@ -1087,30 +1086,28 @@ def test_resume_parent_assignments_match_retained_generation(
         lock_hash="0" * 64,
         root=tmp_path,
     )
-    checkpoint = tmp_path / "native-checkpoint.json"
-    checkpoint.write_text(
-        json.dumps(
-            {
-                "schema_version": "mforge.experiment.generation.v2",
-                "campaign_id": "resume-parents",
-                "slots": {
-                    "old-slot": {
-                        "generation": 3,
-                        "slot": "slot-00",
-                        "parent_id": "g0002-slot-04",
-                        "status": "accepted",
-                    },
-                    "new-slot": {
-                        "generation": 3,
-                        "slot": "slot-00",
-                        "parent_id": "native-baseline",
-                        "status": "failed",
-                    },
+    checkpoint = tmp_path / "native-checkpoint.json.gz"
+    write_json(
+        checkpoint,
+        {
+            "schema_version": "mforge.experiment.generation.v2",
+            "campaign_id": "resume-parents",
+            "slots": {
+                "old-slot": {
+                    "generation": 3,
+                    "slot": "slot-00",
+                    "parent_id": "g0002-slot-04",
+                    "status": "accepted",
                 },
-                "callbacks": {},
-            }
-        ),
-        encoding="utf-8",
+                "new-slot": {
+                    "generation": 3,
+                    "slot": "slot-00",
+                    "parent_id": "native-baseline",
+                    "status": "failed",
+                },
+            },
+            "callbacks": {},
+        },
     )
     original = {
         "slot-00": "g0002-slot-04",
@@ -1154,7 +1151,7 @@ def test_unbounded_generation_canary_crosses_finite_defaults(
             concurrency=1,
             max_model_turns=None,
             max_repairs=0,
-            checkpoint_path=tmp_path / "unbounded-checkpoint.json",
+            checkpoint_path=tmp_path / "unbounded-checkpoint.json.gz",
         ),
         selection_callback=select,
         budget_exhausted=lambda: len(completed_generations) >= 8,
@@ -1201,7 +1198,7 @@ def test_repair_infrastructure_failure_retries_same_request(
             concurrency=1,
             max_model_turns=4,
             max_repairs=1,
-            checkpoint_path=tmp_path / "native-checkpoint.json",
+            checkpoint_path=tmp_path / "native-checkpoint.json.gz",
             infrastructure_retry_limit=2,
             infrastructure_retry_backoff_seconds=0,
         ),
@@ -1246,7 +1243,7 @@ def test_infrastructure_retry_limit_bounds_initial_attempts(tmp_path: Path) -> N
             concurrency=1,
             max_model_turns=10,
             max_repairs=0,
-            checkpoint_path=tmp_path / "native-checkpoint.json",
+            checkpoint_path=tmp_path / "native-checkpoint.json.gz",
             infrastructure_retry_limit=2,
             infrastructure_retry_backoff_seconds=0,
         ),
@@ -1282,7 +1279,7 @@ def test_repair_infrastructure_failure_resumes_same_attempt(
             self.source = VALID_SOURCE
             return self.generate(request)
 
-    checkpoint = tmp_path / "native-checkpoint.json"
+    checkpoint = tmp_path / "native-checkpoint.json.gz"
     first_provider = RepairFailureProvider(succeeds=False)
     first = GenerationCoordinator(
         first_provider,
@@ -1298,7 +1295,7 @@ def test_repair_infrastructure_failure_resumes_same_attempt(
         ),
         retry_infrastructure=True,
     ).run()
-    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    saved = read_json(checkpoint)
     repair_state = next(
         value for value in saved["slots"].values() if value.get("status") == "repair_running"
     )

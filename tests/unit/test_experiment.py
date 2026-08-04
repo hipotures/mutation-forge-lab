@@ -21,6 +21,7 @@ from mutation_forge.experiment.config import (
     validate_experiment_id,
 )
 from mutation_forge.experiment.generation import GenerationConfig, GenerationCoordinator
+from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
 from mutation_forge.experiment.lock import canonical_bytes, sha256_bytes, verify_lock
 from mutation_forge.experiment.provider import NativeProviderConfig, _CodexTransport
@@ -258,9 +259,9 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     root = tmp_path / "configs" / "workspace" / "demo"
     assert result["state"] == "idle"
     assert (root / "experiment.toml").read_bytes() == path.read_bytes()
-    assert (root / "experiment.lock.json").is_file()
+    assert (root / "experiment.lock.json.gz").is_file()
     assert (root / "state.sqlite3").is_file()
-    assert (root / "checkpoints" / "checkpoint-000000000001.json").is_file()
+    assert (root / "checkpoints" / "checkpoint-000000000001.json.gz").is_file()
     assert (
         root / "artifacts" / "sessions" / "session-000001" / "input-config.toml"
     ).read_bytes() == path.read_bytes()
@@ -465,7 +466,7 @@ def test_generation_model_turn_boundary_is_not_completed(tmp_path: Path) -> None
             concurrency=1,
             max_model_turns=0,
             max_repairs=0,
-            checkpoint_path=tmp_path / "generation.json",
+            checkpoint_path=tmp_path / "generation.json.gz",
         ),
     ).run()
     assert result.status == "budget_exhausted"
@@ -487,7 +488,7 @@ def test_generation_hourly_token_boundary_stops_before_provider(
             concurrency=1,
             max_model_turns=None,
             max_repairs=0,
-            checkpoint_path=tmp_path / "generation.json",
+            checkpoint_path=tmp_path / "generation.json.gz",
         ),
         budget_exhausted=lambda: "hourly_token_limit",
     ).run()
@@ -912,8 +913,8 @@ def test_turn_prompt_is_exact_and_response_is_semantic_projection(tmp_path: Path
     assert "## Design summary" in response_markdown
     assert "```python\ndef priority(ctx, proposal):" in response_markdown
     assert (directory / "slot-00.response.raw.txt").read_text() == response_text
-    assert json.loads((directory / "slot-00.response.json").read_text()) == response
-    request_json = json.loads((directory / "slot-00.request.json").read_text(encoding="utf-8"))
+    assert read_json(directory / "slot-00.response.json.gz") == response
+    request_json = read_json(directory / "slot-00.request.json.gz")
     assert request_json["brief"] == "native context"
 
 
@@ -934,7 +935,7 @@ def test_invalid_response_retains_raw_text_and_diagnostics_without_projection(
     directory = store.turn_directory(0, 0)
     assert not (directory / "slot-00.response.md").exists()
     assert (directory / "slot-00.response.raw.txt").read_text() == raw
-    diagnostics = json.loads((directory / "slot-00.response-diagnostics.json").read_text())
+    diagnostics = read_json(directory / "slot-00.response-diagnostics.json.gz")
     assert diagnostics[0]["code"] == "invalid_json"
     assert store.verify_turn(directory)
 
@@ -943,9 +944,7 @@ def test_incomplete_turn_fails_closed_but_retains_manifest(tmp_path: Path) -> No
     store = TurnArtifactStore(tmp_path / "artifacts", max_bytes=4)
     with pytest.raises(ArtifactIncompleteError):
         store.write_turn(generation=0, slot=0, request_text="too long")
-    manifest = json.loads(
-        (store.turn_directory(0, 0) / "turn-manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = read_json(store.turn_directory(0, 0) / "turn-manifest.json.gz")
     assert manifest["artifact_complete"] is False
 
 
@@ -957,9 +956,9 @@ def test_retry_archives_incomplete_turn_manifest(tmp_path: Path) -> None:
 
     archived = store.archive_retryable_manifest(directory)
 
-    assert archived.name == "turn-manifest.attempt-01.json"
-    assert json.loads(archived.read_text(encoding="utf-8"))["artifact_complete"] is False
-    assert not (directory / "turn-manifest.json").exists()
+    assert archived.name == "turn-manifest.attempt-01.json.gz"
+    assert read_json(archived)["artifact_complete"] is False
+    assert not (directory / "turn-manifest.json.gz").exists()
     assert (
         store.artifact_prefix(
             directory,
@@ -1003,9 +1002,9 @@ def test_native_transport_uses_per_turn_limit_and_retry_prefix(tmp_path: Path) -
 def test_artifact_manifest_ignores_atomic_write_temporary_files(tmp_path: Path) -> None:
     layout = ExperimentLayout(tmp_path, "manifest-temporary-files")
     layout.artifacts.mkdir(parents=True)
-    (layout.artifacts / "result.json").write_text("{}", encoding="utf-8")
+    write_json(layout.artifacts / "result.json.gz", {})
     (layout.artifacts / ".log.interrupted").write_text("partial", encoding="utf-8")
 
     manifest = layout.write_artifact_manifest()
 
-    assert [entry["path"] for entry in manifest["files"]] == ["result.json"]
+    assert [entry["path"] for entry in manifest["files"]] == ["result.json.gz"]

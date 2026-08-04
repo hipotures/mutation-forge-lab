@@ -199,7 +199,7 @@ class ExperimentConfig:
         return self.run.turn_timeout_base_seconds * (self.model.concurrency + 1)
 
     def immutable_projection(self) -> dict[str, Any]:
-        """Return the canonical projection used by ``experiment.lock.json``."""
+        """Return the canonical projection used by ``experiment.lock.json.gz``."""
 
         return mutable_runtime_fields_removed(self.raw, self.source_dir)
 

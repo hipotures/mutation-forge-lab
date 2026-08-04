@@ -27,6 +27,7 @@ from .artifacts import (
     redact,
     render_generated_policy_markdown,
 )
+from .json_io import write_json
 
 
 class NativeProviderError(RuntimeError):
@@ -146,6 +147,7 @@ class _CodexTransport:
             # The transport bound applies to one turn.  A long-running
             # experiment legitimately grows beyond one turn's byte limit.
             artifact_root=None,
+            compress_json_artifacts=True,
             sandbox_mode=self.sandbox_mode,
             approval_policy=self.approval_policy,
         )
@@ -512,12 +514,9 @@ class LocalCodexAppServerProvider:
         # The generic transport streams counters through its in-memory result;
         # materialise the exact usage file before the experiment manifest is
         # indexed so a completed turn never claims evidence it did not retain.
-        usage_path = path / f"{prefix}.usage.json"
+        usage_path = path / f"{prefix}.usage.json.gz"
         if path.is_dir() and not usage_path.exists():
-            usage_path.write_text(
-                json.dumps(redact(usage), sort_keys=True, separators=(",", ":")) + "\n",
-                encoding="utf-8",
-            )
+            write_json(usage_path, redact(usage))
         # Native adapters normally validate generated Python immediately
         # after this call.  Do not create a terminal manifest before that
         # finalisation step; doing so would falsely claim validation evidence.

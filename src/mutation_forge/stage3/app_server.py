@@ -200,6 +200,7 @@ class CodexAppServerAdapter:
         artifact_prefix: str = "",
         artifact_root: str | Path | None = None,
         artifact_max_bytes: int = 32 * 1024 * 1024,
+        compress_json_artifacts: bool = False,
         protocol_audit_sha256: str | None = None,
         sandbox_mode: str = "danger-full-access",
         approval_policy: str = "never",
@@ -265,6 +266,7 @@ class CodexAppServerAdapter:
                 max_line_bytes=self.limits.message_limit,
                 aggregate_root=Path(artifact_root) if artifact_root is not None else None,
                 max_aggregate_bytes=artifact_max_bytes,
+                compress_json=compress_json_artifacts,
             )
             if artifact_dir
             else None

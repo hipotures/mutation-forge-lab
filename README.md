@@ -241,17 +241,17 @@ An experiment retains its full operational and scientific record:
 ```text
 workspace/<exp_id>/
 ├── experiment.toml
-├── experiment.lock.json
+├── experiment.lock.json.gz
 ├── state.sqlite3
 ├── checkpoints/
-│   └── checkpoint-*.json
+│   └── checkpoint-*.json.gz
 └── artifacts/
-    ├── experiment-manifest.json
-    ├── native-generation-checkpoint.json
+    ├── experiment-manifest.json.gz
+    ├── native-generation-checkpoint.json.gz
     ├── sessions/
     │   └── session-NNNNNN/
-    │       ├── session.json
-    │       ├── summary.json
+    │       ├── session.json.gz
+    │       ├── summary.json.gz
     │       ├── events.jsonl
     │       ├── stdout.log
     │       └── stderr.log
@@ -277,7 +277,7 @@ Each model turn keeps separate evidence for:
 - provider identifiers, event/RPC streams, and exact token usage.
 
 There is no separate public report command. `experiment status` is the
-supported summary view; `summary.json`, archived source files, evaluation
+supported summary view; `summary.json.gz`, archived source files, evaluation
 records, and turn artifacts provide the detailed evidence.
 
 ## Generated-policy boundary

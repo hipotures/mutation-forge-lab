@@ -485,7 +485,8 @@ class ExperimentService:
             db_checkpoint.get("checkpoint_id") != file_checkpoint.get("checkpoint_id")
             or db_checkpoint.get("sha256") != file_checkpoint.get("checkpoint_sha256")
             or Path(str(db_checkpoint.get("path", ""))).resolve()
-            != checkpoints.root / f"checkpoint-{int(file_checkpoint['sequence']):012d}.json"
+            != checkpoints.root
+            / f"checkpoint-{int(file_checkpoint['sequence']):012d}.json.gz"
         ):
             raise StateError("state database checkpoint digest does not match checkpoint chain")
 
@@ -504,7 +505,9 @@ class ExperimentService:
         import hashlib
 
         if hashlib.sha256(stored).hexdigest() != lock.get("source_config_sha256"):
-            raise LockError("immutable root experiment.toml does not match experiment.lock.json")
+            raise LockError(
+                "immutable root experiment.toml does not match experiment.lock.json.gz"
+            )
 
     def _invoke_adapter(
         self,

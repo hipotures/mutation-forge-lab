@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import pty
 import termios
@@ -18,6 +17,7 @@ from rich.panel import Panel
 
 from mutation_forge import cli
 from mutation_forge.events import Event
+from mutation_forge.experiment.json_io import write_json
 from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.output import interactive_dashboard as dashboard
 from mutation_forge.output.interactive_dashboard import (
@@ -56,7 +56,7 @@ def _running_state() -> DashboardState:
             run_mode="fresh",
             checkpoint=(
                 "/home/user/DEV/mutation-forge-lab/workspace/dashboard-run/"
-                "artifacts/native-generation-checkpoint.json"
+                "artifacts/native-generation-checkpoint.json.gz"
             ),
             configured_wall_seconds=7200.0,
             model="gpt-test",
@@ -770,12 +770,15 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
             },
         )
 
-    checkpoint = root / "artifacts" / "native-generation-checkpoint.json"
+    checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
     checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_text(
-        '{"schema_version":"mforge.experiment.generation.v2",'
-        '"generation":1,"slots":{}}\n',
-        encoding="utf-8",
+    write_json(
+        checkpoint,
+        {
+            "schema_version": "mforge.experiment.generation.v2",
+            "generation": 1,
+            "slots": {},
+        },
     )
     persisted = dashboard.load_persisted_dashboard_state(
         root,
@@ -807,25 +810,23 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
 
 def test_persisted_dashboard_uses_newest_retained_slot_generation(tmp_path: Path) -> None:
     root = tmp_path / "experiment"
-    checkpoint = root / "artifacts" / "native-generation-checkpoint.json"
+    checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
     checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_text(
-        json.dumps(
-            {
-                "schema_version": "mforge.experiment.generation.v2",
-                "generation": 1,
-                "next_generation": 2,
-                "slots": {
-                    "in-progress": {
-                        "generation": 3,
-                        "slot": "slot-00",
-                        "parent_id": "g0002-slot-04",
-                        "status": "pending",
-                    }
+    write_json(
+        checkpoint,
+        {
+            "schema_version": "mforge.experiment.generation.v2",
+            "generation": 1,
+            "next_generation": 2,
+            "slots": {
+                "in-progress": {
+                    "generation": 3,
+                    "slot": "slot-00",
+                    "parent_id": "g0002-slot-04",
+                    "status": "pending",
                 },
-            }
-        ),
-        encoding="utf-8",
+            },
+        },
     )
 
     persisted = dashboard.load_persisted_dashboard_state(
@@ -1159,7 +1160,10 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
         ).print(sink._slot_matrix(width, "full"))
         assert "provider turn" not in matrix_output.getvalue().lower()
         assert "/home/user/" not in rendered
-        assert "workspace/dashboard-run/artifacts/native-generation-checkpoint.json" in rendered
+        assert (
+            "workspace/dashboard-run/artifacts/native-generation-checkpoint.json.gz"
+            in rendered
+        )
         assert "experiment" in rendered
         assert "session" in rendered
         assert "usage" in rendered
@@ -1701,12 +1705,12 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "bb64d27d14ddd0b81002c0a00a8532617529f47ac366004e32c7899681f31e92"
+        "1c21100b08db8e2b0a28833fd14bf78ed0cc25b8bee4b09b1fc0eb63a1fd3935"
     ),
-    "evaluation_active": ("f476385aa437ca4f4c53797153a1e8dee78bfe38c86dab36227ff9024c32c50a"),
-    "validation_details": ("5d6111b487dfb503cca551cc4fd56d53c8a34f7495ef40a96769331a8c9e3dba"),
-    "completed": ("31426883b1980dbce3605c0481f1092114801e898f5350321441cdf52dfaa178"),
-    "profiling_disabled": ("144d754cb2e7f5b65efaa8fbef3daa4da960afa0f89335c874e946afc5d3caa7"),
+    "evaluation_active": ("9ceb7201a5acadc16d102cd0cb6457a11797fc89a2af721e187efcd2aaa4c2b1"),
+    "validation_details": ("4b148ada06788b57363c363bd64d5d2ff4992b87f00fd975bfcf7c9f0188d8ea"),
+    "completed": ("f553b05db4f608b1a2dbcbb0093d145a5e04b5dce8205a174cad10cfa813ebb1"),
+    "profiling_disabled": ("fdb178f014f9d12d175ed879f1d885425c304a71072713ddffcb27397bf3275d"),
     "compact": ("4fde1e927056496ee4a7b53b7cf023f8e220abb54ac89c191baa6b705c211892"),
     "minimal": ("9b89914118f5127abe20a5a887d10e6e6575976d1fe4ec1211f7c0ab038efb48"),
 }

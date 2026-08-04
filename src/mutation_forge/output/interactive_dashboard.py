@@ -30,6 +30,7 @@ from rich.table import Table
 from rich.text import Text
 
 from mutation_forge.events import Event
+from mutation_forge.experiment.json_io import read_json
 from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.models import JsonValue
 from mutation_forge.output.panel_copy import (
@@ -342,10 +343,10 @@ def load_persisted_dashboard_state(
         hourly_token_limit=hourly_token_limit,
     )
     checkpoint: Mapping[str, Any] = {}
-    checkpoint_path = root / "artifacts" / "native-generation-checkpoint.json"
+    checkpoint_path = root / "artifacts" / "native-generation-checkpoint.json.gz"
     if checkpoint_path.is_file():
         try:
-            value = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            value = read_json(checkpoint_path)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise WorkspaceError(
                 f"native generation checkpoint is unreadable: {checkpoint_path}"

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import platform
 import subprocess
 import tomllib
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .config import ExperimentConfig, mutable_runtime_fields_removed, serialize_search_limit
+from .json_io import read_json, write_json
 from .layout import ExperimentLayout
 
 LOCK_SCHEMA_VERSION = "mforge.experiment.lock.v2"
@@ -366,33 +366,16 @@ def build_lock(
 
 
 def write_lock(path: Path, value: Mapping[str, Any]) -> None:
-    payload = canonical_bytes(value) + b"\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise LockError(f"experiment lock is immutable: {path}")
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
-        with temporary.open("wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        try:
-            descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        except OSError:
-            pass
-    finally:
-        temporary.unlink(missing_ok=True)
+        write_json(path, value, exclusive=True)
+    except FileExistsError as exc:
+        raise LockError(f"experiment lock is immutable: {path}") from exc
 
 
 def load_lock(path: str | Path) -> dict[str, Any]:
     lock_path = Path(path)
     try:
-        value = json.loads(lock_path.read_text(encoding="utf-8"))
+        value = read_json(lock_path)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise LockError(f"cannot read experiment lock: {lock_path}") from exc
     if not isinstance(value, dict):

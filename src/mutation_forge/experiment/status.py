@@ -9,6 +9,7 @@ from typing import Any
 
 from .checkpoints import CheckpointIntegrityError, CheckpointStore
 from .config import ExperimentConfig, load_experiment_config, serialize_search_limit
+from .json_io import read_json
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import LockError, load_lock, verify_lock
 from .state import RESUMABLE_STATES, ExperimentStateStore, StateError, process_alive
@@ -207,11 +208,11 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         if configured_model_turns is None and config.search.max_model_turns is not None:
             configured_model_turns = config.search.max_model_turns
         model_turns_used = int(current["provider_turns"])
-        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json"
+        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json.gz"
         native_state: Mapping[str, Any] = {}
         if native_checkpoint.is_file():
             try:
-                raw_native_state = json.loads(native_checkpoint.read_text(encoding="utf-8"))
+                raw_native_state = read_json(native_checkpoint)
                 if isinstance(raw_native_state, Mapping):
                     native_state = raw_native_state
             except (OSError, UnicodeError, json.JSONDecodeError):
@@ -240,11 +241,11 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
                 model_turns_used = max(model_turns_used, checkpoint_turns)
         session_id = str(session["session_id"]) if session is not None else None
         artifacts: dict[str, str] = {}
-        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json"
+        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json.gz"
         if native_checkpoint.is_file():
             artifacts["generation_checkpoint"] = str(native_checkpoint)
         if session_id is not None:
-            session_summary = layout.sessions / session_id / "summary.json"
+            session_summary = layout.sessions / session_id / "summary.json.gz"
             if session_summary.is_file():
                 artifacts["session_summary"] = str(session_summary)
         if layout.archive.is_dir():

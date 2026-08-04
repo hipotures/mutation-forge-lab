@@ -11,8 +11,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+from .json_io import compress_json_bytes, read_json
+
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
-ARTIFACT_MANIFEST = "turn-manifest.json"
+ARTIFACT_MANIFEST = "turn-manifest.json.gz"
 _SECRET_KEY = re.compile(
     r"(?i)(?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|password|secret|cookie|credential|jwt|private[_-]?key|client[_-]?secret)"
 )
@@ -409,7 +411,11 @@ class TurnArtifactStore:
                 if required:
                     missing[name] = "not supplied"
                 return
-            put(name, _canonical(redact(value)) + b"\n", required=required)
+            put(
+                name,
+                compress_json_bytes(_canonical(redact(value)) + b"\n"),
+                required=required,
+            )
 
         if request_text is not None:
             put(
@@ -433,7 +439,7 @@ class TurnArtifactStore:
         if system_prompt is not None:
             put(f"{slot_text}.system-prompt.md", _text(system_prompt), required=True)
         if output_schema is not None:
-            put_json(f"{slot_text}.output-schema.json", output_schema)
+            put_json(f"{slot_text}.output-schema.json.gz", output_schema)
 
         effective_content = (
             content_received
@@ -466,28 +472,28 @@ class TurnArtifactStore:
         else:
             missing[f"{slot_text}.response.md"] = "not applicable: no textual content received"
         if diagnostics:
-            put_json(f"{slot_text}.response-diagnostics.json", diagnostics)
+            put_json(f"{slot_text}.response-diagnostics.json.gz", diagnostics)
         if transport_diagnostics:
             put_json(
-                f"{slot_text}.transport-diagnostics.json",
+                f"{slot_text}.transport-diagnostics.json.gz",
                 transport_diagnostics,
             )
 
-        put_json(f"{slot_text}.request.json", request)
+        put_json(f"{slot_text}.request.json.gz", request)
         # Keep a parsed object for syntactically valid responses, even when
         # schema validation failed.  Malformed/non-object text lives only in
         # response.raw.txt plus diagnostics, never in a misleading JSON view.
-        put_json(f"{slot_text}.response.json", decoded_response)
-        put_json("canonical_response.json", canonical_response)
-        put_json("usage.json", usage)
-        put_json("identity.json", identity)
-        put_json("behavior.json", behavior)
-        put_json("provenance.json", provenance)
-        put_json("validation.json", validation)
-        put_json("metadata-validation.json", metadata_validation)
-        put_json("worker_telemetry.json", worker_telemetry)
-        put_json(f"{slot_text}.provider-raw.json", provider_raw)
-        put_json(f"{slot_text}.codex-profile.json", codex_profile)
+        put_json(f"{slot_text}.response.json.gz", decoded_response)
+        put_json("canonical_response.json.gz", canonical_response)
+        put_json("usage.json.gz", usage)
+        put_json("identity.json.gz", identity)
+        put_json("behavior.json.gz", behavior)
+        put_json("provenance.json.gz", provenance)
+        put_json("validation.json.gz", validation)
+        put_json("metadata-validation.json.gz", metadata_validation)
+        put_json("worker_telemetry.json.gz", worker_telemetry)
+        put_json(f"{slot_text}.provider-raw.json.gz", provider_raw)
+        put_json(f"{slot_text}.codex-profile.json.gz", codex_profile)
         if source is not None:
             put("source.py", _text(source), required=True)
         if rpc is not None:
@@ -530,8 +536,8 @@ class TurnArtifactStore:
         source_extracted = source is not None
         failure_boundary = terminal_status != "completed" or error is not None
         if not validation_completed and source_extracted:
-            missing.setdefault("validation.json", "validation did not complete")
-            blocking_missing.add("validation.json")
+            missing.setdefault("validation.json.gz", "validation did not complete")
+            blocking_missing.add("validation.json.gz")
         # Required transport evidence is recorded as missing rather than
         # silently inferred.  A caller may explicitly mark a pre-response turn
         # complete only when all transport streams were retained.
@@ -541,8 +547,8 @@ class TurnArtifactStore:
             f"{slot_text}.events.jsonl": events is not None,
             f"{slot_text}.stdout.jsonl": stdout is not None,
             f"{slot_text}.stderr.txt": stderr is not None,
-            f"{slot_text}.codex-profile.json": codex_profile is not None,
-            "usage.json": usage is not None,
+            f"{slot_text}.codex-profile.json.gz": codex_profile is not None,
+            "usage.json.gz": usage is not None,
         }.items():
             if not supplied:
                 missing.setdefault(required_name, "not supplied by provider adapter")
@@ -551,10 +557,10 @@ class TurnArtifactStore:
                     blocking_missing.add(required_name)
 
         if usage is not None and not usage_complete(usage):
-            missing.setdefault("usage.json", "usage is not final exact usage")
+            missing.setdefault("usage.json.gz", "usage is not final exact usage")
             if request_accepted and not failure_boundary:
                 complete = False
-                blocking_missing.add("usage.json")
+                blocking_missing.add("usage.json.gz")
 
         manifest = {
             "schema_version": "mforge.experiment.turn-manifest.v2",
@@ -591,7 +597,11 @@ class TurnArtifactStore:
             # is determined by missing/bounded artifacts above, not by the
             # terminal status itself.
             manifest["error"] = error
-        _atomic_write(directory / ARTIFACT_MANIFEST, _canonical(manifest) + b"\n", exclusive=True)
+        _atomic_write(
+            directory / ARTIFACT_MANIFEST,
+            compress_json_bytes(_canonical(manifest) + b"\n"),
+            exclusive=True,
+        )
         if not bool(manifest["artifact_complete"]):
             raise ArtifactIncompleteError(
                 f"incomplete App Server turn artifacts for generation {generation}, slot {slot}: "
@@ -622,7 +632,7 @@ class TurnArtifactStore:
             raise ArtifactIncompleteError(f"turn artifact directory is missing: {root}")
         manifest_path = root / ARTIFACT_MANIFEST
         if manifest_path.exists():
-            retained_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            retained_manifest = read_json(manifest_path)
             if (
                 isinstance(retained_manifest, Mapping)
                 and retained_manifest.get("artifact_complete") is True
@@ -660,25 +670,29 @@ class TurnArtifactStore:
             else:
                 _atomic_write(source_path, source_bytes, exclusive=True)
         validation_value = result.get("validation")
-        validation_path = root / "validation.json"
+        validation_path = root / "validation.json.gz"
         if isinstance(validation_value, Mapping) and not validation_path.exists():
             _atomic_write(
                 validation_path,
-                _canonical(redact(validation_value)) + b"\n",
+                compress_json_bytes(_canonical(redact(validation_value)) + b"\n"),
                 exclusive=True,
             )
         for name, key in (
-            ("identity.json", "identity"),
-            ("behavior.json", "behavior"),
-            ("worker_telemetry.json", "worker_telemetry"),
-            ("provenance.json", "provenance"),
-            ("canonical_response.json", "canonical_response"),
-            ("metadata-validation.json", "metadata_validation"),
+            ("identity.json.gz", "identity"),
+            ("behavior.json.gz", "behavior"),
+            ("worker_telemetry.json.gz", "worker_telemetry"),
+            ("provenance.json.gz", "provenance"),
+            ("canonical_response.json.gz", "canonical_response"),
+            ("metadata-validation.json.gz", "metadata_validation"),
         ):
             value = result.get(key)
             path = root / name
             if isinstance(value, Mapping) and not path.exists():
-                _atomic_write(path, _canonical(redact(value)) + b"\n", exclusive=True)
+                _atomic_write(
+                    path,
+                    compress_json_bytes(_canonical(redact(value)) + b"\n"),
+                    exclusive=True,
+                )
         files = sorted(
             path for path in root.rglob("*") if path.is_file() and not path.name.startswith(".log.")
         )
@@ -703,27 +717,27 @@ class TurnArtifactStore:
         content_received = bool(result.get("content", result.get("response_text")))
         native_envelope = "system_prompt" in request or "output_schema" in request
         expected_transport: tuple[str, ...] = (
-            f"{artifact_prefix}.request.json",
-            f"{artifact_prefix}.provider-raw.json",
+            f"{artifact_prefix}.request.json.gz",
+            f"{artifact_prefix}.provider-raw.json.gz",
             f"{artifact_prefix}.wire.jsonl",
             f"{artifact_prefix}.codex-rpc.jsonl",
             f"{artifact_prefix}.events.jsonl",
             f"{artifact_prefix}.stdout.jsonl",
             f"{artifact_prefix}.stderr.txt",
             f"{artifact_prefix}.transcript.sha256",
-            f"{artifact_prefix}.usage.json",
-            f"{artifact_prefix}.codex-profile.json",
+            f"{artifact_prefix}.usage.json.gz",
+            f"{artifact_prefix}.codex-profile.json.gz",
         )
         if native_envelope:
             expected_transport = (
                 *expected_transport,
                 f"{artifact_prefix}.response.raw.txt",
                 f"{artifact_prefix}.system-prompt.md",
-                f"{artifact_prefix}.output-schema.json",
+                f"{artifact_prefix}.output-schema.json.gz",
             )
         response_value = result.get("response")
         if isinstance(response_value, Mapping):
-            expected_transport = (*expected_transport, f"{artifact_prefix}.response.json")
+            expected_transport = (*expected_transport, f"{artifact_prefix}.response.json.gz")
         for name in expected_transport:
             if name not in names:
                 missing[name] = "provider did not retain this transport stream"
@@ -750,28 +764,31 @@ class TurnArtifactStore:
             )
             blocking.add(f"{artifact_prefix}.response.raw.txt")
         if request_accepted and not usage_complete(usage) and not failure_boundary:
-            missing["usage.json"] = "usage is not final exact usage"
-            blocking.add("usage.json")
+            missing["usage.json.gz"] = "usage is not final exact usage"
+            blocking.add("usage.json.gz")
         if not usage_complete(usage):
-            missing.setdefault("usage.json", "not final exact usage for this failure boundary")
+            missing.setdefault(
+                "usage.json.gz",
+                "not final exact usage for this failure boundary",
+            )
         validation_is_valid = bool(
             isinstance(validation_value, Mapping) and validation_value.get("valid") is True
         )
         if source_path.is_file() and request_accepted and not failure_boundary:
-            required_finalization = ["validation.json", "identity.json"]
+            required_finalization = ["validation.json.gz", "identity.json.gz"]
             if validation_is_valid:
                 required_finalization.extend(
                     [
-                        "behavior.json",
-                        "worker_telemetry.json",
-                        "metadata-validation.json",
+                        "behavior.json.gz",
+                        "worker_telemetry.json.gz",
+                        "metadata-validation.json.gz",
                     ]
                 )
             for name in required_finalization:
                 if name not in names:
                     missing[name] = "turn finalization did not retain this evidence"
                     blocking.add(name)
-            for name in ("provenance.json", "canonical_response.json"):
+            for name in ("provenance.json.gz", "canonical_response.json.gz"):
                 if name not in names:
                     missing[name] = "turn finalization did not retain this evidence"
                     blocking.add(name)
@@ -797,7 +814,7 @@ class TurnArtifactStore:
             "response_projection_valid": bool(projection_valid),
             "source_extraction": (root / "source.py").is_file(),
             "validation_completed": bool(result.get("validation_completed"))
-            and (root / "validation.json").is_file(),
+            and (root / "validation.json.gz").is_file(),
             "artifact_complete": not blocking,
             "files": [
                 {
@@ -811,7 +828,11 @@ class TurnArtifactStore:
         }
         if result.get("error"):
             manifest["error"] = str(result["error"])
-        _atomic_write(manifest_path, _canonical(manifest) + b"\n", exclusive=True)
+        _atomic_write(
+            manifest_path,
+            compress_json_bytes(_canonical(manifest) + b"\n"),
+            exclusive=True,
+        )
         if blocking:
             raise ArtifactIncompleteError(
                 "incomplete existing App Server turn artifacts: "
@@ -848,7 +869,7 @@ class TurnArtifactStore:
             raise ArtifactIncompleteError(f"turn manifest is missing: {manifest_path}")
         attempt = 1
         while True:
-            archived = root / f"turn-manifest.attempt-{attempt:02d}.json"
+            archived = root / f"turn-manifest.attempt-{attempt:02d}.json.gz"
             if not archived.exists():
                 break
             attempt += 1
@@ -860,7 +881,7 @@ class TurnArtifactStore:
         root = Path(directory)
         manifest_path = root / ARTIFACT_MANIFEST
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = read_json(manifest_path)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ArtifactIncompleteError(f"cannot read turn manifest: {manifest_path}") from exc
         if (

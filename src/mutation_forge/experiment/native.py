@@ -44,6 +44,7 @@ from .generation import (
     GenerationCoordinator,
     SlotResult,
 )
+from .json_io import read_json, write_json
 from .layout import ExperimentLayout, WorkspaceError
 from .provider import LocalCodexAppServerProvider
 from .sessions import SessionContext
@@ -341,9 +342,9 @@ class _NativeArchive:
 
     def records(self) -> tuple[dict[str, Any], ...]:
         rows: list[dict[str, Any]] = []
-        for path in sorted(self.programs.glob("*.json")):
+        for path in sorted(self.programs.glob("*.json.gz")):
             try:
-                value = json.loads(path.read_text(encoding="utf-8"))
+                value = read_json(path)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
             if isinstance(value, Mapping):
@@ -367,7 +368,7 @@ class _NativeArchive:
         }
         with self._lock:
             source_path = self.sources / f"{program_id}.py"
-            record_path = self.programs / f"{program_id}.json"
+            record_path = self.programs / f"{program_id}.json.gz"
             if source_path.exists() and source_path.read_text(encoding="utf-8") != source:
                 raise NativeExperimentError(f"native archive source collision: {program_id}")
             if not source_path.exists():
@@ -375,9 +376,8 @@ class _NativeArchive:
                 temporary.write_text(source, encoding="utf-8")
                 os.replace(temporary, source_path)
             if not record_path.exists():
-                temporary = record_path.with_suffix(".json.tmp")
-                temporary.write_bytes(_canonical(record) + b"\n")
-                os.replace(temporary, record_path)
+                with contextlib.suppress(FileExistsError):
+                    write_json(record_path, record, exclusive=True)
         return record
 
     def existing_sources(
@@ -401,7 +401,7 @@ def _unfinished_generation_program_ids(checkpoint_path: Path) -> set[str]:
     if not checkpoint_path.is_file():
         return set()
     try:
-        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint = read_json(checkpoint_path)
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise NativeExperimentError("cannot read native generation checkpoint") from error
     if not isinstance(checkpoint, Mapping):
@@ -455,7 +455,7 @@ def _resume_parent_assignments(
     if not checkpoint_path.is_file():
         return None
     try:
-        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint = read_json(checkpoint_path)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     slots = checkpoint.get("slots") if isinstance(checkpoint, Mapping) else None
@@ -636,11 +636,11 @@ class _NativeProvider:
         manifest: Mapping[str, Any] | None = None
         compatible: list[tuple[Path, Mapping[str, Any]]] = []
         for candidate_directory in self._turn_directories(request):
-            manifest_path = candidate_directory / "turn-manifest.json"
+            manifest_path = candidate_directory / "turn-manifest.json.gz"
             if not manifest_path.is_file():
                 continue
             try:
-                candidate_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                candidate_manifest = read_json(manifest_path)
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise ArtifactIncompleteError(
                     "retained native provider evidence is unreadable"
@@ -671,12 +671,12 @@ class _NativeProvider:
             ):
                 continue
             slot = str(request.get("slot", "slot-00"))
-            request_path = candidate_directory / f"{slot}.request.json"
+            request_path = candidate_directory / f"{slot}.request.json.gz"
             if not request_path.is_file():
-                request_files = sorted(candidate_directory.glob("*.request.json"))
+                request_files = sorted(candidate_directory.glob("*.request.json.gz"))
                 request_path = request_files[-1] if request_files else request_path
             try:
-                retained_request = json.loads(request_path.read_text(encoding="utf-8"))
+                retained_request = read_json(request_path)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
             if not isinstance(retained_request, Mapping):
@@ -701,20 +701,20 @@ class _NativeProvider:
             return None
         try:
             slot = str(request.get("slot", "slot-00"))
-            response_path = directory / f"{slot}.response.json"
+            response_path = directory / f"{slot}.response.json.gz"
             if not response_path.is_file():
-                responses = sorted(directory.glob("*.response.json"))
+                responses = sorted(directory.glob("*.response.json.gz"))
                 response_path = responses[-1] if responses else response_path
             raw_response_path = directory / f"{slot}.response.raw.txt"
             if not raw_response_path.is_file():
                 raw_responses = sorted(directory.glob("*.response.raw.txt"))
                 raw_response_path = raw_responses[-1] if raw_responses else raw_response_path
-            usage_path = directory / "usage.json"
+            usage_path = directory / "usage.json.gz"
             if not usage_path.is_file():
-                usages = sorted(directory.glob("*.usage.json"))
+                usages = sorted(directory.glob("*.usage.json.gz"))
                 usage_path = usages[-1] if usages else usage_path
             response = (
-                json.loads(response_path.read_text(encoding="utf-8"))
+                read_json(response_path)
                 if response_path.is_file()
                 else (
                     raw_response_path.read_text(encoding="utf-8")
@@ -723,23 +723,21 @@ class _NativeProvider:
                 )
             )
             usage = (
-                json.loads(usage_path.read_text(encoding="utf-8")) if usage_path.is_file() else {}
+                read_json(usage_path) if usage_path.is_file() else {}
             )
             retained_evidence: dict[str, Any] = {}
             for key_name, filename in (
-                ("validation", "validation.json"),
-                ("identity", "identity.json"),
-                ("behavior", "behavior.json"),
-                ("worker_telemetry", "worker_telemetry.json"),
-                ("canonical_response", "canonical_response.json"),
-                ("metadata_validation", "metadata-validation.json"),
-                ("response_diagnostics", "response-diagnostics.json"),
+                ("validation", "validation.json.gz"),
+                ("identity", "identity.json.gz"),
+                ("behavior", "behavior.json.gz"),
+                ("worker_telemetry", "worker_telemetry.json.gz"),
+                ("canonical_response", "canonical_response.json.gz"),
+                ("metadata_validation", "metadata-validation.json.gz"),
+                ("response_diagnostics", "response-diagnostics.json.gz"),
             ):
                 evidence_path = directory / filename
                 if evidence_path.is_file():
-                    retained_evidence[key_name] = json.loads(
-                        evidence_path.read_text(encoding="utf-8")
-                    )
+                    retained_evidence[key_name] = read_json(evidence_path)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ArtifactIncompleteError(
                 "retained native provider evidence is unreadable"
@@ -788,11 +786,11 @@ class _NativeProvider:
         return self._retained(request) is not None
 
     def _archive_conflicting_turn(self, directory: Path, key: str) -> None:
-        manifest_path = directory / "turn-manifest.json"
+        manifest_path = directory / "turn-manifest.json.gz"
         if not manifest_path.is_file():
             return
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = read_json(manifest_path)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ArtifactIncompleteError(
                 "existing native provider evidence is unreadable"
@@ -926,10 +924,10 @@ class _NativeProvider:
         directory = self.layout.generation_slot_phase(generation, slot, phase)
         usage = value.get("usage") if isinstance(value.get("usage"), Mapping) else {}
         status = str(value.get("status", "completed"))
-        manifest_path = directory / "turn-manifest.json"
+        manifest_path = directory / "turn-manifest.json.gz"
         retained_manifest: Any = None
         if manifest_path.is_file():
-            retained_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            retained_manifest = read_json(manifest_path)
             if (
                 not isinstance(retained_manifest, Mapping)
                 or retained_manifest.get("request_idempotency_key")
@@ -942,19 +940,10 @@ class _NativeProvider:
             or retained_manifest.get("artifact_complete") is not True
         ):
             artifact_prefix = self.turns.artifact_prefix(directory, value, slot)
-            usage_path = directory / f"{artifact_prefix}.usage.json"
+            usage_path = directory / f"{artifact_prefix}.usage.json.gz"
             if not usage_path.is_file() and usage:
-                descriptor = os.open(
-                    usage_path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
-                try:
-                    payload = _canonical(usage) + b"\n"
-                    os.write(descriptor, payload)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                with contextlib.suppress(FileExistsError):
+                    write_json(usage_path, usage, exclusive=True)
         if not directory.exists():
             self.turns.write_turn(
                 generation=generation,
@@ -1166,11 +1155,11 @@ class NativeExperimentAdapter:
         """Return the fail-safe global turn count enforced by the coordinator."""
 
         ledger_turns = int(state.cumulative().get("provider_turns", 0))
-        checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
+        checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
         if not checkpoint_path.is_file():
             return ledger_turns
         try:
-            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint = read_json(checkpoint_path)
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise NativeExperimentError("cannot read native generation checkpoint") from error
         if not isinstance(checkpoint, Mapping):
@@ -1487,7 +1476,7 @@ class NativeExperimentAdapter:
         archive = _NativeArchive(layout.archive)
         parent_sources, parent_records = self._parent_data(state, layout)
         unfinished_program_ids = _unfinished_generation_program_ids(
-            layout.artifacts / "native-generation-checkpoint.json"
+            layout.artifacts / "native-generation-checkpoint.json.gz"
         )
         baseline_sources = archive.existing_sources(exclude_program_ids=unfinished_program_ids)
         profiling_enabled = config.run.profiling_enabled if profiling is None else bool(profiling)
@@ -1814,12 +1803,15 @@ class NativeExperimentAdapter:
             """Recover a completed evaluation written before the DB commit."""
 
             development_path = (
-                layout.artifacts / "evaluations" / "development" / f"{candidate_id}.json"
+                layout.artifacts
+                / "evaluations"
+                / "development"
+                / f"{candidate_id}.json.gz"
             )
             if not development_path.is_file():
                 return None
             try:
-                development = json.loads(development_path.read_text(encoding="utf-8"))
+                development = read_json(development_path)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 return None
             if not isinstance(development, Mapping):
@@ -1858,11 +1850,16 @@ class NativeExperimentAdapter:
             if not config.evaluation.replay:
                 result["replay"] = {"enabled": False, "exact": None}
                 return result
-            replay_path = layout.artifacts / "evaluations" / "replay" / f"{candidate_id}.json"
+            replay_path = (
+                layout.artifacts
+                / "evaluations"
+                / "replay"
+                / f"{candidate_id}.json.gz"
+            )
             if not replay_path.is_file():
                 return None
             try:
-                replay = json.loads(replay_path.read_text(encoding="utf-8"))
+                replay = read_json(replay_path)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 return None
             replay_identity = replay.get("source_identity") if isinstance(replay, Mapping) else None
@@ -2549,12 +2546,13 @@ class NativeExperimentAdapter:
                     repair_prompt=repair_prompt,
                     sandbox_limits=SandboxLimits(),
                     scientific_contract=True,
-                    checkpoint_path=layout.artifacts / "native-generation-checkpoint.json",
+                    checkpoint_path=layout.artifacts
+                    / "native-generation-checkpoint.json.gz",
                     turn_timeout_seconds=config.turn_timeout_seconds,
                     infrastructure_retry_backoff_seconds=1.0,
                 )
                 resume_parent_assignments = _resume_parent_assignments(
-                    layout.artifacts / "native-generation-checkpoint.json",
+                    layout.artifacts / "native-generation-checkpoint.json.gz",
                     state,
                 )
                 coordinator = GenerationCoordinator(
@@ -2611,9 +2609,9 @@ class NativeExperimentAdapter:
             }
         except _NativeSessionBudgetExpired:
             generation = 0
-            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
             try:
-                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                checkpoint = read_json(checkpoint_path)
                 if isinstance(checkpoint, Mapping):
                     value = checkpoint.get("next_generation", checkpoint.get("generation", 0))
                     if isinstance(value, int) and not isinstance(value, bool):
@@ -2647,9 +2645,9 @@ class NativeExperimentAdapter:
         if not isinstance(result, Mapping):
             raise NativeExperimentError("native generation engine returned a non-object result")
         if not isinstance(result.get("summary"), Mapping):
-            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json"
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
             try:
-                checkpoint_value = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                checkpoint_value = read_json(checkpoint_path)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 checkpoint_value = {}
             checkpoint_summary = (

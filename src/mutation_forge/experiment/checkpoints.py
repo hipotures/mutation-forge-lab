@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+
+from .json_io import read_json, write_json
 
 CHECKPOINT_SCHEMA_VERSION = "mforge.experiment.checkpoint.v2"
 
@@ -64,34 +64,20 @@ class CheckpointStore:
             payload.get("checkpoint_id") or f"checkpoint-{sequence:012d}"
         )
         payload["checkpoint_sha256"] = _digest(payload)
-        path = self.root / f"checkpoint-{sequence:012d}.json"
+        path = self.root / f"checkpoint-{sequence:012d}.json.gz"
         if path.exists():
             raise CheckpointIntegrityError(f"checkpoint already exists: {path.name}")
-        fd, temporary_name = tempfile.mkstemp(prefix=".checkpoint-", suffix=".tmp", dir=self.root)
-        temporary = Path(temporary_name)
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(_canonical(payload) + b"\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-            try:
-                descriptor = os.open(self.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-            except OSError:
-                pass
-        finally:
-            temporary.unlink(missing_ok=True)
+            write_json(path, payload, exclusive=True)
+        except FileExistsError as exc:
+            raise CheckpointIntegrityError(f"checkpoint already exists: {path.name}") from exc
         return payload
 
     def list(self, *, verify: bool = True) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        for path in sorted(self.root.glob("checkpoint-*.json")):
+        for path in sorted(self.root.glob("checkpoint-*.json.gz")):
             try:
-                value = json.loads(path.read_text(encoding="utf-8"))
+                value = read_json(path)
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 if verify:
                     raise CheckpointIntegrityError(f"cannot read checkpoint: {path.name}") from exc

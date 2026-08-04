@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -28,6 +26,8 @@ from mutation_forge.sandbox.validation import (
     render_policy_validator_contract,
     validate_policy,
 )
+
+from .json_io import read_json, write_json
 
 GENERATION_SCHEMA_VERSION = "mforge.experiment.generation.v2"
 
@@ -1346,7 +1346,7 @@ class GenerationCoordinator:
             return state
         if self._checkpoint_file is not None and self._checkpoint_file.exists():
             try:
-                value = json.loads(self._checkpoint_file.read_text(encoding="utf-8"))
+                value = read_json(self._checkpoint_file)
             except (OSError, json.JSONDecodeError, TypeError) as exc:
                 raise ValueError("cannot read native generation checkpoint") from exc
             if not isinstance(value, dict):
@@ -1374,18 +1374,7 @@ class GenerationCoordinator:
             )
         if self._checkpoint_file is None:
             return
-        self._checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(
-            prefix=".generation-", suffix=".tmp", dir=self._checkpoint_file.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(_safe(payload), handle, sort_keys=True, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self._checkpoint_file)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
+        write_json(self._checkpoint_file, _safe(payload), indent=2)
         self._emit(
             "checkpoint_written",
             checkpoint=str(self._checkpoint_file),

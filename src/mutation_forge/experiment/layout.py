@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .json_io import read_json, write_json
+
 if TYPE_CHECKING:
     from .config import ExperimentConfig
 
@@ -51,7 +53,7 @@ class ExperimentLayout:
 
     @property
     def lock(self) -> Path:
-        return self.root / "experiment.lock.json"
+        return self.root / "experiment.lock.json.gz"
 
     @property
     def lock_path(self) -> Path:
@@ -83,7 +85,7 @@ class ExperimentLayout:
 
     @property
     def experiment_manifest(self) -> Path:
-        return self.artifacts / "experiment-manifest.json"
+        return self.artifacts / "experiment-manifest.json.gz"
 
     @property
     def sessions(self) -> Path:
@@ -180,7 +182,7 @@ class ExperimentLayout:
     def checkpoint_path(self, sequence: int, *, root: Path | None = None) -> Path:
         if sequence <= 0:
             raise ValueError("checkpoint sequence must be positive")
-        return (root or self.root) / "checkpoints" / f"checkpoint-{sequence:012d}.json"
+        return (root or self.root) / "checkpoints" / f"checkpoint-{sequence:012d}.json.gz"
 
     def _validate_root(self) -> None:
         workspace = self.workspace.resolve()
@@ -214,30 +216,12 @@ class ExperimentLayout:
             self.ensure_subdirectories(temporary)
             _atomic_write(temporary / "experiment.toml", config.source_bytes)
             if lock_payload is not None:
-                _atomic_write(
-                    temporary / "experiment.lock.json",
-                    json.dumps(
-                        lock_payload,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    + b"\n",
-                )
+                write_json(temporary / "experiment.lock.json.gz", lock_payload)
             else:
                 from .lock import build_lock
 
                 lock_payload = build_lock(config, self)
-                _atomic_write(
-                    temporary / "experiment.lock.json",
-                    json.dumps(
-                        lock_payload,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    + b"\n",
-                )
+                write_json(temporary / "experiment.lock.json.gz", lock_payload)
             if state_initializer is not None:
                 state_initializer(temporary / "state.sqlite3")
             else:
@@ -250,12 +234,9 @@ class ExperimentLayout:
                     root=self.root,
                 )
             manifest = _artifact_manifest(temporary / "artifacts")
-            _atomic_write(
-                temporary / "artifacts" / "experiment-manifest.json",
-                json.dumps(
-                    manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
-                + b"\n",
+            write_json(
+                temporary / "artifacts" / "experiment-manifest.json.gz",
+                manifest,
             )
             _fsync_tree(temporary)
             try:
@@ -290,7 +271,7 @@ class ExperimentLayout:
         for session in sorted(self.sessions.glob("session-*")):
             if not session.is_dir():
                 continue
-            for name in ("session.json", "summary.json"):
+            for name in ("session.json.gz", "summary.json.gz"):
                 path = session / name
                 if path.is_file():
                     _verify_json_schema(
@@ -306,8 +287,8 @@ class ExperimentLayout:
                 _verify_event_stream(events)
 
         known_root_artifacts = {
-            "run_summary.json": "mforge.experiment.run.v2",
-            "native-generation-checkpoint.json": "mforge.experiment.generation.v2",
+            "run_summary.json.gz": "mforge.experiment.run.v2",
+            "native-generation-checkpoint.json.gz": "mforge.experiment.generation.v2",
         }
         for name, schema in known_root_artifacts.items():
             path = self.artifacts / name
@@ -333,13 +314,7 @@ class ExperimentLayout:
 
     def write_artifact_manifest(self) -> dict[str, Any]:
         manifest = _artifact_manifest(self.artifacts)
-        _atomic_write(
-            self.experiment_manifest,
-            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-            + b"\n",
-        )
+        write_json(self.experiment_manifest, manifest)
         return manifest
 
     def reconcile_artifact_manifest(self) -> dict[str, Any]:
@@ -351,7 +326,7 @@ class ExperimentLayout:
         if not self.experiment_manifest.is_file():
             raise WorkspaceError("experiment artifact manifest is missing")
         try:
-            value = json.loads(self.experiment_manifest.read_text(encoding="utf-8"))
+            value = read_json(self.experiment_manifest)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise WorkspaceError("experiment artifact manifest is unreadable") from exc
         if (
@@ -396,9 +371,9 @@ class ExperimentLayout:
                 relocation_candidates = list(
                     path.parent.parent.glob(f"{path.parent.name}.attempt-*/{path.name}")
                 )
-                if path.name == "turn-manifest.json":
+                if path.name == "turn-manifest.json.gz":
                     relocation_candidates.extend(
-                        path.parent.glob("turn-manifest.attempt-*.json")
+                        path.parent.glob("turn-manifest.attempt-*.json.gz")
                     )
                 for candidate in sorted(relocation_candidates):
                     if not candidate.is_file():
@@ -418,13 +393,13 @@ class ExperimentLayout:
                 len(relative_parts) >= 3
                 and relative_parts[0] == "sessions"
                 and (
-                    relative_parts[-1] in {"events.jsonl", "session.json"}
+                    relative_parts[-1] in {"events.jsonl", "session.json.gz"}
                     or "logs" in relative_parts[2:-1]
                 )
             )
             runtime_mutable = (
-                relative == "native-generation-checkpoint.json"
-                or relative == "run-summary.json"
+                relative == "native-generation-checkpoint.json.gz"
+                or relative == "run-summary.json.gz"
                 or relative == "archive/index.jsonl"
                 or relative.startswith("evaluations/development/")
                 or relative.startswith("evaluations/replay/")
@@ -442,7 +417,7 @@ class ExperimentLayout:
                 path.relative_to(self.artifacts).as_posix()
                 for path in self.artifacts.rglob("*")
                 if path.is_file()
-                and path.name != "experiment-manifest.json"
+                and path.name != "experiment-manifest.json.gz"
                 and not path.name.startswith(".")
             }
             if actual_paths != listed_paths:
@@ -494,7 +469,7 @@ def _fsync_tree(root: Path) -> None:
 def _artifact_manifest(root: Path) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        if path.name == "experiment-manifest.json" or path.name.startswith("."):
+        if path.name == "experiment-manifest.json.gz" or path.name.startswith("."):
             continue
         data = path.read_bytes()
         files.append(
@@ -517,7 +492,11 @@ def _artifact_manifest(root: Path) -> dict[str, Any]:
 
 def _read_object(path: Path, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = (
+            read_json(path)
+            if path.name.endswith(".json.gz")
+            else json.loads(path.read_text(encoding="utf-8"))
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise WorkspaceError(f"{label} is unreadable: {path}") from exc
     if not isinstance(value, dict):
