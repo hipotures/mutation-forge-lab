@@ -148,7 +148,14 @@ def test_run_once_resumes_from_last_completed_episode(
             "order": 4,
             "graph_seed": 1,
             "policy_seed": policy_seed,
-            "policies": {"candidate": {"auc": 0.25}},
+            "policies": {
+                "candidate": {
+                    "auc": 0.25,
+                    "accepted_count": 0,
+                    "rejected_count": 1,
+                    "failure_count": 0,
+                }
+            },
         }
 
     monkeypatch.setattr(evaluation, "_trajectory", interrupted)
@@ -172,7 +179,14 @@ def test_run_once_resumes_from_last_completed_episode(
             "order": 4,
             "graph_seed": 1,
             "policy_seed": policy_seed,
-            "policies": {"candidate": {"auc": 0.5}},
+            "policies": {
+                "candidate": {
+                    "auc": 0.5,
+                    "accepted_count": 1,
+                    "rejected_count": 0,
+                    "failure_count": 0,
+                }
+            },
         }
 
     progress: list[dict[str, Any]] = []
@@ -197,6 +211,9 @@ def test_run_once_resumes_from_last_completed_episode(
     assert progress[1]["restored_count"] == 1
     assert cast(dict[str, Any], result["runtime"])["executed_episodes"] == 1
     assert cast(dict[str, Any], result["runtime"])["restored_episodes"] == 1
+    assert cast(dict[str, Any], result["summary"])["improvement_rate"] == pytest.approx(
+        0.5
+    )
 
 
 def test_stale_episode_checkpoint_is_recomputed(tmp_path: Path) -> None:

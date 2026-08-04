@@ -264,7 +264,6 @@ class DashboardState:
     baseline_structural: float | None = None
     improvement_rate: float | None = None
     evaluation_rate: float | None = None
-    episode_rate: float | None = None
     profiling_enabled: bool = False
     timing_profile: Mapping[str, JsonValue] | None = None
     cumulative_usage: TokenUsage = TokenUsage()
@@ -1009,7 +1008,6 @@ def _global_payload(
     numbers = {
         "configured_wall_seconds": "wall_seconds",
         "evaluations_per_second": "evaluation_rate",
-        "episodes_per_second": "episode_rate",
         "ir": "improvement_rate",
         "improvement_rate": "improvement_rate",
     }
@@ -1812,18 +1810,18 @@ def reduce_dashboard_key(
         else:
             index = last
         return replace(state, selected_index=index, retry_confirmation=False), None
-    if key in {"ENTER", "RIGHT"}:
+    if key == "ENTER":
         return replace(state, view="details", status_message=""), None
     if key == "ESC" and state.search_query:
         return replace(state, search_query="", status_message="Filter cleared"), None
-    if key in {"ESC", "LEFT"}:
+    if key == "ESC":
         return replace(state, view="matrix", retry_confirmation=False), None
     if key == "TAB" and state.view == "details":
         return replace(state, detail_tab=(state.detail_tab + 1) % len(DETAIL_TABS)), None
     if key == "SHIFT_TAB" and state.view == "details":
         return replace(state, detail_tab=(state.detail_tab - 1) % len(DETAIL_TABS)), None
-    if key in {"n", "N", "PAGE_UP", "PAGE_DOWN"}:
-        generations = [item.generation for item in state.generations]
+    if key in {"LEFT", "RIGHT"}:
+        generations = sorted(item.generation for item in state.generations)
         if not generations:
             return replace(state, status_message="No retained generation"), None
         current = (
@@ -1831,13 +1829,14 @@ def reduce_dashboard_key(
             if state.displayed_generation in generations
             else len(generations) - 1
         )
-        delta = -1 if key in {"N", "PAGE_UP"} else 1
-        target = generations[(current + delta) % len(generations)]
+        delta = -1 if key == "LEFT" else 1
+        target = generations[
+            max(0, min(len(generations) - 1, current + delta))
+        ]
         return replace(
             state,
             displayed_generation=target,
             selected_index=0,
-            view="matrix",
             status_message=f"Viewing generation {_human_generation(target)}",
         ), None
     if key == "q":
@@ -2086,7 +2085,7 @@ class InteractiveDashboardSink:
 
     def handle_key(self, key: str) -> None:
         with self._lock:
-            if key in {"n", "N", "PAGE_UP", "PAGE_DOWN"} and self._persisted_loader:
+            if key in {"LEFT", "RIGHT"} and self._persisted_loader:
                 self.state = _merge_persisted_dashboard_state(
                     self.state,
                     self._persisted_loader(),
@@ -2837,8 +2836,7 @@ class InteractiveDashboardSink:
         except (AttributeError, OSError):
             user, system = 0.0, 0.0
         rows: list[tuple[str, object]] = [
-            ("eval/s", _rate(self.state.evaluation_rate)),
-            ("episodes/s", _rate(self.state.episode_rate)),
+            ("episodes/s", _rate(self.state.evaluation_rate)),
             ("turn/s", _rate(self.state.provider_turns_completed / elapsed)),
             ("IR", _objective(self.state.improvement_rate)),
             (
@@ -3104,30 +3102,30 @@ class InteractiveDashboardSink:
         )
         if mode == "compact":
             rows = rows[:2]
-        summary = _key_value_grid(rows)
         if not self.state.objective_history:
             chart = Text("No evaluated objective history yet", style="dim")
         else:
             history = self.state.objective_history
             fixed_width = len("min 0.0000    max 0.0000")
+            key_width = max(
+                len("Objective history"),
+                *(len(label) for label, _value in rows),
+            )
             sparkline_width = (
                 None
                 if content_width is None
-                else max(1, content_width - fixed_width)
+                else max(1, content_width - key_width - fixed_width)
             )
             sparkline = _sparkline(history, width=sparkline_width)
             chart_line = (
                 f"min {min(history):.4f}  {sparkline}  max {max(history):.4f}"
             )
-            if mode == "compact":
-                chart = Text(chart_line, style="green")
-            else:
-                chart = Text(
-                    f"Objective history · oldest → latest · n={len(history)}\n"
-                    f"{chart_line}",
-                    style="green",
-                )
-        return Panel(Group(summary, chart), title="Quick View", border_style="cyan")
+            chart = Text(chart_line, style="green")
+        return Panel(
+            _key_value_grid((*rows, ("Objective history", chart))),
+            title="Quick View",
+            border_style="cyan",
+        )
 
     def _overlay_panel(self, width: int, height: int) -> Panel:
         if self.state.view == "config":
@@ -3160,11 +3158,11 @@ class InteractiveDashboardSink:
             content = Text(
                 "Navigation\n"
                 "  ↑/k ↓/j  select slot    Home/End first/last\n"
-                "  Enter/→ details         Esc/← matrix\n"
+                "  Enter details           Esc matrix\n"
+                "  ←/→ previous/next generation\n"
                 "  Tab/Shift+Tab detail tab\n\n"
                 "Actions\n"
                 "  q safe interrupt        p pause/resume scheduling\n"
-                "  n/N view next/previous generation (PageDown/PageUp also work)\n"
                 "  r confirmed retryable slot\n"
                 "  i phase/state icons  c config  l logs  t top  / search  h help\n\n"
                 "Panel copy\n"
@@ -3193,7 +3191,7 @@ class InteractiveDashboardSink:
                 "[1–8] copy",
                 "[q] interrupt",
                 "[p] pause/resume",
-                "[n/N] prev/next gen",
+                "[←/→] gen",
                 "[i] icons/text",
                 "[r] retry failed",
                 "[c] config",
@@ -3207,7 +3205,7 @@ class InteractiveDashboardSink:
                 "[1–8] copy",
                 "[q]interrupt",
                 "[p]pause",
-                "[n/N]prev/next",
+                "[←/→]gen",
                 "[i]icons",
                 "[r]retry",
                 "[c]config",
@@ -3434,7 +3432,7 @@ def _key_value_grid(rows: Sequence[tuple[str, object]]) -> Table:
     table.add_column(style="dim", no_wrap=True)
     table.add_column(justify="right", overflow="ellipsis")
     for label, value in rows:
-        table.add_row(label, _show(value))
+        table.add_row(label, value if isinstance(value, Text) else _show(value))
     return table
 
 

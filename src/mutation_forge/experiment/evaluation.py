@@ -779,6 +779,13 @@ def _run_once(
             ranker.close()
     candidate_rows = [cast(Mapping[str, Any], row["policies"])[candidate_id] for row in episodes]
     aucs = [float(_get(row, "auc", 0.0)) for row in candidate_rows]
+    accepted = sum(int(_get(row, "accepted_count", 0)) for row in candidate_rows)
+    decisions = sum(
+        int(_get(row, "accepted_count", 0))
+        + int(_get(row, "rejected_count", 0))
+        + int(_get(row, "failure_count", 0))
+        for row in candidate_rows
+    )
     baseline_names = tuple(str(name) for name in settings["baselines"])
     baseline_auc: dict[str, JsonValue] = {}
     for baseline in baseline_names:
@@ -802,6 +809,7 @@ def _run_once(
             "mean_auc": sum(aucs) / len(aucs) if aucs else 0.0,
             "best_auc": max(aucs, default=0.0),
             "baseline_auc": baseline_auc,
+            "improvement_rate": accepted / decisions if decisions else 0.0,
         },
         "runtime": {
             "elapsed_seconds": max(time.monotonic() - started, 0.0),

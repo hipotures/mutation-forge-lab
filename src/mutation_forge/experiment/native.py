@@ -2081,7 +2081,7 @@ class NativeExperimentAdapter:
             identity: str,
             result: Mapping[str, Any],
         ) -> None:
-            nonlocal best_objective, best_candidate_id
+            nonlocal best_objective, best_candidate_id, last_ir
             state.record_evaluation(
                 identity,
                 candidate_id=program_id,
@@ -2092,6 +2092,9 @@ class NativeExperimentAdapter:
             summary = result.get("summary")
             summary = summary if isinstance(summary, Mapping) else {}
             evaluation_summary_cache[program_id] = dict(summary)
+            raw_ir = summary.get("improvement_rate")
+            if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
+                last_ir = float(raw_ir)
             metric = summary.get("mean_auc")
             if not isinstance(metric, (int, float)) or isinstance(metric, bool):
                 return
@@ -2122,6 +2125,7 @@ class NativeExperimentAdapter:
                 best_candidate_id=best_candidate_id,
                 best_score=best_objective,
                 baseline_comparison=summary.get("baseline_auc"),
+                ir=last_ir,
                 worker_count=evaluation_worker_count,
                 active_workers=0,
             )
@@ -2462,6 +2466,12 @@ class NativeExperimentAdapter:
                         restored_metric, bool
                     ):
                         restored_value = float(restored_metric)
+                        restored_ir = restored_summary.get("improvement_rate")
+                        if isinstance(restored_ir, (int, float)) and not isinstance(
+                            restored_ir,
+                            bool,
+                        ):
+                            last_ir = float(restored_ir)
                         if best_objective is None or restored_value > best_objective:
                             best_objective = restored_value
                             best_candidate_id = program_id
@@ -2489,6 +2499,7 @@ class NativeExperimentAdapter:
                                 best_candidate_id=best_candidate_id,
                                 best_score=best_objective,
                                 baseline_comparison=restored_summary.get("baseline_auc"),
+                                ir=last_ir,
                                 worker_count=evaluation_worker_count,
                                 active_workers=0,
                             )

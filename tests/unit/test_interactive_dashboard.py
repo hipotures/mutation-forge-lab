@@ -800,13 +800,30 @@ def test_key_reducer_navigation_details_generations_and_retry_confirmation() -> 
     assert action.kind == "retry"
     assert action.slot == "slot-01"
 
-    state, _ = reduce_dashboard_key(state, "N")
+    state, _ = reduce_dashboard_key(state, "LEFT")
     assert state.displayed_generation == 0
     assert state.generation == 1
     assert state.status_message == "Viewing generation 1"
-    state, _ = reduce_dashboard_key(state, "n")
+    state, _ = reduce_dashboard_key(state, "LEFT")
+    assert state.displayed_generation == 0
+    state, _ = reduce_dashboard_key(state, "RIGHT")
     assert state.displayed_generation == 1
     assert state.generation == 1
+    state, _ = reduce_dashboard_key(state, "RIGHT")
+    assert state.displayed_generation == 1
+
+    state, _ = reduce_dashboard_key(state, "LEFT")
+    state, _ = reduce_dashboard_key(state, "ENTER")
+    assert state.view == "details"
+    state, _ = reduce_dashboard_key(state, "RIGHT")
+    assert state.displayed_generation == 1
+    assert state.view == "details"
+    state, _ = reduce_dashboard_key(state, "ESC")
+    assert state.view == "matrix"
+    unchanged, _ = reduce_dashboard_key(state, "n")
+    assert unchanged == state
+    unchanged, _ = reduce_dashboard_key(state, "N")
+    assert unchanged == state
 
 
 def test_safe_interrupt_marks_active_slots_as_stopping() -> None:
@@ -911,7 +928,7 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
         persisted_loader=lambda: persisted,
         start_live=False,
     )
-    sink.handle_key("N")
+    sink.handle_key("LEFT")
     assert sink.state.displayed_generation == 0
     assert sink.state.generations[0].slots[0].objective == pytest.approx(0.75)
     sink.close()
@@ -1283,6 +1300,58 @@ def test_progress_panel_omits_metrics_without_real_progress_bars(
     sink.close()
 
 
+def test_performance_panel_shows_episode_throughput_and_improvement_rate() -> None:
+    state = _running_state()
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_started",
+            generation=1,
+            slot="slot-02",
+            evaluation_total=320,
+        ),
+        monotonic=120.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_progress",
+            generation=1,
+            slot="slot-02",
+            evaluations_per_second=2.5,
+            completed=10,
+            total=320,
+        ),
+        monotonic=121.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "evaluation_completed",
+            generation=1,
+            slot="slot-03",
+            ir=0.375,
+        ),
+        monotonic=122.0,
+    )
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        initial_state=state,
+        start_live=False,
+    )
+    output = io.StringIO()
+    Console(file=output, width=80, force_terminal=False, color_system=None).print(
+        sink._performance_panel()  # noqa: SLF001
+    )
+    rendered = output.getvalue()
+    assert "episodes/s" in rendered
+    assert "2.50" in rendered
+    assert "eval/s" not in rendered
+    assert "IR" in rendered
+    assert "0.3750" in rendered
+    sink.close()
+
+
 @pytest.mark.parametrize(
     ("width", "height", "expected"),
     (
@@ -1488,7 +1557,8 @@ def test_human_generation_numbers_and_truthful_footer_labels(
     assert "Slots" in rendered
 
     footer = sink._footer(150)
-    assert "[n/N] prev/next gen" in footer.plain
+    assert "[←/→] gen" in footer.plain
+    assert "[n/N]" not in footer.plain
     top_span = next(
         span for span in footer.spans if footer.plain[span.start : span.end] == "[t] top"
     )
@@ -1598,8 +1668,11 @@ def test_quick_view_explains_objective_sparkline_direction(
         color_system=None,
     ).print(sink.render())
     rendered = output.getvalue()
-    assert "Objective history · oldest → latest · n=2" in rendered
+    assert "Objective history" in rendered
+    assert "oldest → latest" not in rendered
+    assert "n=2" not in rendered
     objective_line = next(line for line in rendered.splitlines() if "min 0.2500" in line)
+    assert "Objective history" in objective_line
     assert "max 0.7500" in objective_line
     sink.close()
 
