@@ -31,6 +31,13 @@ OPERATOR_MAP = {
 }
 PREPARED_GRAPH_CACHE_SIZE = 2
 HEG_GRAPH_MODE = "unrestricted_min_degree_3"
+HEG_GRAPH_MODES = frozenset(
+    {
+        "cubic_first",
+        "minimal_structure_mixed_degree",
+        "unrestricted_min_degree_3",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -66,7 +73,12 @@ class HegBackend:
         score_longest_first_enabled: bool = True,
         score_compact_dominated_enabled: bool = True,
         score_prepared_request_cache_enabled: bool = True,
+        graph_mode: str = HEG_GRAPH_MODE,
     ) -> None:
+        if graph_mode not in HEG_GRAPH_MODES:
+            raise ValueError(f"unsupported HEG graph mode: {graph_mode}")
+        self.graph_mode = graph_mode
+        self.backend_id = f"heg-erdos-gyarfas-{graph_mode}"
         self.repo = repo.resolve()
         source = self.repo / "src"
         if not (source / "sglab").is_dir():
@@ -225,7 +237,7 @@ class HegBackend:
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
         self._prepared_proposal = None
         graph = self._plugin.generate_seed(
-            random.Random(seed), {"order": order, "mode": HEG_GRAPH_MODE}
+            random.Random(seed), {"order": order, "mode": self.graph_mode}
         )
         state = self._from_heg(graph)
         self._store_prepared(state, _PreparedGraph(graph))
@@ -633,7 +645,7 @@ class HegBackend:
             self._proposal_heg_graph = heg_graph
 
         mutation_config: dict[str, Any] = {
-            "mode": HEG_GRAPH_MODE,
+            "mode": self.graph_mode,
             "mutation_operator": heg_operator,
         }
         if heg_operator == "forbidden_cycle_break_switch":

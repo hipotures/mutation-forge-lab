@@ -98,6 +98,7 @@ class ExperimentService:
             run_mode="fresh" if not layout.root.exists() else "continuation",
             state="starting",
             configured_wall_seconds=config.run.wall_seconds,
+            graph_mode=config.evaluation.graph_mode,
             profiling_enabled=profiling_enabled,
         )
 
@@ -264,6 +265,7 @@ class ExperimentService:
                     run_mode=("fresh" if fresh_session else "continuation"),
                     state="running",
                     checkpoint=session.starting_checkpoint,
+                    graph_mode=config.evaluation.graph_mode,
                     elapsed_seconds=session.elapsed_seconds,
                     configured_wall_seconds=session.wall_seconds,
                     remaining_seconds=max(0.0, session.deadline - time.monotonic()),

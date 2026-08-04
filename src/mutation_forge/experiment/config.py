@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from mutation_forge.backends.heg import HEG_GRAPH_MODES
+
 EXPERIMENT_SCHEMA_VERSION = "mforge.experiment.v2"
 type SearchLimit = int | Literal["unbounded"]
 MAX_EXPERIMENT_ID_BYTES = 128
@@ -139,6 +141,7 @@ class ExperimentSearchConfig:
 
 @dataclass(frozen=True, slots=True)
 class ExperimentEvaluationConfig:
+    graph_mode: str
     orders: tuple[int, ...]
     graph_seeds: tuple[int, ...]
     policy_seeds: tuple[int, ...]
@@ -414,6 +417,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         "evaluation",
         {
             "orders",
+            "graph_mode",
             "graph_seeds",
             "policy_seeds",
             "horizon",
@@ -425,7 +429,14 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     replay = evaluation_raw.get("replay")
     if not isinstance(replay, bool):
         raise ValueError("evaluation.replay must be a boolean")
+    graph_mode = evaluation_raw.get("graph_mode")
+    if graph_mode not in HEG_GRAPH_MODES:
+        raise ValueError(
+            "evaluation.graph_mode must be one of "
+            f"{sorted(HEG_GRAPH_MODES)!r}"
+        )
     evaluation = ExperimentEvaluationConfig(
+        cast(str, graph_mode),
         _ints(evaluation_raw.get("orders"), "evaluation.orders"),
         _ints(evaluation_raw.get("graph_seeds"), "evaluation.graph_seeds"),
         _ints(evaluation_raw.get("policy_seeds"), "evaluation.policy_seeds"),

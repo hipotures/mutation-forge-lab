@@ -1221,7 +1221,7 @@ class NativeExperimentAdapter:
         try:
             from mutation_forge.backends.heg import HegBackend
 
-            backend = HegBackend(heg)
+            backend = HegBackend(heg, graph_mode=config.evaluation.graph_mode)
             backend.close()
         except Exception as error:
             raise WorkspaceError(f"HEG backend is not functional at {heg}: {error}") from error
@@ -1443,7 +1443,10 @@ class NativeExperimentAdapter:
         if target_lengths_backend is None:
             from mutation_forge.backends.heg import HegBackend
 
-            target_lengths_backend = HegBackend(Path(__file__).resolve().parents[4] / "heg")
+            target_lengths_backend = HegBackend(
+                Path(__file__).resolve().parents[4] / "heg",
+                graph_mode=config.evaluation.graph_mode,
+            )
             close_target_lengths_backend = True
         try:
             target_forbidden_lengths_by_order = {
@@ -2004,7 +2007,10 @@ class NativeExperimentAdapter:
                 repository = Path(cast(str | Path, backend_repo))
 
                 def backend_factory(_repo: Path, *, _repository: Path = repository) -> Any:
-                    return HegBackend(_repository)
+                    return HegBackend(
+                        _repository,
+                        graph_mode=config.evaluation.graph_mode,
+                    )
 
                 if "backend_factory" in parameters:
                     evaluator_kwargs["backend_factory"] = backend_factory

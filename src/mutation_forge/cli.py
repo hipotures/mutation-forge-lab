@@ -297,9 +297,11 @@ def _experiment_run(
                 model_config = getattr(config, "model", None)
                 search_config = getattr(config, "search", None)
                 run_config = getattr(config, "run", None)
+                evaluation_config = getattr(config, "evaluation", None)
                 run_id = str(config.exp_id)
                 model_name = str(getattr(model_config, "name", "—"))
                 model_effort = str(getattr(model_config, "effort", "—"))
+                graph_mode = str(getattr(evaluation_config, "graph_mode", "—"))
                 generation_limit = cast(
                     int | None,
                     getattr(search_config, "max_generations", None),
@@ -321,6 +323,7 @@ def _experiment_run(
                         population_size=population_size,
                         wall_seconds=wall_seconds,
                         hourly_token_limit=hourly_token_limit,
+                        graph_mode=graph_mode,
                     )
 
                 persisted_state = persisted_loader()

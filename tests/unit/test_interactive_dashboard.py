@@ -54,10 +54,7 @@ def _running_state() -> DashboardState:
             experiment_id="dashboard-run",
             session_id="session-000001",
             run_mode="fresh",
-            checkpoint=(
-                "/home/user/DEV/mutation-forge-lab/workspace/dashboard-run/"
-                "artifacts/native-generation-checkpoint.json.gz"
-            ),
+            graph_mode="unrestricted_min_degree_3",
             configured_wall_seconds=7200.0,
             model="gpt-test",
             effort="high",
@@ -1160,10 +1157,8 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
         ).print(sink._slot_matrix(width, "full"))
         assert "provider turn" not in matrix_output.getvalue().lower()
         assert "/home/user/" not in rendered
-        assert (
-            "workspace/dashboard-run/artifacts/native-generation-checkpoint.json.gz"
-            in rendered
-        )
+        assert "unrestricted_min_degree_3" in rendered
+        assert "native-generation-checkpoint.json.gz" not in rendered
         assert "experiment" in rendered
         assert "session" in rendered
         assert "usage" in rendered
@@ -1705,12 +1700,12 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
 
 GOLDEN_RENDER_HASHES = {
     "running_provider_profiled": (
-        "1c21100b08db8e2b0a28833fd14bf78ed0cc25b8bee4b09b1fc0eb63a1fd3935"
+        "a113bbad5eeb9c677b99417004895c035da421314dba741d7867c7297f7537e1"
     ),
-    "evaluation_active": ("9ceb7201a5acadc16d102cd0cb6457a11797fc89a2af721e187efcd2aaa4c2b1"),
-    "validation_details": ("4b148ada06788b57363c363bd64d5d2ff4992b87f00fd975bfcf7c9f0188d8ea"),
-    "completed": ("f553b05db4f608b1a2dbcbb0093d145a5e04b5dce8205a174cad10cfa813ebb1"),
-    "profiling_disabled": ("fdb178f014f9d12d175ed879f1d885425c304a71072713ddffcb27397bf3275d"),
+    "evaluation_active": ("668034dc664db0f7bdeab656cfb5bf339208829aacf16438bba942d5606d74cf"),
+    "validation_details": ("49c9ca5e1198fe1e9f06cf2dbff1732091ab3b90c5eba93614303e86950644d6"),
+    "completed": ("d326c9aa39270a1c2f408be2de2c597316279544bd9f1e5fd6bbf7542293c99d"),
+    "profiling_disabled": ("e6e996b397de2618c9d5d7d3af14d7a0dd5e294733d83505510445816af6060c"),
     "compact": ("4fde1e927056496ee4a7b53b7cf023f8e220abb54ac89c191baa6b705c211892"),
     "minimal": ("9b89914118f5127abe20a5a887d10e6e6575976d1fe4ec1211f7c0ab038efb48"),
 }

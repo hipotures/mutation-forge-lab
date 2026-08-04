@@ -76,6 +76,19 @@ def test_heg_unrestricted_seed_supports_odd_mixed_degree_graphs(
         backend.close()
 
 
+def test_heg_backend_uses_configured_graph_mode(heg_repo: Path) -> None:
+    backend = HegBackend(heg_repo, graph_mode="cubic_first")
+    try:
+        assert backend.graph_mode == "cubic_first"
+        with pytest.raises(ValueError, match="even order"):
+            backend.generate_seed(order=31, seed=101)
+    finally:
+        backend.close()
+
+    with pytest.raises(ValueError, match="unsupported HEG graph mode"):
+        HegBackend(heg_repo, graph_mode="all")
+
+
 def test_both_heg_baselines_preserve_validity(heg_repo: Path) -> None:
     backend = HegBackend(heg_repo)
     try:

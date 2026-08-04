@@ -62,6 +62,7 @@ max_model_turns = 4
 selection = "elite-diversity"
 
 [evaluation]
+graph_mode = "unrestricted_min_degree_3"
 orders = [10]
 graph_seeds = [401]
 policy_seeds = [4001]
@@ -87,6 +88,21 @@ def test_config_resolves_workspace_relative_to_config(tmp_path: Path) -> None:
     path = _write_config(tmp_path, workspace="./workspace")
     config = load_experiment_config(path)
     assert config.experiment_root == path.parent / "workspace" / "demo"
+    assert config.evaluation.graph_mode == "unrestricted_min_degree_3"
+
+
+def test_config_rejects_unknown_heg_graph_mode(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+    path.write_text(
+        _config().replace(
+            'graph_mode = "unrestricted_min_degree_3"',
+            'graph_mode = "all"',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="evaluation.graph_mode"):
+        load_experiment_config(path)
 
 
 def test_config_accepts_and_serializes_unbounded_limits(tmp_path: Path) -> None:

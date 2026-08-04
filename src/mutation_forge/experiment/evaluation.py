@@ -897,9 +897,11 @@ def evaluate_candidate(
                 return no_arg_factory()
         if backend is not None:
             return backend
-        from mutation_forge.backends.heg import HegBackend
+        from mutation_forge.backends.heg import HEG_GRAPH_MODE, HegBackend
 
-        return HegBackend(_repo_path(config, heg_repo))
+        evaluation_config = _evaluation_config(config)
+        graph_mode = str(_get(evaluation_config, "graph_mode", HEG_GRAPH_MODE))
+        return HegBackend(_repo_path(config, heg_repo), graph_mode=graph_mode)
 
     primary_backend = make_backend()
     pipeline = counterexample_pipeline or CounterexamplePipeline(

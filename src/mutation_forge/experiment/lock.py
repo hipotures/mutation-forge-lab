@@ -299,6 +299,7 @@ def build_lock(
             "selection": config.search.selection,
         },
         "evaluation": {
+            "graph_mode": config.evaluation.graph_mode,
             "orders": list(config.evaluation.orders),
             "graph_seeds": list(config.evaluation.graph_seeds),
             "policy_seeds": list(config.evaluation.policy_seeds),

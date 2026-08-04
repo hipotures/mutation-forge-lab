@@ -525,6 +525,7 @@ max_model_turns = 1
 selection = "elite-diversity"
 
 [evaluation]
+graph_mode = "unrestricted_min_degree_3"
 orders = [4]
 graph_seeds = [1]
 policy_seeds = [2]

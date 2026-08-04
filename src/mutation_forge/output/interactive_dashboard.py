@@ -222,7 +222,7 @@ class DashboardState:
     model: str = "—"
     effort: str = "—"
     phase: str = "initial"
-    checkpoint: str = "—"
+    graph_mode: str = "—"
     started_at: str = "—"
     started_monotonic: float | None = None
     elapsed_seconds: float = 0.0
@@ -321,6 +321,7 @@ def load_persisted_dashboard_state(
     population_size: int = 8,
     wall_seconds: float | None = None,
     hourly_token_limit: int | None = None,
+    graph_mode: str = "—",
 ) -> DashboardState:
     """Load one durable snapshot without replaying historical events.
 
@@ -341,6 +342,7 @@ def load_persisted_dashboard_state(
         population_size=population_size,
         wall_seconds=wall_seconds,
         hourly_token_limit=hourly_token_limit,
+        graph_mode=graph_mode,
     )
     checkpoint: Mapping[str, Any] = {}
     checkpoint_path = root / "artifacts" / "native-generation-checkpoint.json.gz"
@@ -420,7 +422,6 @@ def load_persisted_dashboard_state(
             state = replace(
                 state,
                 experiment_state=str(experiment.get("state", state.experiment_state)),
-                checkpoint=str(experiment.get("current_checkpoint") or state.checkpoint),
                 provider_turns_attempted=int(cumulative.get("provider_turns", 0)),
                 provider_turns_completed=counts.get("provider_turns_completed", 0),
                 cumulative_usage=usage,
@@ -937,7 +938,7 @@ def _global_payload(
         "model": "model",
         "effort": "effort",
         "phase": "phase",
-        "checkpoint": "checkpoint",
+        "graph_mode": "graph_mode",
     }
     for source, target in mappings.items():
         text_value = _text(payload.get(source))
@@ -2295,7 +2296,7 @@ class InteractiveDashboardSink:
             )
         third = _parameter_line(
             (
-                ("Checkpoint", _safe_display_path(self.state.checkpoint), None),
+                ("Graph mode", self.state.graph_mode, None),
                 ("Started", self.state.started_at, None),
                 ("Uptime", _duration(elapsed), None),
                 ("Wall budget", _duration(self.state.wall_seconds), None),

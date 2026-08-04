@@ -100,6 +100,7 @@ max_model_turns = "unbounded"
 selection = "persistent-elite-weighted-diversity"
 
 [evaluation]
+graph_mode = "unrestricted_min_degree_3"
 orders = [10, 12]
 graph_seeds = [401, 402, 403, 404]
 policy_seeds = [
