@@ -17,7 +17,6 @@ from rich.panel import Panel
 
 from mutation_forge import cli
 from mutation_forge.events import Event
-from mutation_forge.experiment.json_io import write_json
 from mutation_forge.experiment.state import ExperimentStateStore
 from mutation_forge.output import interactive_dashboard as dashboard
 from mutation_forge.output.display_ids import compact_display_ids
@@ -998,23 +997,13 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
         )
         store.connection.commit()
 
-    checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
-    checkpoint.parent.mkdir(parents=True)
-    write_json(
-        checkpoint,
-        {
-            "schema_version": "mforge.experiment.generation.v2",
-            "generation": 1,
-            "slots": {},
-        },
-    )
     persisted = dashboard.load_persisted_dashboard_state(
         root,
         run_id="dashboard-run",
         population_size=2,
     )
 
-    assert [item.generation for item in persisted.generations] == [0, 1]
+    assert [item.generation for item in persisted.generations] == [0]
     assert persisted.generations[0].slots[0].objective == pytest.approx(0.75)
     assert persisted.generations[0].slots[0].elapsed_seconds == pytest.approx(60.0)
     assert persisted.best_objective == pytest.approx(0.75)
@@ -1034,78 +1023,6 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
     assert sink.state.displayed_generation == 0
     assert sink.state.generations[0].slots[0].objective == pytest.approx(0.75)
     sink.close()
-
-
-def test_persisted_dashboard_uses_newest_retained_slot_generation(tmp_path: Path) -> None:
-    root = tmp_path / "experiment"
-    checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
-    checkpoint.parent.mkdir(parents=True)
-    write_json(
-        checkpoint,
-        {
-            "schema_version": "mforge.experiment.generation.v2",
-            "generation": 1,
-            "next_generation": 2,
-            "slots": {
-                "in-progress": {
-                    "generation": 3,
-                    "slot": "slot-00",
-                    "parent_id": "g0002-slot-04",
-                    "status": "pending",
-                },
-            },
-        },
-    )
-
-    persisted = dashboard.load_persisted_dashboard_state(
-        root,
-        run_id="dashboard-run",
-        population_size=2,
-    )
-
-    assert persisted.generation == 3
-    assert persisted.displayed_generation == 3
-
-
-def test_persisted_dashboard_loads_generations_in_pages_of_ten(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "experiment"
-    checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
-    checkpoint.parent.mkdir(parents=True)
-    write_json(
-        checkpoint,
-        {
-            "schema_version": "mforge.experiment.generation.v2",
-            "generation": 14,
-            "slots": {
-                f"generation-{generation}": {
-                    "generation": generation,
-                    "slot": "slot-00",
-                    "parent_id": "root",
-                    "status": "accepted",
-                    "candidate": {"source": "retained"},
-                }
-                for generation in range(15)
-            },
-        },
-    )
-
-    latest = dashboard.load_persisted_dashboard_state(
-        root,
-        run_id="dashboard-run",
-    )
-    previous = dashboard.load_persisted_dashboard_state(
-        root,
-        run_id="dashboard-run",
-        generation_before=5,
-    )
-
-    assert [group.generation for group in latest.generations] == list(range(5, 15))
-    assert latest.displayed_generation == 14
-    assert [group.generation for group in previous.generations] == list(range(5))
-    assert previous.generation == 14
-    assert previous.displayed_generation == 4
 
 
 def test_generation_navigation_loads_only_at_the_oldest_cached_page() -> None:

@@ -1,39 +1,36 @@
 # Mutation Forge Lab
 
-Mutation Forge Lab searches for deterministic Python policies that rank legal
-graph mutations for HEG. It uses the local Codex App Server to generate policy
-candidates, validates and behavior-probes them in a bounded sandbox, evaluates
-them against HEG and fixed baselines, and evolves the best candidates across
-multiple generations.
+Mutation Forge Lab searches for deterministic declarative programs that
+construct bounded graph rewrites for HEG. It uses the local Codex App Server
+to generate typed policy ASTs, validates and interprets them with strict
+resource limits, evaluates them against HEG and fixed DSL baselines, and
+evolves the best candidates across multiple generations.
 
 The project is a standalone, auditable research application. It treats the
 sibling HEG repository as a read-only mathematical backend and never modifies
-HEG. Generated policies implement only:
-
-```python
-def priority(ctx, proposal):
-    ...
-```
-
-They rank host-generated legal proposals; they do not generate graph rewrites,
-score hidden alternatives, or replace HEG's validation and verification.
+HEG. Native v3 policies are data, not Python. They use a versioned
+selector/action DSL to construct a private transactional overlay and emit one
+bounded `RewritePlan` or `NoPlan`. The host still owns final legality,
+authoritative scoring, acceptance, persistence, and exact verification.
 
 ## How it works
 
 For every experiment, Mutation Forge Lab:
 
 1. creates an immutable experiment workspace and records repository provenance;
-2. asks the configured local Codex model for eight differentiated ranking
-   policies;
-3. validates the structured response, Python AST, declared fields, bounded
-   runtime contract, and proposal-dependent behavior;
-4. repairs eligible invalid responses within the configured repair limit;
-5. evaluates accepted policies and the random/structural baselines under
-   matched HEG budgets;
-6. archives candidates, selects parents with the configured search strategy,
-   and continues until a session boundary or terminal outcome;
-7. retains prompts, raw responses, transport diagnostics, token usage,
-   evaluations, checkpoints, and winner information.
+2. freezes an epoch snapshot and asks the configured local Codex model for
+   eight differentiated policy ASTs in bounded batches;
+3. validates each AST independently and immediately streams valid programs to
+   deterministic episode-level evaluator shards;
+4. keeps provider calls and useful CPU evaluation concurrent with bounded
+   queues and backpressure;
+5. evaluates candidates, retained parents, and four fixed DSL baselines under
+   matched manifests and score protocols;
+6. freezes a development promotion shortlist, evaluates every shortlisted
+   program on the sealed validation panel, and commits selection
+   deterministically after the cohort reaches a terminal state;
+7. retains raw and canonical programs, provenance, component score evidence,
+   semantic checkpoints, observational telemetry, and verification artifacts.
 
 The installed CLI intentionally exposes only the current native product:
 
@@ -41,6 +38,7 @@ The installed CLI intentionally exposes only the current native product:
 mforge doctor
 mforge experiment run
 mforge experiment status
+mforge experiment stop --final
 ```
 
 Historical stage-specific implementations remain in the repository as
@@ -72,8 +70,8 @@ configuration fields are rejected.
 Create `experiment.toml` in the repository root:
 
 ```toml
-schema_version = "mforge.experiment.v2"
-exp_id = "heg-ranker-search-01"
+schema_version = "mforge.experiment.v3"
+exp_id = "heg-native-v3-search-01"
 workspace = "./workspace"
 kind = "heg"
 preset = "native"
@@ -104,18 +102,36 @@ graph_mode = "unrestricted_min_degree_3"
 order_schedule = "static"
 orders = [10, 12]
 graph_seeds = [401, 402, 403, 404]
+validation_graph_seeds = [1401, 1402, 1403, 1404]
 policy_seeds = [
   4001, 4002, 4003, 4004, 4005, 4006, 4007, 4008,
   4009, 4010, 4011, 4012, 4013, 4014, 4015, 4016,
 ]
+validation_policy_seeds = [
+  14001, 14002, 14003, 14004, 14005, 14006, 14007, 14008,
+  14009, 14010, 14011, 14012, 14013, 14014, 14015, 14016,
+]
 horizon = 32
-proposal_pool_size = 12
-baselines = ["random", "structural"]
+baselines = [
+  "add-low-local-cycle-risk",
+  "remove-low-bridge-risk",
+  "random-valid",
+  "degree-fanout",
+]
 replay = true
 
 [resources]
 workers = 8
-thread_count = 1
+thread_count = 8
+
+[native_v3]
+provider_batch_size = 4
+candidate_queue_capacity = 40
+evaluation_queue_capacity = 64
+target_evaluation_backlog = 32
+candidate_shard_size = 1
+auxiliary_shard_size = 1
+witness_cap = 64
 ```
 
 Check the resolved target without contacting a model:
@@ -138,19 +154,6 @@ uv run mforge experiment run --config experiment.toml --json
 uv run mforge experiment status --config experiment.toml --json
 ```
 
-Stopped v2 workspaces can be audited and rebuilt into the compact v3 state
-schema without modifying the source database during the audit:
-
-```console
-uv run mforge experiment rebuild-state --config experiment.toml --json
-uv run mforge experiment rebuild-state --config experiment.toml --apply
-```
-
-The apply command uses SQLite's online backup API, verifies every completed
-evaluation against its canonical `json.gz`, atomically installs a fresh
-database, and retains the v2 backup path in its result. Use `--work-dir` when
-the experiment filesystem does not have enough temporary space.
-
 ## Configuration
 
 `experiment.toml` is authoritative. Unknown and legacy keys are rejected
@@ -162,8 +165,9 @@ instead of being silently ignored.
 | `[run]` | Per-invocation wall budget, rolling token cap, output mode, profiling, and timeout base |
 | `[model]` | Codex model, reasoning effort, model concurrency, and repair limit |
 | `[search]` | Population, global generation/turn limits, and parent selection |
-| `[evaluation]` | HEG orders, seeds, horizon, proposal pools, baselines, and replay |
+| `[evaluation]` | Development/validation panels, HEG orders, seeds, horizon, baselines, and replay |
 | `[resources]` | Resource reservation (`workers`) and native evaluation pool (`thread_count`) |
+| `[native_v3]` | Provider batching, bounded queue targets, shard sizes, and witness cap |
 
 Important behavior:
 
@@ -179,12 +183,10 @@ Important behavior:
   `orders_per_generation` and evaluates evenly spaced orders from the minimum
   through the current frontier. The schedule stays fixed after reaching
   `max_order`; `cubic_first` skips odd orders.
-- `selection = "elite-diversity"` keeps the previous generation's best and
-  fills the population with distinct policies. The recommended
-  `selection = "persistent-elite-weighted-diversity"` allows repeated parents;
-  for a population of eight it assigns three slots to the all-time best, two
-  to the current-generation best, two by objective-weighted allocation from
-  the current top half, and one by AST diversity from that top half.
+- `selection = "persistent-elite-weighted-diversity"` is the locked Native v3
+  selection profile. It retains up to four top programs that completed the
+  sealed validation protocol and assigns at most two parent references to
+  each new slot in deterministic round-robin order.
 - `model.effort` may be changed between resumable sessions without creating a
   new experiment identity; the next provider turn uses the current value.
 - `max_total_tokens_per_hour` is optional. It accepts a positive integer or
@@ -252,8 +254,9 @@ uv run mforge experiment status
 ```
 
 It reports progress, resumability, accepted/evaluated candidates, the current
-winner and source path, model-turn and token totals, charged failed turns,
-checkpoint identity, artifact locations, stop reason, and the latest error.
+winner and canonical program identity, model-turn and token totals, charged
+failed turns, checkpoint identity, artifact locations, stop reason, and the
+latest error.
 It never calls the provider, scorer, oracle, or evaluator.
 
 ## Workspace and results
@@ -269,65 +272,52 @@ workspace/<exp_id>/
 │   └── checkpoint-*.json.gz
 └── artifacts/
     ├── experiment-manifest.json.gz
-    ├── native-generation-checkpoint.json.gz
+    ├── native-v3-state.sqlite3
+    ├── provider-v3/
+    │   └── epoch-*/epoch-*_provider-*/
+    ├── counterexamples-v3/
     ├── sessions/
     │   └── session-NNNNNN/
     │       ├── summary.json.gz
     │       ├── events.jsonl.gz
     │       ├── stdout.log
     │       └── stderr.log
-    ├── generations/
-    │   └── generation-NNNN/slot-NN/
-    │       ├── initial/
-    │       ├── repair-NN/
-    │       └── retry-NN/
-    ├── archive/
-    ├── evaluations/
-    │   ├── development/   # one canonical full result per completed evaluation
-    │   ├── episodes/      # checkpoints only for incomplete evaluations
-    │   └── replay/
     └── reports/
 ```
 
-Each model turn keeps separate evidence for:
-
-- the exact model-facing request and system prompt;
-- the raw and parsed response;
-- JSON/schema and App Server transport diagnostics;
-- AST validation and source-derived `used_fields`;
-- behavior-probe output and worker telemetry;
-- provider identifiers, event/RPC streams, and exact token usage.
+Each provider call keeps the exact frozen request, raw response, independently
+validated slot entries, canonical ASTs and hashes, diagnostics, transport
+metadata, and token usage. Native v3 semantic state is separated from
+observational timing and worker telemetry so scheduling order does not change
+replay identity.
 
 There is no separate public report command. `experiment status` is the
-supported summary view; `summary.json.gz`, archived source files, evaluation
-records, and turn artifacts provide the detailed evidence.
+supported summary view; session summaries, canonical program records, score
+evidence, provider artifacts, and semantic records provide the detailed
+evidence.
 
-SQLite contains only orchestration, idempotency, token accounting, and compact
-dashboard projections. Full episode traces are never stored in
-`state.sqlite3`. Per-episode checkpoint files are deleted only after the
-aggregate evaluation artifact is durably written and read back successfully.
+`state.sqlite3` contains orchestration, idempotency, token accounting, and
+compact dashboard projections. `native-v3-state.sqlite3` contains canonical
+semantic evidence and separate observational telemetry through one bounded
+writer. Runtime scheduling order is excluded from its semantic checkpoint
+identity.
 
-## Generated-policy boundary
+## Native v3 program boundary
 
-Native policies receive the public Stage 2B context/proposal contracts:
+The normative program, context, selector, action, and execution contracts live
+under [`configs/native`](configs/native/). Policies cannot import code, call
+host functions, inspect raw labels as strategy features, or bypass selector,
+action, gross-work, and net-diff budgets. Selectors see only the current
+private overlay; connectivity and minimum degree are final-emit invariants.
 
-- [`stage2b-context.schema.json`](configs/schemas/stage2b-context.schema.json)
-- [`stage2b-proposal.schema.json`](configs/schemas/stage2b-proposal.schema.json)
+The provider returns `program_json_raw`. The host parses and validates it,
+creates canonical JSON, and derives `program_hash`; lineage remains
+host-owned. HEG owns authoritative graph validation, bounded score evidence,
+and primary exact verification. An apparent zero is only a durable submission
+to the bounded dual-verifier supervisor.
 
-The host enforces the generated-policy response schema and a restricted Python
-AST. Policies cannot use imports, attributes, method calls, comprehensions,
-generator expressions, randomness, hidden scores, proposal IDs, schema
-versions, or provenance-only ranking fields. A valid policy must use at least
-one proposal-specific structural signal and must distinguish proposals in the
-scientific behavior probe.
-
-HEG owns graph construction, legal proposal generation, rewrite application,
-scoring, and verification. Only the selected proposal is authoritatively
-evaluated.
-
-See [Generated Python security boundary](docs/GENERATED_PYTHON_SECURITY.md)
-and [Codex App Server integration boundary](docs/APP_SERVER_INTEGRATION.md)
-for the detailed isolation and authority contracts.
+See [Native v3 semantics](configs/native/native-v3-semantics.md) and
+[Codex App Server integration boundary](docs/APP_SERVER_INTEGRATION.md).
 
 ## Output and profiling
 

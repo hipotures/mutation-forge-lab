@@ -33,8 +33,6 @@ from rich.text import Text
 
 from mutation_forge.events import Event
 from mutation_forge.experiment.config import orders_for_generation
-from mutation_forge.experiment.json_io import read_json
-from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.models import JsonValue
 from mutation_forge.output.display_ids import compact_display_ids
 from mutation_forge.output.panel_copy import (
@@ -265,6 +263,37 @@ class DashboardState:
     baseline_structural: float | None = None
     improvement_rate: float | None = None
     evaluation_rate: float | None = None
+    native_v3_bottleneck: str = "—"
+    provider_utilization: float | None = None
+    evaluator_utilization: float | None = None
+    provider_response_latency_seconds: float = 0.0
+    programs_returned_per_call: float | None = None
+    valid_programs_per_provider_minute: float | None = None
+    candidate_queue_depth: int = 0
+    evaluation_shard_queue_depth: int = 0
+    verification_queue_depth: int = 0
+    verification_backpressure_active: bool = False
+    provider_starvation_seconds: float = 0.0
+    provider_backpressure_seconds: float = 0.0
+    generation_wall_share: float | None = None
+    validation_wall_share: float | None = None
+    evaluation_wall_share: float | None = None
+    persistence_wall_share: float | None = None
+    time_to_first_evaluation_seconds: float | None = None
+    first_valid_ast_to_first_worker_seconds: float | None = None
+    first_valid_ast_to_half_workers_seconds: float | None = None
+    first_valid_ast_to_all_workers_seconds: float | None = None
+    raw_graph_score_calls: int = 0
+    unique_graph_scores: int = 0
+    raw_graph_score_calls_per_second: float | None = None
+    unique_graph_scores_per_second: float | None = None
+    episodes_per_second: float | None = None
+    accepted_rewrites_per_second: float | None = None
+    accepted_rewrites: int = 0
+    score_cache_hit_rate: float | None = None
+    active_cpp_scorers: int = 0
+    scorer_restarts: int = 0
+    forbidden_fallback_count: int = 0
     profiling_enabled: bool = False
     timing_profile: Mapping[str, JsonValue] | None = None
     cumulative_usage: TokenUsage = TokenUsage()
@@ -351,49 +380,8 @@ def load_persisted_dashboard_state(
         hourly_token_limit=hourly_token_limit,
         graph_mode=graph_mode,
     )
-    checkpoint: Mapping[str, Any] = {}
-    checkpoint_path = root / "artifacts" / "native-generation-checkpoint.json.gz"
-    if checkpoint_path.is_file():
-        try:
-            value = read_json(checkpoint_path)
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise WorkspaceError(
-                f"native generation checkpoint is unreadable: {checkpoint_path}"
-            ) from exc
-        if not isinstance(value, Mapping):
-            raise WorkspaceError(
-                f"native generation checkpoint must be an object: {checkpoint_path}"
-            )
-        if value.get("schema_version") != "mforge.experiment.generation.v2":
-            raise WorkspaceError(
-                "Unsupported native generation checkpoint schema: "
-                f"{value.get('schema_version')!r}. This runtime accepts only "
-                "mforge.experiment.generation.v2. Create a fresh workspace."
-            )
-        checkpoint = value
-
-    generation_value = checkpoint.get("next_generation", checkpoint.get("generation"))
-    checkpoint_generation = (
-        generation_value
-        if isinstance(generation_value, int) and not isinstance(generation_value, bool)
-        else 0
-    )
+    checkpoint_generation = 0
     raw_slot_values: list[Mapping[str, Any]] = []
-    raw_slots = checkpoint.get("slots")
-    if isinstance(raw_slots, Mapping):
-        for raw in raw_slots.values():
-            if not isinstance(raw, Mapping):
-                continue
-            generation = raw.get("generation")
-            slot = raw.get("slot")
-            if (
-                not isinstance(generation, int)
-                or isinstance(generation, bool)
-                or not isinstance(slot, str)
-            ):
-                continue
-            raw_slot_values.append(raw)
-            checkpoint_generation = max(checkpoint_generation, generation)
 
     store_path = root / "state.sqlite3"
     if store_path.is_file():
@@ -447,10 +435,13 @@ def load_persisted_dashboard_state(
 
     evaluations: dict[str, tuple[float, Mapping[str, Any], float | None]] = {}
     evaluation_history: list[tuple[str, float]] = []
-    best_candidate: tuple[
-        str,
-        tuple[float, Mapping[str, Any], float | None],
-    ] | None = None
+    best_candidate: (
+        tuple[
+            str,
+            tuple[float, Mapping[str, Any], float | None],
+        ]
+        | None
+    ) = None
     slot_runtime_seconds: dict[tuple[int, str], float] = {}
     store: Any | None = None
     try:
@@ -549,9 +540,7 @@ def load_persisted_dashboard_state(
                     "episode_count": row["episode_count"],
                     "mean_auc": value,
                     "best_auc": row["best_auc"],
-                    "baseline_auc": (
-                        baseline_auc if isinstance(baseline_auc, Mapping) else {}
-                    ),
+                    "baseline_auc": (baseline_auc if isinstance(baseline_auc, Mapping) else {}),
                     "improvement_rate": row["improvement_rate"],
                 }
                 evaluations[candidate_id] = (
@@ -589,12 +578,9 @@ def load_persisted_dashboard_state(
                     (float(best_row["mean_auc"]), {}, None),
                 )
 
-            # The generation checkpoint is intentionally written only at a
-            # safe boundary.  A resumed run can therefore have completed
-            # candidates/evaluations newer than that file (or a checkpoint
-            # from an earlier session).  Rebuild those slot rows from the
-            # durable candidate table so a dashboard restart never loses a
-            # finished generation or its objective values.
+            # Rebuild slot rows from the durable candidate table so a
+            # dashboard restart never loses a finished generation or its
+            # objective values.
             candidate_rows = store.connection.execute(
                 "SELECT candidate_id,generation,slot,parent_id,status,behavior_json "
                 "FROM candidates WHERE generation BETWEEN ? AND ? "
@@ -622,8 +608,6 @@ def load_persisted_dashboard_state(
                 existing = slot_records.get((generation, slot), {})
                 existing_candidate = existing.get("candidate")
                 if isinstance(existing_candidate, Mapping):
-                    # The checkpoint contains richer provider/request data;
-                    # keep it and only use the row as a fallback.
                     continue
                 slot_records[(generation, slot)] = {
                     "generation": generation,
@@ -662,9 +646,9 @@ def load_persisted_dashboard_state(
             display_state = status
         elif status in {"created", "queued"} and metric is not None:
             # SQLite may contain a completed evaluation written after the last
-            # generation checkpoint.  A metric is durable evidence that this
-            # slot is accepted even when its candidate row still has the
-            # transient ``created`` status.
+            # A metric is durable evidence that this slot is accepted even
+            # when its candidate row still has the transient ``created``
+            # status.
             display_state = "accepted"
         else:
             display_state = "queued"
@@ -806,6 +790,16 @@ def _integer(value: object) -> int | None:
 
 def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _rational_number(value: object) -> float | None:
+    if not isinstance(value, Mapping):
+        return _number(value)
+    numerator = _integer(value.get("numerator"))
+    denominator = _integer(value.get("denominator"))
+    if numerator is None or denominator is None or denominator == 0:
+        return None
+    return numerator / denominator
 
 
 def _provider_elapsed(payload: Mapping[str, JsonValue]) -> float | None:
@@ -1268,6 +1262,99 @@ def reduce_dashboard_event(
                     failed_candidates=state.failed_candidates + 1,
                     failed_slots_seen=state.failed_slots_seen | {failed_key},
                 )
+    elif event_type in {
+        "verification_backpressure_started",
+        "verification_backpressure_ended",
+        "verification_job_queued",
+        "verification_job_completed",
+    }:
+        verification_queue_depth = _integer(payload.get("verification_queue_depth"))
+        state = replace(
+            state,
+            verification_queue_depth=(
+                state.verification_queue_depth
+                if verification_queue_depth is None
+                else verification_queue_depth
+            ),
+            verification_backpressure_active=(
+                event_type == "verification_backpressure_started"
+                or (
+                    state.verification_backpressure_active
+                    and event_type != "verification_backpressure_ended"
+                )
+            ),
+        )
+    elif event_type == "native_v3_metrics":
+        state = replace(
+            state,
+            native_v3_bottleneck=_text(payload.get("bottleneck")) or "—",
+            provider_utilization=_rational_number(payload.get("provider_utilization")),
+            evaluator_utilization=_rational_number(payload.get("evaluator_utilization")),
+            provider_response_latency_seconds=(
+                (_integer(payload.get("provider_response_latency_ns")) or 0) / 1_000_000_000
+            ),
+            programs_returned_per_call=_rational_number(payload.get("programs_returned_per_call")),
+            valid_programs_per_provider_minute=_rational_number(
+                payload.get("valid_programs_per_provider_minute")
+            ),
+            candidate_queue_depth=(_integer(payload.get("candidate_queue_depth")) or 0),
+            evaluation_shard_queue_depth=(
+                _integer(payload.get("evaluation_shard_queue_depth")) or 0
+            ),
+            provider_starvation_seconds=(
+                (_integer(payload.get("cpu_idle_time_caused_by_provider_starvation_ns")) or 0)
+                / 1_000_000_000
+            ),
+            provider_backpressure_seconds=(
+                (
+                    _integer(payload.get("provider_idle_time_caused_by_evaluation_backpressure_ns"))
+                    or 0
+                )
+                / 1_000_000_000
+            ),
+            generation_wall_share=_rational_number(payload.get("generation_wall_share")),
+            validation_wall_share=_rational_number(payload.get("validation_wall_share")),
+            evaluation_wall_share=_rational_number(payload.get("evaluation_wall_share")),
+            persistence_wall_share=_rational_number(payload.get("persistence_wall_share")),
+            time_to_first_evaluation_seconds=(
+                (_integer(payload.get("time_to_first_evaluation_ns")) or 0) / 1_000_000_000
+                if payload.get("time_to_first_evaluation_ns") is not None
+                else None
+            ),
+            first_valid_ast_to_first_worker_seconds=(
+                (_integer(payload.get("first_valid_ast_to_first_worker_ns")) or 0) / 1_000_000_000
+                if payload.get("first_valid_ast_to_first_worker_ns") is not None
+                else None
+            ),
+            first_valid_ast_to_half_workers_seconds=(
+                (_integer(payload.get("first_valid_ast_to_50_percent_workers_ns")) or 0)
+                / 1_000_000_000
+                if payload.get("first_valid_ast_to_50_percent_workers_ns") is not None
+                else None
+            ),
+            first_valid_ast_to_all_workers_seconds=(
+                (_integer(payload.get("first_valid_ast_to_all_workers_ns")) or 0) / 1_000_000_000
+                if payload.get("first_valid_ast_to_all_workers_ns") is not None
+                else None
+            ),
+            raw_graph_score_calls=(_integer(payload.get("raw_graph_score_calls")) or 0),
+            unique_graph_scores=(_integer(payload.get("unique_graph_scores")) or 0),
+            raw_graph_score_calls_per_second=_rational_number(
+                payload.get("raw_graph_score_calls_per_second")
+            ),
+            unique_graph_scores_per_second=_rational_number(
+                payload.get("unique_graph_scores_per_second")
+            ),
+            episodes_per_second=_rational_number(payload.get("episodes_per_second")),
+            accepted_rewrites_per_second=_rational_number(
+                payload.get("accepted_rewrites_per_second")
+            ),
+            accepted_rewrites=(_integer(payload.get("accepted_rewrites")) or 0),
+            score_cache_hit_rate=_rational_number(payload.get("score_cache_hit_rate")),
+            active_cpp_scorers=(_integer(payload.get("active_cpp_scorers")) or 0),
+            scorer_restarts=_integer(payload.get("scorer_restarts")) or 0,
+            forbidden_fallback_count=(_integer(payload.get("forbidden_fallback_count")) or 0),
+        )
     elif event_type in {"evaluation_completed", "evaluation_failed"}:
         explicit_evaluations = _integer(payload.get("evaluations_completed"))
         state = replace(
@@ -1908,8 +1995,7 @@ def reduce_dashboard_key(
                         group,
                         slots=tuple(
                             replace(slot, state="stopping")
-                            if group.generation == state.generation
-                            and slot.state == "queued"
+                            if group.generation == state.generation and slot.state == "queued"
                             else slot
                             for slot in group.slots
                         ),
@@ -2108,9 +2194,8 @@ class InteractiveDashboardSink:
         self.capabilities = capabilities or DashboardCapabilities()
         self.state = initial_state or DashboardState()
         self._persisted_loader = persisted_loader
-        self._history_exhausted = (
-            persisted_loader is None
-            or any(group.generation == 0 for group in self.state.generations)
+        self._history_exhausted = persisted_loader is None or any(
+            group.generation == 0 for group in self.state.generations
         )
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -2164,9 +2249,7 @@ class InteractiveDashboardSink:
                     self.state,
                     self._persisted_loader(previous_oldest),
                 )
-                loaded_generations = [
-                    group.generation for group in self.state.generations
-                ]
+                loaded_generations = [group.generation for group in self.state.generations]
                 loaded_oldest = min(loaded_generations, default=previous_oldest)
                 if loaded_oldest == 0 or loaded_oldest >= previous_oldest:
                     self._history_exhausted = True
@@ -2658,8 +2741,7 @@ class InteractiveDashboardSink:
             columns = [item for item in columns if item[0] in visible]
         icon_state_width = (
             4
-            if icon_mode
-            and any(_slot_evaluation_percent(slot) is not None for slot in group.slots)
+            if icon_mode and any(_slot_evaluation_percent(slot) is not None for slot in group.slots)
             else 1
         )
         for name, justify, max_width in columns:
@@ -2899,6 +2981,7 @@ class InteractiveDashboardSink:
         except (AttributeError, OSError):
             user, system = 0.0, 0.0
         rows: list[tuple[str, object]] = [
+            ("bottleneck", self.state.native_v3_bottleneck),
             ("episodes/s", _rate(self.state.evaluation_rate)),
             ("turn/s", _rate(self.state.provider_turns_completed / elapsed)),
             ("IR", _objective(self.state.improvement_rate)),
@@ -2916,6 +2999,18 @@ class InteractiveDashboardSink:
                     self.state.configured_provider_concurrency,
                 ),
             ),
+            (
+                "v3 provider/evaluator",
+                f"{_objective(self.state.provider_utilization)} / "
+                f"{_objective(self.state.evaluator_utilization)}",
+            ),
+            (
+                "candidate/shard/verify",
+                f"{self.state.candidate_queue_depth} / "
+                f"{self.state.evaluation_shard_queue_depth} / "
+                f"{self.state.verification_queue_depth}"
+                + (" BP" if self.state.verification_backpressure_active else ""),
+            ),
         ]
         if compact:
             rows = rows[: row_limit or 1]
@@ -2929,6 +3024,59 @@ class InteractiveDashboardSink:
                             slot.state in ACTIVE_STATES
                             for slot in _generation_slots(self.state, self.state.generation).slots
                         ),
+                    ),
+                    (
+                        "raw/unique scores",
+                        f"{self.state.raw_graph_score_calls} / {self.state.unique_graph_scores}",
+                    ),
+                    (
+                        "raw/unique score/s",
+                        f"{_rate(self.state.raw_graph_score_calls_per_second)} / "
+                        f"{_rate(self.state.unique_graph_scores_per_second)}",
+                    ),
+                    (
+                        "episode/rewrite/s",
+                        f"{_rate(self.state.episodes_per_second)} / "
+                        f"{_rate(self.state.accepted_rewrites_per_second)}",
+                    ),
+                    ("accepted rewrites", self.state.accepted_rewrites),
+                    (
+                        "score cache hit",
+                        _objective(self.state.score_cache_hit_rate),
+                    ),
+                    (
+                        "C++/restart/fallback",
+                        f"{self.state.active_cpp_scorers} / "
+                        f"{self.state.scorer_restarts} / "
+                        f"{self.state.forbidden_fallback_count}",
+                    ),
+                    (
+                        "starved/backpressure",
+                        f"{self.state.provider_starvation_seconds:.1f}s / "
+                        f"{self.state.provider_backpressure_seconds:.1f}s",
+                    ),
+                    (
+                        "provider latency/batch",
+                        f"{self.state.provider_response_latency_seconds:.1f}s / "
+                        f"{_objective(self.state.programs_returned_per_call)}",
+                    ),
+                    (
+                        "valid/provider-min",
+                        _objective(self.state.valid_programs_per_provider_minute),
+                    ),
+                    (
+                        "gen/val/eval/persist",
+                        f"{_objective(self.state.generation_wall_share)} / "
+                        f"{_objective(self.state.validation_wall_share)} / "
+                        f"{_objective(self.state.evaluation_wall_share)} / "
+                        f"{_objective(self.state.persistence_wall_share)}",
+                    ),
+                    (
+                        "first eval/1/50%/all",
+                        f"{_objective(self.state.time_to_first_evaluation_seconds)} / "
+                        f"{_objective(self.state.first_valid_ast_to_first_worker_seconds)} / "
+                        f"{_objective(self.state.first_valid_ast_to_half_workers_seconds)} / "
+                        f"{_objective(self.state.first_valid_ast_to_all_workers_seconds)}s",
                     ),
                 )
             )
@@ -3574,11 +3722,7 @@ def _slot_state_label(slot: DashboardSlot) -> str:
 
 
 def _slot_evaluation_percent(slot: DashboardSlot) -> int | None:
-    if (
-        slot.state != "evaluating"
-        or slot.evaluation_total is None
-        or slot.evaluation_total <= 0
-    ):
+    if slot.state != "evaluating" or slot.evaluation_total is None or slot.evaluation_total <= 0:
         return None
     return round(
         100 * min(slot.evaluation_completed, slot.evaluation_total) / slot.evaluation_total

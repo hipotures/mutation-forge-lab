@@ -1,13 +1,17 @@
-Generate one deterministic ranker for the supplied native experiment context.
+Generate the requested bounded batch of independent Native v3 policy programs.
 
-The host owns proposal legality, authoritative scoring, and verification.
-Select one legal proposal by implementing `priority(ctx, proposal) -> float` in
-`source`. Larger finite priorities rank first. Use bounded arithmetic and
-proposal-derived signals; context may modulate weights but may not become the
-sole ranking signal. Do not use proposal IDs, hidden state, unavailable
-post-rewrite scores, imports, tools, or randomness.
+Use only nodes, selectors, actions, context fields, and graph features declared
+by the supplied versioned schemas and registries. Prefer short programs. Each
+program must terminate through exactly one `emit` or `no_plan` path and must
+remain within static and dynamic budgets. Selectors observe the current private
+overlay; connectivity and minimum degree are checked only at final `emit`.
 
-Declare `used_fields` canonically as `ctx.<field>` and `proposal.<field>`.
-The host derives the authoritative list from the validated source; any mismatch
-is a validation error that must be repaired. Return only the generated-policy
-JSON object.
+Policies must be label-oblivious. Resolve structural tie-sets only through the
+declared seeded `pick` operations. Do not repeat or invent parent IDs: slot and
+parent assignments are frozen and owned by the host.
+
+Return every result as:
+
+`{"slot_id":"...","program_json_raw":"...","design_summary":"..."}`
+
+inside the required batch envelope.

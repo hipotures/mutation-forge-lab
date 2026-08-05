@@ -27,7 +27,6 @@ from mutation_forge.evaluation.dataset import build_dataset
 from mutation_forge.events import EventSink, JsonlSink
 from mutation_forge.experiment.config import load_experiment_config
 from mutation_forge.experiment.control import ExperimentControl
-from mutation_forge.experiment.rebuild import rebuild_experiment_state
 from mutation_forge.experiment.service import final_stop_experiment, run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
@@ -405,25 +404,6 @@ def _experiment_stop(config_path: Path, *, final: bool, json_output: bool) -> in
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     else:
         Console().print(render_status(experiment_status(config_path)))
-    return 0
-
-
-def _experiment_rebuild_state(
-    config_path: Path,
-    *,
-    apply: bool,
-    work_dir: Path | None,
-    json_output: bool,
-) -> int:
-    result = rebuild_experiment_state(
-        config_path,
-        apply=apply,
-        work_dir=work_dir,
-    )
-    if json_output:
-        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    else:
-        Console().print_json(json.dumps(result))
     return 0
 
 
@@ -834,7 +814,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     experiment_commands = experiment.add_subparsers(
         dest="experiment_command",
         required=True,
-        metavar="{run,status,stop,rebuild-state}",
+        metavar="{run,status,stop}",
     )
     experiment_run = experiment_commands.add_parser(
         "run",
@@ -881,14 +861,6 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     experiment_stop.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_stop.add_argument("--final", action="store_true", required=True)
     experiment_stop.add_argument("--json", action="store_true")
-    experiment_rebuild = experiment_commands.add_parser(
-        "rebuild-state",
-        help="audit or rebuild a stopped v2 experiment state database",
-    )
-    experiment_rebuild.add_argument("--config", type=Path, default=Path("experiment.toml"))
-    experiment_rebuild.add_argument("--apply", action="store_true")
-    experiment_rebuild.add_argument("--work-dir", type=Path)
-    experiment_rebuild.add_argument("--json", action="store_true")
 
     dataset = commands.add_parser("dataset", help=argparse.SUPPRESS)
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
@@ -1279,7 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_commands = experiment.add_subparsers(
         dest="experiment_command",
         required=True,
-        metavar="{run,status,stop,rebuild-state}",
+        metavar="{run,status,stop}",
     )
     experiment_run = experiment_commands.add_parser(
         "run",
@@ -1326,14 +1298,6 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_stop.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_stop.add_argument("--final", action="store_true", required=True)
     experiment_stop.add_argument("--json", action="store_true")
-    experiment_rebuild = experiment_commands.add_parser(
-        "rebuild-state",
-        help="audit or rebuild a stopped v2 experiment state database",
-    )
-    experiment_rebuild.add_argument("--config", type=Path, default=Path("experiment.toml"))
-    experiment_rebuild.add_argument("--apply", action="store_true")
-    experiment_rebuild.add_argument("--work-dir", type=Path)
-    experiment_rebuild.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1364,13 +1328,6 @@ def legacy_main(argv: list[str] | None = None) -> int:
             return _experiment_stop(
                 args.config,
                 final=args.final,
-                json_output=args.json,
-            )
-        if args.command == "experiment" and args.experiment_command == "rebuild-state":
-            return _experiment_rebuild_state(
-                args.config,
-                apply=args.apply,
-                work_dir=args.work_dir,
                 json_output=args.json,
             )
         if args.command == "dataset" and args.dataset_command == "build":
@@ -1471,13 +1428,6 @@ def main(argv: list[str] | None = None) -> int:
             return _experiment_stop(
                 args.config,
                 final=args.final,
-                json_output=args.json,
-            )
-        if args.command == "experiment" and args.experiment_command == "rebuild-state":
-            return _experiment_rebuild_state(
-                args.config,
-                apply=args.apply,
-                work_dir=args.work_dir,
                 json_output=args.json,
             )
     except Exception as error:

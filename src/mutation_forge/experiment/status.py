@@ -9,7 +9,6 @@ from typing import Any
 
 from .checkpoints import CheckpointIntegrityError, CheckpointStore
 from .config import ExperimentConfig, load_experiment_config, serialize_search_limit
-from .json_io import read_json
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import LockError, load_lock, verify_lock
 from .state import RESUMABLE_STATES, ExperimentStateStore, StateError, process_alive
@@ -150,11 +149,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
                 "resumable": False,
                 "last_error": manifest_error or runtime_schema_error,
             }
-        if (
-            current_state == "running"
-            and owner is not None
-            and not owner_active
-        ):
+        if current_state == "running" and owner is not None and not owner_active:
             current_state = "interrupted"
         if checkpoint_error is not None:
             current_state = "failed"
@@ -162,9 +157,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         session = state.session()
         current = state.cumulative()
         generation_value = (
-            checkpoint.get("next_generation", checkpoint.get("generation", 0))
-            if checkpoint
-            else 0
+            checkpoint.get("next_generation", checkpoint.get("generation", 0)) if checkpoint else 0
         )
         generation = (
             int(generation_value)
@@ -182,9 +175,7 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         best_id = str(best["candidate_id"]) if best is not None else None
         best_metric = best["metric"] if best is not None else None
         token_usage = state.token_usage()
-        hourly_usage = state.hourly_token_usage(
-            config.run.max_total_tokens_per_hour
-        )
+        hourly_usage = state.hourly_token_usage(config.run.max_total_tokens_per_hour)
         last_error = checkpoint_error or state.latest_error()
         if current_state == "running" and owner_active:
             # A stale error from an earlier resumable session must not be shown
@@ -193,17 +184,13 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         session_metrics: dict[str, Any] = {}
         if session is not None:
             try:
-                parsed_counterexample = json.loads(
-                    str(session.get("counterexample_json", "{}"))
-                )
+                parsed_counterexample = json.loads(str(session.get("counterexample_json", "{}")))
             except (TypeError, json.JSONDecodeError):
                 parsed_counterexample = {}
             session_metrics = {
                 "ir": session.get("ir"),
                 "counterexample": (
-                    parsed_counterexample
-                    if isinstance(parsed_counterexample, Mapping)
-                    else {}
+                    parsed_counterexample if isinstance(parsed_counterexample, Mapping) else {}
                 ),
             }
         last_stop_reason = experiment.get("terminal_stop_reason") or (session or {}).get(
@@ -216,42 +203,8 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         if configured_model_turns is None and config.search.max_model_turns is not None:
             configured_model_turns = config.search.max_model_turns
         model_turns_used = int(current["provider_turns"])
-        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json.gz"
-        native_state: Mapping[str, Any] = {}
-        if native_checkpoint.is_file():
-            try:
-                raw_native_state = read_json(native_checkpoint)
-                if isinstance(raw_native_state, Mapping):
-                    native_state = raw_native_state
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                native_state = {}
-            native_generation_value = native_state.get(
-                "next_generation", native_state.get("generation")
-            )
-            if (
-                isinstance(native_generation_value, int)
-                and not isinstance(native_generation_value, bool)
-            ):
-                generation = max(generation, native_generation_value)
-            native_completed_slots = native_state.get("completed_slots")
-            if isinstance(native_completed_slots, int) and not isinstance(
-                native_completed_slots, bool
-            ):
-                completed_slots = max(completed_slots, native_completed_slots)
-            checkpoint_turns = (
-                native_state.get("model_turns_used")
-            )
-            if (
-                isinstance(checkpoint_turns, int)
-                and not isinstance(checkpoint_turns, bool)
-                and checkpoint_turns >= 0
-            ):
-                model_turns_used = max(model_turns_used, checkpoint_turns)
         session_id = str(session["session_id"]) if session is not None else None
         artifacts: dict[str, str] = {}
-        native_checkpoint = layout.artifacts / "native-generation-checkpoint.json.gz"
-        if native_checkpoint.is_file():
-            artifacts["generation_checkpoint"] = str(native_checkpoint)
         if session_id is not None:
             session_summary = layout.sessions / session_id / "summary.json.gz"
             if session_summary.is_file():
@@ -334,8 +287,7 @@ def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
         observed_metric = row["mean_auc"]
         metric = (
             float(observed_metric)
-            if isinstance(observed_metric, int | float)
-            and not isinstance(observed_metric, bool)
+            if isinstance(observed_metric, int | float) and not isinstance(observed_metric, bool)
             else None
         )
         candidates.append(

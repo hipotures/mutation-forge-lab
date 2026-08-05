@@ -1,0 +1,12 @@
+{
+  "schema_version": "mforge.native.action_registry.v1",
+  "protocol_id": "native_v3_actions_v1",
+  "actions": [
+    {"operator_id": "add_edge", "argument_types": {"edge": "NonEdgeRef"}, "local_preconditions": ["distinct_vertices", "edge_absent"], "overlay_effect": "add_edge", "gross_action_cost": 1, "possible_branch_failure": "LOCAL_PRECONDITION_FAILED", "final_validation_requirements": ["connected", "minimum_degree_3", "non_noop"]},
+    {"operator_id": "remove_edge", "argument_types": {"edge": "EdgeRef"}, "local_preconditions": ["edge_present"], "overlay_effect": "remove_edge", "gross_action_cost": 1, "possible_branch_failure": "LOCAL_PRECONDITION_FAILED", "final_validation_requirements": ["connected", "minimum_degree_3", "non_noop"]},
+    {"operator_id": "relocate_endpoint", "argument_types": {"edge": "EdgeRef", "keep": "VertexRef", "new": "VertexRef"}, "local_preconditions": ["keep_is_endpoint", "new_is_distinct", "new_edge_absent"], "overlay_effect": "remove_edge_add_keep_new", "gross_action_cost": 1, "possible_branch_failure": "LOCAL_PRECONDITION_FAILED", "final_validation_requirements": ["connected", "minimum_degree_3", "non_noop"]},
+    {"operator_id": "k_switch", "argument_types": {"matching": "MatchingRef"}, "local_preconditions": ["k_between_2_and_4", "removed_edges_pairwise_vertex_disjoint", "matching_legal"], "overlay_effect": "remove_matching_sources_add_matching_targets", "gross_action_cost": 1, "possible_branch_failure": "LOCAL_PRECONDITION_FAILED", "final_validation_requirements": ["connected", "minimum_degree_3", "non_noop"]},
+    {"operator_id": "edge_fanout", "argument_types": {"edge": "EdgeRef", "w": "VertexRef"}, "local_preconditions": ["w_not_endpoint", "fanout_edges_absent"], "overlay_effect": "remove_uv_add_uw_vw", "gross_action_cost": 1, "possible_branch_failure": "LOCAL_PRECONDITION_FAILED", "final_validation_requirements": ["connected", "minimum_degree_3", "non_noop"]},
+    {"operator_id": "edge_fold", "argument_types": {"path": "Path2Ref"}, "local_preconditions": ["path_edges_present", "endpoint_edge_absent"], "overlay_effect": "remove_uw_wv_add_uv", "gross_action_cost": 1, "possible_branch_failure": "LOCAL_PRECONDITION_FAILED", "final_validation_requirements": ["connected", "minimum_degree_3", "non_noop"]}
+  ]
+}

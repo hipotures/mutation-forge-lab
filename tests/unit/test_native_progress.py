@@ -375,9 +375,7 @@ def test_native_validation_and_repair_states_are_distinct() -> None:
         assert sink.state["slot_states"]["slot-00"] == "invalid"
 
         output = io.StringIO()
-        Console(file=output, width=120, height=30, force_terminal=False).print(
-            sink._render()
-        )
+        Console(file=output, width=120, height=30, force_terminal=False).print(sink._render())
         rendered = output.getvalue()
         assert "invalid" in rendered
         assert "forbidden_call" in rendered
@@ -558,7 +556,7 @@ def test_json_cli_keeps_one_final_stdout_object_and_progress_on_stderr(
 ) -> None:
     config = tmp_path / "experiment.toml"
     config.write_text(
-        """schema_version = "mforge.experiment.v2"
+        """schema_version = "mforge.experiment.v3"
 exp_id = "json-progress"
 workspace = "./workspace"
 kind = "heg"
@@ -576,10 +574,10 @@ concurrency = 1
 max_repairs = 0
 
 [search]
-population_size = 1
+population_size = 8
 max_generations = 1
-max_model_turns = 1
-selection = "elite-diversity"
+max_model_turns = 8
+selection = "persistent-elite-weighted-diversity"
 
 [evaluation]
 graph_mode = "unrestricted_min_degree_3"
@@ -587,14 +585,29 @@ order_schedule = "static"
 orders = [4]
 graph_seeds = [1]
 policy_seeds = [2]
+validation_graph_seeds = [3]
+validation_policy_seeds = [4]
 horizon = 1
-proposal_pool_size = 2
-baselines = ["random"]
+baselines = [
+  "add-low-local-cycle-risk",
+  "remove-low-bridge-risk",
+  "random-valid",
+  "degree-fanout",
+]
 replay = false
 
 [resources]
 workers = 1
 thread_count = 1
+
+[native_v3]
+provider_batch_size = 4
+candidate_queue_capacity = 16
+evaluation_queue_capacity = 8
+target_evaluation_backlog = 4
+candidate_shard_size = 1
+auxiliary_shard_size = 1
+witness_cap = 64
 """,
         encoding="utf-8",
     )
@@ -603,9 +616,7 @@ thread_count = 1
     monkeypatch.setattr(cli.sys, "stdout", stdout)
     monkeypatch.setattr(cli.sys, "stderr", stderr)
 
-    def fake_run(
-        *_args: object, event_sinks: list[object], **_kwargs: object
-    ) -> dict[str, object]:
+    def fake_run(*_args: object, event_sinks: list[object], **_kwargs: object) -> dict[str, object]:
         event = _event("evaluation_progress", evaluations=1)
         for sink in event_sinks:
             sink.write(event)  # type: ignore[attr-defined]

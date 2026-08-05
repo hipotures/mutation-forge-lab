@@ -21,8 +21,8 @@ from .config import (
 from .json_io import read_json, write_json
 from .layout import ExperimentLayout
 
-LOCK_SCHEMA_VERSION = "mforge.experiment.lock.v2"
-ARTIFACT_FORMAT_VERSION = "mforge.experiment.artifacts.v2"
+LOCK_SCHEMA_VERSION = "mforge.experiment.lock.v3"
+ARTIFACT_FORMAT_VERSION = "mforge.experiment.artifacts.v3"
 
 
 class LockError(ValueError):
@@ -151,15 +151,13 @@ _NATIVE_PRESET_ASSETS: dict[str, dict[str, str]] = {
         "system_prompt": "prompts/native/system.md",
         "request_prompt": "prompts/native/request.md",
         "repair_prompt": "prompts/native/repair.md",
-        "output_schema": "configs/native/generated-policy.schema.json",
-        "context_schema": "configs/schemas/stage2b-context.schema.json",
-        "proposal_schema": "configs/schemas/stage2b-proposal.schema.json",
-        "semantic_glossary": "configs/stage3-field-semantics.v2.json",
-        "baseline_rankers": "configs/native/baseline-rankers.json",
-        **{
-            f"mutation_brief_{index:02d}": f"configs/stage3-slots/slot-{index:02d}.json"
-            for index in range(8)
-        },
+        "output_schema": "configs/native/generated-program-batch.schema.json",
+        "program_schema": "configs/native/native-v3-program.schema.json",
+        "context_schema": "configs/native/native-v3-context.schema.json",
+        "selector_registry": "configs/native/native-v3-selector-registry.json",
+        "action_registry": "configs/native/native-v3-action-registry.json",
+        "semantics": "configs/native/native-v3-semantics.md",
+        "baseline_programs": "configs/native/native-v3-baseline-programs.json",
     }
 }
 
@@ -180,21 +178,23 @@ def _preset_metadata(config: ExperimentConfig, project: Path) -> dict[str, Any]:
 
     baseline_identities: dict[str, Any] = {}
     try:
-        baseline_path = Path(assets["baseline_rankers"]["path"])
+        baseline_path = Path(assets["baseline_programs"]["path"])
         baseline_value = json.loads(baseline_path.read_text(encoding="utf-8"))
-        rankers = baseline_value.get("rankers") if isinstance(baseline_value, Mapping) else None
-        if not isinstance(rankers, list):
-            raise ValueError("rankers must be an array")
+        baselines = baseline_value.get("baselines") if isinstance(baseline_value, Mapping) else None
+        if not isinstance(baselines, list):
+            raise ValueError("baselines must be an array")
         source_sha256 = sha256_file(baseline_path)
-        for ranker in rankers:
-            if not isinstance(ranker, Mapping) or not isinstance(ranker.get("policy_id"), str):
-                raise ValueError("each baseline ranker must have a policy_id")
-            policy_id = str(ranker["policy_id"])
+        for baseline in baselines:
+            if not isinstance(baseline, Mapping) or not isinstance(
+                baseline.get("baseline_id"), str
+            ):
+                raise ValueError("each baseline program must have a baseline_id")
+            baseline_id = str(baseline["baseline_id"])
             identity = {
                 "source_sha256": source_sha256,
-                "definition_sha256": sha256_bytes(canonical_bytes(ranker)),
+                "definition_sha256": sha256_bytes(canonical_bytes(baseline)),
             }
-            baseline_identities[policy_id.removeprefix("native_")] = identity
+            baseline_identities[baseline_id] = identity
     except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise LockError(f"cannot resolve native preset {config.preset!r}") from exc
     return {
@@ -321,10 +321,20 @@ def build_lock(
             **order_schedule,
             "graph_seeds": list(config.evaluation.graph_seeds),
             "policy_seeds": list(config.evaluation.policy_seeds),
+            "validation_graph_seeds": list(config.evaluation.validation_graph_seeds),
+            "validation_policy_seeds": list(config.evaluation.validation_policy_seeds),
             "horizon": config.evaluation.horizon,
-            "proposal_pool_size": config.evaluation.proposal_pool_size,
             "baselines": list(config.evaluation.baselines),
             "replay": config.evaluation.replay,
+        },
+        "native_v3": {
+            "provider_batch_size": config.native_v3.provider_batch_size,
+            "candidate_queue_capacity": config.native_v3.candidate_queue_capacity,
+            "evaluation_queue_capacity": config.native_v3.evaluation_queue_capacity,
+            "target_evaluation_backlog": config.native_v3.target_evaluation_backlog,
+            "candidate_shard_size": config.native_v3.candidate_shard_size,
+            "auxiliary_shard_size": config.native_v3.auxiliary_shard_size,
+            "witness_cap": config.native_v3.witness_cap,
         },
         "resources": {
             "workers": config.resources.workers,
@@ -340,6 +350,8 @@ def build_lock(
             "orders": list(scheduled_order_domain(config.evaluation)),
             "graph_seeds": list(config.evaluation.graph_seeds),
             "policy_seeds": list(config.evaluation.policy_seeds),
+            "validation_graph_seeds": list(config.evaluation.validation_graph_seeds),
+            "validation_policy_seeds": list(config.evaluation.validation_policy_seeds),
         },
         "generation": {
             "population_size": config.search.population_size,

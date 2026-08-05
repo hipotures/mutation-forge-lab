@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mutation-forge.invalid/schemas/native-v3-context.json",
+  "title": "Mutation Forge Native v3 runtime context",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ctx", "graph_features"],
+  "properties": {
+    "ctx": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_id",
+        "step_index",
+        "horizon",
+        "acceptance_profile_id",
+        "stagnation_steps",
+        "exploration_window_index",
+        "accepted_rewrites",
+        "accepted_non_improving_rewrites",
+        "consecutive_non_improving_rewrites",
+        "target_forbidden_lengths",
+        "witness_cap",
+        "current_score_component_bounds"
+      ],
+      "properties": {
+        "protocol_id": {"type": "string"},
+        "step_index": {"type": "integer", "minimum": 0},
+        "horizon": {"type": "integer", "minimum": 1},
+        "acceptance_profile_id": {"type": "string"},
+        "stagnation_steps": {"type": "integer", "minimum": 0},
+        "exploration_window_index": {"type": ["integer", "null"], "minimum": 0, "maximum": 3},
+        "accepted_rewrites": {"type": "integer", "minimum": 0},
+        "accepted_non_improving_rewrites": {"type": "integer", "minimum": 0},
+        "consecutive_non_improving_rewrites": {"type": "integer", "minimum": 0},
+        "target_forbidden_lengths": {"type": "array", "items": {"type": "integer", "minimum": 3}, "uniqueItems": true},
+        "witness_cap": {"type": "integer", "minimum": 1},
+        "current_score_component_bounds": {"type": "array", "items": {"$ref": "#/$defs/component"}}
+      }
+    },
+    "graph_features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order",
+        "edge_count",
+        "minimum_degree",
+        "maximum_degree",
+        "degree_histogram",
+        "score_component_bounds",
+        "total_witness_interval",
+        "weighted_penalty_interval",
+        "energy_interval"
+      ],
+      "properties": {
+        "order": {"type": "integer", "minimum": 1},
+        "edge_count": {"type": "integer", "minimum": 0},
+        "minimum_degree": {"type": "integer", "minimum": 0},
+        "maximum_degree": {"type": "integer", "minimum": 0},
+        "degree_histogram": {"type": "array", "items": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer"}], "items": false}},
+        "score_component_bounds": {"type": "array", "items": {"$ref": "#/$defs/component"}},
+        "total_witness_interval": {"$ref": "#/$defs/interval"},
+        "weighted_penalty_interval": {"$ref": "#/$defs/interval"},
+        "energy_interval": {"$ref": "#/$defs/interval"}
+      }
+    }
+  },
+  "$defs": {
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lower", "upper"],
+      "properties": {
+        "lower": {"type": "integer"},
+        "upper": {"type": "integer"}
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["forbidden_length", "lower_bound", "upper_bound", "status"],
+      "properties": {
+        "forbidden_length": {"type": "integer", "minimum": 3},
+        "lower_bound": {"type": "integer", "minimum": 0},
+        "upper_bound": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["EXACT", "SATURATED_AT_CAP", "SEARCH_BUDGET_EXHAUSTED", "SEARCH_TIMEOUT_WITH_SAFE_PARTIAL", "SEARCH_TIMEOUT_WITHOUT_PARTIAL"]}
+      }
+    }
+  }
+}

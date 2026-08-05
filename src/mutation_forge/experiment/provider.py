@@ -22,10 +22,7 @@ from typing import Any, Protocol, cast
 
 from .artifacts import (
     TurnArtifactStore,
-    generated_policy_diagnostics,
-    is_generated_policy,
     redact,
-    render_generated_policy_markdown,
 )
 from .json_io import write_json
 
@@ -116,6 +113,21 @@ class _CodexTransport:
         # dependency; native prompts/schemas are supplied by the request.
         from mutation_forge.stage3.app_server import AppServerLimits, CodexAppServerAdapter
 
+        request_limit = request.get("maximum_request_bytes")
+        response_limit = request.get("maximum_encoded_response_bytes")
+        if (
+            isinstance(request_limit, bool)
+            or not isinstance(request_limit, int)
+            or not 1 <= request_limit <= 1024 * 1024
+        ):
+            request_limit = None
+        if (
+            isinstance(response_limit, bool)
+            or not isinstance(response_limit, int)
+            or not 1 <= response_limit <= 1024 * 1024
+        ):
+            response_limit = None
+
         artifact_dir = request.get("artifact_dir")
         prefix = str(request.get("artifact_prefix", "slot-00"))
         if isinstance(artifact_dir, (str, Path)):
@@ -140,6 +152,11 @@ class _CodexTransport:
                 max_turns=1,
                 max_campaigns=1,
                 turn_timeout=self.config.turn_timeout_seconds,
+                max_request_bytes=request_limit,
+                max_response_bytes=response_limit,
+                max_event_bytes=(
+                    max(256 * 1024, response_limit) if response_limit is not None else None
+                ),
             ),
             base_instructions=str(request.get("system_prompt", "")),
             artifact_dir=artifact_dir,
@@ -199,13 +216,13 @@ class _CodexTransport:
             try:
                 system = system_path.read_text(encoding="utf-8")
             except OSError:
-                system = "Return one generated policy JSON object."
+                system = "Return the requested bounded JSON object."
         if not isinstance(schema, Mapping):
             schema_path = (
                 Path(__file__).resolve().parents[3]
                 / "configs"
                 / "native"
-                / "generated-policy.schema.json"
+                / "generated-program-batch.schema.json"
             )
             try:
                 schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -258,10 +275,18 @@ class _CodexTransport:
         else:
             if isinstance(decoded, Mapping):
                 response = dict(decoded)
-        response_diagnostics = generated_policy_diagnostics(response)
-        response_projection_valid = is_generated_policy(response)
-        if response_projection_valid:
-            response_diagnostics = ()
+        response_projection_valid = isinstance(response, Mapping)
+        response_diagnostics: tuple[dict[str, str], ...] = (
+            ()
+            if response_projection_valid
+            else (
+                {
+                    "code": "invalid_json_object",
+                    "path": "/",
+                    "message": "provider response must decode to a JSON object",
+                },
+            )
+        )
         usage = self._usage({"usage": self._usage_from_result(result)})
         value = {
             "status": "completed",
@@ -290,7 +315,17 @@ class _CodexTransport:
             adapter.logger.raw_text("request.md", prompt)
             adapter.logger.raw_text("response.raw.txt", response_text)
             if response_projection_valid and isinstance(response, Mapping):
-                adapter.logger.raw_text("response.md", render_generated_policy_markdown(response))
+                adapter.logger.raw_text(
+                    "response.md",
+                    "```json\n"
+                    + json.dumps(
+                        response,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                    )
+                    + "\n```\n",
+                )
             else:
                 adapter.logger.remove("response.md")
             if isinstance(response, Mapping):
@@ -348,17 +383,12 @@ class _CodexTransport:
             raise ValueError("repair requires bounded diagnostics")
         value = dict(request)
         prompt = str(request.get("prompt", ""))
-        # Native GenerationCoordinator requests already contain a readable
-        # repair section.  Keep that exact prompt.  The fallback is retained
-        # for direct callers that still provide only an initial prompt.
+        # Native v3 requests already carry the locked repair instruction. The
+        # fallback only materializes bounded diagnostics for direct callers.
         if "diagnostic" not in prompt.lower():
             pretty = json.dumps(list(diagnostics), ensure_ascii=False, sort_keys=True, indent=2)
             value["prompt"] = (
-                str(
-                    request.get(
-                        "repair_prompt", "Repair the generated policy using the diagnostics."
-                    )
-                )
+                str(request.get("repair_prompt", "Repair the policy ASTs using the diagnostics."))
                 + "\n\n"
                 + prompt
                 + "\n\n## Repair diagnostics\n\n```json\n"

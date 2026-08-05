@@ -22,7 +22,7 @@ from typing import Any, Literal, cast
 
 from mutation_forge.backends.heg import HEG_GRAPH_MODES
 
-EXPERIMENT_SCHEMA_VERSION = "mforge.experiment.v2"
+EXPERIMENT_SCHEMA_VERSION = "mforge.experiment.v3"
 type SearchLimit = int | Literal["unbounded"]
 type OrderSchedule = Literal["static", "adaptive"]
 MAX_EXPERIMENT_ID_BYTES = 128
@@ -153,8 +153,9 @@ class ExperimentEvaluationConfig:
     orders_per_generation: int | None
     graph_seeds: tuple[int, ...]
     policy_seeds: tuple[int, ...]
+    validation_graph_seeds: tuple[int, ...]
+    validation_policy_seeds: tuple[int, ...]
     horizon: int
-    proposal_pool_size: int
     baselines: tuple[str, ...]
     replay: bool
 
@@ -163,6 +164,17 @@ class ExperimentEvaluationConfig:
 class ExperimentResourcesConfig:
     workers: int
     thread_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class NativeV3Config:
+    provider_batch_size: int = 4
+    candidate_queue_capacity: int = 32
+    evaluation_queue_capacity: int = 64
+    target_evaluation_backlog: int = 32
+    candidate_shard_size: int = 1
+    auxiliary_shard_size: int = 1
+    witness_cap: int = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +189,7 @@ class ExperimentConfig:
     search: ExperimentSearchConfig
     evaluation: ExperimentEvaluationConfig
     resources: ExperimentResourcesConfig
+    native_v3: NativeV3Config
     source_path: Path
     source_bytes: bytes = field(repr=False, compare=False)
     raw: Mapping[str, Any] = field(repr=False, compare=False)
@@ -253,8 +266,7 @@ def scheduled_order_domain(config: object) -> tuple[int, ...]:
         if not isinstance(orders, (list, tuple)) or not orders:
             raise ValueError("evaluation.orders must be a non-empty integer sequence")
         if any(
-            isinstance(order, bool) or not isinstance(order, int) or order <= 0
-            for order in orders
+            isinstance(order, bool) or not isinstance(order, int) or order <= 0 for order in orders
         ):
             raise ValueError("evaluation.orders must contain positive integers")
         return tuple(cast(int, order) for order in orders)
@@ -268,8 +280,7 @@ def scheduled_order_domain(config: object) -> tuple[int, ...]:
         raise ValueError("evaluation.max_order must be an integer")
     if min_order <= 0 or max_order <= 0 or min_order > max_order:
         raise ValueError(
-            "evaluation.min_order and evaluation.max_order must define "
-            "a positive ascending range"
+            "evaluation.min_order and evaluation.max_order must define a positive ascending range"
         )
     orders = range(min_order, max_order + 1)
     if _evaluation_value(config, "graph_mode") == "cubic_first":
@@ -292,17 +303,13 @@ def orders_for_generation(config: object, generation: int) -> tuple[int, ...]:
         raise ValueError("evaluation.orders_per_generation must be a positive integer")
     if count > len(domain):
         raise ValueError(
-            "evaluation.orders_per_generation must not exceed the number "
-            "of eligible graph orders"
+            "evaluation.orders_per_generation must not exceed the number of eligible graph orders"
         )
     graph_seeds = _evaluation_value(config, "graph_seeds")
     if (
         not isinstance(graph_seeds, (list, tuple))
         or not graph_seeds
-        or any(
-            isinstance(seed, bool) or not isinstance(seed, int)
-            for seed in graph_seeds
-        )
+        or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in graph_seeds)
     ):
         raise ValueError("evaluation.graph_seeds must be a non-empty integer sequence")
     seed = f"{','.join(str(value) for value in graph_seeds)}:{generation}"
@@ -358,10 +365,7 @@ def _reject_credentials(value: object, path: str = "") -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             name = f"{path}.{key}" if path else str(key)
-            if (
-                str(key) != "max_total_tokens_per_hour"
-                and _CREDENTIAL_KEY.search(str(key))
-            ):
+            if str(key) != "max_total_tokens_per_hour" and _CREDENTIAL_KEY.search(str(key)):
                 raise ValueError(
                     f"credential field {name!r} is not allowed; use local Codex authentication"
                 )
@@ -393,6 +397,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
             "search",
             "evaluation",
             "resources",
+            "native_v3",
         },
     )
     if raw.get("schema_version") != EXPERIMENT_SCHEMA_VERSION:
@@ -479,8 +484,8 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         {"population_size", "max_generations", "max_model_turns", "selection"},
     )
     selection = search_raw.get("selection")
-    if not isinstance(selection, str) or not selection:
-        raise ValueError("search.selection must be a non-empty string")
+    if selection != "persistent-elite-weighted-diversity":
+        raise ValueError("search.selection must be 'persistent-elite-weighted-diversity'")
     search = ExperimentSearchConfig(
         _positive_int(search_raw.get("population_size"), "search.population_size"),
         _search_limit(search_raw.get("max_generations"), "search.max_generations"),
@@ -501,8 +506,9 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
             "graph_mode",
             "graph_seeds",
             "policy_seeds",
+            "validation_graph_seeds",
+            "validation_policy_seeds",
             "horizon",
-            "proposal_pool_size",
             "baselines",
             "replay",
         },
@@ -512,16 +518,10 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         raise ValueError("evaluation.replay must be a boolean")
     graph_mode = evaluation_raw.get("graph_mode")
     if graph_mode not in HEG_GRAPH_MODES:
-        raise ValueError(
-            "evaluation.graph_mode must be one of "
-            f"{sorted(HEG_GRAPH_MODES)!r}"
-        )
+        raise ValueError(f"evaluation.graph_mode must be one of {sorted(HEG_GRAPH_MODES)!r}")
     order_schedule = evaluation_raw.get("order_schedule")
     if order_schedule not in ORDER_SCHEDULES:
-        raise ValueError(
-            "evaluation.order_schedule must be one of "
-            f"{sorted(ORDER_SCHEDULES)!r}"
-        )
+        raise ValueError(f"evaluation.order_schedule must be one of {sorted(ORDER_SCHEDULES)!r}")
     if order_schedule == "static":
         adaptive_fields = {
             "min_order",
@@ -539,9 +539,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         orders_per_generation = None
     else:
         if "orders" in evaluation_raw:
-            raise ValueError(
-                "evaluation adaptive order schedule does not accept field 'orders'"
-            )
+            raise ValueError("evaluation adaptive order schedule does not accept field 'orders'")
         orders = ()
         min_order = _positive_int(
             evaluation_raw.get("min_order"),
@@ -557,6 +555,28 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         )
         if min_order > max_order:
             raise ValueError("evaluation.min_order must not exceed evaluation.max_order")
+    graph_seeds = _ints(evaluation_raw.get("graph_seeds"), "evaluation.graph_seeds")
+    policy_seeds = _ints(evaluation_raw.get("policy_seeds"), "evaluation.policy_seeds")
+    validation_graph_seeds = (
+        _ints(
+            evaluation_raw.get("validation_graph_seeds"),
+            "evaluation.validation_graph_seeds",
+        )
+        if "validation_graph_seeds" in evaluation_raw
+        else tuple(seed + 1_000_000_007 for seed in graph_seeds)
+    )
+    validation_policy_seeds = (
+        _ints(
+            evaluation_raw.get("validation_policy_seeds"),
+            "evaluation.validation_policy_seeds",
+        )
+        if "validation_policy_seeds" in evaluation_raw
+        else tuple(seed + 1_000_000_007 for seed in policy_seeds)
+    )
+    if set(graph_seeds).intersection(validation_graph_seeds) or set(policy_seeds).intersection(
+        validation_policy_seeds
+    ):
+        raise ValueError("development and validation seed panels must be disjoint")
     evaluation = ExperimentEvaluationConfig(
         cast(str, graph_mode),
         cast(OrderSchedule, order_schedule),
@@ -564,10 +584,11 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         min_order,
         max_order,
         orders_per_generation,
-        _ints(evaluation_raw.get("graph_seeds"), "evaluation.graph_seeds"),
-        _ints(evaluation_raw.get("policy_seeds"), "evaluation.policy_seeds"),
+        graph_seeds,
+        policy_seeds,
+        validation_graph_seeds,
+        validation_policy_seeds,
         _positive_int(evaluation_raw.get("horizon"), "evaluation.horizon"),
-        _positive_int(evaluation_raw.get("proposal_pool_size"), "evaluation.proposal_pool_size"),
         _strings(evaluation_raw.get("baselines"), "evaluation.baselines"),
         replay,
     )
@@ -589,18 +610,14 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
             f"for graph_mode={graph_mode!r}"
         )
     if configured_max_order > MAX_GRAPH_ORDER:
-        raise ValueError(
-            f"evaluation graph orders must not exceed {MAX_GRAPH_ORDER}"
-        )
+        raise ValueError(f"evaluation graph orders must not exceed {MAX_GRAPH_ORDER}")
     if graph_mode == "cubic_first" and any(order % 2 for order in order_domain):
         raise ValueError("evaluation cubic_first graph orders must be even")
-    if (
-        evaluation.order_schedule == "adaptive"
-        and cast(int, evaluation.orders_per_generation) > len(order_domain)
-    ):
+    if evaluation.order_schedule == "adaptive" and cast(
+        int, evaluation.orders_per_generation
+    ) > len(order_domain):
         raise ValueError(
-            "evaluation.orders_per_generation must not exceed the number "
-            "of eligible graph orders"
+            "evaluation.orders_per_generation must not exceed the number of eligible graph orders"
         )
 
     resources_raw = _table(raw, "resources")
@@ -609,6 +626,66 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         _positive_int(resources_raw.get("workers"), "resources.workers"),
         _positive_int(resources_raw.get("thread_count"), "resources.thread_count"),
     )
+
+    native_v3_raw = _table(raw, "native_v3")
+    _reject_unknown_fields(
+        native_v3_raw,
+        "native_v3",
+        {
+            "provider_batch_size",
+            "candidate_queue_capacity",
+            "evaluation_queue_capacity",
+            "target_evaluation_backlog",
+            "candidate_shard_size",
+            "auxiliary_shard_size",
+            "witness_cap",
+        },
+    )
+    native_v3 = NativeV3Config(
+        provider_batch_size=_positive_int(
+            native_v3_raw.get("provider_batch_size", 4),
+            "native_v3.provider_batch_size",
+        ),
+        candidate_queue_capacity=_positive_int(
+            native_v3_raw.get("candidate_queue_capacity", 32),
+            "native_v3.candidate_queue_capacity",
+        ),
+        evaluation_queue_capacity=_positive_int(
+            native_v3_raw.get("evaluation_queue_capacity", 64),
+            "native_v3.evaluation_queue_capacity",
+        ),
+        target_evaluation_backlog=_positive_int(
+            native_v3_raw.get("target_evaluation_backlog", 32),
+            "native_v3.target_evaluation_backlog",
+        ),
+        candidate_shard_size=_positive_int(
+            native_v3_raw.get("candidate_shard_size", 1),
+            "native_v3.candidate_shard_size",
+        ),
+        auxiliary_shard_size=_positive_int(
+            native_v3_raw.get("auxiliary_shard_size", 1),
+            "native_v3.auxiliary_shard_size",
+        ),
+        witness_cap=_positive_int(
+            native_v3_raw.get("witness_cap", 64),
+            "native_v3.witness_cap",
+        ),
+    )
+    if native_v3.provider_batch_size not in {1, 2, 4, 8}:
+        raise ValueError("native_v3.provider_batch_size must be one of 1, 2, 4, 8")
+    if native_v3.target_evaluation_backlog > native_v3.evaluation_queue_capacity:
+        raise ValueError(
+            "native_v3.target_evaluation_backlog must not exceed "
+            "native_v3.evaluation_queue_capacity"
+        )
+    maximum_auxiliary_programs = 8  # four retained parents plus four fixed baselines
+    if native_v3.candidate_queue_capacity < (
+        maximum_auxiliary_programs + model.concurrency * native_v3.provider_batch_size
+    ):
+        raise ValueError(
+            "native_v3.candidate_queue_capacity must hold retained parents, baselines, "
+            "and all in-flight provider batches"
+        )
 
     return ExperimentConfig(
         EXPERIMENT_SCHEMA_VERSION,
@@ -621,6 +698,7 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
         search,
         evaluation,
         resources,
+        native_v3,
         source_path,
         source_bytes,
         raw,
@@ -636,6 +714,7 @@ __all__ = [
     "ExperimentResourcesConfig",
     "ExperimentRunConfig",
     "ExperimentSearchConfig",
+    "NativeV3Config",
     "SearchLimit",
     "load_experiment_config",
     "serialize_search_limit",

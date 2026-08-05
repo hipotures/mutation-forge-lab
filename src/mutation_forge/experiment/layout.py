@@ -259,16 +259,15 @@ class ExperimentLayout:
             raise WorkspaceError(f"experiment workspace is incomplete: {', '.join(missing)}")
 
     def verify_runtime_schemas(self) -> None:
-        """Reject any persisted runtime artifact outside the v2 contract.
+        """Reject persisted runtime artifacts outside the current contract.
 
         The artifact manifest proves bytes and paths, but it deliberately does
         not interpret the contents of session and counterexample records.  A
-        continuation must therefore validate those records before opening a
-        new session; otherwise a v1 history could be silently mixed into a v2
-        run.
+        continuation therefore validates those records before opening a new
+        session.
         """
 
-        _verify_toml_schema(self.experiment_config, "mforge.experiment.v2")
+        _verify_toml_schema(self.experiment_config, "mforge.experiment.v3")
         for session in sorted(self.sessions.glob("session-*")):
             if not session.is_dir():
                 continue
@@ -282,14 +281,13 @@ class ExperimentLayout:
                     )
             input_config = session / "input-config.toml"
             if input_config.is_file():
-                _verify_toml_schema(input_config, "mforge.experiment.v2")
+                _verify_toml_schema(input_config, "mforge.experiment.v3")
             events = session / "events.jsonl.gz"
             if events.is_file():
                 _verify_event_stream(events)
 
         known_root_artifacts = {
-            "run_summary.json.gz": "mforge.experiment.run.v2",
-            "native-generation-checkpoint.json.gz": "mforge.experiment.generation.v2",
+            "run_summary.json.gz": "mforge.experiment.run.v3",
         }
         for name, schema in known_root_artifacts.items():
             path = self.artifacts / name
@@ -382,8 +380,7 @@ class ExperimentLayout:
                     candidate_data = candidate.read_bytes()
                     if (
                         entry.get("size") == len(candidate_data)
-                        and entry.get("sha256")
-                        == hashlib.sha256(candidate_data).hexdigest()
+                        and entry.get("sha256") == hashlib.sha256(candidate_data).hexdigest()
                     ):
                         path = candidate
                         data = candidate_data
@@ -399,8 +396,7 @@ class ExperimentLayout:
                 )
             )
             runtime_mutable = (
-                relative == "native-generation-checkpoint.json.gz"
-                or relative == "run-summary.json.gz"
+                relative == "run-summary.json.gz"
                 or relative == "archive/index.jsonl"
                 or relative.startswith("evaluations/development/")
                 or relative.startswith("evaluations/replay/")
@@ -549,7 +545,7 @@ def _verify_event_stream(path: Path) -> None:
             raise WorkspaceError(
                 f"Unsupported experiment event schema at {path}:{number}: {observed!r}. "
                 "This runtime accepts only mforge.experiment.events.v3. "
-                "Run 'mforge experiment rebuild-state' for a v2 workspace."
+                "Create a fresh Native v3 workspace."
             )
 
 
