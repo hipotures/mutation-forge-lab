@@ -253,6 +253,7 @@ class _CodexTransport:
                 schema = {"type": "object"}
         if not isinstance(prompt, str) or not prompt:
             raise ValueError("native provider prompt must be non-empty")
+        artifact_prompt = self._artifact_prompt(prompt)
         from mutation_forge.stage3.app_server import ModelProfile
 
         adapter = self._adapter(request)
@@ -261,7 +262,7 @@ class _CodexTransport:
             # request.md is the exact final prompt.  The structured request
             # envelope, system prompt, and output schema are retained beside
             # it instead of being injected into Markdown.
-            adapter.logger.raw_text("request.md", prompt)
+            adapter.logger.raw_text("request.md", artifact_prompt)
             adapter.logger.document(
                 "request.json",
                 {
@@ -283,7 +284,7 @@ class _CodexTransport:
             if "auth" in name or "authenticated" in message.lower() or "login" in message.lower():
                 raise AuthenticationError(str(redact(message))) from error
             if adapter.logger:
-                adapter.logger.raw_text("request.md", prompt)
+                adapter.logger.raw_text("request.md", artifact_prompt)
                 adapter.logger.document(
                     "provider-raw.json",
                     {"status": "failed", "error": str(redact(message))},
@@ -335,22 +336,9 @@ class _CodexTransport:
             # transport-level response.md.  Replace that provisional text
             # with the native semantic projection, or remove it entirely for
             # malformed/schema-invalid responses.
-            adapter.logger.raw_text("request.md", prompt)
+            adapter.logger.raw_text("request.md", artifact_prompt)
             adapter.logger.raw_text("response.raw.txt", response_text)
-            if response_projection_valid and isinstance(response, Mapping):
-                adapter.logger.raw_text(
-                    "response.md",
-                    "```json\n"
-                    + json.dumps(
-                        response,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        indent=2,
-                    )
-                    + "\n```\n",
-                )
-            else:
-                adapter.logger.remove("response.md")
+            adapter.logger.raw_text("response.md", response_text)
             if isinstance(response, Mapping):
                 adapter.logger.document("response.json", response)
             if response_diagnostics:
@@ -396,6 +384,18 @@ class _CodexTransport:
             "final": usage.final,
             "partial": usage.partial,
         }
+
+    @staticmethod
+    def _artifact_prompt(prompt: str) -> str:
+        """Return the plain instruction used by the v2 Markdown artifact."""
+
+        try:
+            payload = json.loads(prompt)
+        except (TypeError, ValueError):
+            return prompt
+        if isinstance(payload, Mapping) and isinstance(payload.get("instruction"), str):
+            return str(payload["instruction"])
+        return prompt
 
     def repair(
         self,
