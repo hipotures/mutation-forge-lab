@@ -209,6 +209,49 @@ def test_provider_failure_telemetry_preserves_safe_diagnostics() -> None:
     assert result.epoch_status is EpochStatus.INCONCLUSIVE
 
 
+def test_provider_call_activity_reports_slots_elapsed_time_and_locked_timeout() -> None:
+    def provider(call: ProviderCall) -> ProviderBatch[str]:
+        time.sleep(0.03)
+        entries = tuple(
+            GeneratedEntry(slot, f"program:{slot}", f"hash:{slot}")
+            for slot in call.slot_ids
+        )
+        return ProviderBatch(call.call_id, entries, 100)
+
+    result = StreamingEpochScheduler(
+        config=SchedulerConfig(
+            provider_concurrency=1,
+            evaluator_workers=2,
+            provider_batch_size=2,
+            candidate_queue_capacity=8,
+            evaluation_queue_capacity=16,
+            target_evaluation_backlog=8,
+            provider_call_timeout_seconds=600.0,
+            provider_activity_interval_seconds=0.005,
+        ),
+        provider_call=provider,
+        build_shards=_shards,
+        evaluate_shard=lambda shard, _program: (shard.tasks[0].episode_id,),
+    ).run(_snapshot(slot_count=2))
+
+    started = next(event for event in result.telemetry if event.name == "provider_call_started")
+    activities = [
+        event for event in result.telemetry if event.name == "provider_call_activity"
+    ]
+    completed = next(
+        event for event in result.telemetry if event.name == "provider_call_completed"
+    )
+    assert started.fields["slot_ids"] == "slot-00,slot-01"
+    assert started.fields["timeout_seconds"] == 600.0
+    assert activities
+    assert all(
+        event.fields["operation_elapsed_seconds"] > 0
+        and event.fields["timeout_seconds"] == 600.0
+        for event in activities
+    )
+    assert completed.fields["slot_ids"] == "slot-00,slot-01"
+
+
 def test_late_duplicate_alias_joins_the_in_flight_canonical_evaluation() -> None:
     evaluation_started = threading.Event()
 

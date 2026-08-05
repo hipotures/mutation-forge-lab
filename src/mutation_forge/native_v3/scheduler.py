@@ -154,6 +154,8 @@ class SchedulerConfig:
     target_evaluation_backlog: int
     candidate_shard_size: int = 1
     auxiliary_shard_size: int = 1
+    provider_call_timeout_seconds: float | None = None
+    provider_activity_interval_seconds: float = 1.0
 
     def __post_init__(self) -> None:
         values = (
@@ -174,6 +176,13 @@ class SchedulerConfig:
             raise ValueError(
                 "candidate queue must hold every result from all in-flight provider calls"
             )
+        if (
+            self.provider_call_timeout_seconds is not None
+            and self.provider_call_timeout_seconds <= 0
+        ):
+            raise ValueError("provider call timeout must be positive")
+        if self.provider_activity_interval_seconds <= 0:
+            raise ValueError("provider activity interval must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +369,8 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
             if not set(group).issubset(recovered_slots)
         )
         provider_futures: dict[Future[ProviderBatch[ProgramT]], ProviderCall] = {}
+        provider_started_ns: dict[str, int] = {}
+        provider_activity_ns: dict[str, int] = {}
         provider_entry_queue: queue.Queue[tuple[ProviderCall, GeneratedEntry[ProgramT]]] = (
             queue.Queue(self.config.candidate_queue_capacity)
         )
@@ -452,11 +463,17 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                         entry_sink,
                     )
                 provider_futures[future] = call
+                call_started_ns = time.monotonic_ns()
+                provider_started_ns[call_id] = call_started_ns
+                provider_activity_ns[call_id] = call_started_ns
                 emit(
                     "provider_call_started",
                     call_id=call_id,
                     provider_calls_in_flight=len(provider_futures),
                     slot_count=len(slot_ids),
+                    slot_ids=",".join(slot_ids),
+                    generation=snapshot.epoch_number,
+                    timeout_seconds=self.config.provider_call_timeout_seconds,
                 )
 
         def consume_entry(
@@ -486,7 +503,10 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                 candidate_queue.put((entry.program_hash, entry.program, False))
                 emit(
                     "candidate_validated",
+                    slot=entry.slot_id,
                     slot_id=entry.slot_id,
+                    generation=snapshot.epoch_number,
+                    status="evaluating",
                     program_hash=entry.program_hash,
                     candidate_queue_depth=candidate_queue.qsize(),
                 )
@@ -515,12 +535,11 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                 consume_streamed_entries()
                 changed = True
                 call = provider_futures.pop(future)
-                latency_ns = time.monotonic_ns() - next(
-                    event.monotonic_ns
-                    for event in reversed(events)
-                    if event.name == "provider_call_started"
-                    and event.fields.get("call_id") == call.call_id
+                latency_ns = time.monotonic_ns() - provider_started_ns.pop(
+                    call.call_id,
+                    time.monotonic_ns(),
                 )
+                provider_activity_ns.pop(call.call_id, None)
                 try:
                     batch = future.result()
                 except BaseException as error:
@@ -538,6 +557,8 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                         error_type=type(error).__name__,
                         error_message=str(error)[:1000],
                         provider_calls_in_flight=len(provider_futures),
+                        slot_ids=",".join(call.slot_ids),
+                        generation=snapshot.epoch_number,
                     )
                     continue
                 if self.streaming_provider_call is None:
@@ -557,8 +578,29 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                     valid_programs=valid_count,
                     response_bytes=batch.response_bytes,
                     provider_calls_in_flight=len(provider_futures),
+                    slot_ids=",".join(call.slot_ids),
+                    generation=snapshot.epoch_number,
                 )
             return changed
+
+        def emit_provider_activity() -> None:
+            now_ns = time.monotonic_ns()
+            interval_ns = int(self.config.provider_activity_interval_seconds * 1e9)
+            for call in provider_futures.values():
+                last_ns = provider_activity_ns.get(call.call_id, now_ns)
+                if now_ns - last_ns < interval_ns:
+                    continue
+                provider_activity_ns[call.call_id] = now_ns
+                started_call_ns = provider_started_ns.get(call.call_id, now_ns)
+                emit(
+                    "provider_call_activity",
+                    call_id=call.call_id,
+                    provider_calls_in_flight=len(provider_futures),
+                    slot_ids=",".join(call.slot_ids),
+                    generation=snapshot.epoch_number,
+                    operation_elapsed_seconds=(now_ns - started_call_ns) / 1e9,
+                    timeout_seconds=self.config.provider_call_timeout_seconds,
+                )
 
         def expand_candidates() -> bool:
             nonlocal candidate_seen
@@ -750,6 +792,7 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                 changed = fill_evaluation_queue() or changed
                 changed = dispatch_evaluators() or changed
                 submit_provider_calls()
+                emit_provider_activity()
                 all_slots_terminal = all(
                     status
                     in {

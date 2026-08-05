@@ -318,6 +318,60 @@ def test_native_profile_is_compact_and_conditional() -> None:
         sink.close()
 
 
+def test_native_v3_provider_call_heartbeat_populates_classic_slot_table() -> None:
+    sink = RichLiveSink(
+        console=Console(file=io.StringIO(), width=160, height=30, force_terminal=False),
+        native=True,
+    )
+    try:
+        sink.write(
+            _event(
+                "generation_started",
+                generation=1,
+                population_size=8,
+            )
+        )
+        sink.write(
+            _event(
+                "provider_call_started",
+                generation=1,
+                call_id="epoch-0001:provider:0000",
+                slot_ids="slot-00,slot-01,slot-02,slot-03",
+                provider_calls_in_flight=1,
+                timeout_seconds=600.0,
+            )
+        )
+        sink.write(
+            _event(
+                "provider_call_activity",
+                generation=1,
+                call_id="epoch-0001:provider:0000",
+                slot_ids="slot-00,slot-01,slot-02,slot-03",
+                provider_calls_in_flight=1,
+                operation_elapsed_seconds=42.0,
+                timeout_seconds=600.0,
+            )
+        )
+
+        rows = sink._native_slot_rows()  # noqa: SLF001
+        assert [row["state"] for row in rows] == ["model"] * 4
+        assert [row["elapsed_seconds"] for row in rows] == pytest.approx(
+            [42.0] * 4,
+            abs=0.01,
+        )
+        assert sink.state["active_model_turns"] == 1
+        rendered = io.StringIO()
+        Console(file=rendered, width=160, height=30, force_terminal=False).print(
+            sink._render()
+        )
+        text = rendered.getvalue()
+        assert "waiting for generation" not in text
+        assert "response waiting" in text
+        assert "42s" in text
+    finally:
+        sink.close()
+
+
 def test_native_validation_and_repair_states_are_distinct() -> None:
     sink = RichLiveSink(
         console=Console(file=io.StringIO(), width=120, height=30, force_terminal=False),

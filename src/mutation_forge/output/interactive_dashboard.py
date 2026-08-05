@@ -815,6 +815,82 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _provider_call_slots(payload: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    encoded = _text(payload.get("slot_ids"))
+    if encoded is None:
+        return ()
+    return tuple(value for item in encoded.split(",") if (value := item.strip()))
+
+
+def _update_provider_call_slots(
+    state: DashboardState,
+    payload: Mapping[str, JsonValue],
+    *,
+    event_type: str,
+    now: float,
+) -> DashboardState:
+    generation = _integer(payload.get("generation"))
+    target_generation = state.generation if generation is None else generation
+    elapsed = _provider_elapsed(payload)
+    timeout = _number(payload.get("timeout_seconds"))
+    error_type = _text(payload.get("error_type"))
+    error_message = _text(payload.get("error_message"))
+    diagnostic = (
+        f"{error_type}: {error_message}"
+        if error_type is not None and error_message is not None
+        else error_message or error_type or ""
+    )
+    for slot_name in _provider_call_slots(payload):
+        group = _generation_slots(state, target_generation)
+        slot = next(
+            (item for item in group.slots if item.slot == slot_name),
+            DashboardSlot(slot=slot_name, generation=target_generation),
+        )
+        started = slot.started_monotonic
+        phase_started = slot.phase_started_monotonic
+        if event_type == "provider_call_started":
+            started = now if started is None else started
+            phase_started = now
+            updated = replace(
+                slot,
+                phase="provider",
+                state="model",
+                started_monotonic=started,
+                phase_started_monotonic=phase_started,
+                timeout_seconds=timeout,
+                lifecycle=_lifecycle(slot, "provider", "running"),
+            )
+        elif event_type == "provider_call_activity":
+            updated = replace(
+                slot,
+                phase="provider",
+                state="model",
+                elapsed_seconds=elapsed,
+                timeout_seconds=timeout if timeout is not None else slot.timeout_seconds,
+            )
+        elif event_type == "provider_call_failed":
+            updated = replace(
+                slot,
+                phase="response",
+                state="failed",
+                elapsed_seconds=elapsed,
+                phase_started_monotonic=None,
+                error=diagnostic or "provider call failed",
+                lifecycle=_lifecycle(slot, "provider", "fail", elapsed),
+            )
+        else:
+            updated = replace(
+                slot,
+                phase="response",
+                state="validating",
+                elapsed_seconds=elapsed,
+                phase_started_monotonic=None,
+                lifecycle=_lifecycle(slot, "provider", "pass", elapsed),
+            )
+        state = _replace_slot(state, updated)
+    return state
+
+
 def _usage(value: object, *, quality: object = None) -> TokenUsage:
     source = value if isinstance(value, Mapping) else {}
     return TokenUsage(
@@ -969,10 +1045,27 @@ def _event_activity(event: Event) -> ActivityEntry | None:
     payload = event.payload
     slot = _text(payload.get("slot"))
     event_type = event.event_type
-    if event_type in {"provider_turn_activity", "repair_activity"}:
+    if event_type in {
+        "provider_turn_activity",
+        "repair_activity",
+        "provider_call_activity",
+    }:
         elapsed = _number(payload.get("operation_elapsed_seconds"))
-        message = f"waiting for provider response{f' ({elapsed:.0f}s)' if elapsed else ''}"
-        return ActivityEntry(event.timestamp[11:19], "provider", "info", message, slot)
+        timeout = _number(payload.get("timeout_seconds"))
+        timing = ""
+        if elapsed is not None:
+            timing = (
+                f" ({elapsed:.0f}/{timeout:.0f}s)"
+                if timeout is not None
+                else f" ({elapsed:.0f}s)"
+            )
+        return ActivityEntry(
+            event.timestamp[11:19],
+            "provider",
+            "info",
+            f"waiting for provider response{timing}",
+            slot or _text(payload.get("call_id")),
+        )
     if event_type == "provider_turn_failed":
         return ActivityEntry(
             event.timestamp[11:19],
@@ -1227,6 +1320,19 @@ def reduce_dashboard_event(
             provider_turns_attempted=state.provider_turns_attempted + 1,
             phase="provider",
         )
+        state = _update_provider_call_slots(
+            state,
+            payload,
+            event_type=event_type,
+            now=now,
+        )
+    elif event_type == "provider_call_activity":
+        state = _update_provider_call_slots(
+            state,
+            payload,
+            event_type=event_type,
+            now=now,
+        )
     elif event_type in {"provider_call_completed", "provider_call_failed"}:
         failed = event_type == "provider_call_failed"
         error_type = _text(payload.get("error_type"))
@@ -1242,6 +1348,12 @@ def reduce_dashboard_event(
             provider_turns_completed=state.provider_turns_completed + (0 if failed else 1),
             phase="provider error" if failed else state.phase,
             status_message=diagnostic if failed else state.status_message,
+        )
+        state = _update_provider_call_slots(
+            state,
+            payload,
+            event_type=event_type,
+            now=now,
         )
     elif event_type in {"provider_turn_completed", "provider_turn_failed"}:
         state = replace(
@@ -1662,6 +1774,14 @@ def reduce_dashboard_event(
                 else elapsed
             )
             phase_started = None
+        elif event_type == "candidate_validated":
+            slot_state = "evaluating"
+            phase = "evaluation"
+            lifecycle_phase = "schema"
+            lifecycle_status = "pass"
+            lifecycle_elapsed = 0.0
+            validation = "pass"
+            error = ""
         elif event_type == "repair_started":
             slot_state = "repair"
             lifecycle_phase = "provider"
@@ -1895,7 +2015,12 @@ def reduce_dashboard_event(
     if activity is not None:
         recent = list(state.activity)
         if (
-            event_type in {"provider_turn_activity", "repair_activity"}
+            event_type
+            in {
+                "provider_turn_activity",
+                "repair_activity",
+                "provider_call_activity",
+            }
             and recent
             and recent[0].slot == activity.slot
             and "waiting for provider" in recent[0].message

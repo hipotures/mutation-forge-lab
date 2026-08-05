@@ -175,6 +175,43 @@ def _running_state() -> DashboardState:
     return state
 
 
+def test_provider_call_events_drive_native_v3_slots_and_visible_heartbeat() -> None:
+    state = _running_state()
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "provider_call_started",
+            generation=1,
+            call_id="epoch-0001:provider:0000",
+            slot_ids="slot-00,slot-01,slot-02,slot-03",
+            timeout_seconds=600.0,
+            provider_calls_in_flight=1,
+        ),
+        monotonic=120.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "provider_call_activity",
+            generation=1,
+            call_id="epoch-0001:provider:0000",
+            slot_ids="slot-00,slot-01,slot-02,slot-03",
+            timeout_seconds=600.0,
+            operation_elapsed_seconds=42.0,
+            provider_calls_in_flight=1,
+        ),
+        monotonic=162.0,
+    )
+
+    slots = next(group.slots for group in state.generations if group.generation == 1)
+    assert [slot.state for slot in slots[:4]] == ["model"] * 4
+    assert [slot.phase for slot in slots[:4]] == ["provider"] * 4
+    assert [slot.elapsed_seconds for slot in slots[:4]] == [42.0] * 4
+    assert [slot.timeout_seconds for slot in slots[:4]] == [600.0] * 4
+    assert state.activity[0].message == "waiting for provider response (42/600s)"
+    assert state.activity[0].slot == "epoch-0001:provider:0000"
+
+
 def _adaptive_evaluation_config() -> dict[str, object]:
     return {
         "evaluation": {

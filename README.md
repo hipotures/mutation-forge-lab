@@ -163,7 +163,7 @@ instead of being silently ignored.
 | Section | Purpose |
 | --- | --- |
 | top level | Experiment identity, workspace, native kind, and preset |
-| `[run]` | Per-invocation wall budget, rolling token cap, output mode, profiling, and timeout base |
+| `[run]` | Per-invocation wall budget, rolling token cap, output mode, profiling, and provider-call timeout |
 | `[model]` | Codex model, reasoning effort, concurrency, repair limit, and explicitly authorized `auth.json` path |
 | `[search]` | Population, global generation/turn limits, and parent selection |
 | `[evaluation]` | Development/validation panels, HEG orders, seeds, horizon, baselines, and replay |
@@ -206,7 +206,8 @@ Important behavior:
   idempotent request, including repair turns, with a bounded exponential
   backoff. They do not consume the cumulative model-turn budget.
 - The effective model-turn timeout is
-  `turn_timeout_base_seconds * (model.concurrency + 1)`.
+  `turn_timeout_base_seconds`. Provider concurrency does not silently multiply
+  the timeout of each independent call.
 - `max_repairs` is persisted with every slot and remains enforced after resume.
 - `output` is either `rich` or `json`; `--json` selects JSON output for the
   current command.

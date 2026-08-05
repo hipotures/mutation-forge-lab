@@ -82,7 +82,7 @@ class NativeProviderConfig:
 
     @property
     def turn_timeout_seconds(self) -> float:
-        return self.turn_timeout_base_seconds * (self.concurrency + 1)
+        return self.turn_timeout_base_seconds
 
 
 class _CodexTransport:

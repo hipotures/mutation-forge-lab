@@ -1343,6 +1343,15 @@ def test_native_transport_uses_per_turn_limit_and_retry_prefix(tmp_path: Path) -
         adapter.close(force=True)
 
 
+def test_native_provider_timeout_is_per_call_and_not_multiplied_by_concurrency() -> None:
+    config = NativeProviderConfig(
+        concurrency=2,
+        turn_timeout_base_seconds=600.0,
+    )
+
+    assert config.turn_timeout_seconds == 600.0
+
+
 def test_native_transport_preflight_requires_and_copies_authorized_auth(tmp_path: Path) -> None:
     missing = _CodexTransport(
         NativeProviderConfig(),

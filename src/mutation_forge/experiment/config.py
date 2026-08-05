@@ -221,7 +221,7 @@ class ExperimentConfig:
 
     @property
     def turn_timeout_seconds(self) -> float:
-        return self.run.turn_timeout_base_seconds * (self.model.concurrency + 1)
+        return self.run.turn_timeout_base_seconds
 
     def immutable_projection(self) -> dict[str, Any]:
         """Return the canonical projection used by ``experiment.lock.json.gz``."""

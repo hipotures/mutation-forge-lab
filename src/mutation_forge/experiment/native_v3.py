@@ -1345,6 +1345,9 @@ class NativeV3ExperimentAdapter:
                                 ),
                                 candidate_shard_size=(config.native_v3.candidate_shard_size),
                                 auxiliary_shard_size=(config.native_v3.auxiliary_shard_size),
+                                provider_call_timeout_seconds=(
+                                    config.turn_timeout_seconds
+                                ),
                             ),
                             provider_call=provider_call,
                             streaming_provider_call=streaming_provider_call,
