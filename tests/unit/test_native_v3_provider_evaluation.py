@@ -19,6 +19,13 @@ from mutation_forge.models import (
 from mutation_forge.native_v3.provider_evaluation import (
     run_provider_evaluation_smoke,
 )
+from mutation_forge.native_v3.scoring import (
+    AttemptKind,
+    BackendIdentity,
+    CycleComponentEvidence,
+    EvidenceStatus,
+    ScoreEvidence,
+)
 from mutation_forge.native_v3.serial_evaluator import SerialEpisodeConfig
 
 _FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "fake_stage3_app_server.py"
@@ -32,6 +39,16 @@ sys.modules[_SPEC.name] = _FIXTURE
 _SPEC.loader.exec_module(_FIXTURE)
 FakeProcess = _FIXTURE.FakeProcess
 FakeScenario = _FIXTURE.FakeScenario
+_SCORE_IDENTITY = BackendIdentity(
+    backend_id="recorded-response-backend",
+    heg_commit="fixture",
+    source_tree_sha256="a" * 64,
+    binary_sha256="b" * 64,
+    compiler_identity="fixture",
+    build_flags=(),
+    platform="fixture",
+    architecture="fixture",
+)
 
 
 def _response() -> str:
@@ -80,12 +97,23 @@ class _Backend:
 
     def __init__(self) -> None:
         self.closed = False
+        self.raw_graph_score_calls = 0
+        self.unique_graph_scores = 0
 
     def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
         return (4,)
 
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
-        return GraphState(order, ((0, 1), (1, 2), (2, 3), (0, 3)))
+        del seed
+        edges = {
+            tuple(sorted((vertex, (vertex + 1) % order)))
+            for vertex in range(order)
+        }
+        edges.update(
+            (vertex, vertex + order // 2)
+            for vertex in range(order // 2)
+        )
+        return GraphState(order, tuple(sorted(edges)))
 
     def validate(self, graph: GraphState) -> GraphValidation:
         return GraphValidation(True)
@@ -99,6 +127,38 @@ class _Backend:
         record_profile: Any = None,
     ) -> GraphScore:
         return GraphScore(True, ((4, 1),), 1, 1, True, (1, 1))
+
+    def score_evidence(
+        self,
+        graph: GraphState,
+        *,
+        witness_cap: int,
+        forbidden_lengths: object = None,
+        attempt_kind: AttemptKind = AttemptKind.INITIAL,
+    ) -> ScoreEvidence:
+        del forbidden_lengths
+        self.raw_graph_score_calls += 1
+        self.unique_graph_scores += 1
+        return ScoreEvidence(
+            self.state_hash(graph),
+            graph.order,
+            len(graph.edges),
+            witness_cap,
+            (
+                CycleComponentEvidence(
+                    4,
+                    1,
+                    1,
+                    1,
+                    EvidenceStatus.EXACT,
+                    50_000,
+                    1,
+                    0,
+                    attempt_kind,
+                    _SCORE_IDENTITY,
+                ),
+            ),
+        )
 
     def exact_verify(self, graph: GraphState) -> ExactVerification:
         raise AssertionError("nonzero recorded score must not be verified")

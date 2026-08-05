@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import StrEnum
+from fractions import Fraction
 from typing import Protocol
 
 from mutation_forge.backends.base import GraphBackend, ScoreProfileRecorder
@@ -14,6 +16,10 @@ from mutation_forge.models import GraphScore, GraphState, JsonValue, RewritePlan
 
 from .canonical import canonical_json_bytes, domain_hash
 from .contracts import ValidatedProgram
+from .heg_scoring import (
+    ScoreEvidenceScorer,
+    merge_score_evidence,
+)
 from .interpreter import (
     InterpreterLimits,
     ProgramContext,
@@ -21,8 +27,20 @@ from .interpreter import (
     SemanticEvent,
     invoke_program,
 )
+from .scoring import (
+    AttemptKind,
+    EnergyScale,
+    IntegerInterval,
+    RationalInterval,
+    ScoreEvidence,
+    ScoreTimeoutWithoutPartial,
+    best_so_far_curve,
+    candidate_fitness,
+    episode_auc,
+    proved_strict_energy_improvement,
+)
 
-SERIAL_EVALUATOR_PROTOCOL_ID = "native_v3_serial_evaluator_v1"
+SERIAL_EVALUATOR_PROTOCOL_ID = "native_v3_serial_interval_evaluator_v2"
 _TRACE_HASH_DOMAIN = b"mforge-native-v3-serial-trace\0"
 
 
@@ -35,6 +53,12 @@ class CounterexampleInspector(Protocol):
         provenance: CandidateProvenance,
         witness_cap: int,
     ) -> CounterexampleOutcome: ...
+
+
+class SerialEvaluationStatus(StrEnum):
+    COMPLETE = "COMPLETE"
+    PROGRAM_FAILURE = "PROGRAM_FAILURE"
+    INCONCLUSIVE_UNSAFE_TIMEOUT = "INCONCLUSIVE_UNSAFE_TIMEOUT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,23 +117,38 @@ class CounterexampleTrace:
 class SerialStepTrace:
     step_index: int
     incumbent_before: GraphIdentity
-    score_before: GraphScore
+    evidence_before: ScoreEvidence
+    energy_before: IntegerInterval
+    utility_before: RationalInterval
     interpreter_trace: tuple[SemanticEvent, ...]
     outcome: str
     no_plan_reason: str | None
     failure: ProgramFailure | None
     rewrite: RewritePlan | None
     candidate_identity: GraphIdentity | None
-    score_after: GraphScore | None
+    candidate_evidence: ScoreEvidence | None
+    candidate_energy: IntegerInterval | None
     accepted: bool
+    acceptance_proved: bool
+    expanded_retry_timeouts: tuple[str, ...]
     incumbent_after: GraphIdentity
+    evidence_after: ScoreEvidence
+    utility_after: RationalInterval
     counterexample: CounterexampleTrace | None
 
-    def as_dict(self) -> dict[str, JsonValue]:
+    def as_dict(
+        self,
+        *,
+        include_telemetry: bool = True,
+    ) -> dict[str, JsonValue]:
         return {
             "step_index": self.step_index,
             "incumbent_before": self.incumbent_before.as_dict(),
-            "score_before": self.score_before.as_dict(),
+            "evidence_before": self.evidence_before.as_dict(
+                include_telemetry=include_telemetry
+            ),
+            "energy_before": self.energy_before.as_dict(),
+            "utility_before": self.utility_before.as_dict(),
             "interpreter_trace": [event.as_dict() for event in self.interpreter_trace],
             "outcome": self.outcome,
             "no_plan_reason": self.no_plan_reason,
@@ -128,11 +167,26 @@ class SerialStepTrace:
                 if self.candidate_identity is not None
                 else None
             ),
-            "score_after": (
-                self.score_after.as_dict() if self.score_after is not None else None
+            "candidate_evidence": (
+                self.candidate_evidence.as_dict(
+                    include_telemetry=include_telemetry
+                )
+                if self.candidate_evidence is not None
+                else None
+            ),
+            "candidate_energy": (
+                self.candidate_energy.as_dict()
+                if self.candidate_energy is not None
+                else None
             ),
             "accepted": self.accepted,
+            "acceptance_proved": self.acceptance_proved,
+            "expanded_retry_timeouts": list(self.expanded_retry_timeouts),
             "incumbent_after": self.incumbent_after.as_dict(),
+            "evidence_after": self.evidence_after.as_dict(
+                include_telemetry=include_telemetry
+            ),
+            "utility_after": self.utility_after.as_dict(),
             "counterexample": (
                 self.counterexample.as_dict() if self.counterexample is not None else None
             ),
@@ -143,21 +197,35 @@ class SerialStepTrace:
 class SerialEpisodeResult:
     protocol_id: str
     program_hash: str
+    status: SerialEvaluationStatus
     config: SerialEpisodeConfig
     initial_identity: GraphIdentity
-    initial_score: GraphScore
+    initial_evidence: ScoreEvidence | None
     initial_counterexample: CounterexampleTrace | None
     steps: tuple[SerialStepTrace, ...]
     terminal_identity: GraphIdentity
-    terminal_score: GraphScore
+    terminal_evidence: ScoreEvidence | None
+    utility_trajectory: tuple[RationalInterval, ...]
+    best_so_far_utility: tuple[RationalInterval, ...]
+    auc_interval: RationalInterval
+    fitness_interval: RationalInterval
     accepted_rewrites: int
+    score_attempts: int
+    unique_graph_scores: int
     failure: ProgramFailure | None
+    scientific_error: str | None
     semantic_trace_hash: str
 
-    def as_dict(self, *, include_hash: bool = True) -> dict[str, JsonValue]:
+    def as_dict(
+        self,
+        *,
+        include_hash: bool = True,
+        include_telemetry: bool = True,
+    ) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
             "protocol_id": self.protocol_id,
             "program_hash": self.program_hash,
+            "status": self.status.value,
             "config": {
                 "order": self.config.order,
                 "graph_seed": self.config.graph_seed,
@@ -167,16 +235,41 @@ class SerialEpisodeResult:
                 "episode_id": self.config.episode_id,
             },
             "initial_identity": self.initial_identity.as_dict(),
-            "initial_score": self.initial_score.as_dict(),
+            "initial_evidence": (
+                self.initial_evidence.as_dict(
+                    include_telemetry=include_telemetry
+                )
+                if self.initial_evidence is not None
+                else None
+            ),
             "initial_counterexample": (
                 self.initial_counterexample.as_dict()
                 if self.initial_counterexample is not None
                 else None
             ),
-            "steps": [step.as_dict() for step in self.steps],
+            "steps": [
+                step.as_dict(include_telemetry=include_telemetry)
+                for step in self.steps
+            ],
             "terminal_identity": self.terminal_identity.as_dict(),
-            "terminal_score": self.terminal_score.as_dict(),
+            "terminal_evidence": (
+                self.terminal_evidence.as_dict(
+                    include_telemetry=include_telemetry
+                )
+                if self.terminal_evidence is not None
+                else None
+            ),
+            "utility_trajectory": [
+                interval.as_dict() for interval in self.utility_trajectory
+            ],
+            "best_so_far_utility": [
+                interval.as_dict() for interval in self.best_so_far_utility
+            ],
+            "auc_interval": self.auc_interval.as_dict(),
+            "fitness_interval": self.fitness_interval.as_dict(),
             "accepted_rewrites": self.accepted_rewrites,
+            "score_attempts": self.score_attempts,
+            "unique_graph_scores": self.unique_graph_scores,
             "failure": (
                 {
                     "code": self.failure.code,
@@ -186,6 +279,7 @@ class SerialEpisodeResult:
                 if self.failure is not None
                 else None
             ),
+            "scientific_error": self.scientific_error,
         }
         if include_hash:
             result["semantic_trace_hash"] = self.semantic_trace_hash
@@ -236,14 +330,26 @@ def _inspect_apparent_zero(
     pipeline: CounterexampleInspector | None,
     backend: GraphBackend,
     graph: GraphState,
-    score: GraphScore,
+    evidence: ScoreEvidence,
     config: SerialEpisodeConfig,
     program: ValidatedProgram,
     step_index: int,
     provenance_source_kind: str,
 ) -> CounterexampleTrace | None:
-    if pipeline is None or score.total_capped_witnesses != 0:
+    total = evidence.total_witness_interval
+    if pipeline is None or not total.exact or total.upper != 0:
         return None
+    score = GraphScore(
+        valid=True,
+        capped_cycle_counts=tuple(
+            (component.forbidden_length, component.observed_count)
+            for component in evidence.components
+        ),
+        total_capped_witnesses=0,
+        weighted_penalty=0,
+        complete=evidence.complete_under_cap,
+        ordering_key=(0, 0, 0, 0, evidence.edge_count),
+    )
     outcome: CounterexampleOutcome = pipeline.inspect(
         graph=graph,
         score=score,
@@ -276,30 +382,121 @@ def _trace_hash(payload: dict[str, JsonValue]) -> str:
     return domain_hash(_TRACE_HASH_DOMAIN, canonical_json_bytes(payload))
 
 
+def _utility(scale: EnergyScale, evidence: ScoreEvidence) -> RationalInterval:
+    return scale.utility(scale.interval(evidence))
+
+
+def _expand_nonpoint_components(
+    *,
+    scorer: ScoreEvidenceScorer,
+    graph: GraphState,
+    evidence: ScoreEvidence,
+) -> tuple[ScoreEvidence, bool]:
+    selected_lengths = tuple(
+        component.forbidden_length
+        for component in evidence.components
+        if not component.interval.exact
+    )
+    if not selected_lengths:
+        return evidence, False
+    try:
+        expanded = scorer.score_evidence(
+            graph,
+            witness_cap=evidence.witness_cap,
+            forbidden_lengths=selected_lengths,
+            attempt_kind=AttemptKind.EXPANDED,
+        )
+    except ScoreTimeoutWithoutPartial:
+        return evidence, True
+    return merge_score_evidence(evidence, expanded), False
+
+
+def _full_uncertainty() -> RationalInterval:
+    return RationalInterval(Fraction(), Fraction(1))
+
+
+def _program_failure_fitness() -> RationalInterval:
+    return RationalInterval(Fraction(), Fraction())
+
+
 def evaluate_serial_program(
     *,
     backend: GraphBackend,
+    scorer: ScoreEvidenceScorer,
     program: ValidatedProgram,
     config: SerialEpisodeConfig,
     interpreter_limits: InterpreterLimits | None = None,
     counterexample_pipeline: CounterexampleInspector | None = None,
     provenance_source_kind: str = "native_v3_fixture",
 ) -> SerialEpisodeResult:
-    """Run one deterministic strict-improvement trajectory without a provider."""
+    """Run one serial trajectory using only proved interval improvements."""
 
+    attempts_before = scorer.raw_graph_score_calls
+    unique_before = scorer.unique_graph_scores
     initial = backend.generate_seed(order=config.order, seed=config.graph_seed)
     validation = backend.validate(initial)
     if not validation.valid:
         raise ValueError(f"backend generated an invalid seed: {validation.errors}")
-    initial_score = backend.score(initial, witness_cap=config.witness_cap)
-    if initial_score is None:
-        raise RuntimeError("initial score cannot be cutoff-dominated")
     initial_identity = _identity(backend, initial)
+    try:
+        initial_evidence = scorer.score_evidence(
+            initial,
+            witness_cap=config.witness_cap,
+        )
+    except ScoreTimeoutWithoutPartial:
+        uncertainty = _full_uncertainty()
+        timeout_trajectory = tuple(
+            uncertainty for _ in range(config.horizon + 1)
+        )
+        provisional = SerialEpisodeResult(
+            protocol_id=SERIAL_EVALUATOR_PROTOCOL_ID,
+            program_hash=program.program_hash,
+            status=SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT,
+            config=config,
+            initial_identity=initial_identity,
+            initial_evidence=None,
+            initial_counterexample=None,
+            steps=(),
+            terminal_identity=initial_identity,
+            terminal_evidence=None,
+            utility_trajectory=timeout_trajectory,
+            best_so_far_utility=best_so_far_curve(timeout_trajectory),
+            auc_interval=episode_auc(
+                timeout_trajectory,
+                horizon=config.horizon,
+            ),
+            fitness_interval=uncertainty,
+            accepted_rewrites=0,
+            score_attempts=scorer.raw_graph_score_calls - attempts_before,
+            unique_graph_scores=scorer.unique_graph_scores - unique_before,
+            failure=None,
+            scientific_error=(
+                "initial scoring timed out without safe partial evidence"
+            ),
+            semantic_trace_hash="",
+        )
+        payload = provisional.as_dict(
+            include_hash=False,
+            include_telemetry=False,
+        )
+        return replace(
+            provisional,
+            semantic_trace_hash=_trace_hash(payload),
+        )
+    scale = EnergyScale.build(
+        order=config.order,
+        forbidden_lengths=tuple(
+            component.forbidden_length
+            for component in initial_evidence.components
+        ),
+        witness_cap=config.witness_cap,
+    )
+    initial_utility = _utility(scale, initial_evidence)
     initial_counterexample = _inspect_apparent_zero(
         pipeline=counterexample_pipeline,
         backend=backend,
         graph=initial,
-        score=initial_score,
+        evidence=initial_evidence,
         config=config,
         program=program,
         step_index=0,
@@ -307,15 +504,16 @@ def evaluate_serial_program(
     )
 
     current = initial
-    current_score = initial_score
+    current_evidence = initial_evidence
     accepted_rewrites = 0
     failure: ProgramFailure | None = None
     steps: list[SerialStepTrace] = []
+    trajectory = [initial_utility]
     invocation_episode_id = f"{config.episode_id}/policy-{config.policy_seed}"
 
     for step_index in range(config.horizon):
         before_identity = _identity(backend, current)
-        score_before = current_score
+        evidence_before = current_evidence
         host = _CapturingRewriteHost(backend)
         invocation = invoke_program(
             program,
@@ -337,8 +535,11 @@ def evaluate_serial_program(
         no_plan_reason: str | None = None
         rewrite: RewritePlan | None = None
         candidate_identity: GraphIdentity | None = None
-        candidate_score: GraphScore | None = None
+        candidate_evidence: ScoreEvidence | None = None
+        candidate_energy: IntegerInterval | None = None
         accepted = False
+        acceptance_proved = False
+        expanded_retry_timeouts: list[str] = []
         counterexample: CounterexampleTrace | None = None
 
         if invocation.failure is not None:
@@ -358,69 +559,140 @@ def evaluate_serial_program(
             else:
                 outcome = "rewrite"
                 candidate_identity = _identity(backend, candidate)
-                candidate_score = backend.score(
-                    candidate,
-                    witness_cap=config.witness_cap,
-                )
-                if candidate_score is None:
-                    failure = ProgramFailure(
-                        "SCORING_FAILURE",
-                        f"/steps/{step_index}",
-                        "authoritative score unexpectedly returned no result",
+                try:
+                    candidate_evidence = scorer.score_evidence(
+                        candidate,
+                        witness_cap=config.witness_cap,
                     )
-                else:
+                except ScoreTimeoutWithoutPartial:
+                    outcome = "score_timeout_without_partial"
+                if candidate_evidence is not None:
+                    incumbent_energy = scale.interval(current_evidence)
+                    candidate_energy = scale.interval(candidate_evidence)
+                    intervals_overlap = not (
+                        candidate_energy.upper < incumbent_energy.lower
+                        or incumbent_energy.upper < candidate_energy.lower
+                    )
+                    if intervals_overlap and (
+                        not incumbent_energy.exact
+                        or not candidate_energy.exact
+                    ):
+                        current_evidence, incumbent_timeout = (
+                            _expand_nonpoint_components(
+                                scorer=scorer,
+                                graph=current,
+                                evidence=current_evidence,
+                            )
+                        )
+                        if incumbent_timeout:
+                            expanded_retry_timeouts.append("incumbent")
+                        evidence_before = current_evidence
+                        candidate_evidence, candidate_timeout = (
+                            _expand_nonpoint_components(
+                                scorer=scorer,
+                                graph=candidate,
+                                evidence=candidate_evidence,
+                            )
+                        )
+                        if candidate_timeout:
+                            expanded_retry_timeouts.append("candidate")
+                        incumbent_energy = scale.interval(current_evidence)
+                        candidate_energy = scale.interval(candidate_evidence)
                     counterexample = _inspect_apparent_zero(
                         pipeline=counterexample_pipeline,
                         backend=backend,
                         graph=candidate,
-                        score=candidate_score,
+                        evidence=candidate_evidence,
                         config=config,
                         program=program,
                         step_index=step_index + 1,
                         provenance_source_kind=provenance_source_kind,
                     )
-                    accepted = candidate_score.ordering_key < current_score.ordering_key
+                    acceptance_proved = proved_strict_energy_improvement(
+                        candidate_energy,
+                        incumbent_energy,
+                    )
+                    accepted = acceptance_proved
                     if accepted:
                         current = candidate
-                        current_score = candidate_score
+                        current_evidence = candidate_evidence
                         accepted_rewrites += 1
 
+        energy_before = scale.interval(evidence_before)
+        utility_before = _utility(scale, evidence_before)
+        utility_after = _utility(scale, current_evidence)
+        trajectory.append(utility_after)
         steps.append(
             SerialStepTrace(
                 step_index=step_index,
                 incumbent_before=before_identity,
-                score_before=score_before,
+                evidence_before=evidence_before,
+                energy_before=energy_before,
+                utility_before=utility_before,
                 interpreter_trace=invocation.semantic_trace,
                 outcome=outcome,
                 no_plan_reason=no_plan_reason,
                 failure=failure,
                 rewrite=rewrite,
                 candidate_identity=candidate_identity,
-                score_after=candidate_score,
+                candidate_evidence=candidate_evidence,
+                candidate_energy=candidate_energy,
                 accepted=accepted,
+                acceptance_proved=acceptance_proved,
+                expanded_retry_timeouts=tuple(expanded_retry_timeouts),
                 incumbent_after=_identity(backend, current),
+                evidence_after=current_evidence,
+                utility_after=utility_after,
                 counterexample=counterexample,
             )
         )
         if failure is not None:
             break
 
+    while len(trajectory) < config.horizon + 1:
+        trajectory.append(_utility(scale, current_evidence))
     terminal_identity = _identity(backend, current)
+    status = (
+        SerialEvaluationStatus.PROGRAM_FAILURE
+        if failure is not None
+        else SerialEvaluationStatus.COMPLETE
+    )
+    auc = episode_auc(trajectory, horizon=config.horizon)
+    fitness = (
+        _program_failure_fitness()
+        if failure is not None
+        else candidate_fitness({config.order: (auc,)})
+    )
     provisional = SerialEpisodeResult(
         protocol_id=SERIAL_EVALUATOR_PROTOCOL_ID,
         program_hash=program.program_hash,
+        status=status,
         config=config,
         initial_identity=initial_identity,
-        initial_score=initial_score,
+        initial_evidence=initial_evidence,
         initial_counterexample=initial_counterexample,
         steps=tuple(steps),
         terminal_identity=terminal_identity,
-        terminal_score=current_score,
+        terminal_evidence=current_evidence,
+        utility_trajectory=tuple(trajectory),
+        best_so_far_utility=best_so_far_curve(trajectory),
+        auc_interval=auc,
+        fitness_interval=fitness,
         accepted_rewrites=accepted_rewrites,
+        score_attempts=scorer.raw_graph_score_calls - attempts_before,
+        unique_graph_scores=scorer.unique_graph_scores - unique_before,
         failure=failure,
+        scientific_error=(
+            f"{failure.code}@{failure.path}: {failure.message}"
+            if failure is not None
+            else None
+        ),
         semantic_trace_hash="",
     )
-    payload = provisional.as_dict(include_hash=False)
+    payload = provisional.as_dict(
+        include_hash=False,
+        include_telemetry=False,
+    )
     return replace(
         provisional,
         semantic_trace_hash=_trace_hash(payload),

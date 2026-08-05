@@ -9,6 +9,7 @@ from mutation_forge.native_v3.contracts import (
     ValidatedProgram,
     validate_program,
 )
+from mutation_forge.native_v3.heg_scoring import HegScoreEvidenceAdapter
 from mutation_forge.native_v3.serial_evaluator import (
     SerialEpisodeConfig,
     evaluate_serial_program,
@@ -60,8 +61,10 @@ def test_one_serial_native_v3_episode_uses_current_heg_backend(
 ) -> None:
     backend = HegBackend(heg_repo)
     try:
+        scorer = HegScoreEvidenceAdapter(backend)
         result = evaluate_serial_program(
             backend=backend,
+            scorer=scorer,
             program=_known_valid_program(),
             config=SerialEpisodeConfig(
                 order=30,
@@ -79,5 +82,9 @@ def test_one_serial_native_v3_episode_uses_current_heg_backend(
     assert len(result.steps) == 1
     assert result.steps[0].outcome == "rewrite"
     assert result.steps[0].rewrite is not None
-    assert result.steps[0].score_after is not None
-    assert result.terminal_score.valid
+    assert result.steps[0].candidate_evidence is not None
+    assert result.terminal_evidence is not None
+    assert result.initial_evidence is not None
+    assert result.initial_evidence.scientifically_bounded
+    assert result.terminal_evidence.scientifically_bounded
+    assert result.fitness_interval.lower <= result.fitness_interval.upper

@@ -20,12 +20,15 @@ from .contracts import (
     validated_program_artifact,
 )
 from .graph_runtime import GRAPH_RUNTIME_PROTOCOL_ID
+from .heg_scoring import scorer_for_backend
 from .interpreter import INTERPRETER_PROTOCOL_ID
 from .provider_smoke import NativeV3ProviderSmokeError, run_provider_smoke
+from .scoring import FITNESS_PROTOCOL_ID, SCORE_PROTOCOL_ID
 from .serial_evaluator import (
     SERIAL_EVALUATOR_PROTOCOL_ID,
     SerialEpisodeConfig,
     SerialEpisodeResult,
+    SerialEvaluationStatus,
     evaluate_serial_program,
 )
 
@@ -81,7 +84,7 @@ def _backend_provenance(backend: GraphBackend) -> dict[str, Any]:
 
 
 def _graph_evaluations(result: SerialEpisodeResult) -> int:
-    return 1 + sum(step.score_after is not None for step in result.steps)
+    return result.score_attempts
 
 
 def run_provider_evaluation_smoke(
@@ -125,12 +128,14 @@ def run_provider_evaluation_smoke(
         turn = Path(str(provider_report["turn_directory"]))
         provider_provenance = _provider_provenance(turn)
         backend = backend_factory()
+        scorer = scorer_for_backend(backend)
         pipeline = CounterexamplePipeline(
             backend=backend,
             artifact_root=output_root,
         )
         evaluation = evaluate_serial_program(
             backend=backend,
+            scorer=scorer,
             program=program,
             config=config,
             counterexample_pipeline=pipeline,
@@ -168,6 +173,8 @@ def run_provider_evaluation_smoke(
             "interpreter": INTERPRETER_PROTOCOL_ID,
             "graph_runtime": GRAPH_RUNTIME_PROTOCOL_ID,
             "serial_evaluator": SERIAL_EVALUATOR_PROTOCOL_ID,
+            "score_evidence": SCORE_PROTOCOL_ID,
+            "fitness": FITNESS_PROTOCOL_ID,
         },
         "provider": provider_provenance,
         "backend": backend_provenance,
@@ -176,7 +183,7 @@ def run_provider_evaluation_smoke(
     }
     write_json(evaluation_path, semantic_payload, exclusive=True)
     graph_evaluations = _graph_evaluations(evaluation)
-    completed = evaluation.failure is None
+    completed = evaluation.status is SerialEvaluationStatus.COMPLETE
     report = {
         "schema_version": PROVIDER_EVALUATION_SCHEMA_VERSION,
         "status": "completed" if completed else "evaluation_failed",

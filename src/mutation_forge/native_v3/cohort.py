@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,11 +43,19 @@ from .contracts import (
     validated_program_artifact,
 )
 from .graph_runtime import GRAPH_RUNTIME_PROTOCOL_ID
+from .heg_scoring import scorer_for_backend
 from .interpreter import INTERPRETER_PROTOCOL_ID
+from .scoring import (
+    FITNESS_PROTOCOL_ID,
+    SCORE_PROTOCOL_ID,
+    RationalInterval,
+    conservative_fitness_key,
+)
 from .serial_evaluator import (
     SERIAL_EVALUATOR_PROTOCOL_ID,
     SerialEpisodeConfig,
     SerialEpisodeResult,
+    SerialEvaluationStatus,
     evaluate_serial_program,
 )
 
@@ -180,6 +189,8 @@ def _protocols() -> dict[str, str]:
         "interpreter": INTERPRETER_PROTOCOL_ID,
         "graph_runtime": GRAPH_RUNTIME_PROTOCOL_ID,
         "serial_evaluator": SERIAL_EVALUATOR_PROTOCOL_ID,
+        "score_evidence": SCORE_PROTOCOL_ID,
+        "fitness": FITNESS_PROTOCOL_ID,
         "provider_input": PROVIDER_INPUT_PROFILE_ID,
         "provider_output": PROVIDER_OUTPUT_PROFILE_ID,
     }
@@ -595,7 +606,7 @@ def _record_turn(
 
 
 def _graph_evaluations(result: SerialEpisodeResult) -> int:
-    return 1 + sum(step.score_after is not None for step in result.steps)
+    return result.score_attempts
 
 
 def _attempt_reference(
@@ -801,6 +812,7 @@ def run_sequential_cohort(
     try:
         if programs:
             backend = backend_factory()
+            scorer = scorer_for_backend(backend)
             for evaluation_index, program in enumerate(programs):
                 program_root = output_root / "programs" / program.program_hash
                 program_payload: dict[str, Any] = {
@@ -818,6 +830,7 @@ def run_sequential_cohort(
                 )
                 evaluation = evaluate_serial_program(
                     backend=backend,
+                    scorer=scorer,
                     program=program,
                     config=SerialEpisodeConfig(
                         order=30,
@@ -893,21 +906,50 @@ def run_sequential_cohort(
         if backend is not None:
             backend.close()
 
-    def selection_key(record: Mapping[str, Any]) -> tuple[int, ...]:
+    def selection_key(
+        record: Mapping[str, Any],
+    ) -> tuple[Fraction, bool, Fraction, Fraction, str]:
         evaluation = cast(Mapping[str, Any], record["evaluation"])
-        terminal_score = cast(Mapping[str, Any], evaluation["terminal_score"])
-        ordering_key = cast(Sequence[int], terminal_score["ordering_key"])
-        return tuple(ordering_key)
+        fitness = cast(Mapping[str, Any], evaluation["fitness_interval"])
+        lower = cast(Mapping[str, int], fitness["lower"])
+        upper = cast(Mapping[str, int], fitness["upper"])
+
+        return conservative_fitness_key(
+            fitness=RationalInterval(
+                Fraction(lower["numerator"], lower["denominator"]),
+                Fraction(upper["numerator"], upper["denominator"]),
+            ),
+            program_hash=(
+                f"{int(record['evaluation_index']):08d}:"
+                f"{record['program_hash']}"
+            ),
+        )
 
     ranked = sorted(evaluation_records, key=selection_key)
+    all_scientifically_comparable = all(
+        cast(Mapping[str, Any], record["evaluation"]).get("status")
+        in {
+            SerialEvaluationStatus.COMPLETE.value,
+            SerialEvaluationStatus.PROGRAM_FAILURE.value,
+        }
+        for record in ranked
+    )
     selected_program_hash = (
         str(ranked[0]["program_hash"])
-        if ranked and outcome != "INCONCLUSIVE"
+        if (
+            ranked
+            and outcome != "INCONCLUSIVE"
+            and all_scientifically_comparable
+        )
         else None
     )
     report = {
         "schema_version": COHORT_SCHEMA_VERSION,
-        "status": "completed" if outcome != "INCONCLUSIVE" else "inconclusive",
+        "status": (
+            "completed"
+            if outcome != "INCONCLUSIVE" and all_scientifically_comparable
+            else "inconclusive"
+        ),
         "cohort_outcome": outcome,
         "valid_ast": bool(programs),
         "valid_slots": sum(entry.program is not None for entry in entries),
@@ -918,7 +960,9 @@ def run_sequential_cohort(
         ),
         "model_turns": model_turns,
         "graph_evaluations": graph_evaluations,
-        "scientific_terminal_result": outcome != "INCONCLUSIVE",
+        "scientific_terminal_result": (
+            outcome != "INCONCLUSIVE" and all_scientifically_comparable
+        ),
         "selected_program_hash": selected_program_hash,
         "canonical_program_order": [
             program.program_hash for program in programs

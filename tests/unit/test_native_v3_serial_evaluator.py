@@ -26,10 +26,31 @@ from mutation_forge.native_v3.contracts import (
     ValidatedProgram,
     validate_program,
 )
+from mutation_forge.native_v3.interpreter import InterpreterLimits
+from mutation_forge.native_v3.scoring import (
+    AttemptKind,
+    BackendIdentity,
+    CycleComponentEvidence,
+    EvidenceStatus,
+    ScoreEvidence,
+    ScoreTimeoutWithoutPartial,
+)
 from mutation_forge.native_v3.serial_evaluator import (
     CounterexampleInspector,
     SerialEpisodeConfig,
+    SerialEvaluationStatus,
     evaluate_serial_program,
+)
+
+TEST_IDENTITY = BackendIdentity(
+    backend_id="serial-test-backend",
+    heg_commit="fixture",
+    source_tree_sha256="a" * 64,
+    binary_sha256="b" * 64,
+    compiler_identity="fixture",
+    build_flags=(),
+    platform="fixture",
+    architecture="fixture",
 )
 
 
@@ -127,6 +148,8 @@ class _Backend:
         self.score_calls: list[GraphState] = []
         self.apply_calls: list[RewritePlan] = []
         self.zero_after_edges = zero_after_edges
+        self.raw_graph_score_calls = 0
+        self.unique_graph_scores = 0
 
     def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
         del order
@@ -169,6 +192,50 @@ class _Backend:
             weighted_penalty=total,
             complete=True,
             ordering_key=(total, -len(graph.edges)),
+        )
+
+    def score_evidence(
+        self,
+        graph: GraphState,
+        *,
+        witness_cap: int,
+        forbidden_lengths: object = None,
+        attempt_kind: AttemptKind = AttemptKind.INITIAL,
+    ) -> ScoreEvidence:
+        del forbidden_lengths
+        self.score_calls.append(graph)
+        self.raw_graph_score_calls += 1
+        self.unique_graph_scores += 1
+        total = max(0, 20 - len(graph.edges))
+        if (
+            self.zero_after_edges is not None
+            and len(graph.edges) >= self.zero_after_edges
+        ):
+            total = 0
+        total = min(total, witness_cap)
+        return ScoreEvidence(
+            graph_content_hash=self.state_hash(graph),
+            order=graph.order,
+            edge_count=len(graph.edges),
+            witness_cap=witness_cap,
+            components=(
+                CycleComponentEvidence(
+                    forbidden_length=4,
+                    observed_count=total,
+                    lower_bound=total,
+                    upper_bound=total,
+                    status=EvidenceStatus.EXACT,
+                    node_budget=(
+                        50_000
+                        if attempt_kind is AttemptKind.INITIAL
+                        else 200_000
+                    ),
+                    nodes_visited=1,
+                    wall_time_ns=0,
+                    attempt_kind=attempt_kind,
+                    backend_identity=TEST_IDENTITY,
+                ),
+            ),
         )
 
     def exact_verify(self, graph: GraphState) -> ExactVerification:
@@ -268,13 +335,17 @@ CONFIG = SerialEpisodeConfig(
 
 
 def test_fixed_fixture_replays_identical_semantic_trace_and_hash() -> None:
+    first_backend = _Backend()
     first = evaluate_serial_program(
-        backend=_Backend(),
+        backend=first_backend,
+        scorer=first_backend,
         program=_add_program(),
         config=CONFIG,
     )
+    second_backend = _Backend()
     second = evaluate_serial_program(
-        backend=_Backend(),
+        backend=second_backend,
+        scorer=second_backend,
         program=_add_program(),
         config=CONFIG,
     )
@@ -295,6 +366,7 @@ def test_no_plan_consumes_horizon_without_scoring_nonexistent_graph() -> None:
     backend = _Backend()
     result = evaluate_serial_program(
         backend=backend,
+        scorer=backend,
         program=_validated({"op": "no_plan", "reason": "EXPLICIT"}),
         config=CONFIG,
     )
@@ -309,6 +381,7 @@ def test_illegal_final_overlay_consumes_step_without_candidate_score() -> None:
     backend = _Backend()
     result = evaluate_serial_program(
         backend=backend,
+        scorer=backend,
         program=_remove_program(),
         config=SerialEpisodeConfig(
             order=6,
@@ -329,6 +402,7 @@ def test_legal_degree_change_uses_one_authoritative_candidate_score() -> None:
     backend = _Backend()
     result = evaluate_serial_program(
         backend=backend,
+        scorer=backend,
         program=_add_program(),
         config=SerialEpisodeConfig(
             order=6,
@@ -351,6 +425,7 @@ def test_apparent_zero_initial_and_proposal_reach_current_inspection_boundary() 
     initial_inspector = _Inspector()
     initial = evaluate_serial_program(
         backend=initial_backend,
+        scorer=initial_backend,
         program=_validated({"op": "no_plan", "reason": "EXPLICIT"}),
         config=SerialEpisodeConfig(
             order=6,
@@ -369,6 +444,7 @@ def test_apparent_zero_initial_and_proposal_reach_current_inspection_boundary() 
     proposal_inspector = _Inspector()
     proposal = evaluate_serial_program(
         backend=proposal_backend,
+        scorer=proposal_backend,
         program=_add_program(),
         config=SerialEpisodeConfig(
             order=6,
@@ -399,8 +475,43 @@ def test_equal_score_is_not_accepted_under_strict_improvement() -> None:
             self.score_calls.append(graph)
             return GraphScore(True, ((4, 1),), 1, 1, True, (1,))
 
+        def score_evidence(
+            self,
+            graph: GraphState,
+            *,
+            witness_cap: int,
+            forbidden_lengths: object = None,
+            attempt_kind: AttemptKind = AttemptKind.INITIAL,
+        ) -> ScoreEvidence:
+            del forbidden_lengths
+            self.score_calls.append(graph)
+            self.raw_graph_score_calls += 1
+            self.unique_graph_scores += 1
+            return ScoreEvidence(
+                graph_content_hash=self.state_hash(graph),
+                order=graph.order,
+                edge_count=len(_cubic_graph(graph.order).edges),
+                witness_cap=witness_cap,
+                components=(
+                    CycleComponentEvidence(
+                        forbidden_length=4,
+                        observed_count=1,
+                        lower_bound=1,
+                        upper_bound=1,
+                        status=EvidenceStatus.EXACT,
+                        node_budget=50_000,
+                        nodes_visited=1,
+                        wall_time_ns=0,
+                        attempt_kind=attempt_kind,
+                        backend_identity=TEST_IDENTITY,
+                    ),
+                ),
+            )
+
+    backend = ConstantBackend()
     result = evaluate_serial_program(
-        backend=ConstantBackend(),
+        backend=backend,
+        scorer=backend,
         program=_add_program(),
         config=SerialEpisodeConfig(
             order=6,
@@ -414,3 +525,206 @@ def test_equal_score_is_not_accepted_under_strict_improvement() -> None:
     assert not result.steps[0].accepted
     assert result.accepted_rewrites == 0
     assert result.terminal_identity == result.initial_identity
+
+
+def test_overlapping_budget_bounds_retry_selected_length_and_reject() -> None:
+    class BoundedBackend(_Backend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts: list[tuple[int, AttemptKind, object]] = []
+
+        def score_evidence(
+            self,
+            graph: GraphState,
+            *,
+            witness_cap: int,
+            forbidden_lengths: object = None,
+            attempt_kind: AttemptKind = AttemptKind.INITIAL,
+        ) -> ScoreEvidence:
+            self.score_calls.append(graph)
+            self.raw_graph_score_calls += 1
+            self.unique_graph_scores += 1
+            self.attempts.append(
+                (len(graph.edges), attempt_kind, forbidden_lengths)
+            )
+            candidate = len(graph.edges) > len(_cubic_graph(graph.order).edges)
+            lower = 4 if candidate else 5
+            upper = (
+                8
+                if attempt_kind is AttemptKind.EXPANDED
+                else (9 if candidate else 10)
+            )
+            return ScoreEvidence(
+                self.state_hash(graph),
+                graph.order,
+                len(graph.edges),
+                witness_cap,
+                (
+                    CycleComponentEvidence(
+                        4,
+                        lower,
+                        lower,
+                        upper,
+                        (
+                            EvidenceStatus.SEARCH_TIMEOUT_WITH_SAFE_PARTIAL
+                            if attempt_kind is AttemptKind.EXPANDED
+                            else EvidenceStatus.SEARCH_BUDGET_EXHAUSTED
+                        ),
+                        (
+                            200_000
+                            if attempt_kind is AttemptKind.EXPANDED
+                            else 50_000
+                        ),
+                        1,
+                        0,
+                        attempt_kind,
+                        TEST_IDENTITY,
+                    ),
+                ),
+            )
+
+    backend = BoundedBackend()
+    result = evaluate_serial_program(
+        backend=backend,
+        scorer=backend,
+        program=_add_program(),
+        config=SerialEpisodeConfig(
+            order=6,
+            graph_seed=11,
+            policy_seed=17,
+            horizon=1,
+            witness_cap=100,
+            episode_id="bounded-overlap",
+        ),
+    )
+
+    assert not result.steps[0].accepted
+    assert not result.steps[0].acceptance_proved
+    assert result.score_attempts == 4
+    expanded = [
+        attempt for attempt in backend.attempts
+        if attempt[1] is AttemptKind.EXPANDED
+    ]
+    assert len(expanded) == 2
+    assert all(attempt[2] == (4,) for attempt in expanded)
+
+
+def test_safe_timeout_partial_can_win_only_by_proved_interval_dominance() -> None:
+    class SafePartialBackend(_Backend):
+        def score_evidence(
+            self,
+            graph: GraphState,
+            *,
+            witness_cap: int,
+            forbidden_lengths: object = None,
+            attempt_kind: AttemptKind = AttemptKind.INITIAL,
+        ) -> ScoreEvidence:
+            del forbidden_lengths
+            self.score_calls.append(graph)
+            self.raw_graph_score_calls += 1
+            self.unique_graph_scores += 1
+            candidate = len(graph.edges) > len(_cubic_graph(graph.order).edges)
+            lower, upper = ((0, 1) if candidate else (10, 10))
+            return ScoreEvidence(
+                self.state_hash(graph),
+                graph.order,
+                len(graph.edges),
+                witness_cap,
+                (
+                    CycleComponentEvidence(
+                        4,
+                        lower,
+                        lower,
+                        upper,
+                        (
+                            EvidenceStatus.SEARCH_TIMEOUT_WITH_SAFE_PARTIAL
+                            if candidate
+                            else EvidenceStatus.EXACT
+                        ),
+                        50_000,
+                        1,
+                        0,
+                        attempt_kind,
+                        TEST_IDENTITY,
+                    ),
+                ),
+            )
+
+    backend = SafePartialBackend()
+    result = evaluate_serial_program(
+        backend=backend,
+        scorer=backend,
+        program=_add_program(),
+        config=SerialEpisodeConfig(
+            order=6,
+            graph_seed=11,
+            policy_seed=17,
+            horizon=1,
+            witness_cap=100,
+            episode_id="safe-partial",
+        ),
+    )
+
+    assert result.steps[0].acceptance_proved
+    assert result.steps[0].accepted
+    assert result.accepted_rewrites == 1
+
+
+def test_unsafe_initial_timeout_is_inconclusive_not_fitness() -> None:
+    class UnsafeTimeoutBackend(_Backend):
+        def score_evidence(
+            self,
+            graph: GraphState,
+            *,
+            witness_cap: int,
+            forbidden_lengths: object = None,
+            attempt_kind: AttemptKind = AttemptKind.INITIAL,
+        ) -> ScoreEvidence:
+            del graph, witness_cap, forbidden_lengths, attempt_kind
+            self.raw_graph_score_calls += 1
+            self.unique_graph_scores += 1
+            raise ScoreTimeoutWithoutPartial("unsafe timeout")
+
+    backend = UnsafeTimeoutBackend()
+    result = evaluate_serial_program(
+        backend=backend,
+        scorer=backend,
+        program=_add_program(),
+        config=SerialEpisodeConfig(
+            order=6,
+            graph_seed=11,
+            policy_seed=17,
+            horizon=1,
+            witness_cap=100,
+            episode_id="unsafe-timeout",
+        ),
+    )
+
+    assert result.status is SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT
+    assert result.initial_evidence is None
+    assert result.fitness_interval.lower == 0
+    assert result.fitness_interval.upper == 1
+    assert not result.steps
+
+
+def test_program_failure_is_worst_fitness_not_infrastructure() -> None:
+    backend = _Backend()
+    result = evaluate_serial_program(
+        backend=backend,
+        scorer=backend,
+        program=_add_program(),
+        config=SerialEpisodeConfig(
+            order=6,
+            graph_seed=11,
+            policy_seed=17,
+            horizon=1,
+            witness_cap=100,
+            episode_id="program-failure",
+        ),
+        interpreter_limits=InterpreterLimits(maximum_steps=0),
+    )
+
+    assert result.status is SerialEvaluationStatus.PROGRAM_FAILURE
+    assert result.failure is not None
+    assert result.fitness_interval.lower == 0
+    assert result.fitness_interval.upper == 0
