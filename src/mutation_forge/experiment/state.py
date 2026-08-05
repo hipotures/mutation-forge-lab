@@ -37,7 +37,9 @@ _USAGE_FIELDS = (
     "reasoningOutputTokens",
     "totalTokens",
 )
-_EXACT_USAGE_FIELDS = tuple(field for field in _USAGE_FIELDS if field != "cacheWriteInputTokens")
+_EXACT_USAGE_FIELDS = tuple(
+    field for field in _USAGE_FIELDS if field != "cacheWriteInputTokens"
+)
 _USAGE_COLUMNS = {
     "inputTokens": "input_tokens",
     "cachedInputTokens": "cached_input_tokens",
@@ -289,9 +291,11 @@ class ExperimentStateStore:
                 raise StateError(
                     f"Unsupported experiment state schema: {existing_schema[0]!r}. "
                     f"This runtime accepts only {STATE_SCHEMA_VERSION}. "
-                    "Create a fresh Native v3 workspace."
+                    "Run 'mforge experiment rebuild-state' for a v2 workspace."
                 )
-            existing_experiment = connection.execute("SELECT 1 FROM experiment LIMIT 1").fetchone()
+            existing_experiment = connection.execute(
+                "SELECT 1 FROM experiment LIMIT 1"
+            ).fetchone()
             if existing_experiment is not None:
                 raise StateError("experiment state database is already initialized")
             now = _now()
@@ -320,13 +324,14 @@ class ExperimentStateStore:
             raise StateError(
                 f"Unsupported experiment state schema: {observed}. "
                 f"This runtime accepts only {STATE_SCHEMA_VERSION}. "
-                "Create a fresh Native v3 workspace."
+                "Run 'mforge experiment rebuild-state' for a v2 workspace."
             )
         integrity = self.connection.execute("PRAGMA integrity_check").fetchone()
         if integrity is None or integrity[0] != "ok":
             raise StateError(f"state database integrity check failed: {self.path}")
         for row in self.connection.execute(
-            "SELECT session_id,counterexample_json FROM sessions WHERE counterexample_json != '{}'"
+            "SELECT session_id,counterexample_json FROM sessions "
+            "WHERE counterexample_json != '{}'"
         ):
             try:
                 counterexample = json.loads(str(row["counterexample_json"]))
@@ -335,7 +340,9 @@ class ExperimentStateStore:
                     f"session {row['session_id']} has unreadable counterexample state"
                 ) from exc
             if not isinstance(counterexample, Mapping):
-                raise StateError(f"session {row['session_id']} has invalid counterexample state")
+                raise StateError(
+                    f"session {row['session_id']} has invalid counterexample state"
+                )
 
     def close(self) -> None:
         self.connection.close()
@@ -372,7 +379,9 @@ class ExperimentStateStore:
             "counterexample_verified",
             "operator_final_stop",
         }:
-            raise StateError("COMPLETED requires counterexample_verified or operator_final_stop")
+            raise StateError(
+                "COMPLETED requires counterexample_verified or operator_final_stop"
+            )
         self.connection.execute(
             "UPDATE experiment SET state=?,updated_at=?,last_error=?,"
             "terminal_stop_reason=?,current_checkpoint=?",
@@ -641,7 +650,9 @@ class ExperimentStateStore:
             if row is not None and row["state"] == "completed":
                 self.connection.rollback()
                 return False
-            prior_usage: Mapping[str, Any] = _usage_from_row(dict(row)) if row is not None else {}
+            prior_usage: Mapping[str, Any] = (
+                _usage_from_row(dict(row)) if row is not None else {}
+            )
             prior_total = prior_usage.get("totalTokens", 0)
             prior_consumed = row is not None and (
                 row["state"] == "completed"
@@ -777,7 +788,11 @@ class ExperimentStateStore:
         if backfill:
             self._backfill_token_charges()
         current = now or datetime.now(UTC)
-        current = current.replace(tzinfo=UTC) if current.tzinfo is None else current.astimezone(UTC)
+        current = (
+            current.replace(tzinfo=UTC)
+            if current.tzinfo is None
+            else current.astimezone(UTC)
+        )
         cutoff = current - timedelta(hours=1)
         charges: list[tuple[datetime, int]] = []
         rows = self.connection.execute(
@@ -813,7 +828,9 @@ class ExperimentStateStore:
         return {
             "hourly_token_limit": limit,
             "hourly_tokens_used": used,
-            "hourly_tokens_remaining": (None if limit is None else max(0, limit - used)),
+            "hourly_tokens_remaining": (
+                None if limit is None else max(0, limit - used)
+            ),
             "hourly_window_seconds": 3600,
             "hourly_limit_reached": reached,
             "hourly_retry_after": retry_after,

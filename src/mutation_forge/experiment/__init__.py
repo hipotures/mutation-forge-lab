@@ -14,7 +14,7 @@ from .config import (
 )
 from .layout import ExperimentLayout, WorkspaceError
 from .lock import LOCK_SCHEMA_VERSION, LockError
-from .native_v3 import NativeV3ExperimentAdapter
+from .native import NativeExperimentAdapter, NativeExperimentError
 from .observer import (
     CallbackEventSink,
     ExperimentEventHub,
@@ -46,7 +46,8 @@ __all__ = [
     "ExperimentService",
     "LOCK_SCHEMA_VERSION",
     "LockError",
-    "NativeV3ExperimentAdapter",
+    "NativeExperimentAdapter",
+    "NativeExperimentError",
     "CallbackEventSink",
     "ExperimentEventHub",
     "ExperimentEventObserver",

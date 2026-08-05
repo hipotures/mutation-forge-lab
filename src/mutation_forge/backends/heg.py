@@ -19,13 +19,11 @@ from mutation_forge.backends.base import (
     ScoringBackendError,
 )
 from mutation_forge.models import (
-    Edge,
     ExactVerification,
     GraphScore,
     GraphState,
     GraphValidation,
     RewritePlan,
-    normalized_edge,
 )
 
 OPERATOR_MAP = {
@@ -41,7 +39,6 @@ HEG_GRAPH_MODES = frozenset(
         "unrestricted_min_degree_3",
     }
 )
-MAX_REWRITE_EDGES_PER_SIDE = 8
 
 
 @dataclass(slots=True)
@@ -100,7 +97,6 @@ class HegBackend:
         self._validation_context_class = target_base.GraphValidationContext
         self._validation_result_class = target_base.ValidationResult
         self._worker: Any | None = None
-        self.score_worker_restarts = 0
         self.score_implementation = "heg-cpp-score-worker"
         self._score_timeout_seconds = score_timeout_seconds
         self._score_longest_first_enabled = score_longest_first_enabled
@@ -367,7 +363,6 @@ class HegBackend:
                     },
                 )
                 if attempt == 0 and self._worker is not None:
-                    self.score_worker_restarts += 1
                     self._record(
                         recorder,
                         "worker_restart",
@@ -482,44 +477,6 @@ class HegBackend:
             elapsed_seconds=float(result.elapsed_seconds),
         )
 
-    def sampled_forbidden_witness_loads(
-        self,
-        graph: GraphState,
-        *,
-        relabeling: tuple[int, ...],
-    ) -> tuple[dict[tuple[int, int], int], dict[tuple[int, Edge], int]]:
-        """Return bounded proposal-feature loads without replacing C++ scoring."""
-
-        if tuple(sorted(relabeling)) != tuple(range(graph.order)):
-            raise ValueError("witness-sampling relabeling must be a vertex permutation")
-        inverse = {relabeling[vertex]: vertex for vertex in range(graph.order)}
-        relabeled_graph = GraphState(
-            graph.order,
-            tuple(sorted(normalized_edge((relabeling[u], relabeling[v])) for u, v in graph.edges)),
-        )
-        prepared = self._prepare(relabeled_graph)
-        witness_sampler = getattr(self._plugin, "forbidden_witness_edge_choices", None)
-        if not callable(witness_sampler):
-            raise RuntimeError("configured HEG repository does not expose witness sampling")
-        vertex_loads: dict[tuple[int, int], int] = {}
-        edge_loads: dict[tuple[int, Edge], int] = {}
-        for raw_cycle in witness_sampler(prepared.graph):
-            cycle = tuple(
-                normalized_edge((inverse[int(edge[0])], inverse[int(edge[1])]))
-                for edge in raw_cycle
-            )
-            length = len(cycle)
-            vertices = {vertex for edge in cycle for vertex in edge}
-            if length < 3 or len(vertices) != length:
-                raise RuntimeError("HEG witness sampler returned a non-simple cycle")
-            for vertex in vertices:
-                vertex_key = (length, vertex)
-                vertex_loads[vertex_key] = vertex_loads.get(vertex_key, 0) + 1
-            for edge in cycle:
-                edge_key = (length, edge)
-                edge_loads[edge_key] = edge_loads.get(edge_key, 0) + 1
-        return vertex_loads, edge_loads
-
     def canonical_hash(self, graph: GraphState) -> str:
         canonical = self._plugin.canonical_key(self._prepare(graph).graph)
         return hashlib.sha256(canonical).hexdigest()
@@ -544,13 +501,8 @@ class HegBackend:
         *,
         record_score_profile: ScoreProfileRecorder | None = None,
     ) -> GraphState:
-        if (
-            len(rewrite.removed_edges) > MAX_REWRITE_EDGES_PER_SIDE
-            or len(rewrite.added_edges) > MAX_REWRITE_EDGES_PER_SIDE
-        ):
-            raise ValueError(
-                f"rewrites are limited to {MAX_REWRITE_EDGES_PER_SIDE} removed and added edges"
-            )
+        if len(rewrite.removed_edges) > 4 or len(rewrite.added_edges) > 4:
+            raise ValueError("rewrites are limited to four removed and added edges")
         if len(set(rewrite.removed_edges)) != len(rewrite.removed_edges):
             raise ValueError("rewrite contains duplicate removed edges")
         if len(set(rewrite.added_edges)) != len(rewrite.added_edges):

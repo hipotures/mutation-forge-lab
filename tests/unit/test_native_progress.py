@@ -318,60 +318,6 @@ def test_native_profile_is_compact_and_conditional() -> None:
         sink.close()
 
 
-def test_native_v3_provider_call_uses_local_elapsed_without_telemetry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    now = [100.0]
-    monkeypatch.setattr(
-        "mutation_forge.output.rich_live.time.monotonic",
-        lambda: now[0],
-    )
-    sink = RichLiveSink(
-        console=Console(file=io.StringIO(), width=160, height=30, force_terminal=False),
-        native=True,
-    )
-    try:
-        sink.write(
-            _event(
-                "generation_started",
-                generation=1,
-                population_size=8,
-            )
-        )
-        sink.write(
-            _event(
-                "provider_call_started",
-                generation=1,
-                call_id="epoch-0001:provider:0000",
-                slot_ids="slot-00,slot-01,slot-02,slot-03",
-                provider_calls_in_flight=1,
-                timeout_ns=600_000_000_000,
-            )
-        )
-        now[0] = 142.0
-        rows = sink._native_slot_rows()  # noqa: SLF001
-        assert [row["state"] for row in rows] == [
-            "model",
-            "batched",
-            "batched",
-            "batched",
-        ]
-        assert rows[0]["elapsed_seconds"] == pytest.approx(42.0, abs=0.01)
-        assert all(row.get("elapsed_seconds") is None for row in rows[1:])
-        assert sink.state["active_model_turns"] == 1
-        rendered = io.StringIO()
-        Console(file=rendered, width=160, height=30, force_terminal=False).print(
-            sink._render()
-        )
-        text = rendered.getvalue()
-        assert "waiting for generation" not in text
-        assert "response waiting" not in text
-        assert not any("response waiting" in item for item in sink._recent_events)  # noqa: SLF001
-        assert "42.0s" in text
-    finally:
-        sink.close()
-
-
 def test_native_validation_and_repair_states_are_distinct() -> None:
     sink = RichLiveSink(
         console=Console(file=io.StringIO(), width=120, height=30, force_terminal=False),
@@ -429,7 +375,9 @@ def test_native_validation_and_repair_states_are_distinct() -> None:
         assert sink.state["slot_states"]["slot-00"] == "invalid"
 
         output = io.StringIO()
-        Console(file=output, width=120, height=30, force_terminal=False).print(sink._render())
+        Console(file=output, width=120, height=30, force_terminal=False).print(
+            sink._render()
+        )
         rendered = output.getvalue()
         assert "invalid" in rendered
         assert "forbidden_call" in rendered
@@ -610,7 +558,7 @@ def test_json_cli_keeps_one_final_stdout_object_and_progress_on_stderr(
 ) -> None:
     config = tmp_path / "experiment.toml"
     config.write_text(
-        """schema_version = "mforge.experiment.v3"
+        """schema_version = "mforge.experiment.v2"
 exp_id = "json-progress"
 workspace = "./workspace"
 kind = "heg"
@@ -628,10 +576,10 @@ concurrency = 1
 max_repairs = 0
 
 [search]
-population_size = 8
+population_size = 1
 max_generations = 1
-max_model_turns = 8
-selection = "persistent-elite-weighted-diversity"
+max_model_turns = 1
+selection = "elite-diversity"
 
 [evaluation]
 graph_mode = "unrestricted_min_degree_3"
@@ -639,29 +587,14 @@ order_schedule = "static"
 orders = [4]
 graph_seeds = [1]
 policy_seeds = [2]
-validation_graph_seeds = [3]
-validation_policy_seeds = [4]
 horizon = 1
-baselines = [
-  "add-low-local-cycle-risk",
-  "remove-low-bridge-risk",
-  "random-valid",
-  "degree-fanout",
-]
+proposal_pool_size = 2
+baselines = ["random"]
 replay = false
 
 [resources]
 workers = 1
 thread_count = 1
-
-[native_v3]
-provider_batch_size = 4
-candidate_queue_capacity = 16
-evaluation_queue_capacity = 8
-target_evaluation_backlog = 4
-candidate_shard_size = 1
-auxiliary_shard_size = 1
-witness_cap = 64
 """,
         encoding="utf-8",
     )
@@ -670,7 +603,9 @@ witness_cap = 64
     monkeypatch.setattr(cli.sys, "stdout", stdout)
     monkeypatch.setattr(cli.sys, "stderr", stderr)
 
-    def fake_run(*_args: object, event_sinks: list[object], **_kwargs: object) -> dict[str, object]:
+    def fake_run(
+        *_args: object, event_sinks: list[object], **_kwargs: object
+    ) -> dict[str, object]:
         event = _event("evaluation_progress", evaluations=1)
         for sink in event_sinks:
             sink.write(event)  # type: ignore[attr-defined]

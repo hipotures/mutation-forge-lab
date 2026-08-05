@@ -1,145 +1,84 @@
-# Native v3 experiment workflow
+# Native experiment workflow
 
-Native v3 is the active experiment protocol. The installed public commands
-are:
+Issue #18 is implemented by the native experiment path. The installed public
+commands are:
 
 ```console
 uv run mforge experiment run [--config PATH] [--json]
 uv run mforge experiment status [--config PATH] [--json]
 uv run mforge experiment stop --final [--config PATH] [--json]
+uv run mforge experiment rebuild-state [--config PATH] [--apply] [--work-dir PATH] [--json]
 ```
 
-`experiment.toml` is authoritative. A fresh run atomically creates
-`workspace/<exp_id>/`, records the project and read-only sibling HEG
-provenance, and locks the Native v3 schemas, prompts, registries, scoring
-protocol, and operator-selected profiles. Native v2 workspaces and generated
-Python rankers are not accepted by this runtime.
+`experiment.toml` is authoritative. A fresh run creates an atomic
+`workspace/<exp_id>/` containing the immutable configuration and lock, SQLite
+state, checkpoints, native archive, evaluation artifacts, and complete Codex
+App Server turn evidence. The native coordinator executes the configured
+model, effort, concurrency, repair, generation, evaluation, worker, thread,
+selection, and wall-time values; it never reads a historical campaign or
+freeze.
 
-## Frozen epoch and provider calls
+Native prompts, response schema, and baseline descriptions live under
+`prompts/native/` and `configs/native/`. The prompt and behavior probe use the
+same context/proposal schemas and semantic glossary as the HEG evaluator:
+`configs/schemas/stage2b-*.schema.json` and
+`configs/stage3-field-semantics.v2.json`. HEG is the mathematical backend and
+the lock records the current sibling checkout's commit and dirty state. No
+historical `runs/` directory, Stage 4 freeze, tag, or campaign output is
+required.
 
-At the start of every epoch the host freezes:
+## Turn artifact semantics
 
-- the eight planned slot IDs;
-- retained parent and archive identities;
-- parent assignment and mutation brief for every slot;
-- the development and sealed validation manifests;
-- the complete protocol bundle.
+Each native turn keeps the model-facing text separate from the host envelope:
 
-Every provider call in that epoch uses this versioned snapshot. Calls return a
-bounded batch of one, two, four, or eight independent `program_json_raw`
-values. The default batch size is four. The host persists raw text separately
-from the validated AST, host-canonical JSON, and program hash. Slot identity
-and lineage are host-owned.
+- `slot-XX.request.md` is the exact final Markdown prompt sent to the model;
+- `slot-XX.request.json` is the structured request envelope and metadata;
+- `slot-XX.system-prompt.md` and `slot-XX.output-schema.json` retain the exact
+  system instructions and schema supplied to the provider;
+- `slot-XX.response.md` is a concise generated-policy projection with a fenced
+  Python source block;
+- `slot-XX.response.json` is the parsed policy object, while
+  `slot-XX.response.raw.txt` is the byte-faithful assistant text;
+- `slot-XX.response-diagnostics.json` contains only JSON/schema response
+  diagnostics, and `slot-XX.transport-diagnostics.json` contains App Server
+  lifecycle diagnostics;
+- `validation.json`, `metadata-validation.json`, `behavior.json`, and
+  `worker_telemetry.json` separately retain AST validation, source-derived
+  `used_fields`, behavior-probe results, and worker evidence;
+- `slot-XX.provider-raw.json` and the JSONL transport files retain provider
+  lifecycle and wire evidence.
 
-The input profile is a hard ceiling of four complete parent ASTs, two parent
-references per slot, 128 KiB, and 32k tokens. Remaining archive content is a
-deterministic bounded summary. The actually encoded request is checked before
-dispatch; it is never padded, silently truncated, or rebound to different
-parents.
+Malformed or schema-invalid responses retain `response.raw.txt` and
+`response-diagnostics.json` but do not receive a misleading `response.md`
+projection.
 
-## Streaming evaluation
+The runtime accepts only the compact v3 SQLite state schema. It does not carry
+runtime compatibility for v2. The offline `rebuild-state` command is the
+single explicit v2 importer: without `--apply` it is read-only; with `--apply`
+it requires a stopped workspace, validates canonical artifacts, creates a
+consistent SQLite online backup, builds v3 separately, and atomically switches
+the active database while retaining the v2 backup.
 
-Provider generation and graph evaluation form a bounded producer-consumer
-pipeline:
+Completed evaluation traces live once in
+`artifacts/evaluations/development/<candidate>.json.gz`. Episode files under
+`evaluations/episodes/` are crash-recovery checkpoints and are removed after
+the aggregate artifact passes read-back validation. Session event payloads
+live in `events.jsonl.gz`; SQLite keeps only the fields required by the
+dashboard, resume, idempotency, and rolling token accounting.
 
-```text
-provider calls
-  -> independently parsed and validated ASTs
-  -> bounded candidate queue
-  -> deterministic episode microshards
-  -> bounded evaluator queue
-  -> persistent CPU evaluator processes
-```
+## Open-ended search and certification
 
-The first valid AST starts immediately on the reserved evaluator. Candidate
-microshards take priority as already-running auxiliary microshards reach their
-next terminal boundary, allowing one program to fan out across all configured
-workers. Provider calls continue while evaluation runs. A target evaluation
-backlog pauses provider dispatch before an unbounded backlog forms and resumes
-it before evaluators starve.
+The exact string `"unbounded"` removes the global generation or model-turn
+limit while retaining cumulative counters. `run.wall_seconds` remains a
+per-session boundary and produces resumable `idle`, never scientific
+completion.
 
-At epoch start, uncached retained-parent and fixed-baseline microshards may use
-at most `W-1` evaluators. They are useful scientific work, not synthetic
-occupancy. No new auxiliary shard is dispatched while generated-candidate
-work waits.
-
-## Program execution and scoring
-
-Generated programs are declarative ASTs interpreted against a private graph
-overlay. Selectors observe the current overlay and consume costs from the
-versioned selector registry. The default per-`propose` limit is 128 cost
-units; an uncached query consumes its registered cost and an identical cache
-hit consumes one unit. Runtime budget escape is an uncatchable
-`PROGRAM_FAILURE`.
-
-Private intermediate overlays may temporarily violate connectivity or minimum
-degree. They always preserve structural memory safety, and only a final
-simple, connected, same-order graph with minimum degree at least three may be
-emitted. The host converts the overlay to a canonical net edge difference,
-validates it, scores only the final graph, and applies deterministic
-acceptance.
-
-Score results retain component evidence for every forbidden length. Bounded
-search states produce sound intervals; infrastructure failure is not converted
-to ordinary worst-case fitness, and a contract violation fails closed. The
-mandatory persistent C++ scorer may restart once. A second failure raises an
-infrastructure error; Native v3 never enters a Python reference scorer under
-the same score protocol.
-
-## Selection and replay
-
-Development fitness is comparable only for identical development manifest and
-protocol hashes. Retained parents are re-evaluated when the adaptive
-development manifest changes. After development, the host durably freezes a
-deterministic promotion shortlist of at most four programs and evaluates every
-eligible distinct member on the sealed validation panel.
-
-Epoch terminal semantics are:
-
-```text
-8 unique valid generated programs -> COMPLETE
-4-7                              -> DEGRADED
-0-3                              -> INCONCLUSIVE and safe stop
-```
-
-Provider and evaluator results may arrive in any order. Selection, archive,
-lineage, and checkpoint state are committed in deterministic identity order
-after the planned cohort reaches a terminal state. Timestamps, durations,
-worker IDs, and queue arrival order are observational telemetry and do not
-participate in semantic replay identity.
-
-## Exact verification
-
-Every legal apparent zero is durably written before ordinary continuation and
-enters the dedicated verification supervisor. Jobs are deduplicated by
-`(graph_hash, verification_protocol_id)`.
-
-The locked default profile is:
-
-```text
-concurrency:       1
-unique-job queue: 16
-primary timeout:  600 seconds / 4 GiB
-independent:      600 seconds / 4 GiB
-```
-
-The independent verifier runs only after the primary returns complete
-`VERIFIED`. Both execute sequentially in isolated processes. A certificate is
-created only when both return complete `VERIFIED`; incomplete or conflicting
-outcomes remain durable non-success states. A full verification queue applies
-backpressure to new scoring, and apparent-zero events are never dropped.
-
-## Evidence and monitoring
-
-Native v3 stores deterministic semantic records through one persistence owner
-and separates them from observational telemetry. A durably committed terminal
-episode is never rerun; computed but uncommitted work may be replayed
-idempotently after a crash.
-
-The dashboard and JSON events expose provider concurrency and latency,
-programs and valid programs per call, queue depths, evaluator utilization,
-provider starvation, evaluation backpressure, phase wall shares, first-AST
-fan-out latency, graph-score and episode rates, rewrite acceptance, score-cache
-hits, active C++ scorers, restarts, and forbidden fallback count. These fields
-distinguish provider-bound, evaluator-bound, persistence-bound, and
-verification-backpressured execution.
+Every authoritative zero is committed below
+`artifacts/counterexamples/cx-<sha256>/` before verification. The primary HEG
+verifier rereads that file. A distinct process then runs the independent
+Mutation Forge meet-in-the-middle cycle implementation. Only two
+`VERIFIED, complete=true`
+records over matching graph and target-length hashes create a certificate and
+terminal `counterexample_verified` state. `REJECTED` by the primary verifier
+continues the search; inconclusive verification pauses; disagreement after a
+primary success fails closed.

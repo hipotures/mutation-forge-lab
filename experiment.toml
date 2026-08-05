@@ -1,4 +1,4 @@
-schema_version = "mforge.experiment.v3"
+schema_version = "mforge.experiment.v2"
 
 exp_id = "exp_007"
 workspace = "./workspace"
@@ -17,7 +17,7 @@ name = "gpt-5.6-luna"
 effort = "max"
 concurrency = 2
 max_repairs = 1
-auth_json = "~/.codex/auth.json"
+#auth_json = "~/.codex/auth.json"
 
 [search]
 population_size = 8
@@ -38,31 +38,11 @@ policy_seeds = [
   4009, 4010, 4011, 4012,
   4013, 4014, 4015, 4016,
 ]
-validation_graph_seeds = [1401, 1402, 1403, 1404]
-validation_policy_seeds = [
-  14001, 14002, 14003, 14004,
-  14005, 14006, 14007, 14008,
-  14009, 14010, 14011, 14012,
-  14013, 14014, 14015, 14016,
-]
 horizon = 32
-baselines = [
-  "add-low-local-cycle-risk",
-  "remove-low-bridge-risk",
-  "random-valid",
-  "degree-fanout",
-]
-replay = true
+proposal_pool_size = 12
+baselines = ["random", "structural"]
+replay = false
 
 [resources]
 workers = 8
 thread_count = 8
-
-[native_v3]
-provider_batch_size = 4
-candidate_queue_capacity = 40
-evaluation_queue_capacity = 64
-target_evaluation_backlog = 32
-candidate_shard_size = 1
-auxiliary_shard_size = 1
-witness_cap = 64

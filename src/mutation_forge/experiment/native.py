@@ -1,0 +1,2796 @@
+"""Native experiment adapter and durable experiment-side provider boundary."""
+
+from __future__ import annotations
+
+import contextlib
+import ctypes
+import hashlib
+import inspect
+import json
+import multiprocessing
+import os
+import sys
+import threading
+import time
+from collections.abc import Collection, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, cast
+
+from mutation_forge.counterexamples import (
+    CounterexampleHalt,
+    CounterexampleOutcome,
+    CounterexampleVerified,
+)
+from mutation_forge.proposals.k_switch import FeatureLimits
+from mutation_forge.sandbox.contracts import SandboxLimits
+from mutation_forge.sandbox.policy import probe_scientific_policy
+from mutation_forge.sandbox.validation import accessed_policy_fields, validate_policy
+
+from .artifacts import (
+    ArtifactIncompleteError,
+    TurnArtifactStore,
+    _manifest_is_terminal,
+    generated_policy_diagnostics,
+    is_generated_policy,
+)
+from .config import ExperimentConfig, orders_for_generation, scheduled_order_domain
+from .control import ExperimentControl
+from .evaluation import DEFAULT_WITNESS_CAP, evaluate_candidate
+from .evaluation import SCHEMA_VERSION as EVALUATION_SCHEMA_VERSION
+from .generation import (
+    GENERATION_SCHEMA_VERSION,
+    Candidate,
+    GenerationConfig,
+    GenerationCoordinator,
+    SlotResult,
+)
+from .json_io import read_json, write_json
+from .layout import ExperimentLayout, WorkspaceError
+from .provider import LocalCodexAppServerProvider
+from .sessions import SessionContext
+from .state import ExperimentStateStore
+
+
+class NativeExperimentError(RuntimeError):
+    """A native experiment could not complete its current safe boundary."""
+
+
+BASELINE_SCHEMA_VERSION = "mforge.native.baseline_rankers.v2"
+NATIVE_SELECTION_POLICIES = frozenset(
+    {
+        "elite-diversity",
+        "persistent-elite-weighted-diversity",
+    }
+)
+
+
+class _NativeSessionBudgetExpired(KeyboardInterrupt):
+    """Internal wall-budget boundary, distinct from an operator interrupt."""
+
+
+class _NativeHourlyTokenLimit(KeyboardInterrupt):
+    """Internal rolling-hour token boundary."""
+
+
+class _NativeOperatorStop(Exception):
+    """A graceful operator stop reached a stage boundary."""
+
+
+def _abort_evaluation_pool(executor: ProcessPoolExecutor) -> None:
+    """Cancel queued evaluations and terminate active workers."""
+
+    processes = tuple(getattr(executor, "_processes", {}).values())
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    for process in processes:
+        process.join(timeout=0.5)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=0.5)
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessCounterexampleOutcome:
+    kind: str
+    outcome: CounterexampleOutcome
+
+
+def _set_evaluation_process_name(candidate_id: str) -> str:
+    slot_suffix = candidate_id.rsplit("-slot-", 1)[-1]
+    process_name = f"mforge-eval-{slot_suffix}"[:15]
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(15, process_name.encode("utf-8"), 0, 0, 0)
+    return process_name
+
+
+def _evaluate_candidate_process(
+    config: ExperimentConfig,
+    candidate_id: str,
+    source: str,
+    generation: int,
+    artifact_root: Path,
+    heg_repo: Path,
+    profiling_enabled: bool,
+    progress_connection: Any,
+) -> tuple[Mapping[str, Any] | _ProcessCounterexampleOutcome, float]:
+    """Run one CPU-bound native evaluation outside the coordinator process."""
+
+    _set_evaluation_process_name(candidate_id)
+    started = time.monotonic()
+
+    def send(kind: str, payload: Mapping[str, Any]) -> None:
+        with contextlib.suppress(BrokenPipeError, EOFError, OSError):
+            progress_connection.send((kind, dict(payload)))
+
+    try:
+        try:
+            result: Mapping[str, Any] | _ProcessCounterexampleOutcome = evaluate_candidate(
+                config,
+                candidate_id,
+                source,
+                generation=generation,
+                artifact_root=artifact_root,
+                heg_repo=heg_repo,
+                sandbox_limits=SandboxLimits(),
+                progress=lambda payload: send("progress", payload),
+                profiling_enabled=profiling_enabled,
+                counterexample_event_callback=lambda event_type, payload: send(
+                    "counterexample",
+                    {"event_type": event_type, "payload": dict(payload)},
+                ),
+            )
+        except CounterexampleVerified as verified:
+            result = _ProcessCounterexampleOutcome("verified", verified.outcome)
+        except CounterexampleHalt as halted:
+            result = _ProcessCounterexampleOutcome("halt", halted.outcome)
+        return result, time.monotonic() - started
+    finally:
+        send("done", {})
+        progress_connection.close()
+
+
+def _counterexample_summary(outcome: CounterexampleOutcome) -> dict[str, Any]:
+    candidate = outcome.candidate
+    metadata: dict[str, Any] = {}
+    if candidate is not None:
+        try:
+            value = json.loads(candidate.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            value = {}
+        if isinstance(value, Mapping):
+            metadata = dict(value)
+    certificate = outcome.certificate
+    primary = outcome.primary
+    independent = outcome.independent
+    state = (
+        "verified"
+        if outcome.decision.value == "stop_verified"
+        else "conflict"
+        if outcome.stop_reason == "verification_conflict"
+        else "primary_verified"
+        if primary is not None and primary.status == "VERIFIED" and primary.complete
+        else "candidate"
+    )
+    return {
+        "state": state,
+        "status": outcome.decision.value,
+        "stop_reason": outcome.stop_reason,
+        "candidate_id": candidate.candidate_id if candidate is not None else None,
+        "candidate_path": (str(candidate.artifact_directory) if candidate is not None else None),
+        "order": metadata.get("order"),
+        "edge_count": metadata.get("edge_count"),
+        "minimum_degree": metadata.get("minimum_degree"),
+        "target_forbidden_lengths": metadata.get("target_forbidden_lengths"),
+        "primary": (
+            {
+                "status": primary.status,
+                "complete": primary.complete,
+                "verifier_id": primary.verifier_id,
+                "artifact_ref": str(primary.artifact_path),
+            }
+            if primary is not None
+            else None
+        ),
+        "independent": (
+            {
+                "status": independent.status,
+                "complete": independent.complete,
+                "verifier_id": independent.verifier_id,
+                "artifact_ref": str(independent.artifact_path),
+            }
+            if independent is not None
+            else None
+        ),
+        "certificate_path": (str(certificate.artifact_path) if certificate is not None else None),
+        "certificate_sha256": certificate.sha256 if certificate is not None else None,
+    }
+
+
+class _BehaviorProbeError(ValueError):
+    def __init__(
+        self,
+        error_type: str,
+        message: str,
+        telemetry: Mapping[str, Any],
+    ) -> None:
+        self.error_type = error_type
+        self.telemetry = dict(telemetry)
+        super().__init__(f"{error_type}: {message}" if message else error_type)
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _sha256(value: object) -> str:
+    return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def _asset_path(name: str) -> Path:
+    root = Path(__file__).resolve().parents[3]
+    assets = {
+        "system": root / "prompts" / "native" / "system.md",
+        "request": root / "prompts" / "native" / "request.md",
+        "repair": root / "prompts" / "native" / "repair.md",
+        "schema": root / "configs" / "native" / "generated-policy.schema.json",
+        "context": root / "configs" / "schemas" / "stage2b-context.schema.json",
+        "proposal": root / "configs" / "schemas" / "stage2b-proposal.schema.json",
+        "semantic": root / "configs" / "stage3-field-semantics.v2.json",
+        "baseline": root / "configs" / "native" / "baseline-rankers.json",
+    }
+    try:
+        return assets[name]
+    except KeyError as exc:
+        raise NativeExperimentError(f"unknown native asset {name!r}") from exc
+
+
+def _load_assets() -> tuple[
+    str,
+    dict[str, Any],
+    str,
+    str,
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    system = _asset_path("system").read_text(encoding="utf-8")
+    request = _asset_path("request").read_text(encoding="utf-8")
+    repair = _asset_path("repair").read_text(encoding="utf-8")
+    parsed: dict[str, dict[str, Any]] = {}
+    for name in ("schema", "context", "proposal", "semantic", "baseline"):
+        value = json.loads(_asset_path(name).read_text(encoding="utf-8"))
+        if not isinstance(value, Mapping):
+            raise NativeExperimentError(f"native {name} asset must be an object")
+        parsed[name] = dict(value)
+    if not request.strip() or not repair.strip():
+        raise NativeExperimentError("native request and repair prompts must be non-empty")
+    expected_versions = {
+        "context": "mforge.scientific_context.v2",
+        "proposal": "mforge.scientific_proposal.v2",
+        "baseline": BASELINE_SCHEMA_VERSION,
+    }
+    for name, expected in expected_versions.items():
+        asset = parsed[name]
+        if name in {"context", "proposal"}:
+            properties = asset.get("properties")
+            version = (
+                properties.get("schema_version", {}).get("const")
+                if isinstance(properties, Mapping)
+                else None
+            )
+        else:
+            version = asset.get("schema_version")
+        if version != expected:
+            raise NativeExperimentError(
+                f"native {name} asset has unsupported schema {version!r}; expected {expected}"
+            )
+    return (
+        system,
+        parsed["schema"],
+        request,
+        repair,
+        parsed["context"],
+        parsed["proposal"],
+        parsed["semantic"],
+        parsed["baseline"],
+    )
+
+
+def _load_slot_briefs() -> dict[str, str]:
+    root = Path(__file__).resolve().parents[3] / "configs" / "stage3-slots"
+    briefs: dict[str, str] = {}
+    for index in range(8):
+        slot = f"slot-{index:02d}"
+        path = root / f"{slot}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise NativeExperimentError(f"cannot load native mutation brief {path}") from exc
+        brief = value.get("brief") if isinstance(value, Mapping) else None
+        if not isinstance(brief, str) or not brief.strip() or value.get("slot_id") != slot:
+            raise NativeExperimentError(f"invalid native mutation brief {path}")
+        briefs[slot] = brief.strip()
+    return briefs
+
+
+def _native_behavior(
+    source: str, limits: SandboxLimits
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    result = probe_scientific_policy(source, limits)
+    if result.get("status") != "completed":
+        telemetry = result.get("worker_telemetry")
+        retained_telemetry = dict(telemetry) if isinstance(telemetry, Mapping) else {}
+        failure = result.get("error")
+        if isinstance(failure, Mapping):
+            error_type = str(failure.get("error_type", failure.get("code", "BehaviorProbeError")))
+            message = str(failure.get("message", ""))
+        else:
+            error_type = "BehaviorProbeError"
+            message = str(result.get("status", "behavior probe failed"))
+        raise _BehaviorProbeError(
+            error_type,
+            message,
+            retained_telemetry,
+        )
+    signature = result.get("behavior_signature")
+    telemetry = result.get("worker_telemetry")
+    if not isinstance(signature, Mapping):
+        raise ValueError("behavior probe did not produce a signature")
+    return signature, telemetry if isinstance(telemetry, Mapping) else {}
+
+
+class _NativeArchive:
+    """Small append-only native archive used by the coordinator."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.programs = root / "programs"
+        self.sources = root / "sources"
+        self.programs.mkdir(parents=True, exist_ok=True)
+        self.sources.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def records(self) -> tuple[dict[str, Any], ...]:
+        rows: list[dict[str, Any]] = []
+        for path in sorted(self.programs.glob("*.json.gz")):
+            try:
+                value = read_json(path)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, Mapping):
+                rows.append(dict(value))
+        return tuple(rows)
+
+    def append(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        program_id = str(value.get("program_id", ""))
+        if not program_id or any(char in program_id for char in "/\\\x00"):
+            raise NativeExperimentError("native archive program_id is unsafe")
+        source = value.get("source")
+        if not isinstance(source, str):
+            raise NativeExperimentError("native archive record has no source")
+        source_sha = str(value.get("source_sha256") or hashlib.sha256(source.encode()).hexdigest())
+        record = {
+            "schema_version": "mforge.native.program.v1",
+            **{str(key): item for key, item in value.items() if key != "source"},
+            "program_id": program_id,
+            "source_sha256": source_sha,
+            "source_path": f"sources/{program_id}.py",
+        }
+        with self._lock:
+            source_path = self.sources / f"{program_id}.py"
+            record_path = self.programs / f"{program_id}.json.gz"
+            if source_path.exists() and source_path.read_text(encoding="utf-8") != source:
+                raise NativeExperimentError(f"native archive source collision: {program_id}")
+            if not source_path.exists():
+                temporary = source_path.with_suffix(".py.tmp")
+                temporary.write_text(source, encoding="utf-8")
+                os.replace(temporary, source_path)
+            if not record_path.exists():
+                with contextlib.suppress(FileExistsError):
+                    write_json(record_path, record, exclusive=True)
+        return record
+
+    def existing_sources(
+        self,
+        *,
+        exclude_program_ids: Collection[str] = (),
+    ) -> tuple[str, ...]:
+        excluded = set(exclude_program_ids)
+        result: list[str] = []
+        for path in sorted(self.sources.glob("*.py")):
+            if path.stem in excluded:
+                continue
+            try:
+                result.append(path.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+        return tuple(result)
+
+
+def _unfinished_generation_program_ids(checkpoint_path: Path) -> set[str]:
+    if not checkpoint_path.is_file():
+        return set()
+    try:
+        checkpoint = read_json(checkpoint_path)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise NativeExperimentError("cannot read native generation checkpoint") from error
+    if not isinstance(checkpoint, Mapping):
+        raise NativeExperimentError("native generation checkpoint must be an object")
+    if checkpoint.get("schema_version") != GENERATION_SCHEMA_VERSION:
+        raise NativeExperimentError(
+            f"Unsupported native generation checkpoint schema: "
+            f"{checkpoint.get('schema_version')!r}. This runtime accepts only "
+            f"{GENERATION_SCHEMA_VERSION}. Create a fresh workspace."
+        )
+    if not isinstance(checkpoint.get("campaign_id"), str) or not checkpoint.get("campaign_id"):
+        raise NativeExperimentError("native generation checkpoint campaign_id is required")
+    slots = checkpoint.get("slots")
+    callbacks = checkpoint.get("callbacks")
+    if not isinstance(slots, Mapping) or not isinstance(callbacks, Mapping):
+        raise NativeExperimentError("native generation checkpoint is incomplete")
+    completed_generations = {
+        int(generation)
+        for generation, callback in callbacks.items()
+        if str(generation).isdigit()
+        and isinstance(callback, Mapping)
+        and callback.get("status") == "completed"
+    }
+    result: set[str] = set()
+    for slot_result in slots.values():
+        if not isinstance(slot_result, Mapping):
+            continue
+        candidate = slot_result.get("candidate")
+        if not isinstance(candidate, Mapping):
+            continue
+        generation = candidate.get("generation")
+        slot = candidate.get("slot")
+        if (
+            isinstance(generation, int)
+            and not isinstance(generation, bool)
+            and generation >= 0
+            and generation not in completed_generations
+            and isinstance(slot, str)
+            and slot
+        ):
+            result.add(f"g{generation:04d}-{slot}")
+    return result
+
+
+def _resume_parent_assignments(
+    checkpoint_path: Path,
+    state: ExperimentStateStore,
+) -> Mapping[int, Mapping[str, str]] | None:
+    """Recover the original parent vector for an interrupted generation."""
+
+    if not checkpoint_path.is_file():
+        return None
+    try:
+        checkpoint = read_json(checkpoint_path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    slots = checkpoint.get("slots") if isinstance(checkpoint, Mapping) else None
+    if not isinstance(slots, Mapping):
+        return None
+    status_rank = {
+        "accepted": 100,
+        "duplicate": 90,
+        "invalid": 80,
+        "repair_pending": 70,
+        "repair_running": 60,
+        "failed": 40,
+        "pending": 10,
+    }
+    retained: dict[tuple[int, str], tuple[int, str]] = {}
+    for value in slots.values():
+        if not isinstance(value, Mapping):
+            continue
+        generation = value.get("generation")
+        slot = value.get("slot")
+        parent_id = value.get("parent_id")
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or not isinstance(slot, str)
+            or not isinstance(parent_id, str)
+        ):
+            continue
+        rank = status_rank.get(str(value.get("status", "")), 0)
+        key = (generation, slot)
+        previous = retained.get(key)
+        if previous is None or rank > previous[0]:
+            retained[key] = (rank, parent_id)
+    if not retained:
+        return None
+    target_generation = max(generation for generation, _slot in retained)
+    retained_parents = {
+        slot: parent
+        for (generation, slot), (_rank, parent) in retained.items()
+        if generation == target_generation
+    }
+    if not retained_parents:
+        return None
+    rows = state.connection.execute(
+        "SELECT sequence,generation,selected_parents_json FROM events "
+        "WHERE event_type='selection_completed' ORDER BY sequence"
+    ).fetchall()
+    best_match = 0
+    best_selection: dict[str, str] | None = None
+    for row in rows:
+        if row["generation"] != target_generation - 1:
+            continue
+        try:
+            selected = json.loads(str(row["selected_parents_json"]))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(selected, Mapping):
+            continue
+        selection = {
+            str(slot): str(parent)
+            for slot, parent in selected.items()
+            if isinstance(slot, str) and isinstance(parent, str)
+        }
+        matches = sum(selection.get(slot) == parent for slot, parent in retained_parents.items())
+        if matches > best_match:
+            best_match = matches
+            best_selection = selection
+    if best_selection is None:
+        return {target_generation: retained_parents}
+    return {target_generation: best_selection}
+
+
+class _NativeProvider:
+    """Route provider evidence into the native workspace before ledger commit."""
+
+    def __init__(
+        self,
+        provider: Any,
+        layout: ExperimentLayout,
+        state: ExperimentStateStore,
+        session: SessionContext,
+        *,
+        sandbox_limits: SandboxLimits,
+        hourly_token_limit: int | None = None,
+        observer: Any | None = None,
+    ) -> None:
+        self.provider = provider
+        self.layout = layout
+        self.state = state
+        self.session = session
+        self.sandbox_limits = sandbox_limits
+        self.hourly_token_limit = hourly_token_limit
+        self.observer = observer
+        self.turns = TurnArtifactStore(layout.artifacts)
+        self._lock = threading.RLock()
+
+    def _emit(self, event_type: str, **payload: Any) -> None:
+        if not callable(self.observer):
+            return
+        try:
+            self.observer(event_type, payload)
+        except TypeError:
+            try:
+                self.observer(event_type, **payload)
+            except Exception:
+                return
+        except Exception:
+            return
+
+    def _hourly_limit_reached(self) -> bool:
+        if self.hourly_token_limit is None:
+            return False
+        with self._lock:
+            return (
+                self.state.hourly_token_usage(self.hourly_token_limit)["hourly_limit_reached"]
+                is True
+            )
+
+    @staticmethod
+    def _phase(request: Mapping[str, Any]) -> str:
+        if str(request.get("phase", "initial")) == "repair":
+            attempt = int(request.get("repair_attempt", 1))
+            return f"repair-{attempt:02d}"
+        return str(request.get("phase", "initial"))
+
+    def _payload(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        value = dict(request)
+        generation = int(request.get("generation", 0))
+        slot = str(request.get("slot", "slot-00"))
+        phase = self._phase(request)
+        directory = self.layout.generation_slot_phase(generation, slot, phase)
+        value.update(
+            {
+                "artifact_dir": str(directory),
+                "artifact_root": str(self.layout.artifacts),
+                "artifact_prefix": slot,
+            }
+        )
+        return value
+
+    def _turn_directories(self, request: Mapping[str, Any]) -> tuple[Path, ...]:
+        base = self.layout.generation_slot_phase(
+            int(request.get("generation", 0)),
+            str(request.get("slot", "slot-00")),
+            self._phase(request),
+        )
+        archived = tuple(
+            sorted(path for path in base.parent.glob(f"{base.name}.attempt-*") if path.is_dir())
+        )
+        return (base, *archived)
+
+    @staticmethod
+    def _key(request: Mapping[str, Any]) -> str:
+        value = request.get("idempotency_key", request.get("request_idempotency_key"))
+        if isinstance(value, str) and value:
+            return value
+        return _sha256(
+            {
+                "generation": request.get("generation", 0),
+                "slot": request.get("slot", "slot-00"),
+                "phase": request.get("phase", "initial"),
+            }
+        )
+
+    def _retained(self, request: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        key = self._key(request)
+        directory: Path | None = None
+        manifest: Mapping[str, Any] | None = None
+        compatible: list[tuple[Path, Mapping[str, Any]]] = []
+        for candidate_directory in self._turn_directories(request):
+            manifest_path = candidate_directory / "turn-manifest.json.gz"
+            if not manifest_path.is_file():
+                continue
+            try:
+                candidate_manifest = read_json(manifest_path)
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ArtifactIncompleteError(
+                    "retained native provider evidence is unreadable"
+                ) from exc
+            if (
+                isinstance(candidate_manifest, Mapping)
+                and candidate_manifest.get("request_idempotency_key") == key
+            ):
+                exact_is_terminal = candidate_manifest.get("artifact_complete") is True and (
+                    candidate_manifest.get("terminal_status") == "completed"
+                    or candidate_manifest.get("charged") is True
+                )
+                if exact_is_terminal:
+                    directory = candidate_directory
+                    manifest = candidate_manifest
+                    break
+                # An unfinished/uncharged exact attempt must not hide an older
+                # complete response for the same stable slot identity.
+                continue
+            if not isinstance(candidate_manifest, Mapping):
+                continue
+            if (
+                candidate_manifest.get("artifact_complete") is not True
+                or candidate_manifest.get("terminal_status") != "completed"
+            ):
+                continue
+            slot = str(request.get("slot", "slot-00"))
+            request_path = candidate_directory / f"{slot}.request.json.gz"
+            if not request_path.is_file():
+                request_files = sorted(candidate_directory.glob("*.request.json.gz"))
+                request_path = request_files[-1] if request_files else request_path
+            try:
+                retained_request = read_json(request_path)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(retained_request, Mapping):
+                continue
+            stable_fields = ("campaign_id", "generation", "slot", "parent_id", "phase")
+            if any(
+                retained_request.get(field_name) != request.get(field_name)
+                for field_name in stable_fields
+            ):
+                continue
+            if int(retained_request.get("repair_attempt", 0)) != int(
+                request.get("repair_attempt", 0)
+            ):
+                continue
+            compatible.append((candidate_directory, candidate_manifest))
+        if directory is None and compatible:
+            # Runtime-only changes can alter the rendered prompt and therefore
+            # the request hash.  The completed provider response is still the
+            # same durable slot result when its stable slot identity matches.
+            directory, manifest = compatible[-1]
+        if directory is None or manifest is None:
+            return None
+        try:
+            slot = str(request.get("slot", "slot-00"))
+            response_path = directory / f"{slot}.response.json.gz"
+            if not response_path.is_file():
+                responses = sorted(directory.glob("*.response.json.gz"))
+                response_path = responses[-1] if responses else response_path
+            raw_response_path = directory / f"{slot}.response.raw.txt"
+            if not raw_response_path.is_file():
+                raw_responses = sorted(directory.glob("*.response.raw.txt"))
+                raw_response_path = raw_responses[-1] if raw_responses else raw_response_path
+            usage_path = directory / "usage.json.gz"
+            if not usage_path.is_file():
+                usages = sorted(directory.glob("*.usage.json.gz"))
+                usage_path = usages[-1] if usages else usage_path
+            response = (
+                read_json(response_path)
+                if response_path.is_file()
+                else (
+                    raw_response_path.read_text(encoding="utf-8")
+                    if raw_response_path.is_file()
+                    else {}
+                )
+            )
+            usage = read_json(usage_path) if usage_path.is_file() else {}
+            retained_evidence: dict[str, Any] = {}
+            for key_name, filename in (
+                ("validation", "validation.json.gz"),
+                ("identity", "identity.json.gz"),
+                ("behavior", "behavior.json.gz"),
+                ("worker_telemetry", "worker_telemetry.json.gz"),
+                ("canonical_response", "canonical_response.json.gz"),
+                ("metadata_validation", "metadata-validation.json.gz"),
+                ("response_diagnostics", "response-diagnostics.json.gz"),
+            ):
+                evidence_path = directory / filename
+                if evidence_path.is_file():
+                    retained_evidence[key_name] = read_json(evidence_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ArtifactIncompleteError(
+                "retained native provider evidence is unreadable"
+            ) from exc
+        usage_total = usage.get("totalTokens") if isinstance(usage, Mapping) else None
+        retryable = manifest.get("artifact_complete") is not True or (
+            str(manifest.get("terminal_status", "completed")) != "completed"
+            and manifest.get("charged") is not True
+            and not (
+                isinstance(usage_total, int)
+                and not isinstance(usage_total, bool)
+                and usage_total > 0
+            )
+        )
+        if retryable:
+            self.turns.archive_retryable_manifest(directory)
+            return None
+        # Retry transport files can be appended after the completed attempt
+        # manifest.  The manifest-listed evidence remains authoritative and
+        # every listed digest is still checked.
+        self.turns.verify_turn(directory, allow_extra=True)
+        status = str(manifest.get("terminal_status", "completed"))
+        return {
+            "status": status,
+            "accepted": bool(manifest.get("request_accepted", False)),
+            "content": bool(manifest.get("content_received", False)),
+            "charged": manifest.get("charged"),
+            "uncharged": manifest.get("uncharged"),
+            "response": response,
+            "response_text": (
+                raw_response_path.read_text(encoding="utf-8")
+                if raw_response_path.is_file()
+                else None
+            ),
+            "response_projection_valid": isinstance(response, Mapping)
+            and is_generated_policy(response),
+            "usage": usage if isinstance(usage, Mapping) else {},
+            "provider_thread_id": manifest.get("provider_thread_id"),
+            "provider_turn_id": manifest.get("provider_turn_id"),
+            "retained": True,
+            "error": manifest.get("error"),
+            **retained_evidence,
+        }
+
+    def has_retained(self, request: Mapping[str, Any]) -> bool:
+        return self._retained(request) is not None
+
+    def _archive_conflicting_turn(self, directory: Path, key: str) -> None:
+        manifest_path = directory / "turn-manifest.json.gz"
+        if not manifest_path.is_file():
+            return
+        try:
+            manifest = read_json(manifest_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ArtifactIncompleteError(
+                "existing native provider evidence is unreadable"
+            ) from exc
+        if not isinstance(manifest, Mapping):
+            raise ArtifactIncompleteError("existing native provider manifest is invalid")
+        if manifest.get("request_idempotency_key") == key:
+            return
+        suffix = _sha256({"request_idempotency_key": key})[:16]
+        archived = directory.with_name(f"{directory.name}.attempt-{suffix}")
+        attempt = 1
+        while archived.exists():
+            archived = directory.with_name(f"{directory.name}.attempt-{suffix}-{attempt:02d}")
+            attempt += 1
+        os.replace(directory, archived)
+
+    def _evidence(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        value = dict(result)
+        response = value.get("response")
+        response_text = value.get("response_text")
+        if isinstance(response, (str, bytes, bytearray)):
+            try:
+                decoded = json.loads(
+                    response.decode("utf-8")
+                    if isinstance(response, (bytes, bytearray))
+                    else response
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, Mapping):
+                response = dict(decoded)
+                value["response"] = response
+        projection_value = response if response is not None else response_text
+        projection_diagnostics = generated_policy_diagnostics(projection_value)
+        value["response_projection_valid"] = is_generated_policy(projection_value)
+        existing_diagnostics = value.get("response_diagnostics")
+        if isinstance(existing_diagnostics, Sequence) and not isinstance(
+            existing_diagnostics, (str, bytes, bytearray)
+        ):
+            projection_diagnostics = tuple(
+                [dict(item) for item in existing_diagnostics if isinstance(item, Mapping)]
+                or projection_diagnostics
+            )
+        value["response_diagnostics"] = [dict(item) for item in projection_diagnostics]
+        source = response.get("source") if isinstance(response, Mapping) else None
+        if not isinstance(value.get("response_text"), str) and response is not None:
+            value["response_text"] = (
+                response
+                if isinstance(response, str)
+                else json.dumps(response, sort_keys=True, separators=(",", ":"))
+            )
+        if isinstance(source, str):
+            validation = validate_policy(
+                source,
+                self.sandbox_limits,
+                scientific=True,
+            )
+            value["validation"] = validation.as_dict()
+            value["identity"] = validation.identity.as_dict()
+            value["validation_completed"] = True
+            canonical_response = dict(cast(Mapping[str, Any], response))
+            declared_fields = cast(Mapping[str, Any], response).get("used_fields")
+            declared = (
+                [str(item) for item in declared_fields if isinstance(item, str)]
+                if isinstance(declared_fields, list)
+                else []
+            )
+            extracted = list(accessed_policy_fields(source)) if validation.valid else []
+            matches = (
+                validation.valid
+                and len(declared) == len(set(declared))
+                and sorted(declared) == extracted
+            )
+            value["metadata_validation"] = {
+                "schema_version": "mforge.native.metadata-validation.v1",
+                "status": (
+                    "matched" if matches else "mismatch" if validation.valid else "not_validated"
+                ),
+                "declared_used_fields": declared,
+                "extracted_used_fields": extracted,
+                "errors": (
+                    []
+                    if matches or not validation.valid
+                    else [
+                        {
+                            "code": "used_fields_mismatch",
+                            "message": (
+                                "declared used_fields do not match fields extracted "
+                                "from validated source"
+                            ),
+                        }
+                    ]
+                ),
+            }
+            if validation.valid:
+                try:
+                    behavior, telemetry = _native_behavior(source, self.sandbox_limits)
+                except Exception as error:
+                    value["behavior"] = {
+                        "status": "failed",
+                        "error_type": getattr(error, "error_type", type(error).__name__),
+                        "error": str(error),
+                    }
+                    retained_telemetry = getattr(error, "telemetry", {})
+                    value["worker_telemetry"] = (
+                        dict(retained_telemetry) if isinstance(retained_telemetry, Mapping) else {}
+                    )
+                else:
+                    value["behavior"] = behavior
+                    value["worker_telemetry"] = telemetry
+            value["canonical_response"] = canonical_response
+        provenance = value.get("provenance")
+        value["provenance"] = {
+            **(dict(provenance) if isinstance(provenance, Mapping) else {}),
+            "provider_request_id": value.get("provider_request_id", value.get("request_id")),
+            "provider_thread_id": value.get("provider_thread_id", value.get("thread_id")),
+            "provider_turn_id": value.get("provider_turn_id", value.get("turn_id")),
+            "model": value.get("model"),
+            "effort": value.get("effort"),
+            "transport_sha256": value.get("transport_sha256"),
+        }
+        return value
+
+    def _record(self, request: Mapping[str, Any], result: Mapping[str, Any]) -> Mapping[str, Any]:
+        value = self._evidence(result)
+        generation = int(request.get("generation", 0))
+        slot = str(request.get("slot", "slot-00"))
+        phase = self._phase(request)
+        directory = self.layout.generation_slot_phase(generation, slot, phase)
+        usage = value.get("usage") if isinstance(value.get("usage"), Mapping) else {}
+        status = str(value.get("status", "completed"))
+        manifest_path = directory / "turn-manifest.json.gz"
+        retained_manifest: Any = None
+        if manifest_path.is_file():
+            retained_manifest = read_json(manifest_path)
+            if not isinstance(retained_manifest, Mapping) or retained_manifest.get(
+                "request_idempotency_key"
+            ) != self._key(request):
+                self._archive_conflicting_turn(directory, self._key(request))
+                retained_manifest = None
+        if directory.exists() and (
+            not isinstance(retained_manifest, Mapping)
+            or not _manifest_is_terminal(retained_manifest)
+        ):
+            artifact_prefix = self.turns.artifact_prefix(directory, value, slot)
+            usage_path = directory / f"{artifact_prefix}.usage.json.gz"
+            if not usage_path.is_file() and usage:
+                with contextlib.suppress(FileExistsError):
+                    write_json(usage_path, usage, exclusive=True)
+        if not directory.exists():
+            self.turns.write_turn(
+                generation=generation,
+                slot=slot,
+                phase=phase,
+                request=request,
+                request_text=str(request.get("prompt", "")),
+                request_text_redact=False,
+                response=value.get("response"),
+                response_text=value.get("response_text"),
+                source=(value.get("response") or {}).get("source")
+                if isinstance(value.get("response"), Mapping)
+                else None,
+                usage=cast(Mapping[str, Any], usage),
+                identity=cast(Mapping[str, Any] | None, value.get("identity")),
+                behavior=cast(Mapping[str, Any] | None, value.get("behavior")),
+                provenance=cast(Mapping[str, Any] | None, value.get("provenance")),
+                validation=cast(Mapping[str, Any] | None, value.get("validation")),
+                worker_telemetry=cast(Mapping[str, Any] | None, value.get("worker_telemetry")),
+                canonical_response=cast(Mapping[str, Any] | None, value.get("canonical_response")),
+                provider_raw=value,
+                system_prompt=str(request.get("system_prompt", ""))
+                if request.get("system_prompt") is not None
+                else None,
+                output_schema=cast(Mapping[str, Any] | None, request.get("output_schema")),
+                response_projection_valid=(
+                    bool(value.get("response_projection_valid"))
+                    if isinstance(value.get("response_projection_valid"), bool)
+                    else None
+                ),
+                response_diagnostics=cast(
+                    Sequence[Mapping[str, Any]] | None, value.get("response_diagnostics")
+                ),
+                transport_diagnostics=cast(
+                    Sequence[Mapping[str, Any]] | None,
+                    value.get("transport_diagnostics"),
+                ),
+                metadata_validation=cast(
+                    Mapping[str, Any] | None,
+                    value.get("metadata_validation"),
+                ),
+                codex_profile={"model": request.get("model"), "effort": request.get("effort")},
+                rpc=value.get("rpc", []),
+                events=value.get("events", []),
+                wire=value.get("wire", []),
+                stdout=value.get("stdout", []),
+                stderr=value.get("stderr", ""),
+                request_idempotency_key=self._key(request),
+                provider_thread_id=str(value.get("provider_thread_id", value.get("thread_id")))
+                if value.get("provider_thread_id", value.get("thread_id")) is not None
+                else None,
+                provider_turn_id=str(value.get("provider_turn_id", value.get("turn_id")))
+                if value.get("provider_turn_id", value.get("turn_id")) is not None
+                else None,
+                terminal_status=status,
+                request_accepted=bool(value.get("accepted", value.get("accepted_turn", False))),
+                charged=value.get("charged") if isinstance(value.get("charged"), bool) else None,
+                uncharged=value.get("uncharged")
+                if isinstance(value.get("uncharged"), bool)
+                else None,
+                content_received=bool(value.get("content", value.get("response_text"))),
+                validation_completed=bool(value.get("validation_completed", False)),
+                error=str(value.get("error")) if value.get("error") else None,
+            )
+        elif isinstance(retained_manifest, Mapping):
+            if retained_manifest.get("artifact_complete") is True and (
+                retained_manifest.get("terminal_status") == "completed"
+                or retained_manifest.get("charged") is True
+            ):
+                self.turns.verify_turn(directory)
+            else:
+                self.turns.record_existing_turn(
+                    directory,
+                    generation=generation,
+                    slot=slot,
+                    phase=phase,
+                    request=request,
+                    result=value,
+                )
+                self.turns.verify_turn(directory)
+        else:
+            self.turns.record_existing_turn(
+                directory,
+                generation=generation,
+                slot=slot,
+                phase=phase,
+                request=request,
+                result=value,
+            )
+            self.turns.verify_turn(directory)
+        # The turn directory is fsynced by TurnArtifactStore.  The workspace
+        # manifest is reconciled at the session boundary; rebuilding it here
+        # would recursively hash every prior transport artifact after every
+        # provider turn.
+        with self._lock:
+            self.state.record_provider_turn(
+                idempotency_key=self._key(request),
+                generation=generation,
+                slot=slot,
+                phase=phase,
+                state="completed" if status == "completed" else "failed",
+                artifact_path=str(directory),
+                usage=cast(Mapping[str, Any], usage),
+                provider_thread_id=str(value.get("provider_thread_id", value.get("thread_id")))
+                if value.get("provider_thread_id", value.get("thread_id")) is not None
+                else None,
+                provider_turn_id=str(value.get("provider_turn_id", value.get("turn_id")))
+                if value.get("provider_turn_id", value.get("turn_id")) is not None
+                else None,
+                error=str(value.get("error")) if value.get("error") else None,
+            )
+            hourly_usage = self.state.hourly_token_usage(self.hourly_token_limit)
+        self._emit("hourly_token_usage_updated", **hourly_usage)
+        if hourly_usage["hourly_limit_reached"]:
+            self._emit(
+                "hourly_token_limit_reached",
+                **hourly_usage,
+                idempotency_key=(f"hourly-token-limit:{hourly_usage['hourly_retry_after']}"),
+            )
+        return value
+
+    def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        retained = self._retained(request)
+        if retained is not None:
+            return retained
+        if self.session.budget_exhausted():
+            raise _NativeSessionBudgetExpired
+        if self._hourly_limit_reached():
+            raise _NativeHourlyTokenLimit
+        payload = self._payload(request)
+        try:
+            value = self.provider.generate(payload)
+            provider_result = value if isinstance(value, Mapping) else {"response": value}
+            return self._record(request, cast(Mapping[str, Any], provider_result))
+        except KeyboardInterrupt:
+            raise
+        except BaseException as error:
+            evidence = getattr(error, "evidence", {})
+            failure_result: dict[str, Any] = {
+                "status": "failed",
+                "error": f"{type(error).__name__}: {error}",
+            }
+            if isinstance(evidence, Mapping):
+                failure_result.update(cast(Mapping[str, Any], evidence))
+            try:
+                self._record(request, failure_result)
+            except ArtifactIncompleteError as artifact_error:
+                error.add_note(f"artifact retention also failed: {artifact_error}")
+            raise
+
+    def repair(
+        self, request: Mapping[str, Any], diagnostics: Sequence[Mapping[str, Any]]
+    ) -> Mapping[str, Any]:
+        retained = self._retained(request)
+        if retained is not None:
+            return retained
+        if self.session.budget_exhausted():
+            raise _NativeSessionBudgetExpired
+        if self._hourly_limit_reached():
+            raise _NativeHourlyTokenLimit
+        payload = self._payload(request)
+        payload["diagnostics"] = [dict(item) for item in diagnostics]
+        try:
+            repair = getattr(self.provider, "repair", None)
+            value = (
+                repair(payload, diagnostics)
+                if callable(repair)
+                else self.provider.generate(payload)
+            )
+            result = value if isinstance(value, Mapping) else {"response": value}
+            return self._record(request, cast(Mapping[str, Any], result))
+        except KeyboardInterrupt:
+            raise
+        except BaseException as error:
+            evidence = getattr(error, "evidence", {})
+            result = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
+            if isinstance(evidence, Mapping):
+                result.update(dict(evidence))
+            try:
+                self._record(request, result)
+            except ArtifactIncompleteError as artifact_error:
+                error.add_note(f"artifact retention also failed: {artifact_error}")
+            raise
+
+    def close(self) -> None:
+        close = getattr(self.provider, "close", None)
+        if callable(close):
+            close()
+
+
+class NativeExperimentAdapter:
+    """The default production adapter for ``mforge experiment``."""
+
+    def __init__(
+        self,
+        *,
+        provider: Any | None = None,
+        engine: Any | None = None,
+        evaluator: Any | None = None,
+        backend: Any | None = None,
+    ) -> None:
+        self.provider = provider
+        self.engine = engine
+        self.evaluator = evaluator
+        self.backend = backend
+
+    @staticmethod
+    def model_turns_used(
+        layout: ExperimentLayout,
+        state: ExperimentStateStore,
+    ) -> int:
+        """Return the fail-safe global turn count enforced by the coordinator."""
+
+        ledger_turns = int(state.cumulative().get("provider_turns", 0))
+        checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
+        if not checkpoint_path.is_file():
+            return ledger_turns
+        try:
+            checkpoint = read_json(checkpoint_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise NativeExperimentError("cannot read native generation checkpoint") from error
+        if not isinstance(checkpoint, Mapping):
+            raise NativeExperimentError("native generation checkpoint must be an object")
+        if checkpoint.get("schema_version") != GENERATION_SCHEMA_VERSION:
+            raise NativeExperimentError(
+                f"Unsupported native generation checkpoint schema: "
+                f"{checkpoint.get('schema_version')!r}. This runtime accepts only "
+                f"{GENERATION_SCHEMA_VERSION}. Create a fresh workspace."
+            )
+        reserved_turns = (
+            checkpoint.get("model_turns_used") if isinstance(checkpoint, Mapping) else None
+        )
+        return max(
+            ledger_turns,
+            (
+                int(reserved_turns)
+                if isinstance(reserved_turns, int)
+                and not isinstance(reserved_turns, bool)
+                and reserved_turns >= 0
+                else 0
+            ),
+        )
+
+    def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
+        system, schema, request, repair, context, proposal, semantic, baseline = _load_assets()
+        slot_briefs = _load_slot_briefs()
+        if config.kind != "heg":
+            raise WorkspaceError(f"unsupported experiment kind {config.kind!r}")
+        if config.preset != "native":
+            raise WorkspaceError(f"unsupported native experiment preset {config.preset!r}")
+        if config.model.provider != "codex":
+            raise WorkspaceError(
+                f"unsupported model.provider {config.model.provider!r}; native provider is codex"
+            )
+        if config.model.effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
+            raise WorkspaceError(f"unsupported model.effort {config.model.effort!r}")
+        if config.search.selection not in NATIVE_SELECTION_POLICIES:
+            raise WorkspaceError(f"unsupported native selection policy {config.search.selection!r}")
+        unsupported_baselines = set(config.evaluation.baselines).difference(
+            {"random", "structural"}
+        )
+        if unsupported_baselines:
+            raise WorkspaceError(
+                f"unsupported native baseline policies: {sorted(unsupported_baselines)!r}"
+            )
+        if (
+            not system.strip()
+            or not schema
+            or not context
+            or not proposal
+            or not semantic
+            or not baseline
+        ):
+            raise WorkspaceError("native preset assets are empty")
+        heg = Path(__file__).resolve().parents[4] / "heg"
+        if not (heg / "src").is_dir():
+            raise WorkspaceError(f"HEG backend is unavailable at {heg}")
+        try:
+            from mutation_forge.backends.heg import HegBackend
+
+            backend = HegBackend(heg, graph_mode=config.evaluation.graph_mode)
+            backend.close()
+        except Exception as error:
+            raise WorkspaceError(f"HEG backend is not functional at {heg}: {error}") from error
+        return {
+            "native_assets": {
+                "system_prompt_sha256": hashlib.sha256(system.encode()).hexdigest(),
+                "request_prompt_sha256": hashlib.sha256(request.encode()).hexdigest(),
+                "repair_prompt_sha256": hashlib.sha256(repair.encode()).hexdigest(),
+                "output_schema_sha256": _sha256(schema),
+                "context_schema_sha256": _sha256(context),
+                "proposal_schema_sha256": _sha256(proposal),
+                "semantic_descriptions_sha256": _sha256(semantic),
+                "baseline_rankers_sha256": _sha256(baseline),
+                "mutation_briefs_sha256": _sha256(slot_briefs),
+            },
+            "heg": {"repo": str(heg), "backend": "generic"},
+        }
+
+    @staticmethod
+    def _parent_data(
+        state: ExperimentStateStore, layout: ExperimentLayout
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        sources: dict[str, str] = {}
+        records: dict[str, Any] = {}
+        rows = state.connection.execute(
+            "SELECT candidate_id,archive_path,parent_id,behavior_json FROM candidates "
+            "WHERE status NOT IN ('duplicate','invalid') ORDER BY generation DESC, candidate_id"
+        ).fetchall()
+        for row in rows:
+            candidate_id = str(row["candidate_id"])
+            archive_path = row["archive_path"]
+            source_path = (
+                Path(str(archive_path))
+                if archive_path
+                else layout.archive / "sources" / f"{candidate_id}.py"
+            )
+            try:
+                source = source_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            sources[candidate_id] = source
+            try:
+                behavior = json.loads(str(row["behavior_json"]))
+            except json.JSONDecodeError:
+                behavior = {}
+            records[candidate_id] = {
+                "source": source,
+                "parent_id": str(row["parent_id"] or "root"),
+                "behavior": behavior if isinstance(behavior, Mapping) else {},
+            }
+        return sources, records
+
+    @staticmethod
+    def _select_parents(
+        generation: int,
+        candidates: Sequence[Candidate],
+        slots: int,
+        selection: str = "elite-diversity",
+        _results: Sequence[SlotResult] = (),
+        *,
+        global_best_id: str | None = None,
+    ) -> Mapping[str, str]:
+        del generation, _results
+        if selection not in NATIVE_SELECTION_POLICIES:
+            raise NativeExperimentError(f"unsupported native selection policy {selection!r}")
+
+        def score(candidate: Candidate) -> float:
+            value = (
+                candidate.behavior_signature.get("score", 0.0)
+                if isinstance(candidate.behavior_signature, Mapping)
+                else 0.0
+            )
+            return (
+                float(value)
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else 0.0
+            )
+
+        def candidate_id(candidate: Candidate) -> str:
+            return f"g{candidate.generation:04d}-{candidate.slot}"
+
+        ordered = sorted(
+            candidates,
+            key=lambda item: (
+                -score(item),
+                item.normalized_ast_sha256,
+            ),
+        )
+        if not ordered:
+            return {f"slot-{index:02d}": "native-baseline" for index in range(slots)}
+        if selection == "persistent-elite-weighted-diversity":
+            current_best = ordered[0]
+            elite_id = global_best_id or candidate_id(current_best)
+            global_count = min(slots, max(1, (3 * slots + 4) // 8))
+            slots_remaining = slots - global_count
+            current_count = min(slots_remaining, max(1, (2 * slots + 4) // 8))
+            slots_remaining -= current_count
+            diversity_count = 1 if slots_remaining else 0
+            weighted_count = slots_remaining - diversity_count
+
+            selected_ids = [elite_id] * global_count
+            selected_ids.extend([candidate_id(current_best)] * current_count)
+
+            eligible = ordered[: max(1, (len(ordered) + 1) // 2)]
+            if weighted_count:
+                weights = [max(0.0, score(candidate)) for candidate in eligible]
+                if not any(weights):
+                    weights = [1.0] * len(eligible)
+                total_weight = sum(weights)
+                quotas = [weighted_count * weight / total_weight for weight in weights]
+                counts = [int(quota) for quota in quotas]
+                leftovers = weighted_count - sum(counts)
+                remainder_order = sorted(
+                    range(len(eligible)),
+                    key=lambda index: (
+                        -(quotas[index] - counts[index]),
+                        -score(eligible[index]),
+                        candidate_id(eligible[index]),
+                    ),
+                )
+                for index in remainder_order[:leftovers]:
+                    counts[index] += 1
+                for candidate, count in zip(eligible, counts, strict=True):
+                    selected_ids.extend([candidate_id(candidate)] * count)
+
+            if diversity_count:
+                candidate_by_id = {candidate_id(candidate): candidate for candidate in eligible}
+                selected_candidates = [
+                    candidate_by_id[value] for value in selected_ids if value in candidate_by_id
+                ]
+                unused = [
+                    candidate
+                    for candidate in eligible
+                    if candidate_id(candidate) not in selected_ids
+                ]
+                diversity_pool = unused or eligible
+                diverse = max(
+                    diversity_pool,
+                    key=lambda candidate: (
+                        min(
+                            sum(
+                                left != right
+                                for left, right in zip(
+                                    candidate.normalized_ast_sha256,
+                                    parent.normalized_ast_sha256,
+                                    strict=True,
+                                )
+                            )
+                            for parent in selected_candidates
+                        )
+                        if selected_candidates
+                        else 0,
+                        score(candidate),
+                        candidate.normalized_ast_sha256,
+                    ),
+                )
+                selected_ids.append(candidate_id(diverse))
+
+            return {
+                f"slot-{index:02d}": parent_id
+                for index, parent_id in enumerate(selected_ids[:slots])
+            }
+
+        selected: list[Candidate] = [ordered[0]]
+        while len(selected) < min(slots, len(ordered)):
+            remaining = [candidate for candidate in ordered if candidate not in selected]
+            selected.append(
+                max(
+                    remaining,
+                    key=lambda candidate: (
+                        min(
+                            sum(
+                                left != right
+                                for left, right in zip(
+                                    candidate.normalized_ast_sha256,
+                                    parent.normalized_ast_sha256,
+                                    strict=True,
+                                )
+                            )
+                            for parent in selected
+                        ),
+                        candidate.behavior_signature.get("score", 0.0)
+                        if isinstance(candidate.behavior_signature, Mapping)
+                        else 0.0,
+                        candidate.normalized_ast_sha256,
+                    ),
+                )
+            )
+        selected = (selected * ((slots + len(selected) - 1) // len(selected)))[:slots]
+        return {
+            f"slot-{index:02d}": f"g{candidate.generation:04d}-{candidate.slot}"
+            for index, candidate in enumerate(selected)
+        }
+
+    def run(
+        self,
+        config: ExperimentConfig,
+        layout: ExperimentLayout,
+        state: ExperimentStateStore,
+        session: SessionContext,
+        *,
+        observer: Any | None = None,
+        event_callback: Any | None = None,
+        profiling: bool | None = None,
+        effective_max_model_turns: int | None = None,
+        control: ExperimentControl | None = None,
+    ) -> Mapping[str, Any]:
+        (
+            system_prompt,
+            output_schema,
+            request_prompt,
+            repair_prompt,
+            context_schema,
+            proposal_schema,
+            semantic_descriptions,
+            baseline_rankers,
+        ) = _load_assets()
+        slot_briefs = _load_slot_briefs()
+        target_lengths_backend = self.backend
+        close_target_lengths_backend = False
+        if target_lengths_backend is None:
+            from mutation_forge.backends.heg import HegBackend
+
+            target_lengths_backend = HegBackend(
+                Path(__file__).resolve().parents[4] / "heg",
+                graph_mode=config.evaluation.graph_mode,
+            )
+            close_target_lengths_backend = True
+        try:
+            all_target_forbidden_lengths_by_order = {
+                str(order): list(target_lengths_backend.target_forbidden_lengths(order))
+                for order in scheduled_order_domain(config.evaluation)
+            }
+        finally:
+            if close_target_lengths_backend:
+                target_lengths_backend.close()
+        auth_path = Path.home() / ".codex" / "auth.json"
+        provider = self.provider or LocalCodexAppServerProvider(
+            model=config.model.name,
+            effort=config.model.effort,
+            concurrency=config.model.concurrency,
+            max_repairs=config.model.max_repairs,
+            turn_timeout_base_seconds=config.run.turn_timeout_base_seconds,
+            auth_json=auth_path if auth_path.is_file() else None,
+            persist_artifacts=False,
+        )
+        callback = observer if observer is not None else event_callback
+        wrapped = _NativeProvider(
+            provider,
+            layout,
+            state,
+            session,
+            sandbox_limits=SandboxLimits(),
+            hourly_token_limit=config.run.max_total_tokens_per_hour,
+            observer=callback,
+        )
+        archive = _NativeArchive(layout.archive)
+        parent_sources, parent_records = self._parent_data(state, layout)
+        unfinished_program_ids = _unfinished_generation_program_ids(
+            layout.artifacts / "native-generation-checkpoint.json.gz"
+        )
+        baseline_sources = archive.existing_sources(exclude_program_ids=unfinished_program_ids)
+        profiling_enabled = config.run.profiling_enabled if profiling is None else bool(profiling)
+        model_turn_limit = (
+            config.search.max_model_turns
+            if effective_max_model_turns is None
+            else effective_max_model_turns
+        )
+
+        def emit(event_type: str, **payload: Any) -> None:
+            if not callable(callback):
+                return
+            try:
+                callback(event_type, payload)
+            except TypeError:
+                try:
+                    callback(event_type, **payload)
+                except Exception:
+                    return
+            except Exception:
+                return
+
+        def pretty(value: object) -> str:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
+
+        def fenced(value: object, language: str = "json") -> str:
+            rendered = pretty(value) if not isinstance(value, str) else value.rstrip()
+            return f"```{language}\n{rendered}\n```"
+
+        def render_prompt(**values: Any) -> str:
+            generation = int(values.get("generation", 0))
+            generation_orders = orders_for_generation(
+                config.evaluation,
+                generation,
+            )
+            target_forbidden_lengths_by_order = {
+                str(order): all_target_forbidden_lengths_by_order[str(order)]
+                for order in generation_orders
+            }
+            slot = str(values.get("slot", "slot-00"))
+            phase = str(values.get("phase", "initial"))
+            brief = str(values.get("brief", "")).strip()
+            if not brief or brief.startswith("mutation brief generation"):
+                brief = (
+                    "Generate one deterministic ranker for this native mutation search. "
+                    "The host supplies legal proposals and performs authoritative scoring; "
+                    "the policy only ranks the supplied objects."
+                )
+            parent_source = str(values.get("parent_source", "")).strip()
+            parent_metadata = values.get("parent_metadata", {})
+            parent_metadata_view = (
+                {
+                    str(key): item
+                    for key, item in parent_metadata.items()
+                    if key not in {"source", "parent_id", "program_id", "candidate_id"}
+                }
+                if isinstance(parent_metadata, Mapping)
+                else {}
+            )
+            feedback = str(values.get("search_feedback", "")).strip()
+            archive_context = str(values.get("archive_context", "")).strip()
+            evaluation_schedule: dict[str, Any] = {
+                "order_schedule": config.evaluation.order_schedule,
+                "orders": list(generation_orders),
+            }
+            if config.evaluation.order_schedule == "adaptive":
+                evaluation_schedule.update(
+                    {
+                        "min_order": config.evaluation.min_order,
+                        "max_order": config.evaluation.max_order,
+                        "orders_per_generation": config.evaluation.orders_per_generation,
+                    }
+                )
+            config_view = {
+                "experiment_id": config.exp_id,
+                "generation": generation,
+                "slot": slot,
+                "search": {
+                    "population_size": config.search.population_size,
+                    "max_generations": config.search.max_generations,
+                    "max_model_turns": model_turn_limit,
+                    "selection": config.search.selection,
+                },
+                "evaluation": {
+                    **evaluation_schedule,
+                    "graph_seeds": list(config.evaluation.graph_seeds),
+                    "policy_seeds": list(config.evaluation.policy_seeds),
+                    "horizon": config.evaluation.horizon,
+                    "proposal_pool_size": config.evaluation.proposal_pool_size,
+                    "baselines": list(config.evaluation.baselines),
+                    "replay": config.evaluation.replay,
+                },
+                "target": "erdos_gyarfas",
+                "target_forbidden_lengths_by_order": (target_forbidden_lengths_by_order),
+                "target_feature_limits_by_order": {
+                    str(order): FeatureLimits(forbidden_lengths=tuple(lengths)).as_dict()
+                    for order, lengths in target_forbidden_lengths_by_order.items()
+                },
+                "resources": {
+                    "workers": config.resources.workers,
+                    "thread_count": config.resources.thread_count,
+                },
+            }
+            feature_limits_by_order = {
+                int(order): FeatureLimits(forbidden_lengths=tuple(lengths))
+                for order, lengths in target_forbidden_lengths_by_order.items()
+            }
+            witness_caps_by_order = {
+                str(order): limits.witness_sample_cap
+                for order, limits in feature_limits_by_order.items()
+            }
+            local_risk_budgets_by_order = {
+                str(order): limits.local_risk_budget
+                for order, limits in feature_limits_by_order.items()
+            }
+            sandbox_limits = SandboxLimits()
+            numeric_scales = {
+                "ctx.order": {
+                    "values_in_this_experiment": list(generation_orders),
+                },
+                "ctx.forbidden_lengths": {
+                    "values_by_order": target_forbidden_lengths_by_order,
+                },
+                "ctx.capped_cycle_counts": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum": DEFAULT_WITNESS_CAP,
+                },
+                "ctx.weighted_penalty": {
+                    "minimum": 0,
+                    "note": "pool-constant current-state score; not a candidate signal",
+                },
+                "ctx.step": {
+                    "minimum": 0,
+                    "maximum": config.evaluation.horizon - 1,
+                },
+                "ctx.remaining_steps": {
+                    "minimum": 0,
+                    "maximum": config.evaluation.horizon - 1,
+                },
+                "ctx.stagnation": {
+                    "minimum": 0,
+                    "maximum": config.evaluation.horizon,
+                },
+                "ctx.recent_best_improvement": {
+                    "minimum": 0,
+                    "maximum": 1,
+                },
+                "ctx.recent_acceptance_rate": {"minimum": 0, "maximum": 1},
+                "ctx.recent_duplicate_rate": {"minimum": 0, "maximum": 1},
+                "proposal.k": {"values": [2, 3, 4]},
+                "proposal.broken_sampled_witnesses_by_length": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum_by_order": witness_caps_by_order,
+                },
+                "proposal.removed_edge_load_sum_by_length": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum_by_order": {
+                        order: cap * 4 for order, cap in witness_caps_by_order.items()
+                    },
+                },
+                "proposal.removed_edge_load_max_by_length": {
+                    "per_item_minimum": 0,
+                    "per_item_maximum_by_order": witness_caps_by_order,
+                },
+                "proposal.distance_fields": {
+                    "minimum": 0,
+                    "maximum": "ctx.order (sentinel when the distance budget is exhausted)",
+                },
+                "proposal.local_triangle_risk": {
+                    "minimum": 0,
+                    "operation_budget_by_order": local_risk_budgets_by_order,
+                },
+                "proposal.local_c4_risk": {
+                    "minimum": 0,
+                    "operation_budget_by_order": local_risk_budgets_by_order,
+                },
+            }
+            sections = [
+                "# Mutation Forge native ranker task",
+                "",
+                "## Objective",
+                "",
+                request_prompt.strip(),
+                "",
+                "## Mutation brief",
+                "",
+                brief,
+                "",
+                "## Host boundary",
+                "",
+                "The host supplies the concrete `ctx` and legal `proposal` objects at evaluation "
+                "time. It owns legality, authoritative scoring, and verification. Do not invent "
+                "proposals, post-rewrite scores, proposal IDs, hidden state, or unavailable "
+                "fields.",
+                "",
+                "## Execution limits",
+                "",
+                "The host rejects source that exceeds any of these deterministic limits. "
+                "Keep the ranker compact; do not spend the budget on repeated equivalent "
+                "expressions or long literal tables.",
+                "",
+                fenced(sandbox_limits.as_dict()),
+                "",
+                "## Parent policy",
+                "",
+                (
+                    fenced(parent_source, "python")
+                    if parent_source
+                    else "This is root generation; no parent policy is available."
+                ),
+                "",
+                "## Parent evaluation metadata",
+                "",
+                (
+                    fenced(parent_metadata_view)
+                    if parent_metadata_view
+                    else "No parent evaluation metadata is available."
+                ),
+                "",
+                "## Search feedback",
+                "",
+                feedback or "No prior search feedback is available.",
+                "",
+                "## Archive context",
+                "",
+                archive_context or "No prior archive context is available.",
+                "",
+                "## Experiment configuration",
+                "",
+                fenced(config_view),
+                "",
+                "## Context contract",
+                "",
+                "The host context follows this schema:",
+                "",
+                fenced(context_schema),
+                "",
+                "## Proposal contract",
+                "",
+                "The host proposal follows this schema; all proposals reaching the ranker are "
+                "legal:",
+                "",
+                fenced(proposal_schema),
+                "",
+                "## Field semantics",
+                "",
+                fenced(semantic_descriptions),
+                "",
+                "## Numeric scales and bounds",
+                "",
+                fenced(numeric_scales),
+                "",
+                "## Baseline rankers",
+                "",
+                fenced(baseline_rankers),
+                "",
+                "## Output contract",
+                "",
+                "Return exactly one JSON object and no prose outside it. "
+                "The object must match this schema:",
+                "",
+                fenced(output_schema),
+            ]
+            if phase == "repair":
+                diagnostics = values.get("diagnostics", ())
+                repair_source = str(values.get("repair_source", ""))
+                repair_attempt = int(values.get("repair_attempt", 1))
+                max_repairs = int(values.get("max_repairs", config.model.max_repairs))
+                remaining_repairs = int(values.get("remaining_repairs", 0))
+                sections.extend(
+                    [
+                        "",
+                        "## Repair instructions",
+                        "",
+                        repair_prompt.strip(),
+                        "",
+                        f"Repair attempt {repair_attempt} of {max_repairs}; "
+                        f"{remaining_repairs} repairs remain after this attempt.",
+                        "",
+                        "## Previous response/source",
+                        "",
+                        fenced(repair_source, "python"),
+                        "",
+                        "## Validation diagnostics",
+                        "",
+                        fenced([dict(item) for item in diagnostics], "json"),
+                    ]
+                )
+            return "\n".join(sections).rstrip() + "\n"
+
+        best_objective: float | None = None
+        best_candidate_id: str | None = None
+        last_ir: float | None = None
+        last_timing_profile: Mapping[str, Any] | None = None
+        evaluation_summary_cache: dict[str, dict[str, Any]] = {}
+
+        def stored_evaluation_summary(candidate_id: str) -> dict[str, Any]:
+            cached = evaluation_summary_cache.get(candidate_id)
+            if cached is not None:
+                return dict(cached)
+            parsed = state.evaluation_summary(f"{candidate_id}:development")
+            evaluation_summary_cache[candidate_id] = parsed
+            return dict(parsed)
+
+        historical_rows = state.connection.execute(
+            "SELECT candidate_id,mean_auc "
+            "FROM evaluations "
+            "WHERE state='completed' ORDER BY completed_at,candidate_id"
+        ).fetchall()
+        for historical_row in historical_rows:
+            historical_candidate_id = str(historical_row["candidate_id"] or "")
+            historical_metric = historical_row["mean_auc"]
+            if (
+                historical_candidate_id
+                and isinstance(historical_metric, (int, float))
+                and not isinstance(historical_metric, bool)
+                and (best_objective is None or float(historical_metric) > best_objective)
+            ):
+                best_objective = float(historical_metric)
+                best_candidate_id = historical_candidate_id
+
+        def recover_completed_evaluation(
+            candidate: Candidate,
+            candidate_id: str,
+        ) -> Mapping[str, Any] | None:
+            """Recover a completed evaluation written before the DB commit."""
+
+            development_path = (
+                layout.artifacts / "evaluations" / "development" / f"{candidate_id}.json.gz"
+            )
+            if not development_path.is_file():
+                return None
+            try:
+                development = read_json(development_path)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return None
+            if not isinstance(development, Mapping):
+                return None
+            source_identity = development.get("source_identity")
+            if (
+                development.get("schema_version") != EVALUATION_SCHEMA_VERSION
+                or development.get("status") != "completed"
+                or development.get("candidate_id") != candidate_id
+                or not isinstance(source_identity, Mapping)
+                or source_identity.get("source_sha256") != candidate.source_sha256
+                or source_identity.get("normalized_ast_sha256") != candidate.normalized_ast_sha256
+            ):
+                return None
+            observed_settings = development.get("settings")
+            if not isinstance(observed_settings, Mapping):
+                return None
+            expected_settings = {
+                "orders": list(
+                    orders_for_generation(
+                        config.evaluation,
+                        candidate.generation,
+                    )
+                ),
+                "graph_seeds": list(config.evaluation.graph_seeds),
+                "policy_seeds": list(config.evaluation.policy_seeds),
+                "horizon": config.evaluation.horizon,
+                "proposal_pool_size": config.evaluation.proposal_pool_size,
+                "baselines": list(config.evaluation.baselines),
+                "replay": config.evaluation.replay,
+                "witness_cap": DEFAULT_WITNESS_CAP,
+            }
+            if any(
+                observed_settings.get(field_name) != field_value
+                for field_name, field_value in expected_settings.items()
+            ):
+                return None
+            result = dict(development)
+            result["artifacts"] = {"development": str(development_path)}
+            if not config.evaluation.replay:
+                result["replay"] = {"enabled": False, "exact": None}
+                return result
+            replay_path = layout.artifacts / "evaluations" / "replay" / f"{candidate_id}.json.gz"
+            if not replay_path.is_file():
+                return None
+            try:
+                replay = read_json(replay_path)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return None
+            replay_identity = replay.get("source_identity") if isinstance(replay, Mapping) else None
+            if (
+                not isinstance(replay, Mapping)
+                or replay.get("schema_version") != EVALUATION_SCHEMA_VERSION
+                or replay.get("status") != "completed"
+                or replay.get("candidate_id") != candidate_id
+                or not isinstance(replay_identity, Mapping)
+                or replay_identity.get("source_sha256") != candidate.source_sha256
+                or replay_identity.get("normalized_ast_sha256") != candidate.normalized_ast_sha256
+            ):
+                return None
+            result["replay"] = {
+                "enabled": True,
+                "exact": _sha256(development) == _sha256(replay),
+                "artifact": str(replay_path),
+                "sha256": _sha256(replay),
+            }
+            return result
+
+        def render_search_feedback(
+            _generation: int,
+            _slot: str,
+            parent_id: str,
+        ) -> str:
+            summary = stored_evaluation_summary(parent_id)
+            if not summary:
+                return ""
+            return pretty(
+                {
+                    "parent_id": parent_id,
+                    "mean_auc": summary.get("mean_auc"),
+                    "best_auc": summary.get("best_auc"),
+                    "baseline_auc": summary.get("baseline_auc", {}),
+                    "instruction": (
+                        "Keep evidence-backed strengths, change the assigned brief's "
+                        "mechanism, and avoid repeating recorded failure modes."
+                    ),
+                }
+            )
+
+        def render_archive_context(
+            _generation: int,
+            _slot: str,
+            _parent_id: str,
+        ) -> str:
+            rows = state.connection.execute(
+                "SELECT candidate_id,mean_auc "
+                "FROM evaluations "
+                "WHERE state='completed' ORDER BY completed_at, candidate_id"
+            ).fetchall()
+            summaries = [
+                {
+                    "candidate_id": str(row["candidate_id"]),
+                    **stored_evaluation_summary(str(row["candidate_id"])),
+                }
+                for row in rows
+                if row["candidate_id"]
+            ]
+            summaries.sort(
+                key=lambda item: (
+                    -(
+                        float(item["mean_auc"])
+                        if isinstance(item.get("mean_auc"), (int, float))
+                        and not isinstance(item.get("mean_auc"), bool)
+                        else 0.0
+                    ),
+                    str(item["candidate_id"]),
+                )
+            )
+            return pretty({"evaluated_candidates": summaries[:8]}) if summaries else ""
+
+        configured_evaluation_workers = max(1, config.resources.thread_count)
+        backend_repo = getattr(self.backend, "repo", None)
+        if backend_repo is None and self.backend is None:
+            backend_repo = Path(__file__).resolve().parents[4] / "heg"
+        parallel_evaluation = (
+            self.evaluator is None and backend_repo is not None and Path(backend_repo).is_dir()
+        )
+        evaluation_worker_count = configured_evaluation_workers if parallel_evaluation else 1
+
+        # Keep evaluation work in its own pool.  The generation coordinator can
+        # submit a valid candidate here immediately after validation, while the
+        # remaining provider slots are still producing/repairing responses.
+        evaluation_executor = (
+            ProcessPoolExecutor(
+                max_workers=evaluation_worker_count,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+            if parallel_evaluation
+            else None
+        )
+        evaluation_progress_threads: list[threading.Thread] = []
+        evaluation_progress_connections: list[Any] = []
+        streamed_futures: dict[str, Any] = {}
+        published_evaluations: set[str] = set()
+        evaluation_completion_lock = threading.Lock()
+
+        def evaluation_progress_for(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+        ) -> Any:
+            def evaluation_progress(payload: Mapping[str, Any]) -> None:
+                progress_payload = dict(payload)
+                progress_payload.setdefault("candidate_id", program_id)
+                progress_payload.setdefault("generation", candidate.generation)
+                progress_payload.setdefault("slot", candidate.slot)
+                pass_name = progress_payload.get("pass")
+                progress_payload.setdefault(
+                    "phase",
+                    pass_name if isinstance(pass_name, str) else "development",
+                )
+                progress_payload.setdefault("evaluation_id", identity)
+                progress_payload.setdefault("evaluations_active", evaluation_worker_count)
+                emit("evaluation_progress", **progress_payload)
+
+            return evaluation_progress
+
+        def run_evaluation(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+            evaluation_progress: Any,
+        ) -> tuple[Mapping[str, Any], float]:
+            evaluator = self.evaluator or evaluate_candidate
+            evaluation_started = time.monotonic()
+            evaluator_kwargs: dict[str, Any] = {
+                "artifact_root": layout.artifacts,
+                "sandbox_limits": SandboxLimits(),
+            }
+            try:
+                parameters = dict(inspect.signature(evaluator).parameters)
+            except (TypeError, ValueError):
+                parameters = {}
+            if parallel_evaluation and evaluator is evaluate_candidate:
+                from mutation_forge.backends.heg import HegBackend
+
+                repository = Path(cast(str | Path, backend_repo))
+
+                def backend_factory(_repo: Path, *, _repository: Path = repository) -> Any:
+                    return HegBackend(
+                        _repository,
+                        graph_mode=config.evaluation.graph_mode,
+                    )
+
+                if "backend_factory" in parameters:
+                    evaluator_kwargs["backend_factory"] = backend_factory
+                else:
+                    evaluator_kwargs["backend"] = self.backend
+            else:
+                evaluator_kwargs["backend"] = self.backend
+            if "progress" in parameters:
+                evaluator_kwargs["progress"] = evaluation_progress
+            if "generation" in parameters:
+                evaluator_kwargs["generation"] = candidate.generation
+            if "profiling_enabled" in parameters:
+                evaluator_kwargs["profiling_enabled"] = profiling_enabled
+            if "counterexample_event_callback" in parameters:
+                evaluator_kwargs["counterexample_event_callback"] = lambda event_type, payload: (
+                    emit(event_type, **dict(payload))
+                )
+            try:
+                result = evaluator(config, program_id, candidate.source, **evaluator_kwargs)
+            except BaseException as error:
+                emit(
+                    "evaluation_failed",
+                    generation=candidate.generation,
+                    slot=candidate.slot,
+                    candidate_id=program_id,
+                    phase="development",
+                    evaluation_id=identity,
+                    status="failed",
+                    evaluations_active=0,
+                    error=f"{type(error).__name__}: {error}",
+                    elapsed_seconds=time.monotonic() - evaluation_started,
+                )
+                raise
+            if not isinstance(result, Mapping):
+                raise NativeExperimentError(f"evaluation for {program_id} did not return a mapping")
+            return cast(Mapping[str, Any], result), time.monotonic() - evaluation_started
+
+        def publish_restored_evaluation(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+            result: Mapping[str, Any],
+        ) -> None:
+            nonlocal best_objective, best_candidate_id, last_ir
+            state.record_evaluation(
+                identity,
+                candidate_id=program_id,
+                kind="development",
+                state="completed",
+                summary=(
+                    result.get("summary")
+                    if isinstance(result.get("summary"), Mapping)
+                    else {}
+                ),
+                elapsed_seconds=(
+                    float(result["runtime"]["elapsed_seconds"])
+                    if isinstance(result.get("runtime"), Mapping)
+                    and isinstance(result["runtime"].get("elapsed_seconds"), int | float)
+                    and not isinstance(result["runtime"].get("elapsed_seconds"), bool)
+                    else None
+                ),
+            )
+            summary = result.get("summary")
+            summary = summary if isinstance(summary, Mapping) else {}
+            evaluation_summary_cache[program_id] = dict(summary)
+            raw_ir = summary.get("improvement_rate")
+            if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
+                last_ir = float(raw_ir)
+            metric = summary.get("mean_auc")
+            if not isinstance(metric, (int, float)) or isinstance(metric, bool):
+                return
+            restored_value = float(metric)
+            if best_objective is None or restored_value > best_objective:
+                best_objective = restored_value
+                best_candidate_id = program_id
+            evaluation_count = state.counts().get("evaluation_count", 0)
+            emit(
+                "evaluation_completed",
+                generation=candidate.generation,
+                slot=candidate.slot,
+                candidate_id=program_id,
+                phase="development",
+                evaluation_id=identity,
+                status="completed",
+                restored=True,
+                evaluations_active=0,
+                evaluations_completed=evaluation_count,
+                evaluation_count=evaluation_count,
+                mean_auc=restored_value,
+                best_auc=summary.get("best_auc"),
+                elapsed_seconds=None,
+                development_progress=1.0,
+                replay_progress=1.0,
+                current_objective=restored_value,
+                best_objective=best_objective,
+                best_candidate_id=best_candidate_id,
+                best_score=best_objective,
+                baseline_comparison=summary.get("baseline_auc"),
+                ir=last_ir,
+                worker_count=evaluation_worker_count,
+                active_workers=0,
+            )
+            published_evaluations.add(program_id)
+
+        def publish_completed_evaluation(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+            result: Mapping[str, Any],
+            evaluation_elapsed: float,
+        ) -> None:
+            nonlocal best_objective, best_candidate_id, last_ir, last_timing_profile
+            with evaluation_completion_lock:
+                if program_id in published_evaluations:
+                    return
+                runtime = result.get("runtime")
+                runtime_elapsed = (
+                    runtime.get("elapsed_seconds")
+                    if isinstance(runtime, Mapping)
+                    else None
+                )
+                state.record_evaluation(
+                    identity,
+                    candidate_id=program_id,
+                    kind="development",
+                    state="completed",
+                    summary=(
+                        result.get("summary")
+                        if isinstance(result.get("summary"), Mapping)
+                        else {}
+                    ),
+                    elapsed_seconds=(
+                        float(runtime_elapsed)
+                        if isinstance(runtime_elapsed, int | float)
+                        and not isinstance(runtime_elapsed, bool)
+                        else evaluation_elapsed
+                    ),
+                )
+                session.evaluations_completed += 1
+                summary = result.get("summary")
+                summary = summary if isinstance(summary, Mapping) else {}
+                evaluation_summary_cache[program_id] = dict(summary)
+                metric = summary.get("mean_auc")
+                if (
+                    isinstance(metric, (int, float))
+                    and not isinstance(metric, bool)
+                    and (best_objective is None or float(metric) > best_objective)
+                ):
+                    best_objective = float(metric)
+                    best_candidate_id = program_id
+                timing_profile = result.get("timing_profile")
+                if isinstance(timing_profile, Mapping):
+                    last_timing_profile = dict(timing_profile)
+                raw_ir = result.get("ir")
+                if raw_ir is None:
+                    raw_ir = summary.get("ir", summary.get("improvement_rate"))
+                if isinstance(raw_ir, (int, float)) and not isinstance(raw_ir, bool):
+                    last_ir = float(raw_ir)
+                replay = result.get("replay")
+                active = sum(
+                    1
+                    for item in streamed_futures.values()
+                    if hasattr(item, "done") and not item.done()
+                )
+                published_evaluations.add(program_id)
+                emit(
+                    "evaluation_completed",
+                    generation=candidate.generation,
+                    slot=candidate.slot,
+                    candidate_id=program_id,
+                    phase="development",
+                    evaluation_id=identity,
+                    status="completed",
+                    evaluations_active=active,
+                    evaluations_completed=session.evaluations_completed,
+                    evaluation_count=state.counts().get("evaluation_count", 0),
+                    mean_auc=metric,
+                    best_auc=summary.get("best_auc"),
+                    elapsed_seconds=evaluation_elapsed,
+                    timing_profile=timing_profile,
+                    development_progress=1.0,
+                    replay_progress=(
+                        1.0
+                        if isinstance(replay, Mapping) and replay.get("enabled") is True
+                        else 0.0
+                    ),
+                    current_objective=metric,
+                    best_objective=best_objective,
+                    best_candidate_id=best_candidate_id,
+                    best_score=best_objective,
+                    baseline_comparison=summary.get("baseline_auc"),
+                    ir=last_ir,
+                    worker_count=evaluation_worker_count,
+                    active_workers=active,
+                )
+                state.record_candidate(
+                    program_id,
+                    source_sha256=candidate.source_sha256,
+                    archive_path=str(archive.sources / f"{program_id}.py"),
+                    generation=candidate.generation,
+                    slot=candidate.slot,
+                    status="created",
+                    parent_id=candidate.parent_id,
+                    behavior=candidate.behavior_signature,
+                )
+
+        def submit_evaluation(
+            candidate: Candidate,
+            program_id: str,
+            identity: str,
+            queued_count: int,
+        ) -> Any:
+            progress = evaluation_progress_for(candidate, program_id, identity)
+            generation_orders = orders_for_generation(
+                config.evaluation,
+                candidate.generation,
+            )
+            active_before = sum(
+                1
+                for future in streamed_futures.values()
+                if hasattr(future, "done") and not future.done()
+            )
+            emit(
+                "evaluation_started",
+                generation=candidate.generation,
+                slot=candidate.slot,
+                candidate_id=program_id,
+                phase="development",
+                evaluation_id=identity,
+                evaluations_queued=queued_count,
+                evaluation_total=(
+                    len(generation_orders)
+                    * len(config.evaluation.graph_seeds)
+                    * len(config.evaluation.policy_seeds)
+                ),
+                development_progress=0.0,
+                replay_progress=0.0,
+                worker_count=evaluation_worker_count,
+                active_workers=min(evaluation_worker_count, active_before + 1),
+            )
+            if evaluation_executor is not None:
+                receive_progress, send_progress = multiprocessing.Pipe(duplex=False)
+
+                def relay_progress() -> None:
+                    try:
+                        while True:
+                            kind, message = receive_progress.recv()
+                            if kind == "done":
+                                return
+                            if kind == "progress" and isinstance(message, Mapping):
+                                progress(message)
+                            elif kind == "counterexample" and isinstance(message, Mapping):
+                                event_type = message.get("event_type")
+                                event_payload = message.get("payload")
+                                if isinstance(event_type, str) and isinstance(
+                                    event_payload, Mapping
+                                ):
+                                    emit(event_type, **dict(event_payload))
+                    except (EOFError, OSError):
+                        return
+                    finally:
+                        receive_progress.close()
+
+                progress_thread = threading.Thread(
+                    target=relay_progress,
+                    name=f"native-eval-progress-{program_id}",
+                    daemon=True,
+                )
+                progress_thread.start()
+                evaluation_progress_threads.append(progress_thread)
+                evaluation_progress_connections.append(send_progress)
+                future = evaluation_executor.submit(
+                    _evaluate_candidate_process,
+                    config,
+                    program_id,
+                    candidate.source,
+                    candidate.generation,
+                    layout.artifacts,
+                    Path(cast(str | Path, backend_repo)),
+                    profiling_enabled,
+                    send_progress,
+                )
+
+                def evaluation_finished(done: Any) -> None:
+                    try:
+                        process_result, evaluation_elapsed = done.result()
+                    except BaseException as error:
+                        emit(
+                            "evaluation_failed",
+                            generation=candidate.generation,
+                            slot=candidate.slot,
+                            candidate_id=program_id,
+                            phase="development",
+                            evaluation_id=identity,
+                            status="failed",
+                            evaluations_active=0,
+                            error=f"{type(error).__name__}: {error}",
+                        )
+                        return
+                    if isinstance(process_result, _ProcessCounterexampleOutcome):
+                        return
+                    publish_completed_evaluation(
+                        candidate,
+                        program_id,
+                        identity,
+                        process_result,
+                        evaluation_elapsed,
+                    )
+
+                future.add_done_callback(evaluation_finished)
+                return future
+            return run_evaluation(candidate, program_id, identity, progress)
+
+        def stream_candidate(
+            _generation: int,
+            candidate: Candidate,
+            _result: SlotResult,
+        ) -> None:
+            if (
+                evaluation_executor is None
+                or control is not None
+                and control.graceful_stop_requested
+            ):
+                return
+            program_id = f"g{candidate.generation:04d}-{candidate.slot}"
+            identity = f"{program_id}:development"
+            if state.evaluation(identity) is not None or program_id in streamed_futures:
+                return
+            recovered_evaluation = recover_completed_evaluation(candidate, program_id)
+            if recovered_evaluation is not None:
+                publish_restored_evaluation(
+                    candidate,
+                    program_id,
+                    identity,
+                    recovered_evaluation,
+                )
+                return
+            streamed_futures[program_id] = submit_evaluation(
+                candidate,
+                program_id,
+                identity,
+                state.counts().get("evaluation_count", 0) + len(streamed_futures) + 1,
+            )
+
+        def on_generation(
+            generation: int, candidates: Sequence[Candidate], results: Sequence[SlotResult]
+        ) -> Mapping[str, str]:
+            nonlocal best_objective, best_candidate_id, last_ir, last_timing_profile
+            if session.budget_exhausted():
+                raise _NativeSessionBudgetExpired
+            selection_candidates: list[Candidate] = []
+            prepared: list[tuple[Candidate, str, str, Mapping[str, Any] | None]] = []
+            futures: dict[str, Any] = {}
+            for candidate in candidates:
+                if session.budget_exhausted():
+                    raise _NativeSessionBudgetExpired
+                program_id = f"g{candidate.generation:04d}-{candidate.slot}"
+                archive.append(
+                    {
+                        "program_id": program_id,
+                        "source": candidate.source,
+                        "source_sha256": candidate.source_sha256,
+                        "normalized_ast_sha256": candidate.normalized_ast_sha256,
+                        "generation": candidate.generation,
+                        "slot": candidate.slot,
+                        "parent_id": candidate.parent_id,
+                        "validation_status": "valid",
+                        "probe_status": "passed",
+                        "usage": dict(candidate.usage),
+                        "behavior": dict(candidate.behavior_signature),
+                    }
+                )
+                state.record_candidate(
+                    program_id,
+                    source_sha256=candidate.source_sha256,
+                    archive_path=str(archive.sources / f"{program_id}.py"),
+                    generation=candidate.generation,
+                    slot=candidate.slot,
+                    status="created",
+                    metadata={
+                        "behavior": dict(candidate.behavior_signature),
+                    },
+                    parent_id=candidate.parent_id,
+                    behavior=candidate.behavior_signature,
+                )
+                emit(
+                    "candidate_archived",
+                    generation=generation,
+                    slot=candidate.slot,
+                    candidate_id=program_id,
+                    status="accepted",
+                    archive_size=len(archive.records()),
+                    source_sha256=candidate.source_sha256,
+                    normalized_ast_sha256=candidate.normalized_ast_sha256,
+                    source_lines=len(candidate.source.splitlines()),
+                )
+                identity = f"{program_id}:development"
+                stored_evaluation = state.evaluation(identity)
+                if stored_evaluation is None:
+                    recovered_evaluation = recover_completed_evaluation(
+                        candidate,
+                        program_id,
+                    )
+                    if recovered_evaluation is not None:
+                        publish_restored_evaluation(
+                            candidate,
+                            program_id,
+                            identity,
+                            recovered_evaluation,
+                        )
+                        stored_evaluation = state.evaluation(identity)
+                prepared.append((candidate, program_id, identity, stored_evaluation))
+                if stored_evaluation is not None:
+                    continue
+
+                streamed = streamed_futures.pop(program_id, None)
+                if streamed is not None:
+                    futures[program_id] = streamed
+                else:
+                    futures[program_id] = submit_evaluation(
+                        candidate,
+                        program_id,
+                        identity,
+                        state.counts().get("evaluation_count", 0) + len(futures) + 1,
+                    )
+
+            for candidate, program_id, identity, stored_record in prepared:
+                if stored_record is None:
+                    future = futures[program_id]
+                    try:
+                        process_result, evaluation_elapsed = (
+                            future.result() if hasattr(future, "result") else future
+                        )
+                        if isinstance(process_result, _ProcessCounterexampleOutcome):
+                            if process_result.kind == "verified":
+                                raise CounterexampleVerified(process_result.outcome)
+                            raise CounterexampleHalt(process_result.outcome)
+                        result = process_result
+                    except BaseException:
+                        for pending in futures.values():
+                            if hasattr(pending, "cancel"):
+                                pending.cancel()
+                        raise
+                    publish_completed_evaluation(
+                        candidate,
+                        program_id,
+                        identity,
+                        result,
+                        evaluation_elapsed,
+                    )
+                else:
+                    restored_summary = stored_evaluation_summary(program_id)
+                    restored_metric = restored_summary.get("mean_auc")
+                    if isinstance(restored_metric, (int, float)) and not isinstance(
+                        restored_metric, bool
+                    ):
+                        restored_value = float(restored_metric)
+                        restored_ir = restored_summary.get("improvement_rate")
+                        if isinstance(restored_ir, (int, float)) and not isinstance(
+                            restored_ir,
+                            bool,
+                        ):
+                            last_ir = float(restored_ir)
+                        if best_objective is None or restored_value > best_objective:
+                            best_objective = restored_value
+                            best_candidate_id = program_id
+                        if program_id not in published_evaluations:
+                            evaluation_count = state.counts().get("evaluation_count", 0)
+                            emit(
+                                "evaluation_completed",
+                                generation=generation,
+                                slot=candidate.slot,
+                                candidate_id=program_id,
+                                phase="development",
+                                evaluation_id=identity,
+                                status="completed",
+                                restored=True,
+                                evaluations_active=0,
+                                evaluations_completed=evaluation_count,
+                                evaluation_count=evaluation_count,
+                                mean_auc=restored_value,
+                                best_auc=restored_summary.get("best_auc"),
+                                elapsed_seconds=None,
+                                development_progress=1.0,
+                                replay_progress=1.0,
+                                current_objective=restored_value,
+                                best_objective=best_objective,
+                                best_candidate_id=best_candidate_id,
+                                best_score=best_objective,
+                                baseline_comparison=restored_summary.get("baseline_auc"),
+                                ir=last_ir,
+                                worker_count=evaluation_worker_count,
+                                active_workers=0,
+                            )
+                        state.record_candidate(
+                            program_id,
+                            source_sha256=candidate.source_sha256,
+                            archive_path=str(archive.sources / f"{program_id}.py"),
+                            generation=candidate.generation,
+                            slot=candidate.slot,
+                            status="created",
+                            metadata={
+                                "behavior": dict(candidate.behavior_signature),
+                            },
+                            parent_id=candidate.parent_id,
+                            behavior=candidate.behavior_signature,
+                        )
+                evaluation_summary = state.evaluation_summary(identity)
+                evaluation_metric = evaluation_summary.get("mean_auc")
+                numeric_metric = (
+                    float(evaluation_metric)
+                    if isinstance(evaluation_metric, (int, float))
+                    and not isinstance(evaluation_metric, bool)
+                    else 0.0
+                )
+                selection_candidates.append(
+                    replace(
+                        candidate,
+                        behavior_signature={
+                            **dict(candidate.behavior_signature),
+                            "score": numeric_metric,
+                        },
+                    )
+                )
+            if control is not None and control.graceful_stop_requested:
+                raise _NativeOperatorStop
+            selected = self._select_parents(
+                generation,
+                selection_candidates or candidates,
+                config.search.population_size,
+                config.search.selection,
+                results,
+                global_best_id=best_candidate_id,
+            )
+            return selected
+
+        immediate_interrupt = False
+        try:
+            engine = self.engine
+            if engine is not None:
+                engine_kwargs: dict[str, Any] = {
+                    "config": config,
+                    "archive": archive,
+                    "on_generation": on_generation,
+                    "layout": layout,
+                    "state": state,
+                    "session": session,
+                }
+                try:
+                    engine_parameters = dict(inspect.signature(engine).parameters)
+                except (TypeError, ValueError):
+                    engine_parameters = {}
+                if "observer" in engine_parameters:
+                    engine_kwargs["observer"] = callback
+                elif "event_callback" in engine_parameters:
+                    engine_kwargs["event_callback"] = callback
+                if "profiling" in engine_parameters:
+                    engine_kwargs["profiling"] = profiling_enabled
+                if "max_model_turns" in engine_parameters:
+                    engine_kwargs["max_model_turns"] = model_turn_limit
+                if "control" in engine_parameters:
+                    engine_kwargs["control"] = control
+                result = engine(wrapped, **engine_kwargs)
+            else:
+                generation_config = GenerationConfig(
+                    campaign_id=config.exp_id,
+                    generations=config.search.max_generations,
+                    population_size=config.search.population_size,
+                    concurrency=config.model.concurrency,
+                    max_model_turns=model_turn_limit,
+                    prior_model_turns=self.model_turns_used(layout, state),
+                    max_repairs=config.model.max_repairs,
+                    model=config.model.name,
+                    effort=config.model.effort,
+                    system_prompt=system_prompt,
+                    output_schema=output_schema,
+                    repair_prompt=repair_prompt,
+                    sandbox_limits=SandboxLimits(),
+                    scientific_contract=True,
+                    checkpoint_path=layout.artifacts / "native-generation-checkpoint.json.gz",
+                    turn_timeout_seconds=config.turn_timeout_seconds,
+                    infrastructure_retry_backoff_seconds=1.0,
+                )
+                resume_parent_assignments = _resume_parent_assignments(
+                    layout.artifacts / "native-generation-checkpoint.json.gz",
+                    state,
+                )
+                coordinator = GenerationCoordinator(
+                    wrapped,
+                    config=generation_config,
+                    parent_assignments=resume_parent_assignments,
+                    briefs=slot_briefs,
+                    parent_sources=parent_sources,
+                    parent_records=parent_records,
+                    existing_sources=baseline_sources,
+                    prompt_renderer=render_prompt,
+                    selection_callback=on_generation,
+                    search_feedback=render_search_feedback,
+                    archive_context=render_archive_context,
+                    behavior_evaluator=_native_behavior,
+                    candidate_callback=stream_candidate,
+                    resume_slot_validator=(
+                        lambda request, _cached: wrapped.has_retained(request.as_dict())
+                    ),
+                    retry_infrastructure=True,
+                    stop_requested=(
+                        (lambda: control.graceful_stop_requested) if control is not None else None
+                    ),
+                    budget_exhausted=lambda: (
+                        "operator_stop"
+                        if control is not None and control.graceful_stop_requested
+                        else "wall_seconds"
+                        if session.budget_exhausted()
+                        else "hourly_token_limit"
+                        if wrapped._hourly_limit_reached()
+                        else None
+                    ),
+                    observer=callback,
+                )
+                generation_result = coordinator.run(resume=True)
+                result = {
+                    "status": generation_result.status,
+                    "generation": generation_result.summary.get(
+                        "completed_generation_count",
+                        generation_result.summary.get("generation_count", 0),
+                    ),
+                    "summary": dict(generation_result.summary),
+                }
+        except CounterexampleVerified as verified:
+            result = {
+                "status": "counterexample_verified",
+                "generation": 0,
+                "summary": _counterexample_summary(verified.outcome),
+            }
+        except CounterexampleHalt as halted:
+            result = {
+                "status": (
+                    "counterexample_failed"
+                    if halted.outcome.decision.value == "fail"
+                    else "counterexample_paused"
+                ),
+                "generation": 0,
+                "summary": _counterexample_summary(halted.outcome),
+            }
+        except _NativeSessionBudgetExpired:
+            generation = 0
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
+            try:
+                checkpoint = read_json(checkpoint_path)
+                if isinstance(checkpoint, Mapping):
+                    value = checkpoint.get("next_generation", checkpoint.get("generation", 0))
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        generation = value
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+            result = {
+                "status": "budget_exhausted",
+                "generation": generation,
+                "summary": {"status": "budget_exhausted", "stop_reason": "wall_seconds"},
+            }
+        except _NativeHourlyTokenLimit:
+            result = {
+                "status": "budget_exhausted",
+                "generation": 0,
+                "summary": {
+                    "status": "budget_exhausted",
+                    "stop_reason": "hourly_token_limit",
+                    **state.hourly_token_usage(config.run.max_total_tokens_per_hour),
+                },
+            }
+        except _NativeOperatorStop:
+            generation = 0
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
+            try:
+                checkpoint = read_json(checkpoint_path)
+                if isinstance(checkpoint, Mapping):
+                    value = checkpoint.get("next_generation", checkpoint.get("generation", 0))
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        generation = value
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+            result = {
+                "status": "budget_exhausted",
+                "generation": generation,
+                "summary": {
+                    "status": "budget_exhausted",
+                    "stop_reason": "operator_stop",
+                },
+            }
+        except KeyboardInterrupt:
+            immediate_interrupt = True
+            raise
+        finally:
+            if evaluation_executor is not None:
+                if immediate_interrupt:
+                    _abort_evaluation_pool(evaluation_executor)
+                else:
+                    evaluation_executor.shutdown(wait=True, cancel_futures=True)
+            for progress_connection in evaluation_progress_connections:
+                with contextlib.suppress(OSError):
+                    progress_connection.close()
+            for progress_thread in evaluation_progress_threads:
+                progress_thread.join(timeout=1.0)
+            wrapped.close()
+        if not isinstance(result, Mapping):
+            raise NativeExperimentError("native generation engine returned a non-object result")
+        if not isinstance(result.get("summary"), Mapping):
+            checkpoint_path = layout.artifacts / "native-generation-checkpoint.json.gz"
+            try:
+                checkpoint_value = read_json(checkpoint_path)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                checkpoint_value = {}
+            checkpoint_summary = (
+                checkpoint_value.get("summary") if isinstance(checkpoint_value, Mapping) else None
+            )
+            if isinstance(checkpoint_summary, Mapping):
+                result = {**dict(result), "summary": dict(checkpoint_summary)}
+        result_status = str(result.get("status", "completed"))
+        batch_completed = result_status == "completed"
+        summary = result.get("summary")
+        result_stop_reason = (
+            str(summary.get("stop_reason"))
+            if isinstance(summary, Mapping) and summary.get("stop_reason")
+            else None
+        )
+        if result_status == "counterexample_verified":
+            outcome_state = "completed"
+            outcome_stop_reason = "counterexample_verified"
+        elif result_status == "counterexample_failed":
+            outcome_state = "failed"
+            outcome_stop_reason = result_stop_reason or "verification_conflict"
+        elif result_status == "counterexample_paused":
+            outcome_state = "paused"
+            outcome_stop_reason = result_stop_reason or "primary_verification_inconclusive"
+        elif batch_completed:
+            outcome_state = "exhausted"
+            outcome_stop_reason = result_stop_reason or "generation_limit"
+        else:
+            if str(result.get("status")) == "infrastructure_failed":
+                outcome_state = "paused"
+                outcome_stop_reason = "infrastructure_failed"
+            elif result_stop_reason == "max_model_turns":
+                outcome_state = "exhausted"
+                outcome_stop_reason = "max_model_turns"
+            elif result_stop_reason == "operator_stop":
+                outcome_state = "interrupted"
+                outcome_stop_reason = "operator_stop"
+            else:
+                outcome_state = "idle"
+                outcome_stop_reason = (
+                    "session_wall_seconds"
+                    if result_stop_reason == "wall_seconds"
+                    else result_stop_reason or "session_boundary"
+                )
+        outcome: dict[str, Any] = {
+            "state": outcome_state,
+            "stop_reason": outcome_stop_reason,
+            "generation": int(result.get("generation", 0) or 0),
+            "provider_turns": session.provider_turns_completed,
+            "evaluations": [],
+            "result": dict(result),
+        }
+        if result_status.startswith("counterexample_") and isinstance(summary, Mapping):
+            outcome["counterexample"] = dict(summary)
+        if str(result.get("status")) == "infrastructure_failed":
+            outcome["last_error"] = (
+                "native generation paused after an uncharged provider infrastructure failure"
+            )
+        if last_timing_profile is not None:
+            outcome["timing_profile"] = last_timing_profile
+        if last_ir is not None:
+            outcome["ir"] = last_ir
+        for field in ("deep_operator_profile", "deep_score_profile"):
+            if field in result:
+                outcome[field] = result[field]
+        return outcome
+
+
+__all__ = ["NativeExperimentAdapter", "NativeExperimentError"]

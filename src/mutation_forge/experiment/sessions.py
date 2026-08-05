@@ -18,8 +18,6 @@ from .json_io import write_json
 from .layout import ExperimentLayout
 from .state import ExperimentStateStore
 
-SESSION_SCHEMA_VERSION = "mforge.experiment.session.v3"
-
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -92,7 +90,7 @@ class SessionContext:
         cumulative_tokens: int = 0,
     ) -> dict[str, Any]:
         return {
-            "schema_version": SESSION_SCHEMA_VERSION,
+            "schema_version": "mforge.experiment.session.v2",
             "session_number": self.number,
             "session_id": self.session_id,
             "start_time": self.started_at,
@@ -137,7 +135,7 @@ class SessionManager:
         write_json(
             directory / "summary.json.gz",
             {
-                "schema_version": SESSION_SCHEMA_VERSION,
+                "schema_version": "mforge.experiment.session.v2",
                 "session_number": number,
                 "session_id": session_id,
                 "start_time": _now(),
@@ -164,9 +162,14 @@ class SessionManager:
 
     def event(self, session: SessionContext, event_type: str, **payload: Any) -> None:
         raw_key = payload.get("idempotency_key")
-        storage_key = f"{event_type}:{raw_key}" if isinstance(raw_key, str) and raw_key else None
+        storage_key = (
+            f"{event_type}:{raw_key}"
+            if isinstance(raw_key, str) and raw_key
+            else None
+        )
         if storage_key is not None and (
-            self.state.event_exists(storage_key) or self.state.event_exists(str(raw_key))
+            self.state.event_exists(storage_key)
+            or self.state.event_exists(str(raw_key))
         ):
             return
         # Count provider work at the event boundary as well as in the durable
@@ -249,12 +252,7 @@ class SessionManager:
         )
         result["stop_reason"] = stop_reason
         if summary:
-            adapter_summary = dict(summary)
-            adapter_schema_version = adapter_summary.pop("schema_version", None)
-            result.update(adapter_summary)
-            if adapter_schema_version is not None:
-                result["result_schema_version"] = adapter_schema_version
-        result["schema_version"] = SESSION_SCHEMA_VERSION
+            result.update(dict(summary))
         write_json(session.directory / "summary.json.gz", result)
         self.state.finish_session(
             session.session_id,

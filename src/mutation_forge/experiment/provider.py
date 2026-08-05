@@ -22,7 +22,10 @@ from typing import Any, Protocol, cast
 
 from .artifacts import (
     TurnArtifactStore,
+    generated_policy_diagnostics,
+    is_generated_policy,
     redact,
+    render_generated_policy_markdown,
 )
 from .json_io import write_json
 
@@ -82,7 +85,7 @@ class NativeProviderConfig:
 
     @property
     def turn_timeout_seconds(self) -> float:
-        return self.turn_timeout_base_seconds
+        return self.turn_timeout_base_seconds * (self.concurrency + 1)
 
 
 class _CodexTransport:
@@ -108,48 +111,10 @@ class _CodexTransport:
         self._adapters_lock = threading.RLock()
         self._closed = False
 
-    def preflight(self) -> None:
-        if self.auth_json is None:
-            raise AuthenticationError(
-                "model.auth_json is required for the isolated Codex App Server"
-            )
-        from mutation_forge.stage3.app_server import CodexAppServerAdapter
-        from mutation_forge.stage3.isolation import IsolatedCapsule, secure_capsule_parent
-
-        capsule = IsolatedCapsule.create(
-            secure_capsule_parent(),
-            auth_json=self.auth_json,
-            sandbox_mode=self.sandbox_mode,
-            approval_policy=self.approval_policy,
-        )
-        try:
-            checker = self.auth_checker or CodexAppServerAdapter._login_status
-            if not checker(capsule):
-                raise AuthenticationError(
-                    "Codex authentication copied from model.auth_json is not logged in"
-                )
-        finally:
-            capsule.cleanup()
-
     def _adapter(self, request: Mapping[str, Any]) -> Any:
         # This is the generic JSONL App Server transport.  It has no Stage 4
         # dependency; native prompts/schemas are supplied by the request.
         from mutation_forge.stage3.app_server import AppServerLimits, CodexAppServerAdapter
-
-        request_limit = request.get("maximum_request_bytes")
-        response_limit = request.get("maximum_encoded_response_bytes")
-        if (
-            isinstance(request_limit, bool)
-            or not isinstance(request_limit, int)
-            or not 1 <= request_limit <= 1024 * 1024
-        ):
-            request_limit = None
-        if (
-            isinstance(response_limit, bool)
-            or not isinstance(response_limit, int)
-            or not 1 <= response_limit <= 1024 * 1024
-        ):
-            response_limit = None
 
         artifact_dir = request.get("artifact_dir")
         prefix = str(request.get("artifact_prefix", "slot-00"))
@@ -175,11 +140,6 @@ class _CodexTransport:
                 max_turns=1,
                 max_campaigns=1,
                 turn_timeout=self.config.turn_timeout_seconds,
-                max_request_bytes=request_limit,
-                max_response_bytes=response_limit,
-                max_event_bytes=(
-                    max(256 * 1024, response_limit) if response_limit is not None else None
-                ),
             ),
             base_instructions=str(request.get("system_prompt", "")),
             artifact_dir=artifact_dir,
@@ -239,13 +199,13 @@ class _CodexTransport:
             try:
                 system = system_path.read_text(encoding="utf-8")
             except OSError:
-                system = "Return the requested bounded JSON object."
+                system = "Return one generated policy JSON object."
         if not isinstance(schema, Mapping):
             schema_path = (
                 Path(__file__).resolve().parents[3]
                 / "configs"
                 / "native"
-                / "generated-program-batch.schema.json"
+                / "generated-policy.schema.json"
             )
             try:
                 schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -253,7 +213,6 @@ class _CodexTransport:
                 schema = {"type": "object"}
         if not isinstance(prompt, str) or not prompt:
             raise ValueError("native provider prompt must be non-empty")
-        artifact_prompt = self._artifact_prompt(prompt)
         from mutation_forge.stage3.app_server import ModelProfile
 
         adapter = self._adapter(request)
@@ -262,7 +221,7 @@ class _CodexTransport:
             # request.md is the exact final prompt.  The structured request
             # envelope, system prompt, and output schema are retained beside
             # it instead of being injected into Markdown.
-            adapter.logger.raw_text("request.md", artifact_prompt)
+            adapter.logger.raw_text("request.md", prompt)
             adapter.logger.document(
                 "request.json",
                 {
@@ -284,7 +243,7 @@ class _CodexTransport:
             if "auth" in name or "authenticated" in message.lower() or "login" in message.lower():
                 raise AuthenticationError(str(redact(message))) from error
             if adapter.logger:
-                adapter.logger.raw_text("request.md", artifact_prompt)
+                adapter.logger.raw_text("request.md", prompt)
                 adapter.logger.document(
                     "provider-raw.json",
                     {"status": "failed", "error": str(redact(message))},
@@ -299,18 +258,10 @@ class _CodexTransport:
         else:
             if isinstance(decoded, Mapping):
                 response = dict(decoded)
-        response_projection_valid = isinstance(response, Mapping)
-        response_diagnostics: tuple[dict[str, str], ...] = (
-            ()
-            if response_projection_valid
-            else (
-                {
-                    "code": "invalid_json_object",
-                    "path": "/",
-                    "message": "provider response must decode to a JSON object",
-                },
-            )
-        )
+        response_diagnostics = generated_policy_diagnostics(response)
+        response_projection_valid = is_generated_policy(response)
+        if response_projection_valid:
+            response_diagnostics = ()
         usage = self._usage({"usage": self._usage_from_result(result)})
         value = {
             "status": "completed",
@@ -336,9 +287,12 @@ class _CodexTransport:
             # transport-level response.md.  Replace that provisional text
             # with the native semantic projection, or remove it entirely for
             # malformed/schema-invalid responses.
-            adapter.logger.raw_text("request.md", artifact_prompt)
+            adapter.logger.raw_text("request.md", prompt)
             adapter.logger.raw_text("response.raw.txt", response_text)
-            adapter.logger.raw_text("response.md", response_text)
+            if response_projection_valid and isinstance(response, Mapping):
+                adapter.logger.raw_text("response.md", render_generated_policy_markdown(response))
+            else:
+                adapter.logger.remove("response.md")
             if isinstance(response, Mapping):
                 adapter.logger.document("response.json", response)
             if response_diagnostics:
@@ -385,18 +339,6 @@ class _CodexTransport:
             "partial": usage.partial,
         }
 
-    @staticmethod
-    def _artifact_prompt(prompt: str) -> str:
-        """Return the plain instruction used by the v2 Markdown artifact."""
-
-        try:
-            payload = json.loads(prompt)
-        except (TypeError, ValueError):
-            return prompt
-        if isinstance(payload, Mapping) and isinstance(payload.get("instruction"), str):
-            return str(payload["instruction"])
-        return prompt
-
     def repair(
         self,
         request: Mapping[str, Any],
@@ -406,12 +348,17 @@ class _CodexTransport:
             raise ValueError("repair requires bounded diagnostics")
         value = dict(request)
         prompt = str(request.get("prompt", ""))
-        # Native v3 requests already carry the locked repair instruction. The
-        # fallback only materializes bounded diagnostics for direct callers.
+        # Native GenerationCoordinator requests already contain a readable
+        # repair section.  Keep that exact prompt.  The fallback is retained
+        # for direct callers that still provide only an initial prompt.
         if "diagnostic" not in prompt.lower():
             pretty = json.dumps(list(diagnostics), ensure_ascii=False, sort_keys=True, indent=2)
             value["prompt"] = (
-                str(request.get("repair_prompt", "Repair the policy ASTs using the diagnostics."))
+                str(
+                    request.get(
+                        "repair_prompt", "Repair the generated policy using the diagnostics."
+                    )
+                )
                 + "\n\n"
                 + prompt
                 + "\n\n## Repair diagnostics\n\n```json\n"
@@ -420,8 +367,6 @@ class _CodexTransport:
             )
         else:
             value["prompt"] = prompt
-        prefix = str(value.get("artifact_prefix", "slot-00"))
-        value["artifact_prefix"] = f"{prefix}.repair"
         return self.generate(value)
 
     def close(self) -> None:
@@ -528,11 +473,6 @@ class LocalCodexAppServerProvider:
         )
         self._retained: dict[str, Mapping[str, Any]] = {}
         self._lock = threading.RLock()
-
-    def preflight(self) -> None:
-        preflight = getattr(self._transport, "preflight", None)
-        if callable(preflight):
-            preflight()
 
     def _key(self, request: Mapping[str, Any], phase: str) -> str:
         value = request.get("idempotency_key", request.get("request_idempotency_key"))

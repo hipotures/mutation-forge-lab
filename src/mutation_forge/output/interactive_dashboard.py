@@ -33,6 +33,8 @@ from rich.text import Text
 
 from mutation_forge.events import Event
 from mutation_forge.experiment.config import orders_for_generation
+from mutation_forge.experiment.json_io import read_json
+from mutation_forge.experiment.layout import WorkspaceError
 from mutation_forge.models import JsonValue
 from mutation_forge.output.display_ids import compact_display_ids
 from mutation_forge.output.panel_copy import (
@@ -73,7 +75,6 @@ STATE_STYLES = {
     "queued": "grey62",
     "starting": "cyan",
     "model": "cyan",
-    "batched": "cyan",
     "retrying": "yellow",
     "repair": "yellow",
     "validating": "blue",
@@ -264,37 +265,6 @@ class DashboardState:
     baseline_structural: float | None = None
     improvement_rate: float | None = None
     evaluation_rate: float | None = None
-    native_v3_bottleneck: str = "—"
-    provider_utilization: float | None = None
-    evaluator_utilization: float | None = None
-    provider_response_latency_seconds: float = 0.0
-    programs_returned_per_call: float | None = None
-    valid_programs_per_provider_minute: float | None = None
-    candidate_queue_depth: int = 0
-    evaluation_shard_queue_depth: int = 0
-    verification_queue_depth: int = 0
-    verification_backpressure_active: bool = False
-    provider_starvation_seconds: float = 0.0
-    provider_backpressure_seconds: float = 0.0
-    generation_wall_share: float | None = None
-    validation_wall_share: float | None = None
-    evaluation_wall_share: float | None = None
-    persistence_wall_share: float | None = None
-    time_to_first_evaluation_seconds: float | None = None
-    first_valid_ast_to_first_worker_seconds: float | None = None
-    first_valid_ast_to_half_workers_seconds: float | None = None
-    first_valid_ast_to_all_workers_seconds: float | None = None
-    raw_graph_score_calls: int = 0
-    unique_graph_scores: int = 0
-    raw_graph_score_calls_per_second: float | None = None
-    unique_graph_scores_per_second: float | None = None
-    episodes_per_second: float | None = None
-    accepted_rewrites_per_second: float | None = None
-    accepted_rewrites: int = 0
-    score_cache_hit_rate: float | None = None
-    active_cpp_scorers: int = 0
-    scorer_restarts: int = 0
-    forbidden_fallback_count: int = 0
     profiling_enabled: bool = False
     timing_profile: Mapping[str, JsonValue] | None = None
     cumulative_usage: TokenUsage = TokenUsage()
@@ -381,8 +351,49 @@ def load_persisted_dashboard_state(
         hourly_token_limit=hourly_token_limit,
         graph_mode=graph_mode,
     )
-    checkpoint_generation = 0
+    checkpoint: Mapping[str, Any] = {}
+    checkpoint_path = root / "artifacts" / "native-generation-checkpoint.json.gz"
+    if checkpoint_path.is_file():
+        try:
+            value = read_json(checkpoint_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise WorkspaceError(
+                f"native generation checkpoint is unreadable: {checkpoint_path}"
+            ) from exc
+        if not isinstance(value, Mapping):
+            raise WorkspaceError(
+                f"native generation checkpoint must be an object: {checkpoint_path}"
+            )
+        if value.get("schema_version") != "mforge.experiment.generation.v2":
+            raise WorkspaceError(
+                "Unsupported native generation checkpoint schema: "
+                f"{value.get('schema_version')!r}. This runtime accepts only "
+                "mforge.experiment.generation.v2. Create a fresh workspace."
+            )
+        checkpoint = value
+
+    generation_value = checkpoint.get("next_generation", checkpoint.get("generation"))
+    checkpoint_generation = (
+        generation_value
+        if isinstance(generation_value, int) and not isinstance(generation_value, bool)
+        else 0
+    )
     raw_slot_values: list[Mapping[str, Any]] = []
+    raw_slots = checkpoint.get("slots")
+    if isinstance(raw_slots, Mapping):
+        for raw in raw_slots.values():
+            if not isinstance(raw, Mapping):
+                continue
+            generation = raw.get("generation")
+            slot = raw.get("slot")
+            if (
+                not isinstance(generation, int)
+                or isinstance(generation, bool)
+                or not isinstance(slot, str)
+            ):
+                continue
+            raw_slot_values.append(raw)
+            checkpoint_generation = max(checkpoint_generation, generation)
 
     store_path = root / "state.sqlite3"
     if store_path.is_file():
@@ -436,13 +447,10 @@ def load_persisted_dashboard_state(
 
     evaluations: dict[str, tuple[float, Mapping[str, Any], float | None]] = {}
     evaluation_history: list[tuple[str, float]] = []
-    best_candidate: (
-        tuple[
-            str,
-            tuple[float, Mapping[str, Any], float | None],
-        ]
-        | None
-    ) = None
+    best_candidate: tuple[
+        str,
+        tuple[float, Mapping[str, Any], float | None],
+    ] | None = None
     slot_runtime_seconds: dict[tuple[int, str], float] = {}
     store: Any | None = None
     try:
@@ -541,7 +549,9 @@ def load_persisted_dashboard_state(
                     "episode_count": row["episode_count"],
                     "mean_auc": value,
                     "best_auc": row["best_auc"],
-                    "baseline_auc": (baseline_auc if isinstance(baseline_auc, Mapping) else {}),
+                    "baseline_auc": (
+                        baseline_auc if isinstance(baseline_auc, Mapping) else {}
+                    ),
                     "improvement_rate": row["improvement_rate"],
                 }
                 evaluations[candidate_id] = (
@@ -579,9 +589,12 @@ def load_persisted_dashboard_state(
                     (float(best_row["mean_auc"]), {}, None),
                 )
 
-            # Rebuild slot rows from the durable candidate table so a
-            # dashboard restart never loses a finished generation or its
-            # objective values.
+            # The generation checkpoint is intentionally written only at a
+            # safe boundary.  A resumed run can therefore have completed
+            # candidates/evaluations newer than that file (or a checkpoint
+            # from an earlier session).  Rebuild those slot rows from the
+            # durable candidate table so a dashboard restart never loses a
+            # finished generation or its objective values.
             candidate_rows = store.connection.execute(
                 "SELECT candidate_id,generation,slot,parent_id,status,behavior_json "
                 "FROM candidates WHERE generation BETWEEN ? AND ? "
@@ -609,6 +622,8 @@ def load_persisted_dashboard_state(
                 existing = slot_records.get((generation, slot), {})
                 existing_candidate = existing.get("candidate")
                 if isinstance(existing_candidate, Mapping):
+                    # The checkpoint contains richer provider/request data;
+                    # keep it and only use the row as a fallback.
                     continue
                 slot_records[(generation, slot)] = {
                     "generation": generation,
@@ -647,9 +662,9 @@ def load_persisted_dashboard_state(
             display_state = status
         elif status in {"created", "queued"} and metric is not None:
             # SQLite may contain a completed evaluation written after the last
-            # A metric is durable evidence that this slot is accepted even
-            # when its candidate row still has the transient ``created``
-            # status.
+            # generation checkpoint.  A metric is durable evidence that this
+            # slot is accepted even when its candidate row still has the
+            # transient ``created`` status.
             display_state = "accepted"
         else:
             display_state = "queued"
@@ -793,20 +808,7 @@ def _number(value: object) -> float | None:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
-def _rational_number(value: object) -> float | None:
-    if not isinstance(value, Mapping):
-        return _number(value)
-    numerator = _integer(value.get("numerator"))
-    denominator = _integer(value.get("denominator"))
-    if numerator is None or denominator is None or denominator == 0:
-        return None
-    return numerator / denominator
-
-
 def _provider_elapsed(payload: Mapping[str, JsonValue]) -> float | None:
-    elapsed_ns = _integer(payload.get("operation_elapsed_ns"))
-    if elapsed_ns is not None and elapsed_ns >= 0:
-        return elapsed_ns / 1e9
     duration_ms = _number(payload.get("provider_duration_ms"))
     if duration_ms is not None and duration_ms >= 0:
         return duration_ms / 1000.0
@@ -816,92 +818,6 @@ def _provider_elapsed(payload: Mapping[str, JsonValue]) -> float | None:
 
 def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
-
-
-def _provider_call_slots(payload: Mapping[str, JsonValue]) -> tuple[str, ...]:
-    encoded = _text(payload.get("slot_ids"))
-    if encoded is None:
-        return ()
-    return tuple(value for item in encoded.split(",") if (value := item.strip()))
-
-
-def _update_provider_call_slots(
-    state: DashboardState,
-    payload: Mapping[str, JsonValue],
-    *,
-    event_type: str,
-    now: float,
-) -> DashboardState:
-    generation = _integer(payload.get("generation"))
-    target_generation = state.generation if generation is None else generation
-    elapsed = _provider_elapsed(payload)
-    timeout_ns = _integer(payload.get("timeout_ns"))
-    timeout = (
-        timeout_ns / 1e9
-        if timeout_ns is not None and timeout_ns >= 0
-        else _number(payload.get("timeout_seconds"))
-    )
-    error_type = _text(payload.get("error_type"))
-    error_message = _text(payload.get("error_message"))
-    diagnostic = (
-        f"{error_type}: {error_message}"
-        if error_type is not None and error_message is not None
-        else error_message or error_type or ""
-    )
-    call_id = _text(payload.get("call_id"))
-    slot_names = _provider_call_slots(payload)
-    for index, slot_name in enumerate(slot_names):
-        is_call_representative = index == 0
-        group = _generation_slots(state, target_generation)
-        slot = next(
-            (item for item in group.slots if item.slot == slot_name),
-            DashboardSlot(slot=slot_name, generation=target_generation),
-        )
-        started = slot.started_monotonic
-        phase_started = slot.phase_started_monotonic
-        if event_type == "provider_call_started":
-            started = now if is_call_representative and started is None else started
-            phase_started = now if is_call_representative else None
-            updated = replace(
-                slot,
-                phase="provider",
-                state="model" if is_call_representative else "batched",
-                started_monotonic=started,
-                phase_started_monotonic=phase_started,
-                elapsed_seconds=None,
-                timeout_seconds=timeout,
-                provider_request_id=call_id,
-                lifecycle=_lifecycle(slot, "provider", "running"),
-            )
-        elif event_type == "provider_call_failed":
-            updated = replace(
-                slot,
-                phase="response",
-                state="failed" if is_call_representative else "batched",
-                elapsed_seconds=elapsed if is_call_representative else None,
-                phase_started_monotonic=None,
-                error=(diagnostic or "provider call failed") if is_call_representative else None,
-                lifecycle=(
-                    _lifecycle(slot, "provider", "fail", elapsed)
-                    if is_call_representative
-                    else slot.lifecycle
-                ),
-            )
-        else:
-            updated = replace(
-                slot,
-                phase="response" if is_call_representative else "provider",
-                state="validating" if is_call_representative else "batched",
-                elapsed_seconds=elapsed if is_call_representative else None,
-                phase_started_monotonic=None,
-                lifecycle=(
-                    _lifecycle(slot, "provider", "pass", elapsed)
-                    if is_call_representative
-                    else slot.lifecycle
-                ),
-            )
-        state = _replace_slot(state, updated)
-    return state
 
 
 def _usage(value: object, *, quality: object = None) -> TokenUsage:
@@ -1058,31 +974,10 @@ def _event_activity(event: Event) -> ActivityEntry | None:
     payload = event.payload
     slot = _text(payload.get("slot"))
     event_type = event.event_type
-    if event_type in {
-        "provider_turn_activity",
-        "repair_activity",
-    }:
-        elapsed = _provider_elapsed(payload)
-        timeout_ns = _integer(payload.get("timeout_ns"))
-        timeout = (
-            timeout_ns / 1e9
-            if timeout_ns is not None and timeout_ns >= 0
-            else _number(payload.get("timeout_seconds"))
-        )
-        timing = ""
-        if elapsed is not None:
-            timing = (
-                f" ({elapsed:.0f}/{timeout:.0f}s)"
-                if timeout is not None
-                else f" ({elapsed:.0f}s)"
-            )
-        return ActivityEntry(
-            event.timestamp[11:19],
-            "provider",
-            "info",
-            f"waiting{timing}",
-            slot,
-        )
+    if event_type in {"provider_turn_activity", "repair_activity"}:
+        elapsed = _number(payload.get("operation_elapsed_seconds"))
+        message = f"waiting for provider response{f' ({elapsed:.0f}s)' if elapsed else ''}"
+        return ActivityEntry(event.timestamp[11:19], "provider", "info", message, slot)
     if event_type == "provider_turn_failed":
         return ActivityEntry(
             event.timestamp[11:19],
@@ -1090,17 +985,6 @@ def _event_activity(event: Event) -> ActivityEntry | None:
             "error",
             _text(payload.get("error")) or "provider turn failed",
             slot,
-        )
-    if event_type == "provider_call_failed":
-        error_type = _text(payload.get("error_type"))
-        error_message = _text(payload.get("error_message")) or "provider call failed"
-        message = f"{error_type}: {error_message}" if error_type else error_message
-        return ActivityEntry(
-            event.timestamp[11:19],
-            "provider",
-            "error",
-            message,
-            _text(payload.get("call_id")),
         )
     if event_type in {
         "experiment_failed",
@@ -1330,41 +1214,6 @@ def reduce_dashboard_event(
             provider_turns_attempted=state.provider_turns_attempted + 1,
             phase="repair" if payload.get("phase") == "repair" else "provider",
         )
-    elif event_type == "provider_call_started":
-        state = replace(
-            state,
-            active_provider_turns=state.active_provider_turns + 1,
-            provider_turns_attempted=state.provider_turns_attempted + 1,
-            phase="provider",
-        )
-        state = _update_provider_call_slots(
-            state,
-            payload,
-            event_type=event_type,
-            now=now,
-        )
-    elif event_type in {"provider_call_completed", "provider_call_failed"}:
-        failed = event_type == "provider_call_failed"
-        error_type = _text(payload.get("error_type"))
-        error_message = _text(payload.get("error_message"))
-        diagnostic = (
-            f"{error_type}: {error_message}"
-            if error_type is not None and error_message is not None
-            else error_message or error_type or "Provider call failed"
-        )
-        state = replace(
-            state,
-            active_provider_turns=max(0, state.active_provider_turns - 1),
-            provider_turns_completed=state.provider_turns_completed + (0 if failed else 1),
-            phase="provider error" if failed else state.phase,
-            status_message=diagnostic if failed else state.status_message,
-        )
-        state = _update_provider_call_slots(
-            state,
-            payload,
-            event_type=event_type,
-            now=now,
-        )
     elif event_type in {"provider_turn_completed", "provider_turn_failed"}:
         state = replace(
             state,
@@ -1419,99 +1268,6 @@ def reduce_dashboard_event(
                     failed_candidates=state.failed_candidates + 1,
                     failed_slots_seen=state.failed_slots_seen | {failed_key},
                 )
-    elif event_type in {
-        "verification_backpressure_started",
-        "verification_backpressure_ended",
-        "verification_job_queued",
-        "verification_job_completed",
-    }:
-        verification_queue_depth = _integer(payload.get("verification_queue_depth"))
-        state = replace(
-            state,
-            verification_queue_depth=(
-                state.verification_queue_depth
-                if verification_queue_depth is None
-                else verification_queue_depth
-            ),
-            verification_backpressure_active=(
-                event_type == "verification_backpressure_started"
-                or (
-                    state.verification_backpressure_active
-                    and event_type != "verification_backpressure_ended"
-                )
-            ),
-        )
-    elif event_type == "native_v3_metrics":
-        state = replace(
-            state,
-            native_v3_bottleneck=_text(payload.get("bottleneck")) or "—",
-            provider_utilization=_rational_number(payload.get("provider_utilization")),
-            evaluator_utilization=_rational_number(payload.get("evaluator_utilization")),
-            provider_response_latency_seconds=(
-                (_integer(payload.get("provider_response_latency_ns")) or 0) / 1_000_000_000
-            ),
-            programs_returned_per_call=_rational_number(payload.get("programs_returned_per_call")),
-            valid_programs_per_provider_minute=_rational_number(
-                payload.get("valid_programs_per_provider_minute")
-            ),
-            candidate_queue_depth=(_integer(payload.get("candidate_queue_depth")) or 0),
-            evaluation_shard_queue_depth=(
-                _integer(payload.get("evaluation_shard_queue_depth")) or 0
-            ),
-            provider_starvation_seconds=(
-                (_integer(payload.get("cpu_idle_time_caused_by_provider_starvation_ns")) or 0)
-                / 1_000_000_000
-            ),
-            provider_backpressure_seconds=(
-                (
-                    _integer(payload.get("provider_idle_time_caused_by_evaluation_backpressure_ns"))
-                    or 0
-                )
-                / 1_000_000_000
-            ),
-            generation_wall_share=_rational_number(payload.get("generation_wall_share")),
-            validation_wall_share=_rational_number(payload.get("validation_wall_share")),
-            evaluation_wall_share=_rational_number(payload.get("evaluation_wall_share")),
-            persistence_wall_share=_rational_number(payload.get("persistence_wall_share")),
-            time_to_first_evaluation_seconds=(
-                (_integer(payload.get("time_to_first_evaluation_ns")) or 0) / 1_000_000_000
-                if payload.get("time_to_first_evaluation_ns") is not None
-                else None
-            ),
-            first_valid_ast_to_first_worker_seconds=(
-                (_integer(payload.get("first_valid_ast_to_first_worker_ns")) or 0) / 1_000_000_000
-                if payload.get("first_valid_ast_to_first_worker_ns") is not None
-                else None
-            ),
-            first_valid_ast_to_half_workers_seconds=(
-                (_integer(payload.get("first_valid_ast_to_50_percent_workers_ns")) or 0)
-                / 1_000_000_000
-                if payload.get("first_valid_ast_to_50_percent_workers_ns") is not None
-                else None
-            ),
-            first_valid_ast_to_all_workers_seconds=(
-                (_integer(payload.get("first_valid_ast_to_all_workers_ns")) or 0) / 1_000_000_000
-                if payload.get("first_valid_ast_to_all_workers_ns") is not None
-                else None
-            ),
-            raw_graph_score_calls=(_integer(payload.get("raw_graph_score_calls")) or 0),
-            unique_graph_scores=(_integer(payload.get("unique_graph_scores")) or 0),
-            raw_graph_score_calls_per_second=_rational_number(
-                payload.get("raw_graph_score_calls_per_second")
-            ),
-            unique_graph_scores_per_second=_rational_number(
-                payload.get("unique_graph_scores_per_second")
-            ),
-            episodes_per_second=_rational_number(payload.get("episodes_per_second")),
-            accepted_rewrites_per_second=_rational_number(
-                payload.get("accepted_rewrites_per_second")
-            ),
-            accepted_rewrites=(_integer(payload.get("accepted_rewrites")) or 0),
-            score_cache_hit_rate=_rational_number(payload.get("score_cache_hit_rate")),
-            active_cpp_scorers=(_integer(payload.get("active_cpp_scorers")) or 0),
-            scorer_restarts=_integer(payload.get("scorer_restarts")) or 0,
-            forbidden_fallback_count=(_integer(payload.get("forbidden_fallback_count")) or 0),
-        )
     elif event_type in {"evaluation_completed", "evaluation_failed"}:
         explicit_evaluations = _integer(payload.get("evaluations_completed"))
         state = replace(
@@ -1784,14 +1540,6 @@ def reduce_dashboard_event(
                 else elapsed
             )
             phase_started = None
-        elif event_type == "candidate_validated":
-            slot_state = "evaluating"
-            phase = "evaluation"
-            lifecycle_phase = "schema"
-            lifecycle_status = "pass"
-            lifecycle_elapsed = 0.0
-            validation = "pass"
-            error = ""
         elif event_type == "repair_started":
             slot_state = "repair"
             lifecycle_phase = "provider"
@@ -2024,20 +1772,13 @@ def reduce_dashboard_event(
     activity = _event_activity(event)
     if activity is not None:
         recent = list(state.activity)
-        if event_type in {
-            "provider_turn_activity",
-            "repair_activity",
-        }:
-            recent = [
-                item
-                for item in recent
-                if not (
-                    item.component == "provider"
-                    and item.slot == activity.slot
-                    and item.message.startswith("waiting")
-                )
-            ]
-            recent.insert(0, activity)
+        if (
+            event_type in {"provider_turn_activity", "repair_activity"}
+            and recent
+            and recent[0].slot == activity.slot
+            and "waiting for provider" in recent[0].message
+        ):
+            recent[0] = activity
         else:
             recent.insert(0, activity)
         logs = (*state.logs[-199:], activity)
@@ -2167,7 +1908,8 @@ def reduce_dashboard_key(
                         group,
                         slots=tuple(
                             replace(slot, state="stopping")
-                            if group.generation == state.generation and slot.state == "queued"
+                            if group.generation == state.generation
+                            and slot.state == "queued"
                             else slot
                             for slot in group.slots
                         ),
@@ -2366,8 +2108,9 @@ class InteractiveDashboardSink:
         self.capabilities = capabilities or DashboardCapabilities()
         self.state = initial_state or DashboardState()
         self._persisted_loader = persisted_loader
-        self._history_exhausted = persisted_loader is None or any(
-            group.generation == 0 for group in self.state.generations
+        self._history_exhausted = (
+            persisted_loader is None
+            or any(group.generation == 0 for group in self.state.generations)
         )
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -2421,7 +2164,9 @@ class InteractiveDashboardSink:
                     self.state,
                     self._persisted_loader(previous_oldest),
                 )
-                loaded_generations = [group.generation for group in self.state.generations]
+                loaded_generations = [
+                    group.generation for group in self.state.generations
+                ]
                 loaded_oldest = min(loaded_generations, default=previous_oldest)
                 if loaded_oldest == 0 or loaded_oldest >= previous_oldest:
                     self._history_exhausted = True
@@ -2784,21 +2529,6 @@ class InteractiveDashboardSink:
         )
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
-        current_slots = _generation_slots(self.state, self.state.generation).slots
-        generating_slots = sum(
-            slot.state in {"model", "batched", "repair"}
-            for slot in current_slots
-        )
-        slot_label = "Slots Complete"
-        token_label = "Token Budget"
-        call_label = "call" if self.state.active_provider_turns == 1 else "calls"
-        if generating_slots or self.state.active_provider_turns:
-            slot_label = (
-                f"Slots · {generating_slots} generating · "
-                f"{self.state.active_provider_turns} {call_label}"
-            )
-            if self.state.hourly_tokens_used == 0:
-                token_label = "Token Budget · usage pending"
         configured_values = (
             (
                 "Generation",
@@ -2806,7 +2536,7 @@ class InteractiveDashboardSink:
                 self.state.generation_limit,
             ),
             (
-                slot_label,
+                "Slots Complete",
                 self.state.completed_slots,
                 self.state.population_size,
             ),
@@ -2816,7 +2546,7 @@ class InteractiveDashboardSink:
                 self.state.max_model_turns,
             ),
             (
-                token_label,
+                "Token Budget",
                 self.state.hourly_tokens_used,
                 self.state.hourly_token_limit,
             ),
@@ -2876,27 +2606,18 @@ class InteractiveDashboardSink:
                     renderables[index],
                     renderables[index + 1] if index + 1 < len(renderables) else Text(),
                 )
-        notices: list[RenderableType] = []
-        if generating_slots or self.state.active_provider_turns:
-            notices.append(
-                Align.center(
-                    Text(
-                        f"Provider work active · {generating_slots} programs in "
-                        f"{self.state.active_provider_turns} {call_label} · "
-                        "token usage pending until response",
-                        style="cyan",
-                    )
-                )
-            )
-        if self.state.hourly_limit_reached and self.state.hourly_retry_after:
-            notices.append(
+        content: RenderableType = (
+            Group(
+                grid,
                 Text(
                     f"Hourly token limit reached · retry after "
                     f"{_clock_time(self.state.hourly_retry_after)}",
                     style="bold red",
-                )
+                ),
             )
-        content: RenderableType = Group(grid, *notices) if notices else grid
+            if self.state.hourly_limit_reached and self.state.hourly_retry_after
+            else grid
+        )
         return Panel(content, border_style="cyan", padding=(0, 1))
 
     def _slot_matrix(self, width: int, mode: str) -> Panel:
@@ -2937,7 +2658,8 @@ class InteractiveDashboardSink:
             columns = [item for item in columns if item[0] in visible]
         icon_state_width = (
             4
-            if icon_mode and any(_slot_evaluation_percent(slot) is not None for slot in group.slots)
+            if icon_mode
+            and any(_slot_evaluation_percent(slot) is not None for slot in group.slots)
             else 1
         )
         for name, justify, max_width in columns:
@@ -3177,7 +2899,6 @@ class InteractiveDashboardSink:
         except (AttributeError, OSError):
             user, system = 0.0, 0.0
         rows: list[tuple[str, object]] = [
-            ("bottleneck", self.state.native_v3_bottleneck),
             ("episodes/s", _rate(self.state.evaluation_rate)),
             ("turn/s", _rate(self.state.provider_turns_completed / elapsed)),
             ("IR", _objective(self.state.improvement_rate)),
@@ -3195,18 +2916,6 @@ class InteractiveDashboardSink:
                     self.state.configured_provider_concurrency,
                 ),
             ),
-            (
-                "v3 provider/evaluator",
-                f"{_objective(self.state.provider_utilization)} / "
-                f"{_objective(self.state.evaluator_utilization)}",
-            ),
-            (
-                "candidate/shard/verify",
-                f"{self.state.candidate_queue_depth} / "
-                f"{self.state.evaluation_shard_queue_depth} / "
-                f"{self.state.verification_queue_depth}"
-                + (" BP" if self.state.verification_backpressure_active else ""),
-            ),
         ]
         if compact:
             rows = rows[: row_limit or 1]
@@ -3220,59 +2929,6 @@ class InteractiveDashboardSink:
                             slot.state in ACTIVE_STATES
                             for slot in _generation_slots(self.state, self.state.generation).slots
                         ),
-                    ),
-                    (
-                        "raw/unique scores",
-                        f"{self.state.raw_graph_score_calls} / {self.state.unique_graph_scores}",
-                    ),
-                    (
-                        "raw/unique score/s",
-                        f"{_rate(self.state.raw_graph_score_calls_per_second)} / "
-                        f"{_rate(self.state.unique_graph_scores_per_second)}",
-                    ),
-                    (
-                        "episode/rewrite/s",
-                        f"{_rate(self.state.episodes_per_second)} / "
-                        f"{_rate(self.state.accepted_rewrites_per_second)}",
-                    ),
-                    ("accepted rewrites", self.state.accepted_rewrites),
-                    (
-                        "score cache hit",
-                        _objective(self.state.score_cache_hit_rate),
-                    ),
-                    (
-                        "C++/restart/fallback",
-                        f"{self.state.active_cpp_scorers} / "
-                        f"{self.state.scorer_restarts} / "
-                        f"{self.state.forbidden_fallback_count}",
-                    ),
-                    (
-                        "starved/backpressure",
-                        f"{self.state.provider_starvation_seconds:.1f}s / "
-                        f"{self.state.provider_backpressure_seconds:.1f}s",
-                    ),
-                    (
-                        "provider latency/batch",
-                        f"{self.state.provider_response_latency_seconds:.1f}s / "
-                        f"{_objective(self.state.programs_returned_per_call)}",
-                    ),
-                    (
-                        "valid/provider-min",
-                        _objective(self.state.valid_programs_per_provider_minute),
-                    ),
-                    (
-                        "gen/val/eval/persist",
-                        f"{_objective(self.state.generation_wall_share)} / "
-                        f"{_objective(self.state.validation_wall_share)} / "
-                        f"{_objective(self.state.evaluation_wall_share)} / "
-                        f"{_objective(self.state.persistence_wall_share)}",
-                    ),
-                    (
-                        "first eval/1/50%/all",
-                        f"{_objective(self.state.time_to_first_evaluation_seconds)} / "
-                        f"{_objective(self.state.first_valid_ast_to_first_worker_seconds)} / "
-                        f"{_objective(self.state.first_valid_ast_to_half_workers_seconds)} / "
-                        f"{_objective(self.state.first_valid_ast_to_all_workers_seconds)}s",
                     ),
                 )
             )
@@ -3918,7 +3574,11 @@ def _slot_state_label(slot: DashboardSlot) -> str:
 
 
 def _slot_evaluation_percent(slot: DashboardSlot) -> int | None:
-    if slot.state != "evaluating" or slot.evaluation_total is None or slot.evaluation_total <= 0:
+    if (
+        slot.state != "evaluating"
+        or slot.evaluation_total is None
+        or slot.evaluation_total <= 0
+    ):
         return None
     return round(
         100 * min(slot.evaluation_completed, slot.evaluation_total) / slot.evaluation_total

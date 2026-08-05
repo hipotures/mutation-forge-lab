@@ -5,6 +5,7 @@ import json
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,11 +30,8 @@ from mutation_forge.experiment.generation import GenerationConfig, GenerationCoo
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
 from mutation_forge.experiment.lock import canonical_bytes, sha256_bytes, verify_lock
-from mutation_forge.experiment.provider import (
-    AuthenticationError,
-    NativeProviderConfig,
-    _CodexTransport,
-)
+from mutation_forge.experiment.native import _NativeProvider
+from mutation_forge.experiment.provider import NativeProviderConfig, _CodexTransport
 from mutation_forge.experiment.service import (
     ExperimentService,
     NullExperimentAdapter,
@@ -45,10 +43,11 @@ from mutation_forge.experiment.status import (
     experiment_status,
     render_status,
 )
+from mutation_forge.sandbox.contracts import SandboxLimits
 
 
 def _config(*, exp_id: str = "demo", workspace: str = "./workspace", wall: int = 1) -> str:
-    return f'''schema_version = "mforge.experiment.v3"
+    return f'''schema_version = "mforge.experiment.v2"
 exp_id = "{exp_id}"
 workspace = "{workspace}"
 kind = "heg"
@@ -65,10 +64,10 @@ concurrency = 1
 max_repairs = 0
 
 [search]
-population_size = 8
+population_size = 2
 max_generations = 2
 max_model_turns = 4
-selection = "persistent-elite-weighted-diversity"
+selection = "elite-diversity"
 
 [evaluation]
 graph_mode = "unrestricted_min_degree_3"
@@ -76,15 +75,9 @@ order_schedule = "static"
 orders = [10]
 graph_seeds = [401]
 policy_seeds = [4001]
-validation_graph_seeds = [1401]
-validation_policy_seeds = [14001]
 horizon = 4
-baselines = [
-  "add-low-local-cycle-risk",
-  "remove-low-bridge-risk",
-  "random-valid",
-  "degree-fanout",
-]
+proposal_pool_size = 2
+baselines = ["random", "structural"]
 replay = true
 
 [resources]
@@ -140,10 +133,10 @@ def test_config_accepts_and_serializes_unbounded_limits(tmp_path: Path) -> None:
     assert config.search.max_generations is None
     assert config.search.max_model_turns is None
     assert config.resolved_dict()["search"] == {
-        "population_size": 8,
+        "population_size": 2,
         "max_generations": "unbounded",
         "max_model_turns": "unbounded",
-        "selection": "persistent-elite-weighted-diversity",
+        "selection": "elite-diversity",
     }
     assert "effort" not in config.immutable_projection()["model"]
 
@@ -234,13 +227,13 @@ def test_config_rejects_invalid_search_limits(tmp_path: Path, field: str, value:
         load_experiment_config(path)
 
 
-def test_config_rejects_v2_explicitly(tmp_path: Path) -> None:
+def test_config_rejects_v1_explicitly(tmp_path: Path) -> None:
     path = _write_config(tmp_path)
     path.write_text(
-        _config().replace("mforge.experiment.v3", "mforge.experiment.v2"),
+        _config().replace("mforge.experiment.v2", "mforge.experiment.v1"),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="accepts only mforge.experiment.v3"):
+    with pytest.raises(ValueError, match="accepts only mforge.experiment.v2"):
         load_experiment_config(path)
 
 
@@ -406,7 +399,13 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     events = [
         json.loads(line)
         for line in gzip.decompress(
-            (root / "artifacts" / "sessions" / "session-000001" / "events.jsonl.gz").read_bytes()
+            (
+                root
+                / "artifacts"
+                / "sessions"
+                / "session-000001"
+                / "events.jsonl.gz"
+            ).read_bytes()
         )
         .decode("utf-8")
         .splitlines()
@@ -414,27 +413,6 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     started = next(event for event in events if event["event_type"] == "session_started")
     assert started["worker_count"] == 1
     assert started["active_workers"] == 0
-
-
-def test_native_v3_result_schema_cannot_replace_session_schema(tmp_path: Path) -> None:
-    path = _write_config(tmp_path)
-
-    class NativeV3Result:
-        def run(self, *_: object) -> dict[str, str]:
-            return {
-                "schema_version": "mforge.native.run.v3",
-                "state": "idle",
-                "stop_reason": "session_wall_seconds",
-            }
-
-    service = ExperimentService(adapter=NativeV3Result())
-    service.run(path)
-    root = tmp_path / "configs" / "workspace" / "demo"
-    summary = read_json(root / "artifacts" / "sessions" / "session-000001" / "summary.json.gz")
-
-    assert summary["schema_version"] == "mforge.experiment.session.v3"
-    assert summary["result_schema_version"] == "mforge.native.run.v3"
-    assert service.run(path)["session_id"] == "session-000002"
 
 
 def test_second_run_continues_and_invocation_fields_are_mutable(tmp_path: Path) -> None:
@@ -788,7 +766,9 @@ def test_generation_graceful_stop_finishes_validation_without_starting_probe(
             checkpoint_path=tmp_path / "generation.json.gz",
         ),
         stop_requested=lambda: control.graceful_stop_requested,
-        budget_exhausted=lambda: "operator_stop" if control.graceful_stop_requested else None,
+        budget_exhausted=lambda: (
+            "operator_stop" if control.graceful_stop_requested else None
+        ),
         behavior_evaluator=lambda *_args: pytest.fail(
             "probe must not start after validation finishes"
         ),
@@ -961,7 +941,9 @@ def test_hourly_token_usage_is_rolling_and_idempotent(
         }
         assert state.record_provider_turn(**values)
         assert not state.record_provider_turn(**values)
-        charges = state.connection.execute("SELECT token_delta FROM token_charges").fetchall()
+        charges = state.connection.execute(
+            "SELECT token_delta FROM token_charges"
+        ).fetchall()
         assert len(charges) == 1
         assert charges[0]["token_delta"] == 1_000_000
         at_limit = state.hourly_token_usage(1_000_000, now=started)
@@ -1284,7 +1266,9 @@ def test_retry_archives_complete_uncharged_turn_manifest(tmp_path: Path) -> None
     directory = store.turn_directory(0, 0)
     for path in tuple(directory.iterdir()):
         if path.is_file() and path.name.startswith("slot-00."):
-            retry_path = directory / path.name.replace("slot-00.", "slot-00.retry-01.", 1)
+            retry_path = directory / path.name.replace(
+                "slot-00.", "slot-00.retry-01.", 1
+            )
             retry_path.write_bytes(path.read_bytes())
     (directory / "slot-00.retry-01.usage.json.gz").write_bytes(
         (directory / "usage.json.gz").read_bytes()
@@ -1311,6 +1295,76 @@ def test_retry_archives_complete_uncharged_turn_manifest(tmp_path: Path) -> None
     assert manifest["artifact_complete"] is True
     assert (directory / "turn-manifest.attempt-01.json.gz").is_file()
     assert store.verify_turn(directory)
+
+
+def test_native_retry_materializes_usage_after_complete_failed_manifest(tmp_path: Path) -> None:
+    layout = ExperimentLayout(tmp_path, "native-retry")
+    layout.ensure_subdirectories()
+    store = TurnArtifactStore(layout.artifacts)
+    initial = _full_turn_kwargs()
+    initial["request"] = {"prompt": "rendered prompt"}
+    initial.update(
+        terminal_status="failed",
+        request_accepted=False,
+        charged=False,
+        uncharged=True,
+        content_received=False,
+        error="turn completed with active items",
+    )
+    store.write_turn(generation=0, slot=0, **initial)
+    directory = store.turn_directory(0, 0)
+    for path in tuple(directory.iterdir()):
+        if path.is_file() and path.name.startswith("slot-00."):
+            path.with_name(path.name.replace("slot-00.", "slot-00.retry-01.", 1)).write_bytes(
+                path.read_bytes()
+            )
+
+    result = {
+        "artifact_refs": ["slot-00.retry-01.request.md"],
+        "response": initial["response"],
+        "response_text": initial["response_text"],
+        "accepted": True,
+        "content": True,
+        "status": "completed",
+        "charged": True,
+        "usage": initial["usage"],
+        "validation": initial["validation"],
+        "identity": initial["identity"],
+        "behavior": initial["behavior"],
+        "worker_telemetry": initial["worker_telemetry"],
+        "provenance": initial["provenance"],
+        "canonical_response": initial["canonical_response"],
+        "validation_completed": True,
+        "response_projection_valid": True,
+    }
+
+    class State:
+        def record_provider_turn(self, **_kwargs: Any) -> bool:
+            return True
+
+        def hourly_token_usage(self, _limit: int | None) -> dict[str, Any]:
+            return {"hourly_limit_reached": False, "hourly_tokens_used": 0}
+
+    native = _NativeProvider(
+        SimpleNamespace(),
+        layout,
+        State(),
+        SimpleNamespace(),
+        sandbox_limits=SandboxLimits(),
+    )
+    request = {
+        "idempotency_key": "turn-1",
+        "generation": 0,
+        "slot": "slot-00",
+        "phase": "initial",
+        "prompt": "rendered prompt",
+    }
+
+    native._record(request, result)
+    manifest = read_json(directory / "turn-manifest.json.gz")
+
+    assert manifest["artifact_complete"] is True
+    assert (directory / "slot-00.retry-01.usage.json.gz").is_file()
 
 
 def test_native_transport_uses_per_turn_limit_and_retry_prefix(tmp_path: Path) -> None:
@@ -1341,50 +1395,6 @@ def test_native_transport_uses_per_turn_limit_and_retry_prefix(tmp_path: Path) -
         assert adapter.logger.aggregate_root == turn.resolve()
     finally:
         adapter.close(force=True)
-
-
-def test_native_provider_timeout_is_per_call_and_not_multiplied_by_concurrency() -> None:
-    config = NativeProviderConfig(
-        concurrency=2,
-        turn_timeout_base_seconds=600.0,
-    )
-
-    assert config.turn_timeout_seconds == 600.0
-
-
-def test_native_transport_preflight_requires_and_copies_authorized_auth(tmp_path: Path) -> None:
-    missing = _CodexTransport(
-        NativeProviderConfig(),
-        auth_json=None,
-        process_factory=None,
-        auth_checker=lambda _capsule: True,
-        sandbox_mode="danger-full-access",
-        approval_policy="never",
-    )
-    with pytest.raises(AuthenticationError, match="model.auth_json is required"):
-        missing.preflight()
-
-    auth_json = tmp_path / "auth.json"
-    auth_json.write_text('{"tokens":{}}', encoding="utf-8")
-    auth_json.chmod(0o600)
-    observed: list[bool] = []
-    configured = _CodexTransport(
-        NativeProviderConfig(),
-        auth_json=auth_json,
-        process_factory=None,
-        auth_checker=lambda capsule: (
-            observed.append(
-                (capsule.codex_home / "auth.json").read_bytes() == auth_json.read_bytes()
-            )
-            or True
-        ),
-        sandbox_mode="danger-full-access",
-        approval_policy="never",
-    )
-
-    configured.preflight()
-
-    assert observed == [True]
 
 
 def test_artifact_manifest_ignores_atomic_write_temporary_files(tmp_path: Path) -> None:

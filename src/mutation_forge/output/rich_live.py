@@ -91,11 +91,7 @@ class RichLiveSink:
         self.state.update(event.payload)
         self.state["latest_event"] = event.event_type
         self.state["run_id"] = event.run_id
-        if event.event_type in {
-            "provider_turn_started",
-            "provider_turn_activity",
-            "provider_call_started",
-        }:
+        if event.event_type in {"provider_turn_started", "provider_turn_activity"}:
             self.state["phase"] = "repair" if event.payload.get("phase") == "repair" else "provider"
         elif event.event_type == "repair_started":
             self.state["phase"] = "repair"
@@ -121,10 +117,6 @@ class RichLiveSink:
             "provider_turn_activity",
             "provider_turn_completed",
             "provider_turn_failed",
-            "provider_call_started",
-            "provider_call_completed",
-            "provider_call_failed",
-            "candidate_validated",
             "repair_started",
             "repair_activity",
             "repair_completed",
@@ -156,10 +148,7 @@ class RichLiveSink:
             self.state["native"] = True
             self._update_counterexample(event)
             self._update_native_counters(event)
-            if event.event_type.startswith("provider_call_"):
-                self._update_native_provider_call_slots(event)
-            else:
-                self._update_native_slot(event)
+            self._update_native_slot(event)
             self._record_recent_event(event)
             self._track_native_activity(event)
         if event.event_type == "session_started":
@@ -267,56 +256,34 @@ class RichLiveSink:
             self._session_cpu_start = (float(usage.ru_utime), float(usage.ru_stime))
             self._last_activity_monotonic = now
             self._last_activity_label = "session"
-        if event_type in {
-            "provider_turn_started",
-            "provider_call_started",
-            "repair_started",
-        }:
-            slot = payload.get("slot", payload.get("slot_ids"))
+        if event_type in {"provider_turn_started", "repair_started"}:
+            slot = payload.get("slot")
             phase = "repair" if event_type == "repair_started" else "provider"
-            timeout_ns = payload.get("timeout_ns")
-            timeout = (
-                float(timeout_ns) / 1e9
-                if isinstance(timeout_ns, int) and not isinstance(timeout_ns, bool)
-                else payload.get("timeout_seconds", 120.0)
-            )
             self._active_operation = {
                 "phase": phase,
                 "slot": slot if isinstance(slot, str) else "?",
                 "generation": payload.get("generation"),
                 "started": now,
-                "timeout": timeout,
+                "timeout": payload.get("timeout_seconds", 120.0),
                 "thread": payload.get("provider_thread_id"),
                 "turn": payload.get("provider_turn_id"),
             }
             self._last_activity_monotonic = now
             self._last_activity_label = event_type.removesuffix("_started")
-        elif event_type in {
-            "provider_turn_activity",
-            "repair_activity",
-        }:
-            elapsed_ns = payload.get("operation_elapsed_ns")
+        elif event_type in {"provider_turn_activity", "repair_activity"}:
             elapsed_value = payload.get("operation_elapsed_seconds")
             operation_elapsed = (
-                float(elapsed_ns) / 1e9
-                if isinstance(elapsed_ns, int) and not isinstance(elapsed_ns, bool)
-                else float(elapsed_value)
+                float(elapsed_value)
                 if isinstance(elapsed_value, (int, float)) and not isinstance(elapsed_value, bool)
                 else 0.0
-            )
-            timeout_ns = payload.get("timeout_ns")
-            timeout = (
-                float(timeout_ns) / 1e9
-                if isinstance(timeout_ns, int) and not isinstance(timeout_ns, bool)
-                else payload.get("timeout_seconds", 120.0)
             )
             if self._active_operation is None:
                 self._active_operation = {
                     "phase": "repair" if event_type == "repair_activity" else "provider",
-                    "slot": payload.get("slot", payload.get("slot_ids", "?")),
+                    "slot": payload.get("slot", "?"),
                     "generation": payload.get("generation"),
                     "started": now - operation_elapsed,
-                    "timeout": timeout,
+                    "timeout": payload.get("timeout_seconds", 120.0),
                 }
             self._last_activity_monotonic = now
             self._last_activity_label = event_type.removesuffix("_activity")
@@ -327,22 +294,13 @@ class RichLiveSink:
         elif event_type in {
             "provider_turn_completed",
             "provider_turn_failed",
-            "provider_call_completed",
-            "provider_call_failed",
             "repair_completed",
         }:
             self._last_activity_monotonic = now
             self._last_activity_label = event_type.removesuffix("_completed").removesuffix(
                 "_failed"
             )
-            calls_in_flight = payload.get("provider_calls_in_flight")
-            keep_provider_call = (
-                event_type == "provider_call_completed"
-                and isinstance(calls_in_flight, int)
-                and not isinstance(calls_in_flight, bool)
-                and calls_in_flight > 0
-            )
-            if event_type != "repair_completed" and not keep_provider_call:
+            if event_type != "repair_completed":
                 self._active_operation = None
         elif event_type in {
             "validation_started",
@@ -457,29 +415,6 @@ class RichLiveSink:
         elif event.event_type == "provider_turn_started":
             self.state["active_model_turns"] = integer("active_model_turns") + 1
             add("provider_turns_attempted")
-        elif event.event_type == "provider_call_started":
-            in_flight = payload.get("provider_calls_in_flight")
-            self.state["active_model_turns"] = (
-                in_flight
-                if isinstance(in_flight, int) and not isinstance(in_flight, bool)
-                else integer("active_model_turns") + 1
-            )
-            add("provider_turns_attempted")
-        elif event.event_type in {"provider_call_completed", "provider_call_failed"}:
-            in_flight = payload.get("provider_calls_in_flight")
-            self.state["active_model_turns"] = (
-                in_flight
-                if isinstance(in_flight, int) and not isinstance(in_flight, bool)
-                else max(0, integer("active_model_turns") - 1)
-            )
-            if event.event_type == "provider_call_completed":
-                add("provider_turns_completed")
-                add("responses_received")
-            else:
-                self.state["error_summary"] = payload.get(
-                    "error_message",
-                    "provider call failed",
-                )
         elif event.event_type in {"provider_turn_completed", "provider_turn_failed"}:
             self.state["active_model_turns"] = max(0, integer("active_model_turns") - 1)
             if payload.get("retained") is True:
@@ -672,7 +607,7 @@ class RichLiveSink:
 
     def _update_native_slot(self, event: Event) -> None:
         payload = event.payload
-        slot = payload.get("slot", payload.get("call_id"))
+        slot = payload.get("slot")
         if not isinstance(slot, str):
             return
         detail = self._slot_details.setdefault(slot, {})
@@ -786,71 +721,6 @@ class RichLiveSink:
         if isinstance(error, str) and error:
             detail["error"] = error
 
-    def _update_native_provider_call_slots(self, event: Event) -> None:
-        payload = event.payload
-        encoded_slots = payload.get("slot_ids")
-        if not isinstance(encoded_slots, str):
-            return
-        now = time.monotonic()
-        event_type = event.event_type
-        elapsed_ns = payload.get("operation_elapsed_ns")
-        elapsed = (
-            float(elapsed_ns) / 1e9
-            if isinstance(elapsed_ns, int) and not isinstance(elapsed_ns, bool)
-            else payload.get("operation_elapsed_seconds")
-        )
-        if not isinstance(elapsed, int | float) or isinstance(elapsed, bool):
-            latency_ns = payload.get("latency_ns")
-            elapsed = (
-                float(latency_ns) / 1e9
-                if isinstance(latency_ns, int) and not isinstance(latency_ns, bool)
-                else None
-            )
-        error_type = payload.get("error_type")
-        error_message = payload.get("error_message")
-        diagnostic = ": ".join(
-            str(value)
-            for value in (error_type, error_message)
-            if isinstance(value, str) and value
-        )
-        slots = self.state.get("slot_states")
-        if not isinstance(slots, dict):
-            slots = {}
-            self.state["slot_states"] = slots
-        slot_names = tuple(
-            item.strip() for item in encoded_slots.split(",") if item.strip()
-        )
-        for index, slot in enumerate(slot_names):
-            is_call_representative = index == 0
-            if not slot:
-                continue
-            detail = self._slot_details.setdefault(slot, {})
-            detail["generation"] = payload.get("generation")
-            if event_type == "provider_call_started":
-                detail["phase"] = "provider"
-                detail["state"] = "model" if is_call_representative else "batched"
-                if is_call_representative:
-                    detail["_slot_started_at"] = now
-                else:
-                    detail.pop("_slot_started_at", None)
-            elif event_type == "provider_call_failed":
-                detail["phase"] = "response"
-                detail["state"] = "failed" if is_call_representative else "batched"
-                if is_call_representative:
-                    detail["error"] = diagnostic or "provider call failed"
-                else:
-                    detail.pop("error", None)
-                detail.pop("_slot_started_at", None)
-                if is_call_representative and elapsed is not None:
-                    detail["elapsed_seconds"] = float(elapsed)
-            else:
-                detail["phase"] = "response" if is_call_representative else "provider"
-                detail["state"] = "validating" if is_call_representative else "batched"
-                detail.pop("_slot_started_at", None)
-                if is_call_representative and elapsed is not None:
-                    detail["elapsed_seconds"] = float(elapsed)
-            slots[slot] = detail["state"]
-
     def _record_recent_event(self, event: Event) -> None:
         meaningful = {
             "preflight_started",
@@ -864,10 +734,6 @@ class RichLiveSink:
             "provider_turn_activity",
             "provider_turn_completed",
             "provider_turn_failed",
-            "provider_call_started",
-            "provider_call_completed",
-            "provider_call_failed",
-            "candidate_validated",
             "repair_started",
             "repair_activity",
             "repair_completed",
@@ -901,11 +767,11 @@ class RichLiveSink:
         slot = payload.get("slot")
         timestamp = event.timestamp[11:19] if len(event.timestamp) >= 19 else ""
         slot_label = compact_display_ids(slot) if isinstance(slot, str) else "work"
-        if event.event_type in {"provider_turn_started", "provider_call_started"}:
+        if event.event_type == "provider_turn_started":
             phase = payload.get("phase")
             phase_label = f" {phase}" if isinstance(phase, str) and phase else ""
             entry = f"{timestamp} prompt sent {slot_label}{phase_label}".strip()
-        elif event.event_type in {"provider_turn_completed", "provider_call_completed"}:
+        elif event.event_type == "provider_turn_completed":
             tokens = payload.get("totalTokens")
             token_label = (
                 f" {tokens:,} tok"
@@ -913,8 +779,8 @@ class RichLiveSink:
                 else ""
             )
             entry = f"{timestamp} response received {slot_label}{token_label}".strip()
-        elif event.event_type in {"provider_turn_failed", "provider_call_failed"}:
-            error = payload.get("error", payload.get("error_message"))
+        elif event.event_type == "provider_turn_failed":
+            error = payload.get("error")
             error_label = f": {error}" if isinstance(error, str) and error else ""
             entry = f"{timestamp} response failed {slot_label}{error_label}".strip()
         else:
@@ -928,18 +794,10 @@ class RichLiveSink:
             if isinstance(error, str) and error:
                 label += f": {error}"
             entry = f"{timestamp} {label}".strip()
-        if event.event_type in {
-            "provider_turn_activity",
-            "repair_activity",
-        }:
+        if event.event_type in {"provider_turn_activity", "repair_activity"}:
             # Heartbeats should keep the tail current without consuming all
             # six rows during a long model turn.
-            elapsed_ns = payload.get("operation_elapsed_ns")
-            elapsed = (
-                float(elapsed_ns) / 1e9
-                if isinstance(elapsed_ns, int) and not isinstance(elapsed_ns, bool)
-                else payload.get("operation_elapsed_seconds")
-            )
+            elapsed = payload.get("operation_elapsed_seconds")
             elapsed_label = (
                 f" {float(elapsed):.0f}s"
                 if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)

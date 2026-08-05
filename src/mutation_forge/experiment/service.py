@@ -20,7 +20,7 @@ from .lock import (
     load_lock,
     verify_lock,
 )
-from .native_v3 import NativeV3ExperimentAdapter
+from .native import NativeExperimentAdapter
 from .observer import CallbackEventSink, ExperimentEventHub
 from .sessions import SessionContext, SessionManager
 from .state import ExperimentStateStore, StateError, process_alive
@@ -76,7 +76,7 @@ class ExperimentService:
         profiling: bool | None = None,
         control: ExperimentControl | None = None,
     ) -> None:
-        self.adapter = adapter or NativeV3ExperimentAdapter()
+        self.adapter = adapter or NativeExperimentAdapter()
         self.event_sinks = list(event_sinks)
         if observer is not None:
             self.event_sinks.append(CallbackEventSink(observer))
@@ -615,7 +615,7 @@ class ExperimentService:
         session = state.session() or {}
         checkpoint = state.checkpoint()
         return {
-            "schema_version": "mforge.experiment.run.v3",
+            "schema_version": "mforge.experiment.run.v2",
             "status": terminal_state,
             "exp_id": config.exp_id,
             "state": terminal_state,
@@ -639,7 +639,7 @@ class ExperimentService:
         effective_model_turns: int | None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "schema_version": "mforge.experiment.run.v3",
+            "schema_version": "mforge.experiment.run.v2",
             "status": (
                 "failed"
                 if outcome.get("state") == "failed"
@@ -663,10 +663,6 @@ class ExperimentService:
             result["result"] = outcome["result"]
         result["session"] = dict(session)
         for field in (
-            "generation",
-            "validated_global_best",
-            "semantic_checkpoint_hash",
-            "counterexample",
             "timing_profile",
             "deep_operator_profile",
             "deep_score_profile",
