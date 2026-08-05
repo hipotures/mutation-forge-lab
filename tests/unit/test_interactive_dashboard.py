@@ -158,6 +158,16 @@ def _running_state() -> DashboardState:
     state = reduce_dashboard_event(
         state,
         _event(
+            "validation_started",
+            generation=1,
+            slot="slot-01",
+            phase="validation",
+        ),
+        monotonic=111.5,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
             "validation_completed",
             generation=1,
             slot="slot-01",
@@ -395,6 +405,78 @@ def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> N
         monotonic=124.0,
     )
     assert evaluated.evaluations_completed == 7
+
+
+def test_validation_diagnostics_require_started_work_and_clear_for_new_turn() -> None:
+    state = reduce_dashboard_event(
+        DashboardState(),
+        _event(
+            "slot_queued",
+            generation=0,
+            slot="slot-00",
+            phase="initial",
+            status="queued",
+        ),
+        monotonic=1.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "validation_completed",
+            generation=0,
+            slot="slot-00",
+            phase="initial",
+            valid=False,
+            validation_codes=["turn_provenance", "invalid_output"],
+        ),
+        monotonic=2.0,
+    )
+    untouched = state.generations[0].slots[0]
+    assert untouched.state == "queued"
+    assert untouched.validation == "—"
+    assert untouched.error == ""
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "validation_started",
+            generation=0,
+            slot="slot-00",
+            phase="initial",
+        ),
+        monotonic=3.0,
+    )
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "validation_completed",
+            generation=0,
+            slot="slot-00",
+            phase="initial",
+            valid=False,
+            validation_codes=["invalid_output"],
+        ),
+        monotonic=4.0,
+    )
+    invalid = state.generations[0].slots[0]
+    assert invalid.state == "invalid"
+    assert invalid.validation == "invalid_output"
+
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "provider_turn_started",
+            generation=0,
+            slot="slot-00",
+            phase="initial",
+        ),
+        monotonic=5.0,
+    )
+    model = state.generations[0].slots[0]
+    assert model.state == "model"
+    assert model.validation == "—"
+    assert model.validation_message == ""
+    assert model.error == ""
 
 
 def test_counterexample_lifecycle_is_idempotent_and_terminal() -> None:
