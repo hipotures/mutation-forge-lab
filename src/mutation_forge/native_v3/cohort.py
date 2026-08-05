@@ -13,6 +13,7 @@ from mutation_forge.artifacts import git_state
 from mutation_forge.backends.base import GraphBackend
 from mutation_forge.counterexamples import CounterexamplePipeline
 from mutation_forge.experiment.artifacts import (
+    NATIVE_V3_PROGRAM_BATCH_PROJECTION,
     TurnArtifactStore,
     generated_policy_diagnostics,
 )
@@ -302,6 +303,7 @@ def build_batch_request(
             "call_id": call_id,
             "slot_ids": list(slot_ids),
             "reasoning_effort": effort,
+            "response_projection": NATIVE_V3_PROGRAM_BATCH_PROJECTION,
         }
     )
     return request

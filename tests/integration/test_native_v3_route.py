@@ -236,6 +236,27 @@ def test_v3_completes_eight_slots_and_status_is_read_only(
     assert report_payload["selected_program_hash"] == (
         report_payload["canonical_program_order"][0]
     )
+    for call_index, batch_report in enumerate(report_payload["batch_reports"]):
+        turn = Path(batch_report["attempts"][0]["turn_directory"])
+        prefix = f"slot-{call_index * 4:02d}"
+        assert not (turn / "source.py").exists()
+        assert (turn / "program-batch.json").is_file()
+        turn_manifest = read_json(turn / "turn-manifest.json.gz")
+        assert turn_manifest["source_artifact"] == "program-batch.json"
+        assert turn_manifest["source_extraction"] is True
+        response_markdown = (turn / f"{prefix}.response.md").read_text()
+        assert response_markdown.startswith("# Native v3 program batch\n\n")
+        assert "```json\n" in response_markdown
+        assert "```python\n" not in response_markdown
+        assert (turn / f"{prefix}.response.raw.txt").read_text() == _response(
+            (
+                f"slot-{call_index * 4:02d}",
+                f"slot-{call_index * 4 + 1:02d}",
+                f"slot-{call_index * 4 + 2:02d}",
+                f"slot-{call_index * 4 + 3:02d}",
+            ),
+            offset=call_index * 4,
+        )
 
     before = {
         item.relative_to(tmp_path): (item.stat().st_mtime_ns, item.read_bytes())
@@ -379,11 +400,19 @@ def test_wholly_invalid_batch_gets_exactly_one_frozen_repair(
         "initial",
         "repair-01",
     ]
-    initial_source = Path(attempts[0]["turn_directory"]) / "source.py"
-    repair_source = Path(attempts[1]["turn_directory"]) / "source.py"
+    initial_turn = Path(attempts[0]["turn_directory"])
+    repair_turn = Path(attempts[1]["turn_directory"])
+    initial_source = initial_turn / "program-batch.json"
+    repair_source = repair_turn / "program-batch.json"
     assert initial_source.is_file()
     assert repair_source.is_file()
+    assert not (initial_turn / "source.py").exists()
+    assert not (repair_turn / "source.py").exists()
     assert initial_source.read_bytes() != repair_source.read_bytes()
+    assert "```json\n" in (repair_turn / "slot-00.response.md").read_text()
+    assert "```python\n" not in (
+        repair_turn / "slot-00.response.md"
+    ).read_text()
     assert all(attempt["provider_turn_id"] for attempt in attempts)
 
 

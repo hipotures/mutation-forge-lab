@@ -21,11 +21,13 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from .artifacts import (
+    NATIVE_V3_PROGRAM_BATCH_PROJECTION,
     TurnArtifactStore,
     generated_policy_diagnostics,
     is_generated_policy,
     redact,
     render_generated_policy_markdown,
+    render_native_v3_program_batch_markdown,
 )
 from .json_io import write_json
 
@@ -191,6 +193,14 @@ class _CodexTransport:
     def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         model = str(request.get("model", self.config.model))
         effort = str(request.get("effort", self.config.effort))
+        response_projection = request.get("response_projection")
+        if response_projection not in {
+            None,
+            NATIVE_V3_PROGRAM_BATCH_PROJECTION,
+        }:
+            raise NativeProviderError(
+                f"unsupported response projection: {response_projection!r}"
+            )
         prompt = request.get("prompt")
         system = request.get("system_prompt")
         schema = request.get("output_schema")
@@ -290,7 +300,13 @@ class _CodexTransport:
             adapter.logger.raw_text("request.md", prompt)
             adapter.logger.raw_text("response.raw.txt", response_text)
             if response_projection_valid and isinstance(response, Mapping):
-                adapter.logger.raw_text("response.md", render_generated_policy_markdown(response))
+                response_markdown = (
+                    render_native_v3_program_batch_markdown(response)
+                    if response_projection
+                    == NATIVE_V3_PROGRAM_BATCH_PROJECTION
+                    else render_generated_policy_markdown(response)
+                )
+                adapter.logger.raw_text("response.md", response_markdown)
             else:
                 adapter.logger.remove("response.md")
             if isinstance(response, Mapping):

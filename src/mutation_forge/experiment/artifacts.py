@@ -122,6 +122,7 @@ _GENERATED_POLICY_FIELDS = (
     "assumptions",
     "expected_failure_modes",
 )
+NATIVE_V3_PROGRAM_BATCH_PROJECTION = "native-v3-program-batch"
 _USED_FIELD_NAME = re.compile(r"^(?:ctx|proposal)\.[A-Za-z][A-Za-z0-9_]*$")
 
 
@@ -288,6 +289,36 @@ def render_generated_policy_markdown(value: Mapping[str, Any]) -> bytes:
     ).encode()
 
 
+def render_native_v3_program_batch_markdown(value: Mapping[str, Any]) -> bytes:
+    """Render a v3 batch projection without mislabelling its JSON as Python."""
+
+    source = value.get("source", "")
+    design_summary = value.get("design_summary", "")
+    hypothesis = value.get("hypothesis", "")
+    return (
+        "# Native v3 program batch\n\n"
+        "## Design summary\n\n"
+        f"{str(design_summary).strip()}\n\n"
+        "## Hypothesis\n\n"
+        f"{str(hypothesis).strip()}\n\n"
+        "## Program batch\n\n"
+        f"```json\n{str(source).strip()}\n```\n"
+    ).encode()
+
+
+def _source_artifact_name(request: object | None) -> str:
+    if not isinstance(request, Mapping):
+        return "source.py"
+    projection = request.get("response_projection")
+    if projection is None:
+        return "source.py"
+    if projection == NATIVE_V3_PROGRAM_BATCH_PROJECTION:
+        return "program-batch.json"
+    raise ArtifactIncompleteError(
+        f"unsupported response projection: {projection!r}"
+    )
+
+
 def usage_complete(value: Mapping[str, Any] | None) -> bool:
     """Return whether provider usage is final, non-partial, and exact."""
 
@@ -400,6 +431,7 @@ class TurnArtifactStore:
         blocking_missing: set[str] = set()
         complete = True
         slot_text = str(slot) if str(slot).startswith("slot-") else f"slot-{int(slot):02d}"
+        source_artifact_name = _source_artifact_name(request)
 
         def put(name: str, data: bytes, *, required: bool = False) -> None:
             nonlocal complete
@@ -466,9 +498,14 @@ class TurnArtifactStore:
             # parsed, redacted, fenced, or otherwise rewritten.
             put(f"{slot_text}.response.raw.txt", _text(response_text, redact_value=False))
         if response_projection_valid and decoded_response is not None:
+            response_markdown = (
+                render_native_v3_program_batch_markdown(decoded_response)
+                if source_artifact_name == "program-batch.json"
+                else render_generated_policy_markdown(decoded_response)
+            )
             put(
                 f"{slot_text}.response.md",
-                render_generated_policy_markdown(decoded_response),
+                response_markdown,
                 required=True,
             )
         elif effective_content:
@@ -501,7 +538,7 @@ class TurnArtifactStore:
         put_json(f"{slot_text}.provider-raw.json.gz", provider_raw)
         put_json(f"{slot_text}.codex-profile.json.gz", codex_profile)
         if source is not None:
-            put("source.py", _text(source), required=True)
+            put(source_artifact_name, _text(source), required=True)
         if rpc is not None:
             put(f"{slot_text}.codex-rpc.jsonl", _json_lines(rpc))
         if events is not None:
@@ -603,6 +640,8 @@ class TurnArtifactStore:
             # is determined by missing/bounded artifacts above, not by the
             # terminal status itself.
             manifest["error"] = error
+        if source_extracted and source_artifact_name != "source.py":
+            manifest["source_artifact"] = source_artifact_name
         _atomic_write(
             directory / ARTIFACT_MANIFEST,
             compress_json_bytes(_canonical(manifest) + b"\n"),
@@ -665,14 +704,15 @@ class TurnArtifactStore:
         # the provider's original response bytes remain untouched.
         response_value = result.get("response")
         source_value = response_value.get("source") if isinstance(response_value, Mapping) else None
-        source_path = root / "source.py"
+        source_artifact_name = _source_artifact_name(request)
+        source_path = root / source_artifact_name
         if isinstance(source_value, str) and not source_path.exists():
             source_bytes = source_value.encode("utf-8")
             if len(source_bytes) > self.max_bytes:
-                missing["source.py"] = (
+                missing[source_artifact_name] = (
                     f"artifact bound exceeded ({len(source_bytes)} > {self.max_bytes} bytes)"
                 )
-                blocking.add("source.py")
+                blocking.add(source_artifact_name)
             else:
                 _atomic_write(source_path, source_bytes, exclusive=True)
         validation_value = result.get("validation")
@@ -818,7 +858,7 @@ class TurnArtifactStore:
             ),
             "content_received": content_received,
             "response_projection_valid": bool(projection_valid),
-            "source_extraction": (root / "source.py").is_file(),
+            "source_extraction": source_path.is_file(),
             "validation_completed": bool(result.get("validation_completed"))
             and (root / "validation.json.gz").is_file(),
             "artifact_complete": not blocking,
@@ -834,6 +874,8 @@ class TurnArtifactStore:
         }
         if result.get("error"):
             manifest["error"] = str(result["error"])
+        if source_path.is_file() and source_artifact_name != "source.py":
+            manifest["source_artifact"] = source_artifact_name
         _atomic_write(
             manifest_path,
             compress_json_bytes(_canonical(manifest) + b"\n"),
@@ -959,11 +1001,13 @@ __all__ = [
     "ArtifactIncompleteError",
     "ArtifactStore",
     "MAX_ARTIFACT_BYTES",
+    "NATIVE_V3_PROGRAM_BATCH_PROJECTION",
     "TurnArtifactStore",
     "copy_canonical_source",
     "generated_policy_diagnostics",
     "is_generated_policy",
     "redact",
     "render_generated_policy_markdown",
+    "render_native_v3_program_batch_markdown",
     "usage_complete",
 ]
