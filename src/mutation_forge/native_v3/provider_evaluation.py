@@ -109,6 +109,10 @@ def run_provider_evaluation_smoke(
             "provider_report": str(
                 output_root / "provider-smoke-report.json.gz"
             ),
+            "error_classification": provider_report.get("error_classification"),
+            "error_type": provider_report.get("error_type"),
+            "error": provider_report.get("error"),
+            "usage": provider_report.get("usage"),
             "resumable": bool(provider_report.get("resumable")),
         }
         write_json(report_path, report)
@@ -182,6 +186,7 @@ def run_provider_evaluation_smoke(
         "graph_evaluations": graph_evaluations,
         "semantic_trace_hash": evaluation.semantic_trace_hash,
         "scientific_terminal_result": completed,
+        "usage": provider_report.get("usage"),
         "provider_turn_directory": str(provider_report["turn_directory"]),
         "evaluation_result": str(evaluation_path),
         "resumable": True,
