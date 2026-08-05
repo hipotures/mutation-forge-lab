@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-STATE_SCHEMA_VERSION = "mforge.experiment.state.v3"
+STATE_SCHEMA_VERSION = "mforge.experiment.state.v2"
 TERMINAL_STATES = frozenset({"exhausted", "completed"})
 RESUMABLE_STATES = frozenset({"idle", "paused", "interrupted", "failed"})
 VALID_STATES = frozenset(
@@ -40,14 +40,6 @@ _USAGE_FIELDS = (
 _EXACT_USAGE_FIELDS = tuple(
     field for field in _USAGE_FIELDS if field != "cacheWriteInputTokens"
 )
-_USAGE_COLUMNS = {
-    "inputTokens": "input_tokens",
-    "cachedInputTokens": "cached_input_tokens",
-    "cacheWriteInputTokens": "cache_write_input_tokens",
-    "outputTokens": "output_tokens",
-    "reasoningOutputTokens": "reasoning_output_tokens",
-    "totalTokens": "total_tokens",
-}
 
 
 class StateError(RuntimeError):
@@ -96,26 +88,6 @@ def _usage_quality(value: Mapping[str, Any]) -> str:
     ):
         return "partial"
     return "unknown"
-
-
-def _usage_value(value: Mapping[str, Any], field: str) -> int | None:
-    observed = value.get(field)
-    return (
-        int(observed)
-        if isinstance(observed, int) and not isinstance(observed, bool) and observed >= 0
-        else None
-    )
-
-
-def _usage_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        **{
-            field: row.get(column)
-            for field, column in _USAGE_COLUMNS.items()
-            if isinstance(row.get(column), int)
-        },
-        "quality": str(row.get("usage_quality") or "unknown"),
-    }
 
 
 def process_alive(pid: int) -> bool:
@@ -205,8 +177,7 @@ class ExperimentStateStore:
                     runtime_seconds REAL NOT NULL DEFAULT 0,
                     stop_reason TEXT,
                     exit_status INTEGER,
-                    ir REAL,
-                    counterexample_json TEXT NOT NULL DEFAULT '{}'
+                    summary_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS ownership (
                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -224,13 +195,7 @@ class ExperimentStateStore:
                     provider_thread_id TEXT,
                     provider_turn_id TEXT,
                     artifact_path TEXT,
-                    input_tokens INTEGER,
-                    cached_input_tokens INTEGER,
-                    cache_write_input_tokens INTEGER,
-                    output_tokens INTEGER,
-                    reasoning_output_tokens INTEGER,
-                    total_tokens INTEGER,
-                    usage_quality TEXT NOT NULL DEFAULT 'unknown',
+                    usage_json TEXT NOT NULL DEFAULT '{}',
                     completed_at TEXT,
                     error TEXT
                 );
@@ -240,21 +205,15 @@ class ExperimentStateStore:
                     archive_path TEXT,
                     generation INTEGER,
                     slot TEXT,
-                    parent_id TEXT,
                     status TEXT NOT NULL,
-                    behavior_json TEXT NOT NULL DEFAULT '{}'
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS evaluations (
                     identity TEXT PRIMARY KEY,
                     candidate_id TEXT,
                     kind TEXT NOT NULL,
                     state TEXT NOT NULL,
-                    episode_count INTEGER,
-                    mean_auc REAL,
-                    best_auc REAL,
-                    baseline_auc_json TEXT NOT NULL DEFAULT '{}',
-                    improvement_rate REAL,
-                    elapsed_seconds REAL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
                     completed_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -272,15 +231,7 @@ class ExperimentStateStore:
                     event_type TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     idempotency_key TEXT UNIQUE,
-                    generation INTEGER,
-                    slot TEXT,
-                    selected_parents_json TEXT
-                );
-                CREATE TABLE IF NOT EXISTS token_charges (
-                    idempotency_key TEXT PRIMARY KEY,
-                    turn_idempotency_key TEXT NOT NULL,
-                    charged_at TEXT NOT NULL,
-                    token_delta INTEGER NOT NULL CHECK(token_delta > 0)
+                    payload_json TEXT NOT NULL
                 );
                 """
             )
@@ -290,8 +241,7 @@ class ExperimentStateStore:
             if existing_schema is not None and existing_schema[0] != STATE_SCHEMA_VERSION:
                 raise StateError(
                     f"Unsupported experiment state schema: {existing_schema[0]!r}. "
-                    f"This runtime accepts only {STATE_SCHEMA_VERSION}. "
-                    "Run 'mforge experiment rebuild-state' for a v2 workspace."
+                    f"This runtime accepts only {STATE_SCHEMA_VERSION}. Create a fresh workspace."
                 )
             existing_experiment = connection.execute(
                 "SELECT 1 FROM experiment LIMIT 1"
@@ -324,24 +274,40 @@ class ExperimentStateStore:
             raise StateError(
                 f"Unsupported experiment state schema: {observed}. "
                 f"This runtime accepts only {STATE_SCHEMA_VERSION}. "
-                "Run 'mforge experiment rebuild-state' for a v2 workspace."
+                "Create a fresh workspace."
             )
         integrity = self.connection.execute("PRAGMA integrity_check").fetchone()
         if integrity is None or integrity[0] != "ok":
             raise StateError(f"state database integrity check failed: {self.path}")
         for row in self.connection.execute(
-            "SELECT session_id,counterexample_json FROM sessions "
-            "WHERE counterexample_json != '{}'"
+            "SELECT session_id,summary_json FROM sessions WHERE summary_json != '{}'"
         ):
             try:
-                counterexample = json.loads(str(row["counterexample_json"]))
+                summary = json.loads(str(row["summary_json"]))
             except json.JSONDecodeError as exc:
                 raise StateError(
-                    f"session {row['session_id']} has unreadable counterexample state"
+                    f"session {row['session_id']} has an unreadable summary"
                 ) from exc
-            if not isinstance(counterexample, Mapping):
+            if not isinstance(summary, Mapping) or summary.get(
+                "schema_version"
+            ) != "mforge.experiment.session.v2":
+                observed = summary.get("schema_version") if isinstance(summary, Mapping) else None
                 raise StateError(
-                    f"session {row['session_id']} has invalid counterexample state"
+                    f"Unsupported session summary schema: {observed!r}. "
+                    "This runtime accepts only mforge.experiment.session.v2. "
+                    "Create a fresh workspace."
+                )
+        for row in self.connection.execute("SELECT payload_json FROM events"):
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError as exc:
+                raise StateError("experiment event payload is unreadable") from exc
+            schema = payload.get("schema_version") if isinstance(payload, Mapping) else None
+            if schema is not None and schema != "mforge.experiment.events.v2":
+                raise StateError(
+                    f"Unsupported experiment event schema: {schema!r}. "
+                    "This runtime accepts only mforge.experiment.events.v2. "
+                    "Create a fresh workspace."
                 )
 
     def close(self) -> None:
@@ -439,7 +405,7 @@ class ExperimentStateStore:
             "provider_turns_completed=MAX(provider_turns_completed,?),candidates_created=?,"
             "evaluations_completed=?,token_usage_delta=MAX(token_usage_delta,?),"
             "cumulative_tokens=?,runtime_seconds=?,"
-            "stop_reason=?,exit_status=?,ir=?,counterexample_json=? WHERE session_id=?",
+            "stop_reason=?,exit_status=?,summary_json=? WHERE session_id=?",
             (
                 _now(),
                 ending_checkpoint,
@@ -454,8 +420,7 @@ class ExperimentStateStore:
                 runtime_seconds,
                 stop_reason,
                 exit_status,
-                (summary or {}).get("ir"),
-                _json((summary or {}).get("counterexample", {})),
+                _json(dict(summary or {})),
                 session_id,
             ),
         )
@@ -560,35 +525,14 @@ class ExperimentStateStore:
         *,
         session_id: str | None = None,
         idempotency_key: str | None = None,
-        timestamp: str | None = None,
     ) -> int:
         raw_key = idempotency_key if idempotency_key is not None else payload.get("idempotency_key")
         idempotency_key = raw_key if isinstance(raw_key, str) and raw_key else None
-        generation = payload.get("generation")
-        generation = (
-            int(generation)
-            if isinstance(generation, int) and not isinstance(generation, bool)
-            else None
-        )
-        slot = payload.get("slot")
-        slot = str(slot) if isinstance(slot, str) and slot else None
-        selected_parents = payload.get("selected_parents")
-        selected_parents_json = (
-            _json(dict(selected_parents)) if isinstance(selected_parents, Mapping) else None
-        )
         cursor = self.connection.execute(
             "INSERT OR IGNORE INTO events("
-            "session_id,event_type,timestamp,idempotency_key,generation,slot,"
-            "selected_parents_json) VALUES(?,?,?,?,?,?,?)",
-            (
-                session_id,
-                event_type,
-                timestamp or _now(),
-                idempotency_key,
-                generation,
-                slot,
-                selected_parents_json,
-            ),
+            "session_id,event_type,timestamp,idempotency_key,payload_json"
+            ") VALUES(?,?,?,?,?)",
+            (session_id, event_type, _now(), idempotency_key, _json(dict(payload))),
         )
         self.connection.commit()
         if cursor.rowcount:
@@ -642,17 +586,20 @@ class ExperimentStateStore:
             # exits without touching any ledger.
             self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
-                "SELECT state,input_tokens,cached_input_tokens,cache_write_input_tokens,"
-                "output_tokens,reasoning_output_tokens,total_tokens,usage_quality "
-                "FROM provider_turns WHERE idempotency_key=?",
+                "SELECT state,usage_json FROM provider_turns WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
             if row is not None and row["state"] == "completed":
                 self.connection.rollback()
                 return False
-            prior_usage: Mapping[str, Any] = (
-                _usage_from_row(dict(row)) if row is not None else {}
-            )
+            prior_usage: Mapping[str, Any] = {}
+            if row is not None:
+                try:
+                    decoded = json.loads(str(row["usage_json"]))
+                    if isinstance(decoded, Mapping):
+                        prior_usage = decoded
+                except json.JSONDecodeError:
+                    prior_usage = {}
             prior_total = prior_usage.get("totalTokens", 0)
             prior_consumed = row is not None and (
                 row["state"] == "completed"
@@ -665,17 +612,14 @@ class ExperimentStateStore:
             if row is not None:
                 self.connection.execute(
                     "UPDATE provider_turns SET state=?,provider_thread_id=?,provider_turn_id=?,"
-                    "artifact_path=?,input_tokens=?,cached_input_tokens=?,"
-                    "cache_write_input_tokens=?,output_tokens=?,reasoning_output_tokens=?,"
-                    "total_tokens=?,usage_quality=?,completed_at=?,error=? "
+                    "artifact_path=?,usage_json=?,completed_at=?,error=? "
                     "WHERE idempotency_key=?",
                     (
                         state,
                         provider_thread_id,
                         provider_turn_id,
                         artifact_path,
-                        *(_usage_value(usage_value, field) for field in _USAGE_FIELDS),
-                        usage_value["quality"],
+                        _json(usage_value),
                         _now() if terminal else None,
                         error,
                         idempotency_key,
@@ -684,10 +628,9 @@ class ExperimentStateStore:
             else:
                 self.connection.execute(
                     "INSERT INTO provider_turns(idempotency_key,generation,slot,phase,state,"
-                    "provider_thread_id,provider_turn_id,artifact_path,input_tokens,"
-                    "cached_input_tokens,cache_write_input_tokens,output_tokens,"
-                    "reasoning_output_tokens,total_tokens,usage_quality,completed_at,error) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "provider_thread_id,provider_turn_id,artifact_path,usage_json,"
+                    "completed_at,error) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         idempotency_key,
                         generation,
@@ -697,8 +640,7 @@ class ExperimentStateStore:
                         provider_thread_id,
                         provider_turn_id,
                         artifact_path,
-                        *(_usage_value(usage_value, field) for field in _USAGE_FIELDS),
-                        usage_value["quality"],
+                        _json(usage_value),
                         _now() if terminal else None,
                         error,
                     ),
@@ -715,12 +657,28 @@ class ExperimentStateStore:
                 token_delta = max(0, observed_tokens - prior_observed_tokens)
                 if token_delta:
                     charged_at = _now()
-                    charge_key = f"model-token-charge:{idempotency_key}:{observed_tokens}"
+                    charge_payload = {
+                        "idempotency_key": (
+                            f"model-token-charge:{idempotency_key}:{observed_tokens}"
+                        ),
+                        "turn_idempotency_key": idempotency_key,
+                        "generation": generation,
+                        "slot": slot,
+                        "phase": phase,
+                        "token_delta": token_delta,
+                        "usage": usage_value,
+                        "charged_at": charged_at,
+                    }
                     self.connection.execute(
-                        "INSERT OR IGNORE INTO token_charges("
-                        "idempotency_key,turn_idempotency_key,charged_at,token_delta"
-                        ") VALUES(?,?,?,?)",
-                        (charge_key, idempotency_key, charged_at, token_delta),
+                        "INSERT OR IGNORE INTO events("
+                        "session_id,event_type,timestamp,idempotency_key,payload_json"
+                        ") VALUES((SELECT current_session_id FROM experiment LIMIT 1),?,?,?,?)",
+                        (
+                            "model_token_charge_recorded",
+                            charged_at,
+                            charge_payload["idempotency_key"],
+                            _json(charge_payload),
+                        ),
                     )
                 self.connection.execute(
                     "UPDATE sessions SET provider_turns_attempted=provider_turns_attempted+?,"
@@ -749,15 +707,19 @@ class ExperimentStateStore:
             self.connection.rollback()
             raise
 
-    def _backfill_token_charges(self) -> None:
+    def _backfill_token_charge_events(self) -> None:
         rows = self.connection.execute(
-            "SELECT idempotency_key,completed_at,total_tokens "
+            "SELECT idempotency_key,generation,slot,phase,completed_at,usage_json "
             "FROM provider_turns WHERE completed_at IS NOT NULL"
         ).fetchall()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             for row in rows:
-                total = row["total_tokens"]
+                try:
+                    usage = json.loads(str(row["usage_json"]))
+                except json.JSONDecodeError:
+                    continue
+                total = usage.get("totalTokens") if isinstance(usage, Mapping) else None
                 if (
                     not isinstance(total, int)
                     or isinstance(total, bool)
@@ -767,11 +729,27 @@ class ExperimentStateStore:
                     continue
                 turn_key = str(row["idempotency_key"])
                 event_key = f"model-token-charge:{turn_key}:{total}"
+                payload = {
+                    "idempotency_key": event_key,
+                    "turn_idempotency_key": turn_key,
+                    "generation": int(row["generation"]),
+                    "slot": str(row["slot"]),
+                    "phase": str(row["phase"]),
+                    "token_delta": total,
+                    "usage": usage,
+                    "charged_at": str(row["completed_at"]),
+                    "backfilled": True,
+                }
                 self.connection.execute(
-                    "INSERT OR IGNORE INTO token_charges("
-                    "idempotency_key,turn_idempotency_key,charged_at,token_delta"
-                    ") VALUES(?,?,?,?)",
-                    (event_key, turn_key, str(row["completed_at"]), total),
+                    "INSERT OR IGNORE INTO events("
+                    "session_id,event_type,timestamp,idempotency_key,payload_json"
+                    ") VALUES(NULL,?,?,?,?)",
+                    (
+                        "model_token_charge_recorded",
+                        str(row["completed_at"]),
+                        event_key,
+                        _json(payload),
+                    ),
                 )
             self.connection.commit()
         except BaseException:
@@ -786,7 +764,7 @@ class ExperimentStateStore:
         backfill: bool = False,
     ) -> dict[str, Any]:
         if backfill:
-            self._backfill_token_charges()
+            self._backfill_token_charge_events()
         current = now or datetime.now(UTC)
         current = (
             current.replace(tzinfo=UTC)
@@ -796,18 +774,22 @@ class ExperimentStateStore:
         cutoff = current - timedelta(hours=1)
         charges: list[tuple[datetime, int]] = []
         rows = self.connection.execute(
-            "SELECT charged_at,token_delta FROM token_charges "
-            "WHERE charged_at>? AND charged_at<=? ORDER BY charged_at,idempotency_key",
+            "SELECT timestamp,payload_json FROM events "
+            "WHERE event_type='model_token_charge_recorded' "
+            "AND timestamp>? AND timestamp<=? ORDER BY timestamp,sequence",
             (cutoff.isoformat(), current.isoformat()),
         ).fetchall()
         for row in rows:
             try:
-                charged_at = datetime.fromisoformat(str(row["charged_at"]))
-            except ValueError:
+                payload = json.loads(str(row["payload_json"]))
+                charged_at = datetime.fromisoformat(
+                    str(payload.get("charged_at", row["timestamp"]))
+                )
+            except (ValueError, json.JSONDecodeError):
                 continue
             if charged_at.tzinfo is None:
                 charged_at = charged_at.replace(tzinfo=UTC)
-            delta = row["token_delta"]
+            delta = payload.get("token_delta") if isinstance(payload, Mapping) else None
             if (
                 cutoff < charged_at <= current
                 and isinstance(delta, int)
@@ -840,76 +822,37 @@ class ExperimentStateStore:
         row = self.connection.execute(
             "SELECT * FROM provider_turns WHERE idempotency_key=?", (idempotency_key,)
         ).fetchone()
-        if row is None:
-            return None
-        value = dict(row)
-        value["usage"] = _usage_from_row(value)
-        return value
+        return dict(row) if row is not None else None
 
     def record_candidate(self, candidate_id: str, **values: Any) -> None:
-        metadata = values.get("metadata")
-        metadata = metadata if isinstance(metadata, Mapping) else {}
-        behavior = values.get("behavior", metadata.get("behavior"))
-        behavior = behavior if isinstance(behavior, Mapping) else None
-        parent_id = values.get("parent_id", metadata.get("parent_id"))
-        existing = self.connection.execute(
-            "SELECT parent_id,behavior_json FROM candidates WHERE candidate_id=?",
-            (candidate_id,),
-        ).fetchone()
         self.connection.execute(
             "INSERT OR REPLACE INTO candidates(candidate_id,source_sha256,archive_path,"
-            "generation,slot,parent_id,status,behavior_json) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "generation,slot,status,metadata_json) "
+            "VALUES(?,?,?,?,?,?,?)",
             (
                 candidate_id,
                 values.get("source_sha256"),
                 values.get("archive_path"),
                 values.get("generation"),
                 values.get("slot"),
-                (
-                    parent_id
-                    if parent_id is not None
-                    else (existing["parent_id"] if existing else None)
-                ),
                 values.get("status", "created"),
-                _json(behavior)
-                if behavior is not None
-                else str(existing["behavior_json"] if existing else "{}"),
+                _json(values.get("metadata", {})),
             ),
         )
         self.connection.commit()
 
-    def record_evaluation(
-        self,
-        identity: str,
-        *,
-        candidate_id: str,
-        kind: str = "development",
-        state: str = "completed",
-        summary: Mapping[str, Any] | None = None,
-        elapsed_seconds: float | None = None,
-    ) -> bool:
+    def record_evaluation(self, identity: str, **values: Any) -> bool:
         existing = self.evaluation(identity)
-        summary_value = summary or {}
-        columns = (
-            summary_value.get("episode_count"),
-            summary_value.get("mean_auc"),
-            summary_value.get("best_auc"),
-            _json(summary_value.get("baseline_auc", {})),
-            summary_value.get("improvement_rate"),
-            elapsed_seconds,
-        )
         if existing is not None:
             if existing.get("state") == "completed":
                 return False
+            evaluation_state = values.get("state", "completed")
             self.connection.execute(
-                "UPDATE evaluations SET state=?,episode_count=?,mean_auc=?,best_auc=?,"
-                "baseline_auc_json=?,improvement_rate=?,elapsed_seconds=?,completed_at=? "
-                "WHERE identity=?",
+                "UPDATE evaluations SET state=?,result_json=?,completed_at=? WHERE identity=?",
                 (
-                    state,
-                    *columns,
-                    _now() if state == "completed" else None,
+                    evaluation_state,
+                    _json(values.get("result", {})),
+                    _now() if evaluation_state == "completed" else None,
                     identity,
                 ),
             )
@@ -917,15 +860,14 @@ class ExperimentStateStore:
             return True
         cursor = self.connection.execute(
             "INSERT OR IGNORE INTO evaluations(identity,candidate_id,kind,state,"
-            "episode_count,mean_auc,best_auc,baseline_auc_json,improvement_rate,"
-            "elapsed_seconds,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "result_json,completed_at) VALUES(?,?,?,?,?,?)",
             (
                 identity,
-                candidate_id,
-                kind,
-                state,
-                *columns,
-                _now() if state == "completed" else None,
+                values.get("candidate_id"),
+                values.get("kind", "development"),
+                values.get("state", "completed"),
+                _json(values.get("result", {})),
+                _now() if values.get("state", "completed") == "completed" else None,
             ),
         )
         self.connection.commit()
@@ -936,22 +878,6 @@ class ExperimentStateStore:
             "SELECT * FROM evaluations WHERE identity=?", (identity,)
         ).fetchone()
         return dict(row) if row is not None else None
-
-    def evaluation_summary(self, identity: str) -> dict[str, Any]:
-        row = self.evaluation(identity)
-        if row is None:
-            return {}
-        try:
-            baseline_auc = json.loads(str(row.get("baseline_auc_json", "{}")))
-        except json.JSONDecodeError:
-            baseline_auc = {}
-        return {
-            "episode_count": row.get("episode_count"),
-            "mean_auc": row.get("mean_auc"),
-            "best_auc": row.get("best_auc"),
-            "baseline_auc": baseline_auc if isinstance(baseline_auc, Mapping) else {},
-            "improvement_rate": row.get("improvement_rate"),
-        }
 
     def record_checkpoint(
         self,
@@ -1029,13 +955,14 @@ class ExperimentStateStore:
         totals = {field: 0 for field in _USAGE_FIELDS}
         qualities: set[str] = set()
         charged_failed_turns = 0
-        rows = self.connection.execute(
-            "SELECT state,input_tokens,cached_input_tokens,cache_write_input_tokens,"
-            "output_tokens,reasoning_output_tokens,total_tokens,usage_quality "
-            "FROM provider_turns"
-        ).fetchall()
+        rows = self.connection.execute("SELECT state,usage_json FROM provider_turns").fetchall()
         for row in rows:
-            usage = _usage_from_row(dict(row))
+            try:
+                usage = json.loads(str(row["usage_json"]))
+            except json.JSONDecodeError:
+                usage = {}
+            if not isinstance(usage, Mapping):
+                continue
             for field in _USAGE_FIELDS:
                 value = usage.get(field)
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:

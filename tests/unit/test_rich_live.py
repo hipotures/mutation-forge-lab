@@ -262,6 +262,7 @@ def test_rich_live_renders_separate_deep_score_profile() -> None:
                 "score_cache_lookups": 90,
                 "worker_failure_calls": 1,
                 "worker_restart_successes": 1,
+                "python_fallback_calls": 0,
             },
             "prepared_graph": {
                 "materialization": {"seconds": 0.4, "calls": 80},
@@ -298,7 +299,7 @@ def test_rich_live_renders_separate_deep_score_profile() -> None:
         assert "score_assembly" in rendered
         assert "hits / misses / lookups  9/81/90" in rendered
         assert "full 20 · dominated 70 · failures 1" in rendered
-        assert "failures 1 · restarts 1" in rendered
+        assert "failures 1 · restarts 1 · fallbacks 0" in rendered
         table = sink._deep_score_profile_table()
         assert table is not None
         assert table.box is box.MINIMAL

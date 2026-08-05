@@ -88,8 +88,7 @@ class ExperimentEventHub:
     ``SessionManager`` is attached only after a session directory exists.  A
     caller may therefore emit preflight/workspace events before session start;
     those events still reach Rich/JSON sinks and later events are additionally
-    persisted to ``sessions/<session>/events.jsonl.gz`` with only a compact
-    dashboard/resume index in SQLite.
+    persisted to ``sessions/<session>/events.jsonl`` and SQLite.
     """
 
     def __init__(

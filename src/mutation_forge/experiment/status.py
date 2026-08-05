@@ -193,19 +193,11 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         session_metrics: dict[str, Any] = {}
         if session is not None:
             try:
-                parsed_counterexample = json.loads(
-                    str(session.get("counterexample_json", "{}"))
-                )
+                parsed = json.loads(str(session.get("summary_json", "{}")))
             except (TypeError, json.JSONDecodeError):
-                parsed_counterexample = {}
-            session_metrics = {
-                "ir": session.get("ir"),
-                "counterexample": (
-                    parsed_counterexample
-                    if isinstance(parsed_counterexample, Mapping)
-                    else {}
-                ),
-            }
+                parsed = {}
+            if isinstance(parsed, Mapping):
+                session_metrics = dict(parsed)
         last_stop_reason = experiment.get("terminal_stop_reason") or (session or {}).get(
             "stop_reason"
         )
@@ -320,24 +312,45 @@ def experiment_status(config_path: str | Path = "experiment.toml") -> dict[str, 
         state.close()
 
 
+def _candidate_metric(metadata: Mapping[str, Any]) -> float | int | None:
+    search_metrics = metadata.get("search_metrics")
+    nested = search_metrics if isinstance(search_metrics, Mapping) else {}
+    nested_metric = nested.get("best_primary_metric", nested.get("pooled_auc"))
+    if nested_metric is None:
+        nested_metric = nested.get("pooled_median_auc")
+    metric = metadata.get("best_primary_metric", metadata.get("pooled_auc", nested_metric))
+    return metric if isinstance(metric, int | float) and not isinstance(metric, bool) else None
+
+
 def _ranked_candidates(state: ExperimentStateStore) -> list[dict[str, Any]]:
     rows = state.connection.execute(
-        "SELECT candidates.candidate_id,candidates.archive_path,candidates.generation,"
-        "candidates.slot,candidates.status,evaluations.mean_auc "
-        "FROM candidates LEFT JOIN evaluations "
-        "ON evaluations.identity = candidates.candidate_id || ':development' "
-        "AND evaluations.state='completed' "
-        "WHERE candidates.status NOT IN ('duplicate','invalid')"
+        "SELECT candidate_id,archive_path,generation,slot,status,metadata_json,"
+        "(SELECT result_json FROM evaluations e "
+        " WHERE e.identity = candidates.candidate_id || ':development' "
+        "   AND e.state='completed' LIMIT 1) AS evaluation_json "
+        "FROM candidates WHERE status NOT IN ('duplicate','invalid')"
     ).fetchall()
     candidates: list[dict[str, Any]] = []
     for row in rows:
-        observed_metric = row["mean_auc"]
-        metric = (
-            float(observed_metric)
-            if isinstance(observed_metric, int | float)
-            and not isinstance(observed_metric, bool)
-            else None
-        )
+        try:
+            metadata = json.loads(str(row["metadata_json"]))
+        except json.JSONDecodeError:
+            metadata = {}
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        metric = _candidate_metric(metadata)
+        if metric is None and row["evaluation_json"]:
+            try:
+                evaluation = json.loads(str(row["evaluation_json"]))
+            except json.JSONDecodeError:
+                evaluation = {}
+            summary = evaluation.get("summary") if isinstance(evaluation, Mapping) else None
+            candidate_metric = summary.get("mean_auc") if isinstance(summary, Mapping) else None
+            if (
+                isinstance(candidate_metric, (int, float))
+                and not isinstance(candidate_metric, bool)
+            ):
+                metric = float(candidate_metric)
         candidates.append(
             {
                 "candidate_id": str(row["candidate_id"]),

@@ -27,8 +27,8 @@ materialization, switch attempts, partner-edge sampling, candidate
 construction, connectivity validation, and graph-family validation. For
 scoring, it records prepared-graph work, score-cache and cutoff counters,
 request packing and pipe I/O, C++ cycle-count time and nodes by forbidden
-length, score assembly, and worker failures and restarts. These measurements
-do not change the search policy.
+length, score assembly, worker failures and restarts, and Python fallback.
+These measurements do not change the search policy.
 
 The aggregate results are stored as `deep_operator_profile` and
 `deep_score_profile` in `run_summary.json` and terminal events. Per-episode
@@ -66,9 +66,8 @@ validation, scoring, serialization, and proposal generation can reuse
 `BitGraph` construction and validation.
 
 The persistent C++ worker is restarted once after a request failure. A second
-failure raises `ScoringBackendError` and fails the run. There is no Python
-heuristic-scoring fallback. Deep profile counters expose the failed request and
-restart attempt before termination.
+failure switches the backend to the bounded Python reference scorer for the
+rest of the run. Deep profile counters make both transitions visible.
 
 The prepared-proposal handoff is a bounded, backend-owned one-entry bridge
 between HEG proposal generation and rewrite application. It reuses only the

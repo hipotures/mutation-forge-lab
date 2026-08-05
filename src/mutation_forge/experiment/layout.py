@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import os
@@ -272,7 +271,7 @@ class ExperimentLayout:
         for session in sorted(self.sessions.glob("session-*")):
             if not session.is_dir():
                 continue
-            for name in ("summary.json.gz",):
+            for name in ("session.json.gz", "summary.json.gz"):
                 path = session / name
                 if path.is_file():
                     _verify_json_schema(
@@ -283,7 +282,7 @@ class ExperimentLayout:
             input_config = session / "input-config.toml"
             if input_config.is_file():
                 _verify_toml_schema(input_config, "mforge.experiment.v2")
-            events = session / "events.jsonl.gz"
+            events = session / "events.jsonl"
             if events.is_file():
                 _verify_event_stream(events)
 
@@ -394,7 +393,7 @@ class ExperimentLayout:
                 len(relative_parts) >= 3
                 and relative_parts[0] == "sessions"
                 and (
-                    relative_parts[-1] in {"events.jsonl.gz", "summary.json.gz"}
+                    relative_parts[-1] in {"events.jsonl", "session.json.gz"}
                     or "logs" in relative_parts[2:-1]
                 )
             )
@@ -528,9 +527,8 @@ def _verify_toml_schema(path: Path, expected: str) -> None:
 
 def _verify_event_stream(path: Path) -> None:
     try:
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-    except (OSError, UnicodeError, gzip.BadGzipFile) as exc:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
         raise WorkspaceError(f"experiment event stream is unreadable: {path}") from exc
     for number, line in enumerate(lines, start=1):
         if not line.strip():
@@ -543,13 +541,12 @@ def _verify_event_stream(path: Path) -> None:
             ) from exc
         if (
             not isinstance(value, dict)
-            or value.get("schema_version") != "mforge.experiment.events.v3"
+            or value.get("schema_version") != "mforge.experiment.events.v2"
         ):
             observed = value.get("schema_version") if isinstance(value, dict) else None
             raise WorkspaceError(
                 f"Unsupported experiment event schema at {path}:{number}: {observed!r}. "
-                "This runtime accepts only mforge.experiment.events.v3. "
-                "Run 'mforge experiment rebuild-state' for a v2 workspace."
+                "This runtime accepts only mforge.experiment.events.v2. Create a fresh workspace."
             )
 
 

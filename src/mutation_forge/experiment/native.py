@@ -522,18 +522,19 @@ def _resume_parent_assignments(
     if not retained_parents:
         return None
     rows = state.connection.execute(
-        "SELECT sequence,generation,selected_parents_json FROM events "
+        "SELECT sequence,payload_json FROM events "
         "WHERE event_type='selection_completed' ORDER BY sequence"
     ).fetchall()
     best_match = 0
     best_selection: dict[str, str] | None = None
     for row in rows:
-        if row["generation"] != target_generation - 1:
-            continue
         try:
-            selected = json.loads(str(row["selected_parents_json"]))
+            payload = json.loads(str(row["payload_json"]))
         except json.JSONDecodeError:
             continue
+        if not isinstance(payload, Mapping) or payload.get("generation") != target_generation - 1:
+            continue
+        selected = payload.get("selected_parents")
         if not isinstance(selected, Mapping):
             continue
         selection = {
@@ -1253,7 +1254,7 @@ class NativeExperimentAdapter:
         sources: dict[str, str] = {}
         records: dict[str, Any] = {}
         rows = state.connection.execute(
-            "SELECT candidate_id,archive_path,parent_id,behavior_json FROM candidates "
+            "SELECT candidate_id,archive_path,metadata_json FROM candidates "
             "WHERE status NOT IN ('duplicate','invalid') ORDER BY generation DESC, candidate_id"
         ).fetchall()
         for row in rows:
@@ -1270,13 +1271,12 @@ class NativeExperimentAdapter:
                 continue
             sources[candidate_id] = source
             try:
-                behavior = json.loads(str(row["behavior_json"]))
+                metadata = json.loads(str(row["metadata_json"]))
             except json.JSONDecodeError:
-                behavior = {}
+                metadata = {}
             records[candidate_id] = {
                 "source": source,
-                "parent_id": str(row["parent_id"] or "root"),
-                "behavior": behavior if isinstance(behavior, Mapping) else {},
+                **(metadata if isinstance(metadata, Mapping) else {}),
             }
         return sources, records
 
@@ -1788,12 +1788,25 @@ class NativeExperimentAdapter:
             cached = evaluation_summary_cache.get(candidate_id)
             if cached is not None:
                 return dict(cached)
-            parsed = state.evaluation_summary(f"{candidate_id}:development")
+            row = state.connection.execute(
+                "SELECT json_extract(result_json,'$.summary') AS summary_json "
+                "FROM evaluations WHERE identity=?",
+                (f"{candidate_id}:development",),
+            ).fetchone()
+            raw_summary = row["summary_json"] if row is not None else None
+            if not isinstance(raw_summary, str):
+                return {}
+            try:
+                summary = json.loads(raw_summary)
+            except json.JSONDecodeError:
+                return {}
+            parsed = dict(summary) if isinstance(summary, Mapping) else {}
             evaluation_summary_cache[candidate_id] = parsed
             return dict(parsed)
 
         historical_rows = state.connection.execute(
-            "SELECT candidate_id,mean_auc "
+            "SELECT candidate_id,"
+            "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
             "FROM evaluations "
             "WHERE state='completed' ORDER BY completed_at,candidate_id"
         ).fetchall()
@@ -1917,7 +1930,8 @@ class NativeExperimentAdapter:
             _parent_id: str,
         ) -> str:
             rows = state.connection.execute(
-                "SELECT candidate_id,mean_auc "
+                "SELECT candidate_id,"
+                "json_extract(result_json,'$.summary.mean_auc') AS mean_auc "
                 "FROM evaluations "
                 "WHERE state='completed' ORDER BY completed_at, candidate_id"
             ).fetchall()
@@ -2064,18 +2078,7 @@ class NativeExperimentAdapter:
                 candidate_id=program_id,
                 kind="development",
                 state="completed",
-                summary=(
-                    result.get("summary")
-                    if isinstance(result.get("summary"), Mapping)
-                    else {}
-                ),
-                elapsed_seconds=(
-                    float(result["runtime"]["elapsed_seconds"])
-                    if isinstance(result.get("runtime"), Mapping)
-                    and isinstance(result["runtime"].get("elapsed_seconds"), int | float)
-                    and not isinstance(result["runtime"].get("elapsed_seconds"), bool)
-                    else None
-                ),
+                result=result,
             )
             summary = result.get("summary")
             summary = summary if isinstance(summary, Mapping) else {}
@@ -2130,28 +2133,12 @@ class NativeExperimentAdapter:
             with evaluation_completion_lock:
                 if program_id in published_evaluations:
                     return
-                runtime = result.get("runtime")
-                runtime_elapsed = (
-                    runtime.get("elapsed_seconds")
-                    if isinstance(runtime, Mapping)
-                    else None
-                )
                 state.record_evaluation(
                     identity,
                     candidate_id=program_id,
                     kind="development",
                     state="completed",
-                    summary=(
-                        result.get("summary")
-                        if isinstance(result.get("summary"), Mapping)
-                        else {}
-                    ),
-                    elapsed_seconds=(
-                        float(runtime_elapsed)
-                        if isinstance(runtime_elapsed, int | float)
-                        and not isinstance(runtime_elapsed, bool)
-                        else evaluation_elapsed
-                    ),
+                    result=result,
                 )
                 session.evaluations_completed += 1
                 summary = result.get("summary")
@@ -2210,6 +2197,11 @@ class NativeExperimentAdapter:
                     worker_count=evaluation_worker_count,
                     active_workers=active,
                 )
+                metadata = {
+                    "search_metrics": {"pooled_median_auc": metric}
+                    if isinstance(metric, (int, float))
+                    else {}
+                }
                 state.record_candidate(
                     program_id,
                     source_sha256=candidate.source_sha256,
@@ -2217,8 +2209,7 @@ class NativeExperimentAdapter:
                     generation=candidate.generation,
                     slot=candidate.slot,
                     status="created",
-                    parent_id=candidate.parent_id,
-                    behavior=candidate.behavior_signature,
+                    metadata=metadata,
                 )
 
         def submit_evaluation(
@@ -2396,9 +2387,8 @@ class NativeExperimentAdapter:
                     status="created",
                     metadata={
                         "behavior": dict(candidate.behavior_signature),
+                        "search_metrics": {},
                     },
-                    parent_id=candidate.parent_id,
-                    behavior=candidate.behavior_signature,
                 )
                 emit(
                     "candidate_archived",
@@ -2517,12 +2507,26 @@ class NativeExperimentAdapter:
                             slot=candidate.slot,
                             status="created",
                             metadata={
-                                "behavior": dict(candidate.behavior_signature),
+                                "search_metrics": {
+                                    "pooled_median_auc": restored_value,
+                                }
                             },
-                            parent_id=candidate.parent_id,
-                            behavior=candidate.behavior_signature,
                         )
-                evaluation_summary = state.evaluation_summary(identity)
+                evaluation_row = state.evaluation(identity)
+                evaluation_result: Mapping[str, Any] = {}
+                if isinstance(evaluation_row, Mapping):
+                    raw_result = evaluation_row.get("result_json")
+                    if isinstance(raw_result, str):
+                        try:
+                            decoded_result = json.loads(raw_result)
+                        except json.JSONDecodeError:
+                            decoded_result = {}
+                        if isinstance(decoded_result, Mapping):
+                            evaluation_result = decoded_result
+                evaluation_summary = evaluation_result.get("summary")
+                evaluation_summary = (
+                    evaluation_summary if isinstance(evaluation_summary, Mapping) else {}
+                )
                 evaluation_metric = evaluation_summary.get("mean_auc")
                 numeric_metric = (
                     float(evaluation_metric)

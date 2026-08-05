@@ -339,7 +339,7 @@ def _decision_gates(config: Stage7Config, replay: dict[str, JsonValue], compatib
         "Pinned HEG has no proposal-pool/ranker seam or generalized legal k=3/k=4 operators.",
         "Pinned HEG cycle semantics use power-of-two target lengths; Stage 2B feature vectors require the frozen 4,5,6,7,8,9 contract.",
         "Pinned HEG transient live-frontier accounting and checkpoint-ID validation require a deterministic recovery fix.",
-        "Pinned HEG generic scorer/external process lifecycle and M4 authority require a direct integration seam.",
+        "Pinned HEG generic scorer/external process lifecycle and M4 authority cannot be projected faithfully through the Stage 1 adapter fallback.",
         "A faithful end-to-end HEG throughput projection is unavailable without the additive HEG seam; benchmark gate is therefore intentionally failed.",
     ]
     return gates, blockers

@@ -113,7 +113,7 @@ def run_benchmark(
         "replay_hash_a": replay_a,
         "replay_hash_b": replay_b,
         "faithful_heg_throughput_projection": False,
-        "projection_reason": "pinned HEG has no policy pool/ranker seam; no invented throughput evidence",
+        "projection_reason": "pinned HEG has no policy pool/ranker seam and its scorer fallback semantics differ; no invented throughput evidence",
         "throughput_regression": None,
         "stratum_regressions": {},
         "thresholds": {

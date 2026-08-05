@@ -138,19 +138,6 @@ uv run mforge experiment run --config experiment.toml --json
 uv run mforge experiment status --config experiment.toml --json
 ```
 
-Stopped v2 workspaces can be audited and rebuilt into the compact v3 state
-schema without modifying the source database during the audit:
-
-```console
-uv run mforge experiment rebuild-state --config experiment.toml --json
-uv run mforge experiment rebuild-state --config experiment.toml --apply
-```
-
-The apply command uses SQLite's online backup API, verifies every completed
-evaluation against its canonical `json.gz`, atomically installs a fresh
-database, and retains the v2 backup path in its result. Use `--work-dir` when
-the experiment filesystem does not have enough temporary space.
-
 ## Configuration
 
 `experiment.toml` is authoritative. Unknown and legacy keys are rejected
@@ -272,8 +259,9 @@ workspace/<exp_id>/
     ├── native-generation-checkpoint.json.gz
     ├── sessions/
     │   └── session-NNNNNN/
+    │       ├── session.json.gz
     │       ├── summary.json.gz
-    │       ├── events.jsonl.gz
+    │       ├── events.jsonl
     │       ├── stdout.log
     │       └── stderr.log
     ├── generations/
@@ -283,8 +271,7 @@ workspace/<exp_id>/
     │       └── retry-NN/
     ├── archive/
     ├── evaluations/
-    │   ├── development/   # one canonical full result per completed evaluation
-    │   ├── episodes/      # checkpoints only for incomplete evaluations
+    │   ├── development/
     │   └── replay/
     └── reports/
 ```
@@ -301,11 +288,6 @@ Each model turn keeps separate evidence for:
 There is no separate public report command. `experiment status` is the
 supported summary view; `summary.json.gz`, archived source files, evaluation
 records, and turn artifacts provide the detailed evidence.
-
-SQLite contains only orchestration, idempotency, token accounting, and compact
-dashboard projections. Full episode traces are never stored in
-`state.sqlite3`. Per-episode checkpoint files are deleted only after the
-aggregate evaluation artifact is durably written and read back successfully.
 
 ## Generated-policy boundary
 

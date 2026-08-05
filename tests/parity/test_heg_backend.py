@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mutation_forge.backends.base import ScoreProfileRecorder, ScoringBackendError
+from mutation_forge.backends.base import ScoreProfileRecorder
 from mutation_forge.backends.heg import HEG_GRAPH_MODE, HegBackend
 from mutation_forge.evaluation.episode import run_episode
 from mutation_forge.models import GraphScore, GraphState, RewritePlan
@@ -677,14 +677,16 @@ def test_heg_score_worker_restarts_after_one_crash(heg_repo: Path) -> None:
         assert counters["worker_failure_calls"] == 1
         assert counters["worker_restart_attempts"] == 1
         assert counters["worker_restart_successes"] == 1
+        assert counters.get("python_fallback_calls", 0) == 0
     finally:
         backend.close()
 
 
-def test_heg_score_worker_fails_closed_after_restart_failure(
+def test_heg_score_worker_falls_back_after_restart_failure(
     heg_repo: Path,
 ) -> None:
     backend = HegBackend(heg_repo)
+    reference = HegBackend(heg_repo)
     worker_error = backend._worker_error  # noqa: SLF001
 
     class AlwaysFailWorker:
@@ -699,6 +701,11 @@ def test_heg_score_worker_fails_closed_after_restart_failure(
 
     try:
         graph = backend.generate_seed(order=30, seed=101)
+        expected = reference.score(
+            reference.generate_seed(order=30, seed=101),
+            witness_cap=64,
+        )
+        assert expected is not None
         backend._worker = AlwaysFailWorker()  # noqa: SLF001
         counters: dict[str, int] = {}
 
@@ -707,21 +714,20 @@ def test_heg_score_worker_fails_closed_after_restart_failure(
                 key = f"{event}_{name}"
                 counters[key] = counters.get(key, 0) + value
 
-        with pytest.raises(
-            ScoringBackendError,
-            match=r"mandatory C\+\+ score worker failed after one restart",
-        ):
-            backend.score(
-                graph,
-                witness_cap=64,
-                record_profile=record,
-            )
-        assert backend.score_implementation == "heg-cpp-score-worker"
+        recovered = backend.score(
+            graph,
+            witness_cap=64,
+            record_profile=record,
+        )
+        assert recovered == expected
+        assert backend.score_implementation == "heg-python-bounded-reference"
         assert counters["worker_failure_calls"] == 2
         assert counters["worker_restart_attempts"] == 1
         assert counters.get("worker_restart_successes", 0) == 0
+        assert counters["python_fallback_calls"] == 1
     finally:
         backend.close()
+        reference.close()
 
 
 @pytest.mark.parametrize("policy_seed", [1, 2, 3])

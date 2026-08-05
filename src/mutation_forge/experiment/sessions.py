@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
 import tempfile
@@ -43,15 +42,6 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _append_gzip_member(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("ab") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
-            compressed.write(payload)
-        raw.flush()
-        os.fsync(raw.fileno())
-
-
 @dataclass(slots=True)
 class SessionContext:
     number: int
@@ -67,7 +57,6 @@ class SessionContext:
     candidates_created: int = 0
     evaluations_completed: int = 0
     token_usage_delta: int = 0
-    event_count: int = 0
     ending_checkpoint: str | None = None
     stop_reason: str | None = None
 
@@ -133,7 +122,7 @@ class SessionManager:
         )
         _atomic_write(directory / "input-config.toml", config.source_bytes)
         write_json(
-            directory / "summary.json.gz",
+            directory / "session.json.gz",
             {
                 "schema_version": "mforge.experiment.session.v2",
                 "session_number": number,
@@ -144,7 +133,7 @@ class SessionManager:
                 "starting_state": starting_state,
             },
         )
-        for filename in ("events.jsonl.gz", "stdout.log", "stderr.log"):
+        for filename in ("events.jsonl", "stdout.log", "stderr.log"):
             (directory / filename).touch()
         # Make the append-only session destination visible in the experiment
         # manifest before any adapter/provider work can begin.  This keeps a
@@ -186,25 +175,22 @@ class SessionManager:
             elif event_type == "provider_turn_completed":
                 session.provider_turns_completed += 1
         event = {
-            "schema_version": "mforge.experiment.events.v3",
-            "event_id": f"{session.session_id}:{session.event_count:08d}",
+            "schema_version": "mforge.experiment.events.v2",
             "run_id": session.session_id,
             "timestamp": _now(),
             "event_type": event_type,
             **payload,
         }
-        session.event_count += 1
         self.state.write_event(
             event_type,
             payload,
             session_id=session.session_id,
             idempotency_key=storage_key,
-            timestamp=str(event["timestamp"]),
         )
-        _append_gzip_member(
-            session.directory / "events.jsonl.gz",
-            _canonical(event) + b"\n",
-        )
+        with (session.directory / "events.jsonl").open("ab") as handle:
+            handle.write(_canonical(event) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         # The manifest is reconciled at session boundaries.  Rebuilding it for
         # every heartbeat would recursively hash the complete artifact tree and
         # can dominate CPU time during a long provider turn.
@@ -253,6 +239,7 @@ class SessionManager:
         result["stop_reason"] = stop_reason
         if summary:
             result.update(dict(summary))
+        write_json(session.directory / "session.json.gz", result)
         write_json(session.directory / "summary.json.gz", result)
         self.state.finish_session(
             session.session_id,

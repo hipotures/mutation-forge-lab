@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 import io
 import json
 import multiprocessing
@@ -606,16 +605,8 @@ def test_invalid_final_repair_is_terminal_and_not_repeated_on_resume(
     )
     events = [
         json.loads(line)
-        for line in gzip.decompress(
-            (
-                root
-                / "artifacts"
-                / "sessions"
-                / "session-000001"
-                / "events.jsonl.gz"
-            ).read_bytes()
-        )
-        .decode("utf-8")
+        for line in (root / "artifacts" / "sessions" / "session-000001" / "events.jsonl")
+        .read_text(encoding="utf-8")
         .splitlines()
     ]
     slot_states = list(checkpoint["slots"].values())
@@ -912,9 +903,10 @@ def test_charged_failed_turn_is_retained_without_replacement_call(tmp_path: Path
     try:
         row = state.connection.execute("SELECT * FROM provider_turns LIMIT 1").fetchone()
         assert row is not None
+        usage = json.loads(str(row["usage_json"]))
         assert row["state"] == "failed"
-        assert row["usage_quality"] == "partial"
-        assert row["total_tokens"] == 12_000
+        assert usage["quality"] == "partial"
+        assert usage["totalTokens"] == 12_000
         assert state.cumulative()["total_tokens"] == 12_000
     finally:
         state.close()
@@ -1408,11 +1400,11 @@ def test_native_hourly_token_limit_stops_and_resumes_without_new_turns(
         / "artifacts"
         / "sessions"
         / "session-000001"
-        / "events.jsonl.gz"
+        / "events.jsonl"
     )
     event_types = [
         json.loads(line)["event_type"]
-        for line in gzip.decompress(events_path.read_bytes()).decode("utf-8").splitlines()
+        for line in events_path.read_text(encoding="utf-8").splitlines()
     ]
 
     assert first["state"] == "idle"
