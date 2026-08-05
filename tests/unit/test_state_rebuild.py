@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from mutation_forge.experiment.json_io import write_json
+from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.rebuild import RebuildError, rebuild_experiment_state
 from mutation_forge.experiment.state import STATE_SCHEMA_VERSION, ExperimentStateStore
 
@@ -527,3 +528,127 @@ def test_rebuild_accepts_strict_initial_record_for_incomplete_session(
 
     assert checked["status"] == "checked"
     assert checked["redundant_session_records"] == 0
+
+
+def test_rebuild_recovers_orphan_evaluation_from_verified_turn(
+    tmp_path: Path,
+) -> None:
+    config_path, root = _workspace(tmp_path)
+    candidate_id = "g0000-slot-00"
+    evaluation_path = (
+        root / "artifacts" / "evaluations" / "development" / f"{candidate_id}.json.gz"
+    )
+    evaluation = read_json(evaluation_path)
+    assert isinstance(evaluation, dict)
+    source = b"def choose_action(state):\n    return 0\n"
+    source_sha256 = hashlib.sha256(source).hexdigest()
+    evaluation["source_identity"] = {"source_sha256": source_sha256}
+    write_json(evaluation_path, evaluation)
+
+    turn_dir = (
+        root
+        / "artifacts"
+        / "generations"
+        / "generation-0000"
+        / "slot-00"
+        / "initial"
+    )
+    turn_dir.mkdir(parents=True)
+    (turn_dir / "source.py").write_bytes(source)
+    identity = {"source_sha256": source_sha256}
+    write_json(turn_dir / "identity.json.gz", identity)
+    write_json(
+        turn_dir / "behavior.json.gz",
+        {"identity": identity, "terminal_status": "completed"},
+    )
+    write_json(
+        turn_dir / "validation.json.gz",
+        {"identity": identity, "valid": True, "errors": []},
+    )
+    write_json(
+        turn_dir / "metadata-validation.json.gz",
+        {"status": "matched", "errors": []},
+    )
+    write_json(
+        turn_dir / "slot-00.request.json.gz",
+        {
+            "generation": 0,
+            "slot": "slot-00",
+            "phase": "initial",
+            "parent_id": "root",
+        },
+    )
+    manifest_files = []
+    for path in sorted(turn_dir.iterdir()):
+        payload = path.read_bytes()
+        manifest_files.append(
+            {
+                "path": path.name,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    write_json(
+        turn_dir / "turn-manifest.json.gz",
+        {
+            "schema_version": "mforge.experiment.turn-manifest.v2",
+            "generation": 0,
+            "slot": "slot-00",
+            "phase": "initial",
+            "terminal_status": "completed",
+            "artifact_complete": True,
+            "files": manifest_files,
+        },
+    )
+    with sqlite3.connect(root / "state.sqlite3") as connection:
+        connection.execute(
+            "DELETE FROM evaluations WHERE identity='g0000-slot-00:development'"
+        )
+        connection.execute(
+            "DELETE FROM candidates WHERE candidate_id='g0000-slot-00'"
+        )
+
+    checked = rebuild_experiment_state(config_path)
+
+    assert checked["candidate_count"] == 1
+    assert checked["evaluation_count"] == 1
+    assert checked["recovered_candidate_count"] == 1
+    rebuilt = rebuild_experiment_state(
+        config_path,
+        apply=True,
+        work_dir=tmp_path / "backups",
+    )
+    with ExperimentStateStore(root / "state.sqlite3") as state:
+        candidate = state.connection.execute(
+            "SELECT source_sha256,archive_path,generation,slot,parent_id "
+            "FROM candidates WHERE candidate_id=?",
+            (candidate_id,),
+        ).fetchone()
+        assert candidate is not None
+        assert tuple(candidate) == (
+            source_sha256,
+            str(turn_dir / "source.py"),
+            0,
+            "slot-00",
+            "root",
+        )
+        assert state.evaluation_summary(
+            "g0000-slot-00:development"
+        )["episode_count"] == 1
+    assert rebuilt["status"] == "rebuilt"
+
+
+def test_rebuild_refuses_orphan_evaluation_without_verified_turn(
+    tmp_path: Path,
+) -> None:
+    config_path, root = _workspace(tmp_path)
+    with sqlite3.connect(root / "state.sqlite3") as connection:
+        connection.execute(
+            "DELETE FROM evaluations WHERE identity='g0000-slot-00:development'"
+        )
+        connection.execute(
+            "DELETE FROM candidates WHERE candidate_id='g0000-slot-00'"
+        )
+
+    with pytest.raises(RebuildError, match="candidate recovery artifacts are invalid"):
+        rebuild_experiment_state(config_path)

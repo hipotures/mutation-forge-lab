@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -16,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .artifacts import ArtifactIncompleteError, TurnArtifactStore
 from .config import load_experiment_config
 from .evaluation import SCHEMA_VERSION as EVALUATION_SCHEMA_VERSION
 from .evaluation import _remove_redundant_episode_checkpoints
@@ -172,6 +174,99 @@ def _is_initial_session_record(
     }
 
 
+def _recover_candidate_from_turn(
+    layout: ExperimentLayout,
+    candidate_id: str,
+    evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    match = re.fullmatch(r"g(\d{4})-(slot-\d{2})", candidate_id)
+    if match is None:
+        raise RebuildError(f"cannot recover candidate identity: {candidate_id}")
+    generation = int(match.group(1))
+    slot = match.group(2)
+    turn_dir = layout.generation_slot_phase(generation, slot)
+    try:
+        TurnArtifactStore(layout.artifacts).verify_turn(turn_dir)
+        manifest = _json_object(
+            read_json(turn_dir / "turn-manifest.json.gz"),
+            f"turn manifest {candidate_id}",
+        )
+        identity = _json_object(
+            read_json(turn_dir / "identity.json.gz"),
+            f"candidate identity {candidate_id}",
+        )
+        behavior = _json_object(
+            read_json(turn_dir / "behavior.json.gz"),
+            f"candidate behavior {candidate_id}",
+        )
+        validation = _json_object(
+            read_json(turn_dir / "validation.json.gz"),
+            f"candidate validation {candidate_id}",
+        )
+        metadata_validation = _json_object(
+            read_json(turn_dir / "metadata-validation.json.gz"),
+            f"candidate metadata validation {candidate_id}",
+        )
+        request = _json_object(
+            read_json(turn_dir / f"{slot}.request.json.gz"),
+            f"candidate request {candidate_id}",
+        )
+    except (
+        ArtifactIncompleteError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise RebuildError(
+            f"candidate recovery artifacts are invalid: {candidate_id}"
+        ) from exc
+    source_identity = evaluation.get("source_identity")
+    behavior_identity = behavior.get("identity")
+    validation_identity = validation.get("identity")
+    source_sha256 = (
+        source_identity.get("source_sha256")
+        if isinstance(source_identity, Mapping)
+        else None
+    )
+    source_path = turn_dir / "source.py"
+    parent_id = request.get("parent_id")
+    if (
+        not isinstance(source_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", source_sha256)
+        or not source_path.is_file()
+        or hashlib.sha256(source_path.read_bytes()).hexdigest() != source_sha256
+        or identity.get("source_sha256") != source_sha256
+        or not isinstance(behavior_identity, Mapping)
+        or behavior_identity.get("source_sha256") != source_sha256
+        or not isinstance(validation_identity, Mapping)
+        or validation_identity.get("source_sha256") != source_sha256
+        or validation.get("valid") is not True
+        or metadata_validation.get("status") != "matched"
+        or manifest.get("artifact_complete") is not True
+        or manifest.get("terminal_status") != "completed"
+        or manifest.get("generation") != generation
+        or manifest.get("slot") != slot
+        or manifest.get("phase") != "initial"
+        or request.get("generation") != generation
+        or request.get("slot") != slot
+        or request.get("phase") != "initial"
+        or not isinstance(parent_id, str)
+    ):
+        raise RebuildError(
+            f"candidate recovery metadata does not match evaluation: {candidate_id}"
+        )
+    return {
+        "candidate_id": candidate_id,
+        "source_sha256": source_sha256,
+        "archive_path": str(source_path),
+        "generation": generation,
+        "slot": slot,
+        "parent_id": parent_id,
+        "status": "created",
+        "behavior": behavior,
+    }
+
+
 def _archive_metadata(layout: ExperimentLayout) -> dict[str, dict[str, Any]]:
     path = layout.archive / "index.jsonl"
     if not path.is_file():
@@ -320,7 +415,13 @@ def _audit_source(
     layout: ExperimentLayout,
     *,
     remove_checkpoints: bool,
-) -> tuple[dict[str, dict[str, Any]], int, int, list[Path]]:
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    int,
+    int,
+    list[Path],
+]:
     integrity = connection.execute("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":
         raise RebuildError("source state database failed PRAGMA integrity_check")
@@ -401,6 +502,7 @@ def _audit_source(
     candidate_ids = {
         str(row[0]) for row in connection.execute("SELECT candidate_id FROM candidates")
     }
+    recovered_candidates: dict[str, dict[str, Any]] = {}
     projections: dict[str, dict[str, Any]] = {}
     removable_bytes = 0
     rows = connection.execute(
@@ -486,10 +588,6 @@ def _audit_source(
         identity = f"{candidate_id}:development"
         if identity in projections:
             continue
-        if candidate_id not in candidate_ids:
-            raise RebuildError(
-                f"evaluation artifact has no candidate index: {artifact_path}"
-            )
         artifact = _json_object(read_json(artifact_path), f"evaluation {candidate_id}")
         if (
             artifact.get("schema_version") != EVALUATION_SCHEMA_VERSION
@@ -497,6 +595,12 @@ def _audit_source(
             or artifact.get("candidate_id") != candidate_id
         ):
             raise RebuildError(f"evaluation artifact identity mismatch: {artifact_path}")
+        if candidate_id not in candidate_ids:
+            recovered_candidates[candidate_id] = _recover_candidate_from_turn(
+                layout,
+                candidate_id,
+                artifact,
+            )
         projections[identity] = {
             **_evaluation_projection(artifact),
             "_completed_at": datetime.fromtimestamp(
@@ -514,7 +618,13 @@ def _audit_source(
     if remove_checkpoints:
         for path in redundant_session_records:
             path.unlink()
-    return projections, removable_bytes, len(candidate_ids), redundant_session_records
+    return (
+        projections,
+        recovered_candidates,
+        removable_bytes,
+        len(candidate_ids) + len(recovered_candidates),
+        redundant_session_records,
+    )
 
 
 def _copy_rows(
@@ -522,6 +632,7 @@ def _copy_rows(
     destination: sqlite3.Connection,
     projections: Mapping[str, Mapping[str, Any]],
     archive_metadata: Mapping[str, Mapping[str, Any]],
+    recovered_candidates: Mapping[str, Mapping[str, Any]],
 ) -> None:
     destination.execute("BEGIN IMMEDIATE")
     try:
@@ -603,6 +714,26 @@ def _copy_rows(
                     row["status"],
                     json.dumps(
                         behavior if isinstance(behavior, Mapping) else {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+        for candidate_id, candidate in sorted(recovered_candidates.items()):
+            destination.execute(
+                "INSERT INTO candidates(candidate_id,source_sha256,archive_path,generation,"
+                "slot,parent_id,status,behavior_json) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    candidate_id,
+                    candidate["source_sha256"],
+                    candidate["archive_path"],
+                    candidate["generation"],
+                    candidate["slot"],
+                    candidate["parent_id"],
+                    candidate["status"],
+                    json.dumps(
+                        candidate["behavior"],
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
@@ -704,6 +835,9 @@ def _copy_rows(
 def _validate_destination(
     source: sqlite3.Connection,
     destination: sqlite3.Connection,
+    *,
+    candidate_count: int,
+    evaluation_count: int,
 ) -> None:
     integrity = destination.execute("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":
@@ -711,7 +845,8 @@ def _validate_destination(
     expected = {
         "sessions": source.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
         "provider_turns": source.execute("SELECT COUNT(*) FROM provider_turns").fetchone()[0],
-        "candidates": source.execute("SELECT COUNT(*) FROM candidates").fetchone()[0],
+        "candidates": candidate_count,
+        "evaluations": evaluation_count,
         "checkpoints": source.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0],
     }
     for table, count in expected.items():
@@ -757,11 +892,13 @@ def rebuild_experiment_state(
             }
         if observed_schema != SOURCE_SCHEMA_VERSION:
             raise RebuildError(f"unsupported source state schema: {observed_schema!r}")
-        projections, removable_bytes, candidate_count, redundant_sessions = _audit_source(
-            source,
-            layout,
-            remove_checkpoints=False,
-        )
+        (
+            projections,
+            recovered_candidates,
+            removable_bytes,
+            candidate_count,
+            redundant_sessions,
+        ) = _audit_source(source, layout, remove_checkpoints=False)
         event_payloads = _session_event_payloads(layout)
         evaluation_count = len(projections)
 
@@ -772,6 +909,7 @@ def rebuild_experiment_state(
         "state_path": str(state_path),
         "source_database_bytes": state_path.stat().st_size,
         "candidate_count": candidate_count,
+        "recovered_candidate_count": len(recovered_candidates),
         "evaluation_count": evaluation_count,
         "redundant_checkpoint_bytes": removable_bytes,
         "redundant_session_records": len(redundant_sessions),
@@ -832,8 +970,19 @@ def rebuild_experiment_state(
         with _readonly_connection(backup_path) as snapshot, sqlite3.connect(new_path) as target:
             snapshot.row_factory = sqlite3.Row
             target.row_factory = sqlite3.Row
-            _copy_rows(snapshot, target, projections, archive_metadata)
-            _validate_destination(snapshot, target)
+            _copy_rows(
+                snapshot,
+                target,
+                projections,
+                archive_metadata,
+                recovered_candidates,
+            )
+            _validate_destination(
+                snapshot,
+                target,
+                candidate_count=candidate_count,
+                evaluation_count=evaluation_count,
+            )
         new_bytes = new_path.stat().st_size
         if state_path.stat().st_size >= 100_000_000 and new_bytes * 20 > state_path.stat().st_size:
             raise RebuildError("rebuilt database is not at least 95% smaller than source")
