@@ -415,6 +415,65 @@ def test_native_config_values_reach_provider_and_evaluator(tmp_path: Path) -> No
     assert (turn / "slot-00.output-schema.json.gz").is_file()
 
 
+def test_descendant_prompt_omits_host_metadata_and_rounds_evaluation_metrics(
+    tmp_path: Path,
+) -> None:
+    class DistinctPolicyProvider(RecordingProvider):
+        def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.source = (
+                "def priority(ctx, proposal):\n"
+                f'    return proposal["local_c4_risk"] + {len(self.calls)}\n'
+            )
+            return super().generate(request)
+
+    config_path = _write_config(
+        tmp_path / "experiment.toml",
+        workspace=tmp_path / "workspace",
+        population=1,
+        generations=2,
+        max_turns=2,
+        max_repairs=0,
+    )
+    provider = DistinctPolicyProvider()
+
+    _service(provider).run(config_path)
+
+    assert len(provider.calls) == 2
+    prompt = str(provider.calls[1]["prompt"])
+    assert "## Parent evaluation metadata" not in prompt
+    assert "## Archive context" not in prompt
+    for host_only_field in (
+        '"behavior_signature"',
+        '"context_schema_sha256"',
+        '"normalized_ast_sha256"',
+        '"proposal_schema_sha256"',
+        '"source_identity"',
+        '"source_sha256"',
+        '"turn_id"',
+        '"usage"',
+        '"validator_version"',
+    ):
+        assert host_only_field not in prompt
+    assert "0000000000000000000000000000000000000000000000000000000000000006" not in prompt
+    proposal_contract = prompt.split("## Proposal contract\n\n", 1)[1].split(
+        "\n\n## Field semantics", 1
+    )[0]
+    assert '"proposal_id": {' not in proposal_contract
+
+    feedback = prompt.split("## Search feedback\n\n", 1)[1].split(
+        "\n\n## Experiment configuration", 1
+    )[0]
+    feedback_value = json.loads(feedback)
+    assert "parent_id" not in feedback_value
+    assert feedback_value["instruction"]
+    metrics = [
+        feedback_value["mean_auc"],
+        feedback_value["best_auc"],
+        *feedback_value["baseline_auc"].values(),
+    ]
+    assert all(value == round(value, 4) for value in metrics)
+
+
 def test_native_evaluation_runs_in_spawned_process(tmp_path: Path) -> None:
     config_path = _write_config(
         tmp_path / "experiment.toml",
