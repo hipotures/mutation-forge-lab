@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import platform
 import secrets
@@ -84,6 +85,18 @@ def provider_artifact_snapshot(experiment_root: Path) -> dict[str, str]:
     }
 
 
+def verify_appserver_artifact_structure(experiment_root: Path) -> dict[str, Any]:
+    """Verify real provider turns against the frozen Native v2 structure."""
+
+    path = PROJECT_ROOT / "scripts" / "appserver_artifact_parity.py"
+    spec = importlib.util.spec_from_file_location("appserver_artifact_parity", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load App Server parity gate: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return dict(module.verify_real_provider_workspace(experiment_root))
+
+
 def _run_text(command: Sequence[str]) -> str:
     completed = subprocess.run(
         command,
@@ -155,6 +168,7 @@ def main() -> int:
     artifacts_before_status = provider_artifact_snapshot(experiment_root)
     status = _run_json(status_command)
     artifacts_after_status = provider_artifact_snapshot(experiment_root)
+    artifact_contract = verify_appserver_artifact_structure(experiment_root)
 
     checks = {
         "model_turns_positive": int(status.get("model_turns_used", 0)) > 0,
@@ -164,6 +178,7 @@ def main() -> int:
         "provider_artifacts_unchanged_by_status": (
             artifacts_after_status == artifacts_before_status
         ),
+        "appserver_artifact_structure": int(artifact_contract.get("turn_count", 0)) > 0,
         "terminal_without_error": (
             status.get("state") in {"completed", "exhausted"}
             and status.get("last_error") is None
@@ -191,6 +206,7 @@ def main() -> int:
         "checks": checks,
         "provider_turn_artifact_tree": list(artifacts_before_status),
         "provider_turn_artifact_sha256": artifacts_before_status,
+        "appserver_artifact_contract": artifact_contract,
     }
     report_path = report_dir / f"{exp_id}.json"
     report_path.write_text(
