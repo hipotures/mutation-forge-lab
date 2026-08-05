@@ -210,6 +210,22 @@ def test_provider_call_events_drive_native_v3_slots_and_visible_heartbeat() -> N
     assert [slot.timeout_seconds for slot in slots[:4]] == [600.0] * 4
     assert state.activity[0].message == "waiting for provider response (42/600s)"
     assert state.activity[0].slot == "epoch-0001:provider:0000"
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=160, force_terminal=False),
+        initial_state=state,
+        start_live=False,
+    )
+    try:
+        rendered = io.StringIO()
+        Console(file=rendered, width=160, force_terminal=False).print(
+            sink._progress(160, horizontal=True)  # noqa: SLF001
+        )
+        text = rendered.getvalue()
+        assert "4 generating" in text
+        assert "1 call" in text
+        assert "usage pending" in text
+    finally:
+        sink.close()
 
 
 def _adaptive_evaluation_config() -> dict[str, object]:

@@ -2805,6 +2805,21 @@ class InteractiveDashboardSink:
         )
 
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
+        current_slots = _generation_slots(self.state, self.state.generation).slots
+        generating_slots = sum(
+            slot.state in {"model", "repair"}
+            for slot in current_slots
+        )
+        slot_label = "Slots Complete"
+        token_label = "Token Budget"
+        call_label = "call" if self.state.active_provider_turns == 1 else "calls"
+        if generating_slots or self.state.active_provider_turns:
+            slot_label = (
+                f"Slots · {generating_slots} generating · "
+                f"{self.state.active_provider_turns} {call_label}"
+            )
+            if self.state.hourly_tokens_used == 0:
+                token_label = "Token Budget · usage pending"
         configured_values = (
             (
                 "Generation",
@@ -2812,7 +2827,7 @@ class InteractiveDashboardSink:
                 self.state.generation_limit,
             ),
             (
-                "Slots Complete",
+                slot_label,
                 self.state.completed_slots,
                 self.state.population_size,
             ),
@@ -2822,7 +2837,7 @@ class InteractiveDashboardSink:
                 self.state.max_model_turns,
             ),
             (
-                "Token Budget",
+                token_label,
                 self.state.hourly_tokens_used,
                 self.state.hourly_token_limit,
             ),
@@ -2882,18 +2897,27 @@ class InteractiveDashboardSink:
                     renderables[index],
                     renderables[index + 1] if index + 1 < len(renderables) else Text(),
                 )
-        content: RenderableType = (
-            Group(
-                grid,
+        notices: list[RenderableType] = []
+        if generating_slots or self.state.active_provider_turns:
+            notices.append(
+                Align.center(
+                    Text(
+                        f"Provider work active · {generating_slots} programs in "
+                        f"{self.state.active_provider_turns} {call_label} · "
+                        "token usage pending until response",
+                        style="cyan",
+                    )
+                )
+            )
+        if self.state.hourly_limit_reached and self.state.hourly_retry_after:
+            notices.append(
                 Text(
                     f"Hourly token limit reached · retry after "
                     f"{_clock_time(self.state.hourly_retry_after)}",
                     style="bold red",
-                ),
+                )
             )
-            if self.state.hourly_limit_reached and self.state.hourly_retry_after
-            else grid
-        )
+        content: RenderableType = Group(grid, *notices) if notices else grid
         return Panel(content, border_style="cyan", padding=(0, 1))
 
     def _slot_matrix(self, width: int, mode: str) -> Panel:
