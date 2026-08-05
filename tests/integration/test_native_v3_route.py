@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from mutation_forge.experiment.json_io import read_json
+from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.provider import LocalCodexAppServerProvider
 from mutation_forge.models import (
     ExactVerification,
@@ -18,16 +18,16 @@ from mutation_forge.models import (
     GraphValidation,
     RewritePlan,
 )
-from mutation_forge.native_v3.preview import (
-    NativeV3PreviewConfig,
-    NativeV3PreviewWorkspaceError,
-    run_v3_preview,
-    v3_preview_status,
+from mutation_forge.native_v3.experiment import (
+    V3Config,
+    V3WorkspaceError,
+    run_v3,
+    v3_status,
 )
 
 _FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "fake_stage3_app_server.py"
 _SPEC = importlib.util.spec_from_file_location(
-    "native_v3_preview_route_fake",
+    "native_v3_route_fake",
     _FIXTURE_PATH,
 )
 assert _SPEC is not None and _SPEC.loader is not None
@@ -100,13 +100,13 @@ def _config(tmp_path: Path, *, extra: str = "") -> Path:
     (heg_repo / "src" / "sglab").mkdir(parents=True, exist_ok=True)
     path = tmp_path / "experiment.toml"
     path.write_text(
-        f'''schema_version = "mforge.experiment.v3-preview.v2"
-protocol = "native-v3-preview"
-exp_id = "preview"
+        f'''schema_version = "mforge.experiment.v3"
+protocol = "v3"
+exp_id = "v3-run"
 workspace = "{(tmp_path / "workspace").as_posix()}"
 {extra}
 
-[native_v3_preview]
+[v3]
 model = "gpt-5.6-luna"
 effort = "high"
 timeout_seconds = 30
@@ -140,18 +140,18 @@ def _provider_with_responses(
     )
 
 
-def _provider(_: NativeV3PreviewConfig) -> LocalCodexAppServerProvider:
+def _provider(_: V3Config) -> LocalCodexAppServerProvider:
     return _provider_with_responses(
         [
-        _response(("slot-00", "slot-01", "slot-02", "slot-03"), offset=0),
-        _response(("slot-04", "slot-05", "slot-06", "slot-07"), offset=4),
+            _response(("slot-00", "slot-01", "slot-02", "slot-03"), offset=0),
+            _response(("slot-04", "slot-05", "slot-06", "slot-07"), offset=4),
         ]
     )
 
 
 class _Backend:
-    backend_id = "preview-recorded-backend"
-    score_implementation = "preview-recorded-scorer"
+    backend_id = "v3-recorded-backend"
+    score_implementation = "v3-recorded-scorer"
 
     def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
         return (4,)
@@ -197,22 +197,22 @@ class _Backend:
         raise AssertionError("no-plan program must not rewrite")
 
     def propose_rewrite(self, graph: GraphState, **_: Any) -> RewritePlan:
-        raise AssertionError("preview evaluator must not request backend proposals")
+        raise AssertionError("v3 evaluator must not request backend proposals")
 
     def close(self) -> None:
         return None
 
 
-def _backend(_: NativeV3PreviewConfig) -> _Backend:
+def _backend(_: V3Config) -> _Backend:
     return _Backend()
 
 
-def test_preview_completes_eight_slots_and_status_is_read_only(
+def test_v3_completes_eight_slots_and_status_is_read_only(
     tmp_path: Path,
 ) -> None:
     path = _config(tmp_path)
 
-    result = run_v3_preview(
+    result = run_v3(
         path,
         provider_factory=_provider,
         backend_factory=_backend,
@@ -220,7 +220,8 @@ def test_preview_completes_eight_slots_and_status_is_read_only(
     )
 
     assert result["state"] == "completed"
-    assert result["protocol_version"] == "native-v3-preview.v2"
+    assert result["protocol"] == "v3"
+    assert result["protocol_version"] == "v3"
     assert result["provider_turns"] == 2
     assert result["evaluation_count"] == 8
     assert result["cohort_outcome"] == "COMPLETE"
@@ -241,7 +242,7 @@ def test_preview_completes_eight_slots_and_status_is_read_only(
         for item in tmp_path.rglob("*")
         if item.is_file()
     }
-    status = v3_preview_status(path)
+    status = v3_status(path)
     after = {
         item.relative_to(tmp_path): (item.stat().st_mtime_ns, item.read_bytes())
         for item in tmp_path.rglob("*")
@@ -258,17 +259,17 @@ def test_auth_preflight_is_blocked_resumable_then_completes(
     provider_calls = 0
     backend_calls = 0
 
-    def provider(config: NativeV3PreviewConfig) -> LocalCodexAppServerProvider:
+    def provider(config: V3Config) -> LocalCodexAppServerProvider:
         nonlocal provider_calls
         provider_calls += 1
         return _provider(config)
 
-    def backend(config: NativeV3PreviewConfig) -> _Backend:
+    def backend(config: V3Config) -> _Backend:
         nonlocal backend_calls
         backend_calls += 1
         return _backend(config)
 
-    blocked = run_v3_preview(
+    blocked = run_v3(
         path,
         provider_factory=provider,
         backend_factory=backend,
@@ -282,7 +283,7 @@ def test_auth_preflight_is_blocked_resumable_then_completes(
     assert provider_calls == 0
     assert backend_calls == 0
 
-    completed = run_v3_preview(
+    completed = run_v3(
         path,
         provider_factory=provider,
         backend_factory=backend,
@@ -309,7 +310,7 @@ def test_partial_batch_is_not_repaired_and_duplicate_is_evaluated_once(
         _response(("slot-04", "slot-05", "slot-06", "slot-07"), offset=4),
     ]
 
-    result = run_v3_preview(
+    result = run_v3(
         path,
         provider_factory=lambda _: _provider_with_responses(responses),
         backend_factory=_backend,
@@ -359,7 +360,7 @@ def test_wholly_invalid_batch_gets_exactly_one_frozen_repair(
         _response(("slot-04", "slot-05", "slot-06", "slot-07"), offset=4),
     ]
 
-    result = run_v3_preview(
+    result = run_v3(
         path,
         provider_factory=lambda _: _provider_with_responses(responses),
         backend_factory=_backend,
@@ -386,11 +387,11 @@ def test_wholly_invalid_batch_gets_exactly_one_frozen_repair(
     assert all(attempt["provider_turn_id"] for attempt in attempts)
 
 
-def test_v2_workspace_is_rejected_by_preview_without_mutation(
+def test_v2_workspace_is_rejected_by_v3_without_mutation(
     tmp_path: Path,
 ) -> None:
     path = _config(tmp_path)
-    root = tmp_path / "workspace" / "preview"
+    root = tmp_path / "workspace" / "v3-run"
     root.mkdir(parents=True)
     (root / "state.sqlite3").write_bytes(b"v2-state-sentinel")
     (root / "experiment.toml").write_text(
@@ -404,16 +405,16 @@ def test_v2_workspace_is_rejected_by_preview_without_mutation(
     }
 
     with pytest.raises(
-        NativeV3PreviewWorkspaceError,
+        V3WorkspaceError,
         match="never reinterpret a Native v2 workspace",
     ):
-        run_v3_preview(
+        run_v3(
             path,
             provider_factory=_provider,
             backend_factory=_backend,
             auth_available=lambda _: True,
         )
-    status = v3_preview_status(path)
+    status = v3_status(path)
     after = {
         item.relative_to(root): (item.stat().st_mtime_ns, item.read_bytes())
         for item in root.rglob("*")
@@ -425,6 +426,43 @@ def test_v2_workspace_is_rejected_by_preview_without_mutation(
     assert after == before
 
 
+def test_old_preview_workspace_marker_is_rejected_without_mutation(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    root = tmp_path / "workspace" / "v3-run"
+    root.mkdir(parents=True)
+    (root / "experiment.toml").write_bytes(path.read_bytes())
+    write_json(
+        root / "native-v3-preview-state.json.gz",
+        {
+            "schema_version": "mforge.experiment.status.v3-preview.v2",
+            "protocol": "native-v3-preview",
+            "protocol_version": "native-v3-preview.v2",
+        },
+    )
+    before = {
+        item.relative_to(root): (item.stat().st_mtime_ns, item.read_bytes())
+        for item in root.rglob("*")
+        if item.is_file()
+    }
+
+    with pytest.raises(V3WorkspaceError, match="not a v3 workspace"):
+        run_v3(
+            path,
+            provider_factory=_provider,
+            backend_factory=_backend,
+            auth_available=lambda _: True,
+        )
+
+    after = {
+        item.relative_to(root): (item.stat().st_mtime_ns, item.read_bytes())
+        for item in root.rglob("*")
+        if item.is_file()
+    }
+    assert after == before
+
+
 def test_mixed_config_fails_before_workspace_provider_or_backend(
     tmp_path: Path,
 ) -> None:
@@ -432,18 +470,18 @@ def test_mixed_config_fails_before_workspace_provider_or_backend(
     provider_called = False
     backend_called = False
 
-    def provider(_: NativeV3PreviewConfig) -> LocalCodexAppServerProvider:
+    def provider(_: V3Config) -> LocalCodexAppServerProvider:
         nonlocal provider_called
         provider_called = True
         return _provider(_)
 
-    def backend(_: NativeV3PreviewConfig) -> _Backend:
+    def backend(_: V3Config) -> _Backend:
         nonlocal backend_called
         backend_called = True
         return _Backend()
 
     with pytest.raises(ValueError, match="cannot contain Native v2 fields"):
-        run_v3_preview(
+        run_v3(
             path,
             provider_factory=provider,
             backend_factory=backend,

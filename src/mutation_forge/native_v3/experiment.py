@@ -1,4 +1,4 @@
-"""Explicit Native v3 cohort preview routing for the public experiment CLI."""
+"""Explicit Native v3 routing for the public experiment CLI."""
 
 from __future__ import annotations
 
@@ -21,24 +21,22 @@ from mutation_forge.experiment.provider import LocalCodexAppServerProvider
 from .cohort import run_sequential_cohort
 
 V2_PROTOCOL = "native-v2"
-V3_PREVIEW_SELECTOR = "native-v3-preview"
-V3_PREVIEW_CONFIG_SCHEMA_VERSION = "mforge.experiment.v3-preview.v2"
-V3_PREVIEW_PROTOCOL_VERSION = "native-v3-preview.v2"
-V3_PREVIEW_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3-preview.v2"
-_STATE_NAME = "native-v3-preview-state.json.gz"
+V3_SELECTOR = "v3"
+V3_CONFIG_SCHEMA_VERSION = "mforge.experiment.v3"
+V3_PROTOCOL_VERSION = "v3"
+V3_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3"
+_STATE_NAME = "v3-state.json.gz"
 _V2_TOP_LEVEL_FIELDS = frozenset(
     {"kind", "preset", "run", "model", "search", "evaluation", "resources"}
 )
 
-type ProviderFactory = Callable[
-    ["NativeV3PreviewConfig"], LocalCodexAppServerProvider
-]
-type BackendFactory = Callable[["NativeV3PreviewConfig"], GraphBackend]
+type ProviderFactory = Callable[["V3Config"], LocalCodexAppServerProvider]
+type BackendFactory = Callable[["V3Config"], GraphBackend]
 type AuthAvailable = Callable[[Path], bool]
 
 
 @dataclass(frozen=True, slots=True)
-class NativeV3PreviewConfig:
+class V3Config:
     schema_version: str
     protocol: str
     exp_id: str
@@ -59,8 +57,8 @@ class NativeV3PreviewConfig:
         return hashlib.sha256(self.source_bytes).hexdigest()
 
 
-class NativeV3PreviewWorkspaceError(RuntimeError):
-    """The selected workspace is not a compatible Native v3 preview root."""
+class V3WorkspaceError(RuntimeError):
+    """The selected workspace is not a compatible v3 experiment root."""
 
 
 def _raw_config(path: str | Path) -> tuple[Path, bytes, dict[str, Any]]:
@@ -73,18 +71,18 @@ def _raw_config(path: str | Path) -> tuple[Path, bytes, dict[str, Any]]:
 
 
 def experiment_protocol(path: str | Path = "experiment.toml") -> str:
-    """Return the explicit preview selector or the unchanged Native v2 default."""
+    """Return the explicit v3 selector or the unchanged Native v2 default."""
 
     _, _, raw = _raw_config(path)
     protocol = raw.get("protocol")
     if protocol is None:
         return V2_PROTOCOL
-    if protocol != V3_PREVIEW_SELECTOR:
+    if protocol != V3_SELECTOR:
         raise ValueError(
             f"unsupported experiment protocol selector: {protocol!r}; "
-            f"expected {V3_PREVIEW_SELECTOR!r} or omit it for Native v2"
+            f"expected {V3_SELECTOR!r} or omit it for Native v2"
         )
-    return V3_PREVIEW_SELECTOR
+    return V3_SELECTOR
 
 
 def _string(value: object, name: str) -> str:
@@ -104,14 +102,14 @@ def _resolved_path(value: object, name: str, source_dir: Path) -> Path:
     return (source_dir / raw).resolve() if not raw.is_absolute() else raw.resolve()
 
 
-def load_v3_preview_config(
+def load_v3_config(
     path: str | Path = "experiment.toml",
-) -> NativeV3PreviewConfig:
+) -> V3Config:
     source_path, source_bytes, raw = _raw_config(path)
     mixed = sorted(_V2_TOP_LEVEL_FIELDS.intersection(raw))
     if mixed:
         raise ValueError(
-            "native-v3-preview configuration cannot contain Native v2 fields: "
+            "v3 configuration cannot contain Native v2 fields: "
             f"{mixed}"
         )
     allowed = {
@@ -119,48 +117,44 @@ def load_v3_preview_config(
         "protocol",
         "exp_id",
         "workspace",
-        "native_v3_preview",
+        "v3",
     }
     unknown = sorted(set(raw).difference(allowed))
     if unknown:
         raise ValueError(f"unsupported top-level fields: {unknown}")
-    if raw.get("schema_version") != V3_PREVIEW_CONFIG_SCHEMA_VERSION:
+    if raw.get("schema_version") != V3_CONFIG_SCHEMA_VERSION:
         raise ValueError(
-            "native-v3-preview requires schema_version "
-            f"{V3_PREVIEW_CONFIG_SCHEMA_VERSION!r}"
+            "v3 requires schema_version "
+            f"{V3_CONFIG_SCHEMA_VERSION!r}"
         )
-    if raw.get("protocol") != V3_PREVIEW_SELECTOR:
-        raise ValueError(
-            f"native-v3-preview requires protocol {V3_PREVIEW_SELECTOR!r}"
-        )
+    if raw.get("protocol") != V3_SELECTOR:
+        raise ValueError(f"v3 requires protocol {V3_SELECTOR!r}")
     exp_id = validate_experiment_id(raw.get("exp_id"))
     workspace = _resolved_path(raw.get("workspace"), "workspace", source_path.parent)
-    preview_value = raw.get("native_v3_preview")
-    if not isinstance(preview_value, dict):
-        raise ValueError("[native_v3_preview] must be a table")
-    preview = cast(dict[str, Any], preview_value)
-    allowed_preview = {"model", "effort", "timeout_seconds", "heg_repo"}
-    unknown_preview = sorted(set(preview).difference(allowed_preview))
-    if unknown_preview:
-        raise ValueError(
-            f"unsupported [native_v3_preview] fields: {unknown_preview}"
-        )
-    model = _string(preview.get("model"), "native_v3_preview.model")
-    effort = _string(preview.get("effort"), "native_v3_preview.effort")
+    v3_value = raw.get("v3")
+    if not isinstance(v3_value, dict):
+        raise ValueError("[v3] must be a table")
+    v3 = cast(dict[str, Any], v3_value)
+    allowed_v3 = {"model", "effort", "timeout_seconds", "heg_repo"}
+    unknown_v3 = sorted(set(v3).difference(allowed_v3))
+    if unknown_v3:
+        raise ValueError(f"unsupported [v3] fields: {unknown_v3}")
+    model = _string(v3.get("model"), "v3.model")
+    effort = _string(v3.get("effort"), "v3.effort")
     if effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
-        raise ValueError("native_v3_preview.effort is unsupported")
+        raise ValueError("v3.effort is unsupported")
     timeout_seconds = _positive_number(
-        preview.get("timeout_seconds"),
-        "native_v3_preview.timeout_seconds",
+        v3.get("timeout_seconds"),
+        "v3.timeout_seconds",
     )
     heg_repo = _resolved_path(
-        preview.get("heg_repo"),
-        "native_v3_preview.heg_repo",
+        v3.get("heg_repo"),
+        "v3.heg_repo",
         source_path.parent,
     )
-    return NativeV3PreviewConfig(
-        V3_PREVIEW_CONFIG_SCHEMA_VERSION,
-        V3_PREVIEW_SELECTOR,
+    return V3Config(
+        V3_CONFIG_SCHEMA_VERSION,
+        V3_SELECTOR,
         exp_id,
         workspace,
         model,
@@ -172,11 +166,11 @@ def load_v3_preview_config(
     )
 
 
-def _base_status(config: NativeV3PreviewConfig) -> dict[str, Any]:
+def _base_status(config: V3Config) -> dict[str, Any]:
     return {
-        "schema_version": V3_PREVIEW_STATUS_SCHEMA_VERSION,
-        "protocol": V3_PREVIEW_SELECTOR,
-        "protocol_version": V3_PREVIEW_PROTOCOL_VERSION,
+        "schema_version": V3_STATUS_SCHEMA_VERSION,
+        "protocol": V3_SELECTOR,
+        "protocol_version": V3_PROTOCOL_VERSION,
         "exp_id": config.exp_id,
         "workspace": str(config.experiment_root),
         "state": "not_created",
@@ -200,12 +194,12 @@ def _base_status(config: NativeV3PreviewConfig) -> dict[str, Any]:
     }
 
 
-def _state_path(config: NativeV3PreviewConfig) -> Path:
+def _state_path(config: V3Config) -> Path:
     return config.experiment_root / _STATE_NAME
 
 
 def _state_payload(
-    config: NativeV3PreviewConfig,
+    config: V3Config,
     status: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -218,27 +212,27 @@ def _public_state(value: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): item for key, item in value.items() if key != "config_sha256"}
 
 
-def _load_workspace_state(config: NativeV3PreviewConfig) -> dict[str, Any]:
+def _load_workspace_state(config: V3Config) -> dict[str, Any]:
     state_path = _state_path(config)
     if not state_path.is_file():
-        raise NativeV3PreviewWorkspaceError(
-            "existing workspace is not a Native v3 preview workspace; "
+        raise V3WorkspaceError(
+            "existing workspace is not a v3 workspace; "
             "use a fresh exp_id and never reinterpret a Native v2 workspace"
         )
     value = read_json(state_path)
     if not isinstance(value, Mapping):
-        raise NativeV3PreviewWorkspaceError("Native v3 preview state is not an object")
+        raise V3WorkspaceError("v3 state is not an object")
     if (
-        value.get("schema_version") != V3_PREVIEW_STATUS_SCHEMA_VERSION
-        or value.get("protocol") != V3_PREVIEW_SELECTOR
-        or value.get("protocol_version") != V3_PREVIEW_PROTOCOL_VERSION
+        value.get("schema_version") != V3_STATUS_SCHEMA_VERSION
+        or value.get("protocol") != V3_SELECTOR
+        or value.get("protocol_version") != V3_PROTOCOL_VERSION
     ):
-        raise NativeV3PreviewWorkspaceError(
-            "Native v3 preview workspace protocol does not match this runtime"
+        raise V3WorkspaceError(
+            "v3 workspace protocol does not match this runtime"
         )
     if value.get("config_sha256") != config.source_sha256:
-        raise NativeV3PreviewWorkspaceError(
-            "Native v3 preview configuration changed; create a fresh workspace"
+        raise V3WorkspaceError(
+            "v3 configuration changed; create a fresh workspace"
         )
     stored_config = config.experiment_root / "experiment.toml"
     if (
@@ -246,24 +240,24 @@ def _load_workspace_state(config: NativeV3PreviewConfig) -> dict[str, Any]:
         or hashlib.sha256(stored_config.read_bytes()).hexdigest()
         != config.source_sha256
     ):
-        raise NativeV3PreviewWorkspaceError(
-            "Native v3 preview workspace configuration identity mismatch"
+        raise V3WorkspaceError(
+            "v3 workspace configuration identity mismatch"
         )
     return _public_state(value)
 
 
 def _persist_state(
-    config: NativeV3PreviewConfig,
+    config: V3Config,
     status: Mapping[str, Any],
 ) -> None:
     write_json(_state_path(config), _state_payload(config, status))
 
 
-def _initialize_workspace(config: NativeV3PreviewConfig) -> dict[str, Any]:
+def _initialize_workspace(config: V3Config) -> dict[str, Any]:
     config.workspace.mkdir(parents=True, exist_ok=True)
     temporary = Path(
         tempfile.mkdtemp(
-            prefix=f".{config.exp_id}.native-v3-preview.",
+            prefix=f".{config.exp_id}.v3.",
             dir=config.workspace,
         )
     )
@@ -279,7 +273,7 @@ def _initialize_workspace(config: NativeV3PreviewConfig) -> dict[str, Any]:
 
 
 def _failed_status(
-    config: NativeV3PreviewConfig,
+    config: V3Config,
     error: Exception,
 ) -> dict[str, Any]:
     return {
@@ -291,22 +285,22 @@ def _failed_status(
     }
 
 
-def v3_preview_status(
+def v3_status(
     config_path: str | Path = "experiment.toml",
 ) -> dict[str, Any]:
-    """Read Native v3 preview status without provider or scorer contact."""
+    """Read v3 status without provider or scorer contact."""
 
-    config = load_v3_preview_config(config_path)
+    config = load_v3_config(config_path)
     if not config.experiment_root.exists():
         return _base_status(config)
     try:
         return _load_workspace_state(config)
-    except (OSError, ValueError, NativeV3PreviewWorkspaceError) as error:
+    except (OSError, ValueError, V3WorkspaceError) as error:
         return _failed_status(config, error)
 
 
 def _default_provider(
-    config: NativeV3PreviewConfig,
+    config: V3Config,
 ) -> LocalCodexAppServerProvider:
     return LocalCodexAppServerProvider(
         model=config.model,
@@ -319,12 +313,12 @@ def _default_provider(
     )
 
 
-def _default_backend(config: NativeV3PreviewConfig) -> GraphBackend:
+def _default_backend(config: V3Config) -> GraphBackend:
     return HegBackend(config.heg_repo)
 
 
 def _blocked_preflight(
-    config: NativeV3PreviewConfig,
+    config: V3Config,
     message: str,
 ) -> dict[str, Any]:
     return {
@@ -338,7 +332,7 @@ def _blocked_preflight(
 
 
 def _status_from_report(
-    config: NativeV3PreviewConfig,
+    config: V3Config,
     report: Mapping[str, Any],
 ) -> dict[str, Any]:
     status = str(report.get("status"))
@@ -417,23 +411,23 @@ def _status_from_report(
     }
 
 
-def run_v3_preview(
+def run_v3(
     config_path: str | Path = "experiment.toml",
     *,
     provider_factory: ProviderFactory = _default_provider,
     backend_factory: BackendFactory = _default_backend,
     auth_available: AuthAvailable = Path.is_file,
 ) -> dict[str, Any]:
-    """Run or resume the bounded sequential Native v3 cohort preview."""
+    """Run or resume the bounded sequential v3 cohort."""
 
-    config = load_v3_preview_config(config_path)
+    config = load_v3_config(config_path)
     if config.experiment_root.exists():
         status = _load_workspace_state(config)
         if status.get("state") == "completed":
             return status
         if status.get("resumable") is not True:
-            raise NativeV3PreviewWorkspaceError(
-                "Native v3 preview workspace is not resumable"
+            raise V3WorkspaceError(
+                "v3 workspace is not resumable"
             )
     else:
         status = _initialize_workspace(config)
@@ -502,14 +496,14 @@ def run_v3_preview(
 
 __all__ = [
     "V2_PROTOCOL",
-    "V3_PREVIEW_CONFIG_SCHEMA_VERSION",
-    "V3_PREVIEW_PROTOCOL_VERSION",
-    "V3_PREVIEW_SELECTOR",
-    "V3_PREVIEW_STATUS_SCHEMA_VERSION",
-    "NativeV3PreviewConfig",
-    "NativeV3PreviewWorkspaceError",
+    "V3_CONFIG_SCHEMA_VERSION",
+    "V3_PROTOCOL_VERSION",
+    "V3_SELECTOR",
+    "V3_STATUS_SCHEMA_VERSION",
+    "V3Config",
+    "V3WorkspaceError",
     "experiment_protocol",
-    "load_v3_preview_config",
-    "run_v3_preview",
-    "v3_preview_status",
+    "load_v3_config",
+    "run_v3",
+    "v3_status",
 ]

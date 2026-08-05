@@ -274,7 +274,7 @@ def build_batch_request(
         )
     ).hexdigest()
     request = GenerationRequest(
-        campaign_id="native-v3-preview-cohort",
+        campaign_id="v3-cohort",
         generation=0,
         slot=slot_ids[0],
         parent_id="native-v3-empty-parent-set",

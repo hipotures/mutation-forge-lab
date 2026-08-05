@@ -31,11 +31,11 @@ from mutation_forge.experiment.rebuild import rebuild_experiment_state
 from mutation_forge.experiment.service import final_stop_experiment, run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
-from mutation_forge.native_v3.preview import (
-    V3_PREVIEW_SELECTOR,
+from mutation_forge.native_v3.experiment import (
+    V3_SELECTOR,
     experiment_protocol,
-    run_v3_preview,
-    v3_preview_status,
+    run_v3,
+    v3_status,
 )
 from mutation_forge.output.interactive_dashboard import (
     DashboardCapabilities,
@@ -288,13 +288,13 @@ def _experiment_run(
     dashboard: bool = False,
     until_complete: bool = False,
 ) -> int:
-    if experiment_protocol(config_path) == V3_PREVIEW_SELECTOR:
+    if experiment_protocol(config_path) == V3_SELECTOR:
         if dashboard or until_complete or profiling is not None:
             raise ValueError(
-                "native-v3-preview does not accept Native v2 dashboard, "
+                "v3 does not accept Native v2 dashboard, "
                 "until-complete, or profiling options"
             )
-        result = run_v3_preview(config_path)
+        result = run_v3(config_path)
         encoded = json.dumps(
             result,
             ensure_ascii=False,
@@ -416,8 +416,8 @@ def _experiment_run(
 
 
 def _experiment_status(config_path: Path, *, json_output: bool) -> int:
-    if experiment_protocol(config_path) == V3_PREVIEW_SELECTOR:
-        result = v3_preview_status(config_path)
+    if experiment_protocol(config_path) == V3_SELECTOR:
+        result = v3_status(config_path)
         encoded = json.dumps(
             result,
             ensure_ascii=False,

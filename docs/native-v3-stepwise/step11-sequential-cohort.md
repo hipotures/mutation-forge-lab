@@ -1,6 +1,6 @@
 # Native v3 Step 11 sequential cohort
 
-The explicit `native-v3-preview` route now freezes one epoch with eight primary
+The explicit `v3` route now freezes one epoch with eight primary
 slots (`slot-00` through `slot-07`). Provider generation is strictly
 sequential: call 0 owns slots 00–03 and call 1 owns slots 04–07. Graph
 evaluation starts only after both calls finish and remains single-process and
@@ -45,7 +45,6 @@ four-program batch is carried inside the existing
 validated programs, evaluations, and cohort reports are written outside the
 provider turn.
 
-The preview configuration schema and workspace marker are
-`mforge.experiment.v3-preview.v2` and `native-v3-preview.v2`. Older preview
-workspaces are rejected rather than migrated. Native v2 remains the default
+The configuration schema and protocol are `mforge.experiment.v3` and `v3`.
+Older v3 workspaces are rejected rather than migrated. Native v2 remains the default
 when `protocol` is omitted.

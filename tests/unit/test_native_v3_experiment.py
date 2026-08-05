@@ -6,22 +6,22 @@ from pathlib import Path
 import pytest
 
 from mutation_forge import cli
-from mutation_forge.native_v3.preview import (
+from mutation_forge.native_v3.experiment import (
     V2_PROTOCOL,
-    V3_PREVIEW_SELECTOR,
+    V3_SELECTOR,
     experiment_protocol,
-    load_v3_preview_config,
+    load_v3_config,
 )
 
 
 def _config(tmp_path: Path, *, extra: str = "") -> str:
-    return f'''schema_version = "mforge.experiment.v3-preview.v2"
-protocol = "native-v3-preview"
-exp_id = "preview"
+    return f'''schema_version = "mforge.experiment.v3"
+protocol = "v3"
+exp_id = "v3-run"
 workspace = "{(tmp_path / "workspace").as_posix()}"
 {extra}
 
-[native_v3_preview]
+[v3]
 model = "gpt-5.6-luna"
 effort = "high"
 timeout_seconds = 30
@@ -36,35 +36,35 @@ def test_protocol_omission_keeps_native_v2_default(tmp_path: Path) -> None:
     assert experiment_protocol(path) == V2_PROTOCOL
 
 
-def test_preview_config_is_explicit_and_bounded(tmp_path: Path) -> None:
+def test_v3_config_is_explicit_and_bounded(tmp_path: Path) -> None:
     path = tmp_path / "experiment.toml"
     path.write_text(_config(tmp_path), encoding="utf-8")
 
-    config = load_v3_preview_config(path)
+    config = load_v3_config(path)
 
-    assert experiment_protocol(path) == V3_PREVIEW_SELECTOR
-    assert config.exp_id == "preview"
+    assert experiment_protocol(path) == V3_SELECTOR
+    assert config.exp_id == "v3-run"
     assert config.workspace == tmp_path / "workspace"
     assert config.heg_repo == tmp_path / "heg"
 
 
 @pytest.mark.parametrize("field", ["model", "search", "evaluation", "resources"])
-def test_preview_rejects_native_v2_sections(tmp_path: Path, field: str) -> None:
+def test_v3_rejects_native_v2_sections(tmp_path: Path, field: str) -> None:
     path = tmp_path / "experiment.toml"
     path.write_text(_config(tmp_path, extra=f"\n[{field}]\n"), encoding="utf-8")
 
     with pytest.raises(ValueError, match="cannot contain Native v2 fields"):
-        load_v3_preview_config(path)
+        load_v3_config(path)
 
     assert not (tmp_path / "workspace").exists()
 
 
-def test_preview_rejects_unknown_selector_and_fields(tmp_path: Path) -> None:
+def test_v3_rejects_old_names_and_unknown_fields(tmp_path: Path) -> None:
     path = tmp_path / "experiment.toml"
     path.write_text(
         _config(tmp_path).replace(
+            'protocol = "v3"',
             'protocol = "native-v3-preview"',
-            'protocol = "native-v3"',
         ),
         encoding="utf-8",
     )
@@ -73,16 +73,26 @@ def test_preview_rejects_unknown_selector_and_fields(tmp_path: Path) -> None:
 
     path.write_text(
         _config(tmp_path).replace(
+            'schema_version = "mforge.experiment.v3"',
+            'schema_version = "mforge.experiment.v3-preview.v2"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="v3 requires schema_version"):
+        load_v3_config(path)
+
+    path.write_text(
+        _config(tmp_path).replace(
             'heg_repo = "',
             'population_size = 8\nheg_repo = "',
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match=r"unsupported \[native_v3_preview\]"):
-        load_v3_preview_config(path)
+    with pytest.raises(ValueError, match=r"unsupported \[v3\]"):
+        load_v3_config(path)
 
 
-def test_public_cli_routes_preview_run_and_status(
+def test_public_cli_routes_v3_run_and_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -93,14 +103,14 @@ def test_public_cli_routes_preview_run_and_status(
 
     def run(config_path: str | Path) -> dict[str, object]:
         calls.append(f"run:{Path(config_path).name}")
-        return {"state": "completed", "protocol": V3_PREVIEW_SELECTOR}
+        return {"state": "completed", "protocol": V3_SELECTOR}
 
     def status(config_path: str | Path) -> dict[str, object]:
         calls.append(f"status:{Path(config_path).name}")
-        return {"state": "completed", "protocol": V3_PREVIEW_SELECTOR}
+        return {"state": "completed", "protocol": V3_SELECTOR}
 
-    monkeypatch.setattr(cli, "run_v3_preview", run)
-    monkeypatch.setattr(cli, "v3_preview_status", status)
+    monkeypatch.setattr(cli, "run_v3", run)
+    monkeypatch.setattr(cli, "v3_status", status)
 
     assert (
         cli.main(["experiment", "run", "--config", str(path), "--json"])
@@ -112,13 +122,13 @@ def test_public_cli_routes_preview_run_and_status(
     )
     payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [payload["protocol"] for payload in payloads] == [
-        V3_PREVIEW_SELECTOR,
-        V3_PREVIEW_SELECTOR,
+        V3_SELECTOR,
+        V3_SELECTOR,
     ]
     assert calls == ["run:experiment.toml", "status:experiment.toml"]
 
 
-def test_preview_rejects_v2_only_run_options_before_execution(
+def test_v3_rejects_v2_only_run_options_before_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -131,7 +141,7 @@ def test_preview_rejects_v2_only_run_options_before_execution(
         called = True
         return {"state": "completed"}
 
-    monkeypatch.setattr(cli, "run_v3_preview", run)
+    monkeypatch.setattr(cli, "run_v3", run)
 
     assert (
         cli.main(
