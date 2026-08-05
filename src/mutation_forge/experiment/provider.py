@@ -420,6 +420,8 @@ class _CodexTransport:
             )
         else:
             value["prompt"] = prompt
+        prefix = str(value.get("artifact_prefix", "slot-00"))
+        value["artifact_prefix"] = f"{prefix}.repair"
         return self.generate(value)
 
     def close(self) -> None:

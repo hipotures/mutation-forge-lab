@@ -951,6 +951,12 @@ class NativeV3ExperimentAdapter:
                             contract_bundle=provider_contract,
                             request_prompt=request_prompt,
                             repair_prompt=repair_prompt,
+                            artifact_dir=str(
+                                layout.artifacts
+                                / "slots"
+                                / call.slot_ids[0]
+                            ),
+                            artifact_prefix=call.slot_ids[0],
                         )
 
                     def artifact_sink(
