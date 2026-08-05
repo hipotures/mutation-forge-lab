@@ -826,21 +826,30 @@ class RichLiveSink:
         if not isinstance(slots, dict):
             slots = {}
             self.state["slot_states"] = slots
-        for slot in (item.strip() for item in encoded_slots.split(",")):
+        slot_names = tuple(
+            item.strip() for item in encoded_slots.split(",") if item.strip()
+        )
+        for index, slot in enumerate(slot_names):
+            is_call_representative = index == 0
             if not slot:
                 continue
             detail = self._slot_details.setdefault(slot, {})
             detail["generation"] = payload.get("generation")
             if event_type == "provider_call_started":
                 detail["phase"] = "provider"
-                detail["state"] = "model"
-                detail["_slot_started_at"] = now
+                detail["state"] = "model" if is_call_representative else "batched"
+                if is_call_representative:
+                    detail["_slot_started_at"] = now
+                else:
+                    detail.pop("_slot_started_at", None)
             elif event_type == "provider_call_activity":
                 detail["phase"] = "provider"
-                detail["state"] = "model"
-                if elapsed is not None:
+                detail["state"] = "model" if is_call_representative else "batched"
+                if elapsed is not None and is_call_representative:
                     detail["elapsed_seconds"] = float(elapsed)
                     detail["_slot_started_at"] = now - float(elapsed)
+                elif not is_call_representative:
+                    detail.pop("elapsed_seconds", None)
             elif event_type == "provider_call_failed":
                 detail["phase"] = "response"
                 detail["state"] = "failed"

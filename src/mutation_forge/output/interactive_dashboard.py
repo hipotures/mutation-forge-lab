@@ -73,6 +73,7 @@ STATE_STYLES = {
     "queued": "grey62",
     "starting": "cyan",
     "model": "cyan",
+    "batched": "cyan",
     "retrying": "yellow",
     "repair": "yellow",
     "validating": "blue",
@@ -848,7 +849,10 @@ def _update_provider_call_slots(
         if error_type is not None and error_message is not None
         else error_message or error_type or ""
     )
-    for slot_name in _provider_call_slots(payload):
+    call_id = _text(payload.get("call_id"))
+    slot_names = _provider_call_slots(payload)
+    for index, slot_name in enumerate(slot_names):
+        is_call_representative = index == 0
         group = _generation_slots(state, target_generation)
         slot = next(
             (item for item in group.slots if item.slot == slot_name),
@@ -857,24 +861,26 @@ def _update_provider_call_slots(
         started = slot.started_monotonic
         phase_started = slot.phase_started_monotonic
         if event_type == "provider_call_started":
-            started = now if started is None else started
-            phase_started = now
+            started = now if is_call_representative and started is None else started
+            phase_started = now if is_call_representative else None
             updated = replace(
                 slot,
                 phase="provider",
-                state="model",
+                state="model" if is_call_representative else "batched",
                 started_monotonic=started,
                 phase_started_monotonic=phase_started,
                 timeout_seconds=timeout,
+                provider_request_id=call_id,
                 lifecycle=_lifecycle(slot, "provider", "running"),
             )
         elif event_type == "provider_call_activity":
             updated = replace(
                 slot,
                 phase="provider",
-                state="model",
-                elapsed_seconds=elapsed,
+                state="model" if is_call_representative else "batched",
+                elapsed_seconds=elapsed if is_call_representative else None,
                 timeout_seconds=timeout if timeout is not None else slot.timeout_seconds,
+                provider_request_id=call_id or slot.provider_request_id,
             )
         elif event_type == "provider_call_failed":
             updated = replace(
@@ -2807,7 +2813,7 @@ class InteractiveDashboardSink:
     def _progress(self, width: int, *, horizontal: bool) -> Panel:
         current_slots = _generation_slots(self.state, self.state.generation).slots
         generating_slots = sum(
-            slot.state in {"model", "repair"}
+            slot.state in {"model", "batched", "repair"}
             for slot in current_slots
         )
         slot_label = "Slots Complete"

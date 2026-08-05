@@ -204,10 +204,18 @@ def test_provider_call_events_drive_native_v3_slots_and_visible_heartbeat() -> N
     )
 
     slots = next(group.slots for group in state.generations if group.generation == 1)
-    assert [slot.state for slot in slots[:4]] == ["model"] * 4
+    assert [slot.state for slot in slots[:4]] == [
+        "model",
+        "batched",
+        "batched",
+        "batched",
+    ]
     assert [slot.phase for slot in slots[:4]] == ["provider"] * 4
-    assert [slot.elapsed_seconds for slot in slots[:4]] == [42.0] * 4
+    assert [slot.elapsed_seconds for slot in slots[:4]] == [42.0, None, None, None]
     assert [slot.timeout_seconds for slot in slots[:4]] == [600.0] * 4
+    assert [slot.provider_request_id for slot in slots[:4]] == [
+        "epoch-0001:provider:0000"
+    ] * 4
     assert state.activity[0].message == "waiting for provider response (42/600s)"
     assert state.activity[0].slot == "epoch-0001:provider:0000"
     sink = InteractiveDashboardSink(

@@ -354,11 +354,14 @@ def test_native_v3_provider_call_heartbeat_populates_classic_slot_table() -> Non
         )
 
         rows = sink._native_slot_rows()  # noqa: SLF001
-        assert [row["state"] for row in rows] == ["model"] * 4
-        assert [row["elapsed_seconds"] for row in rows] == pytest.approx(
-            [42.0] * 4,
-            abs=0.01,
-        )
+        assert [row["state"] for row in rows] == [
+            "model",
+            "batched",
+            "batched",
+            "batched",
+        ]
+        assert rows[0]["elapsed_seconds"] == pytest.approx(42.0, abs=0.01)
+        assert all(row.get("elapsed_seconds") is None for row in rows[1:])
         assert sink.state["active_model_turns"] == 1
         rendered = io.StringIO()
         Console(file=rendered, width=160, height=30, force_terminal=False).print(
