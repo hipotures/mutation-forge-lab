@@ -8,7 +8,7 @@ from enum import StrEnum
 from fractions import Fraction
 from typing import Any, NoReturn, cast
 
-from mutation_forge.models import GraphState, RewritePlan
+from mutation_forge.models import GraphState, JsonValue, RewritePlan
 
 from .contracts import (
     ACTION_ARGUMENT_TYPES,
@@ -143,6 +143,16 @@ class ProgramFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticEvent:
+    kind: str
+    path: str
+    payload: Mapping[str, JsonValue]
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        return {"kind": self.kind, "path": self.path, "payload": dict(self.payload)}
+
+
+@dataclass(frozen=True, slots=True)
 class InvocationCounters:
     steps: int
     repeat_iterations: int
@@ -160,6 +170,7 @@ class InvocationResult:
     no_plan: NoPlan | None
     failure: ProgramFailure | None
     counters: InvocationCounters
+    semantic_trace: tuple[SemanticEvent, ...]
 
     @property
     def successful(self) -> bool:
@@ -211,6 +222,7 @@ class _Runtime:
     episode_id: str
     limits: InterpreterLimits
     counters: _Counters = field(default_factory=_Counters)
+    semantic_trace: list[SemanticEvent] = field(default_factory=list)
 
     def budget(self, field_name: str, increment: int, maximum: int, path: str) -> None:
         value = cast(int, getattr(self.counters, field_name)) + increment
@@ -224,6 +236,9 @@ class _Runtime:
 
     def step(self, path: str) -> None:
         self.budget("steps", 1, self.limits.maximum_steps, path)
+
+    def record(self, kind: str, path: str, payload: Mapping[str, JsonValue]) -> None:
+        self.semantic_trace.append(SemanticEvent(kind, path, dict(payload)))
 
     def random_index(self, path: str, weights: Sequence[int]) -> int:
         seed = derive_seed64(
@@ -265,6 +280,40 @@ def _runtime_type(value: RuntimeValue) -> ValueType:
     if isinstance(value, VertexSetRef | EdgeSetRef | SelectionPopulation):
         return population_type(value)
     raise TypeError(f"unsupported runtime value: {type(value).__name__}")
+
+
+def _semantic_value(value: RuntimeValue) -> JsonValue:
+    if isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, Fraction):
+        return {
+            "type": ValueType.RATIONAL.value,
+            "numerator": value.numerator,
+            "denominator": value.denominator,
+        }
+    if isinstance(value, VertexRef):
+        return {"type": ValueType.VERTEX.value, "vertex": value.vertex}
+    if isinstance(value, EdgeRef):
+        return {"type": ValueType.EDGE.value, "edge": list(value.edge)}
+    if isinstance(value, NonEdgeRef):
+        return {"type": ValueType.NON_EDGE.value, "edge": list(value.edge)}
+    if isinstance(value, PathRef):
+        return {
+            "type": ValueType.PATH.value,
+            "vertices": [value.u, value.w, value.v],
+        }
+    if isinstance(value, MatchingRef):
+        return {
+            "type": ValueType.MATCHING.value,
+            "removed_edges": [list(edge) for edge in value.removed_edges],
+            "added_edges": [list(edge) for edge in value.added_edges],
+        }
+    if isinstance(value, VertexSetRef | EdgeSetRef | SelectionPopulation):
+        return {
+            "type": population_type(value).value,
+            "items": [_semantic_value(item) for item in population_items(value)],
+        }
+    raise TypeError(f"unsupported semantic value: {type(value).__name__}")
 
 
 def _fault(code: str, path: str, message: str) -> NoReturn:
@@ -383,6 +432,14 @@ def _expression(
         except (TypeError, ValueError) as exc:
             raise _ProgramFault("TYPE_ERROR", path, str(exc)) from exc
         _expect(selection, SELECTOR_TYPES[selector_id], path)
+        runtime.record(
+            "selector",
+            path,
+            {
+                "selector_id": selector_id,
+                "population": _semantic_value(selection),
+            },
+        )
         return selection
     if operation == "pick":
         source = _expression(runtime, expression.get("source"), environment, f"{path}/source")
@@ -398,11 +455,23 @@ def _expression(
                     BranchFailureCode.LOCAL_PRECONDITION_FAILED,
                     "selection is not a singleton",
                 )
-            return items[0]
+            selected = items[0]
+            runtime.record(
+                "pick",
+                path,
+                {"mode": mode, "selected_index": 0, "value": _semantic_value(selected)},
+            )
+            return selected
         runtime.budget("choices", 1, runtime.limits.maximum_choices, path)
         if mode == "seeded_uniform":
             index = runtime.random_index(path, [1] * len(items))
-            return items[index]
+            selected = items[index]
+            runtime.record(
+                "pick",
+                path,
+                {"mode": mode, "selected_index": index, "value": _semantic_value(selected)},
+            )
+            return selected
         if mode == "seeded_weighted":
             feature = expression.get("weight_feature")
             if not isinstance(feature, str):
@@ -416,7 +485,14 @@ def _expression(
                 if isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0:
                     _fault("TYPE_ERROR", path, "weight must be a positive integer")
                 weights.append(weight)
-            return items[runtime.random_index(path, weights)]
+            index = runtime.random_index(path, weights)
+            selected = items[index]
+            runtime.record(
+                "pick",
+                path,
+                {"mode": mode, "selected_index": index, "value": _semantic_value(selected)},
+            )
+            return selected
         _fault("INVALID_AST", path, "unknown pick mode")
     if operation in {
         "add",
@@ -511,6 +587,11 @@ def _node(
             _fault("INVALID_AST", path, "invalid binding")
         value = _expression(runtime, node.get("value"), environment, f"{path}/value")
         runtime.budget("bindings", 1, runtime.limits.maximum_bindings, path)
+        runtime.record(
+            "binding",
+            path,
+            {"name": name, "value": _semantic_value(value)},
+        )
         nested = environment.copy()
         nested[name] = value
         _node(runtime, node.get("body"), nested, f"{path}/body")
@@ -547,6 +628,11 @@ def _node(
                 runtime.graph_runtime.overlay.restore(graph_snapshot)
                 environment.clear()
                 environment.update(environment_snapshot)
+                runtime.record(
+                    "fallback",
+                    path,
+                    {"branch_index": index, "failure_code": exc.code.value},
+                )
         if last_failure is None:
             _fault("INVALID_AST", path, "try has no branches")
         raise last_failure
@@ -582,6 +668,7 @@ def _node(
             weights.append(weight)
         runtime.budget("choices", 1, runtime.limits.maximum_choices, path)
         index = runtime.random_index(path, weights)
+        runtime.record("choose", path, {"selected_branch": index})
         branch = cast(dict[str, Any], branches[index])
         _node(
             runtime,
@@ -619,6 +706,17 @@ def _node(
             ) from exc
         except (TypeError, ValueError) as exc:
             raise _ProgramFault("TYPE_ERROR", path, str(exc)) from exc
+        runtime.record(
+            "action",
+            path,
+            {
+                "action_id": action_id,
+                "arguments": {
+                    name: _semantic_value(value)
+                    for name, value in sorted(arguments.items())
+                },
+            },
+        )
         return
     if operation == "emit":
         try:
@@ -639,11 +737,20 @@ def _node(
             ) from exc
         except GraphResourceError as exc:
             raise _ProgramFault("BUDGET_EXHAUSTED", path, str(exc)) from exc
+        runtime.record(
+            "emit",
+            path,
+            {
+                "removed_edges": [list(edge) for edge in rewrite.removed_edges],
+                "added_edges": [list(edge) for edge in rewrite.added_edges],
+            },
+        )
         raise _Terminal(rewrite)
     if operation == "no_plan":
         reason = node.get("reason")
         if not isinstance(reason, str):
             _fault("INVALID_AST", path, "NoPlan reason must be a string")
+        runtime.record("no_plan", path, {"reason": reason})
         raise _Terminal(NoPlan(reason))
     _fault("INVALID_AST", path, f"unknown node: {operation!r}")
 
@@ -694,22 +801,34 @@ def invoke_program(
             no_plan,
             None,
             runtime.counters.frozen(),
+            tuple(runtime.semantic_trace),
         )
     except CatchableBranchFailure as exc:
         runtime.graph_runtime.overlay.restore(invocation_snapshot)
+        reason = _no_plan_reason(exc.code)
+        runtime.record("no_plan", "/entry", {"reason": reason})
         return InvocationResult(
             None,
-            NoPlan(_no_plan_reason(exc.code)),
+            NoPlan(reason),
             None,
             runtime.counters.frozen(),
+            tuple(runtime.semantic_trace),
         )
     except _ProgramFault as exc:
-        return InvocationResult(None, None, exc.failure, runtime.counters.frozen())
+        return InvocationResult(
+            None,
+            None,
+            exc.failure,
+            runtime.counters.frozen(),
+            tuple(runtime.semantic_trace),
+        )
     except Exception as exc:
         counters = runtime.counters.frozen() if "runtime" in locals() else _Counters().frozen()
+        semantic_trace = tuple(runtime.semantic_trace) if "runtime" in locals() else ()
         return InvocationResult(
             None,
             None,
             ProgramFailure("INTERPRETER_FAULT", "/entry", str(exc)),
             counters,
+            semantic_trace,
         )

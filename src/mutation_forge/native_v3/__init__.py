@@ -41,6 +41,7 @@ from .interpreter import (
     NoPlan,
     ProgramContext,
     ProgramFailure,
+    SemanticEvent,
     invoke_program,
 )
 from .randomness import (
@@ -51,6 +52,16 @@ from .randomness import (
     uniform_below,
     weighted_index,
 )
+from .serial_evaluator import (
+    SERIAL_EVALUATOR_PROTOCOL_ID,
+    CounterexampleInspector,
+    CounterexampleTrace,
+    GraphIdentity,
+    SerialEpisodeConfig,
+    SerialEpisodeResult,
+    SerialStepTrace,
+    evaluate_serial_program,
+)
 
 __all__ = [
     "CANONICAL_PROTOCOL_ID",
@@ -58,13 +69,17 @@ __all__ = [
     "INTERPRETER_PROTOCOL_ID",
     "PROGRAM_SCHEMA_VERSION",
     "RANDOM_PROTOCOL_ID",
+    "SERIAL_EVALUATOR_PROTOCOL_ID",
     "VALIDATOR_PROTOCOL_ID",
     "BranchFailureCode",
     "CanonicalJsonError",
     "CatchableBranchFailure",
+    "CounterexampleInspector",
+    "CounterexampleTrace",
     "EdgeRef",
     "EdgeSetRef",
     "GraphFeatureInput",
+    "GraphIdentity",
     "InterpreterLimits",
     "InvocationCounters",
     "InvocationResult",
@@ -78,7 +93,11 @@ __all__ = [
     "ProgramLimits",
     "ProgramValidation",
     "RewriteHost",
+    "SemanticEvent",
     "SelectionPopulation",
+    "SerialEpisodeConfig",
+    "SerialEpisodeResult",
+    "SerialStepTrace",
     "ValidatedProgram",
     "VertexRef",
     "VertexSetRef",
@@ -86,6 +105,7 @@ __all__ = [
     "derive_seed64",
     "domain_hash",
     "draw64",
+    "evaluate_serial_program",
     "invoke_program",
     "parse_strict_json",
     "program_hash",
