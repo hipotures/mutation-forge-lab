@@ -156,6 +156,17 @@ class SessionManager:
             if isinstance(raw_key, str) and raw_key
             else None
         )
+        if storage_key is None and event_type == "evaluation_progress":
+            progress_scope = {
+                "session_id": session.session_id,
+                "generation": payload.get("generation"),
+                "slot": payload.get("slot"),
+                "evaluation_id": payload.get("evaluation_id"),
+                "candidate_id": payload.get("candidate_id"),
+                "phase": payload.get("phase", payload.get("pass")),
+                "state": "completed" if payload.get("pass_completed") is True else "running",
+            }
+            storage_key = f"{event_type}:{_canonical(progress_scope).decode('utf-8')}"
         if storage_key is not None and (
             self.state.event_exists(storage_key)
             or self.state.event_exists(str(raw_key))

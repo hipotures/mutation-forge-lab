@@ -36,6 +36,7 @@ from mutation_forge.experiment.service import (
     NullExperimentAdapter,
     final_stop_experiment,
 )
+from mutation_forge.experiment.sessions import SessionManager
 from mutation_forge.experiment.state import ActiveSessionError, ExperimentStateStore
 from mutation_forge.experiment.status import (
     STATUS_SCHEMA_VERSION,
@@ -368,6 +369,73 @@ def test_durable_events_are_idempotent_by_key(tmp_path: Path) -> None:
 
     assert repeated == first
     assert count is not None and count[0] == 1
+
+
+def test_durable_evaluation_progress_records_only_state_changes(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    ExperimentStateStore.initialize(
+        state_path,
+        exp_id="demo",
+        lock_hash="0" * 64,
+        root=tmp_path,
+    )
+    session = SimpleNamespace(
+        session_id="session-000001",
+        event_count=0,
+        directory=tmp_path / "session-000001",
+    )
+    resumed_session = SimpleNamespace(
+        session_id="session-000002",
+        event_count=0,
+        directory=tmp_path / "session-000002",
+    )
+    session.directory.mkdir()
+    resumed_session.directory.mkdir()
+    common = {
+        "generation": 0,
+        "slot": "slot-01",
+        "candidate_id": "g0000-slot-01",
+        "evaluation_id": "g0000-slot-01:development",
+        "phase": "development",
+    }
+
+    with ExperimentStateStore(state_path) as state:
+        manager = SessionManager(ExperimentLayout(tmp_path, "demo"), state)
+        manager.event(session, "evaluation_progress", **common, completed=1, total=10)
+        manager.event(session, "evaluation_progress", **common, completed=2, total=10)
+        manager.event(
+            session,
+            "evaluation_progress",
+            **common,
+            completed=10,
+            total=10,
+            pass_completed=True,
+        )
+        manager.event(
+            session,
+            "evaluation_progress",
+            **{**common, "phase": "replay"},
+            completed=1,
+            total=10,
+        )
+        manager.event(
+            resumed_session,
+            "evaluation_progress",
+            **common,
+            completed=1,
+            total=10,
+        )
+        rows = state.connection.execute(
+            "SELECT session_id,idempotency_key FROM events ORDER BY sequence"
+        ).fetchall()
+
+    assert [row["session_id"] for row in rows] == [
+        "session-000001",
+        "session-000001",
+        "session-000001",
+        "session-000002",
+    ]
+    assert all(row["idempotency_key"] for row in rows)
 
 
 @pytest.mark.parametrize("value", ["", ".", "..", "a/b", r"a\\b", "/tmp/demo", "bad\x01"])
