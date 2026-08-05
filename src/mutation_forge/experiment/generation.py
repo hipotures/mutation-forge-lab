@@ -971,7 +971,6 @@ class GenerationCoordinator:
 
     def _invoke(self, request: GenerationRequest) -> ProviderResult:
         payload = request.as_dict()
-        heartbeat_stop = threading.Event()
         turn_started = time.monotonic()
         self._emit(
             "provider_turn_started",
@@ -986,28 +985,6 @@ class GenerationCoordinator:
             provider_turn_state="running",
             timeout_seconds=self.config.turn_timeout_seconds,
         )
-
-        def heartbeat() -> None:
-            while not heartbeat_stop.wait(1.0):
-                self._emit(
-                    "repair_activity" if request.phase == "repair" else "provider_turn_activity",
-                    generation=request.generation,
-                    slot=request.slot,
-                    phase=request.phase,
-                    parent_id=request.parent_id,
-                    idempotency_key=request.idempotency_key,
-                    repair_attempt=request.repair_attempt,
-                    operation_elapsed_seconds=time.monotonic() - turn_started,
-                    timeout_seconds=self.config.turn_timeout_seconds,
-                    provider_turn_state="running",
-                )
-
-        heartbeat_thread = threading.Thread(
-            target=heartbeat,
-            name=f"native-heartbeat-{request.slot}",
-            daemon=True,
-        )
-        heartbeat_thread.start()
         try:
             if request.phase == "repair" and callable(getattr(self.provider, "repair", None)):
                 value = self.provider.repair(payload, tuple(request.diagnostics))  # type: ignore[attr-defined]
@@ -1087,10 +1064,6 @@ class GenerationCoordinator:
                 repair_attempt=request.repair_attempt,
             )
             return result
-        finally:
-            heartbeat_stop.set()
-            if heartbeat_thread is not threading.current_thread():
-                heartbeat_thread.join(timeout=0.2)
 
     def _assess(
         self, request: GenerationRequest, raw: ProviderResult, *, repair: bool = False

@@ -15,7 +15,7 @@ from typing import Any
 
 from mutation_forge.models import JsonValue
 
-from .canonical import canonical_json_bytes, domain_hash, json_value
+from .canonical import canonical_json_bytes, domain_hash
 
 PERSISTENCE_SCHEMA_VERSION = "mforge.native.persistence.v3"
 SEMANTIC_CHECKPOINT_PROTOCOL = "native_v3_semantic_checkpoint_v1"
@@ -49,17 +49,10 @@ class SemanticRecord:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class TelemetryRecord:
-    event_name: str
-    observed_at_ns: int
-    fields: Mapping[str, JsonValue]
-
-
 @dataclass(slots=True)
 class _WriteCommand:
     kind: str
-    value: SemanticRecord | TelemetryRecord | None
+    value: SemanticRecord | None
     future: Future[str | None]
 
 
@@ -96,9 +89,6 @@ class NativeV3Persistence:
         return_value = self._submit("semantic", record)
         assert isinstance(return_value, str)
         return return_value
-
-    def record_telemetry(self, record: TelemetryRecord) -> None:
-        self._submit("telemetry", record)
 
     def semantic_checkpoint(self) -> tuple[str, bytes]:
         value = self._submit("checkpoint", None)
@@ -159,7 +149,7 @@ class NativeV3Persistence:
     def _submit(
         self,
         kind: str,
-        value: SemanticRecord | TelemetryRecord | None,
+        value: SemanticRecord | None,
     ) -> str | None:
         if self._closed:
             raise RuntimeError("Native v3 persistence is closed")
@@ -187,12 +177,6 @@ class NativeV3Persistence:
                     canonical_payload BLOB NOT NULL,
                     PRIMARY KEY (record_type, semantic_key)
                 ) WITHOUT ROWID;
-                CREATE TABLE IF NOT EXISTS native_v3_telemetry (
-                    telemetry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_name TEXT NOT NULL,
-                    observed_at_ns INTEGER NOT NULL,
-                    fields_json TEXT NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS native_v3_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -227,10 +211,6 @@ class NativeV3Persistence:
                                     self._write_semantic(connection, command.value),
                                 )
                             )
-                        elif command.kind == "telemetry":
-                            assert isinstance(command.value, TelemetryRecord)
-                            self._write_telemetry(connection, command.value)
-                            completed.append((command, None))
                         elif command.kind == "checkpoint":
                             checkpoint_commands.append(command)
                         elif command.kind == "close":
@@ -279,20 +259,6 @@ class NativeV3Persistence:
             ),
         )
         return record.semantic_hash
-
-    @staticmethod
-    def _write_telemetry(connection: sqlite3.Connection, record: TelemetryRecord) -> None:
-        fields = json.dumps(
-            json_value(dict(record.fields)),
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        connection.execute(
-            "INSERT INTO native_v3_telemetry(event_name,observed_at_ns,fields_json) VALUES (?,?,?)",
-            (record.event_name, record.observed_at_ns, fields),
-        )
 
     @staticmethod
     def _checkpoint(connection: sqlite3.Connection) -> tuple[str, bytes]:

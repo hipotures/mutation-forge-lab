@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,6 @@ from mutation_forge.native_v3.persistence import (
     NativeV3Persistence,
     PersistenceConflict,
     SemanticRecord,
-    TelemetryRecord,
 )
 
 
@@ -25,20 +25,21 @@ def test_semantic_commit_is_idempotent_and_conflicts_fail_closed(tmp_path: Path)
             store.commit_semantic(_record("episode-1", 8))
 
 
-def test_telemetry_is_excluded_from_semantic_checkpoint_identity(tmp_path: Path) -> None:
+def test_sqlite_contains_semantic_cache_only(tmp_path: Path) -> None:
     checkpoints: list[tuple[str, bytes]] = []
     for index in range(2):
         path = tmp_path / f"state-{index}.sqlite3"
         with NativeV3Persistence(path) as store:
             store.commit_semantic(_record("episode-2", 11))
-            store.record_telemetry(
-                TelemetryRecord(
-                    "worker_observed",
-                    100 + index,
-                    {"worker_id": f"worker-{index}", "wall_time_ns": index + 1},
-                )
-            )
             checkpoints.append(store.semantic_checkpoint())
+        with sqlite3.connect(path) as connection:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        assert "native_v3_telemetry" not in tables
     assert checkpoints[0] == checkpoints[1]
 
 

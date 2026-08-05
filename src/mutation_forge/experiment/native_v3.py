@@ -34,7 +34,6 @@ from mutation_forge.native_v3.interpreter import INTERPRETER_PROTOCOL_ID
 from mutation_forge.native_v3.persistence import (
     NativeV3Persistence,
     SemanticRecord,
-    TelemetryRecord,
 )
 from mutation_forge.native_v3.provider import (
     NativeV3Provider,
@@ -651,7 +650,6 @@ class NativeV3ExperimentAdapter:
                 fields: Mapping[str, JsonValue],
             ) -> None:
                 emit(name, **dict(fields))
-                persistence.record_telemetry(TelemetryRecord(name, time.time_ns(), fields))
 
             verification = VerificationSupervisor(
                 artifact_root=layout.artifacts / "counterexamples-v3",
@@ -675,7 +673,6 @@ class NativeV3ExperimentAdapter:
                     verified_outcome = outcome
 
             def submit_result(result: EpisodeResult, phase: str) -> None:
-                started = time.monotonic_ns()
                 # Every apparent zero crosses the supervisor's durable
                 # candidate boundary before the episode itself becomes
                 # terminal. Recovery may therefore skip a committed episode
@@ -694,17 +691,6 @@ class NativeV3ExperimentAdapter:
                         f"episode:{phase}",
                         result.episode_id,
                         _episode_payload(result),
-                    )
-                )
-                persistence.record_telemetry(
-                    TelemetryRecord(
-                        "episode_committed",
-                        time.time_ns(),
-                        {
-                            "episode_id": result.episode_id,
-                            "phase": phase,
-                            "persistence_wall_ns": time.monotonic_ns() - started,
-                        },
                     )
                 )
                 for future in verification_futures:
@@ -1316,17 +1302,6 @@ class NativeV3ExperimentAdapter:
                                 if value is None or isinstance(value, bool | int | float | str)
                             },
                         )
-                        persistence.record_telemetry(
-                            TelemetryRecord(
-                                event.name,
-                                time.time_ns(),
-                                {
-                                    str(key): cast(JsonValue, value)
-                                    for key, value in event.fields.items()
-                                    if value is None or isinstance(value, bool | int | float | str)
-                                },
-                            )
-                        )
 
                     with ProcessPoolExecutor(
                         max_workers=config.resources.thread_count,
@@ -1596,13 +1571,6 @@ class NativeV3ExperimentAdapter:
                             "native_v3_metrics",
                             generation=frozen_epoch_number,
                             **fields,
-                        )
-                        persistence.record_telemetry(
-                            TelemetryRecord(
-                                "native_v3_metrics",
-                                time.time_ns(),
-                                fields,
-                            )
                         )
 
                     if last_epoch_status is EpochStatus.INCONCLUSIVE:
