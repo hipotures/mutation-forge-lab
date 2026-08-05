@@ -1,13 +1,13 @@
 schema_version = "mforge.experiment.v3"
 
-exp_id = "exp_001"
-workspace = "./workspace"
+exp_id = "exp_native_v3_001"
+workspace = "./workspace-native-v3"
 
 kind = "heg"
 preset = "native"
 
 [run]
-wall_seconds = 7200
+wall_seconds = 72000000
 turn_timeout_base_seconds = 600
 max_total_tokens_per_hour = 1_000_000
 
@@ -16,13 +16,12 @@ provider = "codex"
 name = "gpt-5.6-luna"
 effort = "max"
 concurrency = 2
-max_repairs = 3
+max_repairs = 1
 
 [search]
 population_size = 8
 max_generations = "unbounded"
 max_model_turns = "unbounded"
-#selection = "elite-diversity"
 selection = "persistent-elite-weighted-diversity"
 
 [evaluation]
