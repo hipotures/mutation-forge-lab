@@ -44,6 +44,10 @@ from .interpreter import (
     SemanticEvent,
     invoke_program,
 )
+from .provider_evaluation import (
+    PROVIDER_EVALUATION_SCHEMA_VERSION,
+    run_provider_evaluation_smoke,
+)
 from .randomness import (
     RANDOM_PROTOCOL_ID,
     derive_seed64,
@@ -68,6 +72,7 @@ __all__ = [
     "GRAPH_RUNTIME_PROTOCOL_ID",
     "INTERPRETER_PROTOCOL_ID",
     "PROGRAM_SCHEMA_VERSION",
+    "PROVIDER_EVALUATION_SCHEMA_VERSION",
     "RANDOM_PROTOCOL_ID",
     "SERIAL_EVALUATOR_PROTOCOL_ID",
     "VALIDATOR_PROTOCOL_ID",
@@ -109,6 +114,7 @@ __all__ = [
     "invoke_program",
     "parse_strict_json",
     "program_hash",
+    "run_provider_evaluation_smoke",
     "splitmix64",
     "uniform_below",
     "validate_program",

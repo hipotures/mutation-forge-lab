@@ -240,6 +240,7 @@ def _inspect_apparent_zero(
     config: SerialEpisodeConfig,
     program: ValidatedProgram,
     step_index: int,
+    provenance_source_kind: str,
 ) -> CounterexampleTrace | None:
     if pipeline is None or score.total_capped_witnesses != 0:
         return None
@@ -248,7 +249,7 @@ def _inspect_apparent_zero(
         score=score,
         witness_cap=config.witness_cap,
         provenance=CandidateProvenance(
-            source_kind="native_v3_fixture",
+            source_kind=provenance_source_kind,
             source_id=program.program_hash,
             episode_id=config.episode_id,
             graph_seed=config.graph_seed,
@@ -282,6 +283,7 @@ def evaluate_serial_program(
     config: SerialEpisodeConfig,
     interpreter_limits: InterpreterLimits | None = None,
     counterexample_pipeline: CounterexampleInspector | None = None,
+    provenance_source_kind: str = "native_v3_fixture",
 ) -> SerialEpisodeResult:
     """Run one deterministic strict-improvement trajectory without a provider."""
 
@@ -301,6 +303,7 @@ def evaluate_serial_program(
         config=config,
         program=program,
         step_index=0,
+        provenance_source_kind=provenance_source_kind,
     )
 
     current = initial
@@ -374,6 +377,7 @@ def evaluate_serial_program(
                         config=config,
                         program=program,
                         step_index=step_index + 1,
+                        provenance_source_kind=provenance_source_kind,
                     )
                     accepted = candidate_score.ordering_key < current_score.ordering_key
                     if accepted:
