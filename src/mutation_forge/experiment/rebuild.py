@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,64 @@ def _content_hash(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _session_summaries_match(
+    database_summary: dict[str, Any],
+    artifact_summary: dict[str, Any],
+    layout: ExperimentLayout,
+) -> bool:
+    if database_summary == artifact_summary:
+        return True
+    database_result = database_summary.get("result")
+    artifact_result = artifact_summary.get("result")
+    if not isinstance(database_result, Mapping) or not isinstance(
+        artifact_result, Mapping
+    ):
+        return False
+    database_result_summary = database_result.get("summary")
+    artifact_result_summary = artifact_result.get("summary")
+    if not isinstance(database_result_summary, Mapping) or not isinstance(
+        artifact_result_summary, Mapping
+    ):
+        return False
+    database_checkpoint = database_result_summary.get("checkpoint")
+    artifact_checkpoint = artifact_result_summary.get("checkpoint")
+    if (
+        not isinstance(database_checkpoint, str)
+        or not isinstance(artifact_checkpoint, str)
+        or not database_checkpoint.endswith(".json")
+        or artifact_checkpoint != f"{database_checkpoint}.gz"
+        or Path(artifact_checkpoint).name != "native-generation-checkpoint.json.gz"
+    ):
+        return False
+    checkpoint_path = Path(artifact_checkpoint)
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = layout.root / checkpoint_path
+    checkpoint_path = checkpoint_path.resolve()
+    if (
+        not checkpoint_path.is_relative_to(layout.root.resolve())
+        or not checkpoint_path.is_file()
+    ):
+        return False
+    normalized = deepcopy(database_summary)
+    normalized["result"]["summary"]["checkpoint"] = artifact_checkpoint
+    return normalized == artifact_summary
+
+
+def _is_initial_session_record(
+    record: Mapping[str, Any],
+    row: sqlite3.Row,
+) -> bool:
+    return dict(record) == {
+        "schema_version": "mforge.experiment.session.v2",
+        "session_id": row["session_id"],
+        "session_number": row["number"],
+        "start_time": row["started_at"],
+        "starting_checkpoint": row["starting_checkpoint"],
+        "starting_state": row["starting_state"],
+        "wall_seconds": row["wall_seconds"],
+    }
+
+
 def _archive_metadata(layout: ExperimentLayout) -> dict[str, dict[str, Any]]:
     path = layout.archive / "index.jsonl"
     if not path.is_file():
@@ -160,6 +219,7 @@ def _session_event_payloads(
     layout: ExperimentLayout,
 ) -> dict[str, tuple[Path, bytes]]:
     payloads: dict[str, tuple[Path, bytes]] = {}
+    found_event_stream = False
     for session_dir in sorted(layout.sessions.glob("session-*")):
         if not session_dir.is_dir():
             continue
@@ -189,9 +249,13 @@ def _session_event_payloads(
                     raise RebuildError(
                         f"unsupported compressed event at {compressed}:{number}"
                     )
+            found_event_stream = True
             continue
         if not source.is_file():
-            raise RebuildError(f"session event stream is missing: {source}")
+            if found_event_stream:
+                raise RebuildError(f"session event stream is missing: {source}")
+            continue
+        found_event_stream = True
         session_id = session_dir.name
         canonical = b"".join(
             (
@@ -261,7 +325,9 @@ def _audit_source(
 
     redundant_session_records: list[Path] = []
     for row in connection.execute(
-        "SELECT session_id,summary_json FROM sessions ORDER BY number"
+        "SELECT number,session_id,started_at,finished_at,wall_seconds,"
+        "starting_checkpoint,starting_state,ending_state,status,exit_status,summary_json "
+        "FROM sessions ORDER BY number"
     ):
         session_id = str(row["session_id"])
         database_summary = _decode_object(
@@ -270,8 +336,31 @@ def _audit_source(
         )
         session_dir = layout.sessions / session_id
         summary_path = session_dir / "summary.json.gz"
+        duplicate_path = session_dir / "session.json.gz"
         if not summary_path.is_file():
-            raise RebuildError(f"session summary artifact is missing: {summary_path}")
+            if (
+                database_summary
+                or row["status"] != "running"
+                or row["finished_at"] is not None
+                or row["ending_state"] is not None
+                or row["exit_status"] is not None
+                or not duplicate_path.is_file()
+            ):
+                raise RebuildError(f"session summary artifact is missing: {summary_path}")
+            try:
+                initial_record = _json_object(
+                    read_json(duplicate_path),
+                    f"initial session record {session_id}",
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise RebuildError(
+                    f"initial session record is unreadable: {duplicate_path}"
+                ) from exc
+            if not _is_initial_session_record(initial_record, row):
+                raise RebuildError(
+                    f"incomplete session record is invalid: {session_id}"
+                )
+            continue
         try:
             artifact_summary = _json_object(
                 read_json(summary_path),
@@ -281,11 +370,10 @@ def _audit_source(
             raise RebuildError(
                 f"session summary artifact is unreadable: {summary_path}"
             ) from exc
-        if database_summary != artifact_summary:
+        if not _session_summaries_match(database_summary, artifact_summary, layout):
             raise RebuildError(
                 f"database session summary contains data not matched by artifact: {session_id}"
             )
-        duplicate_path = session_dir / "session.json.gz"
         if duplicate_path.is_file():
             try:
                 duplicate = _json_object(

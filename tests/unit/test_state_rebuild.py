@@ -438,3 +438,92 @@ def test_rebuild_refuses_active_or_mismatched_source(tmp_path: Path) -> None:
     )
     with pytest.raises(RebuildError, match="not matched by artifact"):
         rebuild_experiment_state(mismatch_config)
+
+
+def test_rebuild_accepts_compressed_native_checkpoint_reference(tmp_path: Path) -> None:
+    config_path, root = _workspace(tmp_path)
+    session_dir = root / "artifacts" / "sessions" / "session-000001"
+    artifact_checkpoint = (
+        "artifacts/generations/generation-0000/native-generation-checkpoint.json.gz"
+    )
+    database_summary = {
+        "schema_version": "mforge.experiment.session.v2",
+        "result": {
+            "summary": {
+                "checkpoint": artifact_checkpoint.removesuffix(".gz"),
+            }
+        },
+    }
+    artifact_summary = {
+        **database_summary,
+        "result": {
+            "summary": {
+                "checkpoint": artifact_checkpoint,
+            }
+        },
+    }
+    write_json(root / artifact_checkpoint, {"checkpoint": 1})
+    write_json(session_dir / "summary.json.gz", artifact_summary)
+    write_json(session_dir / "session.json.gz", artifact_summary)
+    with sqlite3.connect(root / "state.sqlite3") as connection:
+        connection.execute(
+            "UPDATE sessions SET summary_json=? WHERE session_id='session-000001'",
+            (json.dumps(database_summary),),
+        )
+
+    assert rebuild_experiment_state(config_path)["status"] == "checked"
+
+
+def test_rebuild_accepts_historical_sessions_without_event_streams(
+    tmp_path: Path,
+) -> None:
+    config_path, root = _workspace(tmp_path)
+    events_path = (
+        root / "artifacts" / "sessions" / "session-000001" / "events.jsonl"
+    )
+    events_path.unlink()
+
+    checked = rebuild_experiment_state(config_path)
+
+    assert checked["status"] == "checked"
+    assert checked["session_event_streams"] == 0
+
+
+def test_rebuild_refuses_missing_event_stream_after_streams_begin(
+    tmp_path: Path,
+) -> None:
+    config_path, root = _workspace(tmp_path)
+    (root / "artifacts" / "sessions" / "session-000002").mkdir()
+
+    with pytest.raises(RebuildError, match="session event stream is missing"):
+        rebuild_experiment_state(config_path)
+
+
+def test_rebuild_accepts_strict_initial_record_for_incomplete_session(
+    tmp_path: Path,
+) -> None:
+    config_path, root = _workspace(tmp_path)
+    session_dir = root / "artifacts" / "sessions" / "session-000001"
+    (session_dir / "summary.json.gz").unlink()
+    write_json(
+        session_dir / "session.json.gz",
+        {
+            "schema_version": "mforge.experiment.session.v2",
+            "session_id": "session-000001",
+            "session_number": 1,
+            "start_time": "2026-08-04T11:00:00+00:00",
+            "starting_checkpoint": None,
+            "starting_state": "idle",
+            "wall_seconds": 60.0,
+        },
+    )
+    with sqlite3.connect(root / "state.sqlite3") as connection:
+        connection.execute(
+            "UPDATE sessions SET finished_at=NULL,ending_state=NULL,status='running',"
+            "exit_status=NULL,summary_json='{}' WHERE session_id='session-000001'"
+        )
+
+    checked = rebuild_experiment_state(config_path)
+
+    assert checked["status"] == "checked"
+    assert checked["redundant_session_records"] == 0
