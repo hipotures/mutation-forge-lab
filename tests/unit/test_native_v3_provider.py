@@ -68,6 +68,26 @@ def test_request_profile_includes_no_more_than_four_complete_parent_asts() -> No
     assert len(request.encoded_bytes) <= 128 * 1024
 
 
+def test_provider_transport_artifact_path_is_part_of_frozen_request() -> None:
+    call = _call(("slot-00",))
+    request = build_provider_request(
+        call=call,
+        slots=(ProviderSlotSpec("slot-00", (), "brief"),),
+        parent_programs={},
+        archive_summary={},
+        system_prompt="system",
+        output_schema={"type": "object"},
+        artifact_dir="/workspace/artifacts/provider-v3/epoch/call/transport",
+        artifact_prefix="initial",
+    )
+
+    assert request.request["artifact_dir"] == (
+        "/workspace/artifacts/provider-v3/epoch/call/transport"
+    )
+    assert request.request["artifact_prefix"] == "initial"
+    assert b'"artifact_prefix":"initial"' in request.encoded_bytes
+
+
 def test_request_is_rejected_instead_of_silently_changing_parent_set() -> None:
     call = _call(("slot-00",))
     with pytest.raises(ProviderContractError, match="too many parent"):

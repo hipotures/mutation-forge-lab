@@ -99,6 +99,8 @@ def build_provider_request(
     contract_bundle: Mapping[str, Any] | None = None,
     request_prompt: str | None = None,
     repair_prompt: str | None = None,
+    artifact_dir: str | None = None,
+    artifact_prefix: str | None = None,
     input_profile: ProviderInputProfile | None = None,
     output_profile: ProviderOutputProfile | None = None,
     token_counter: Callable[[bytes], int] | None = None,
@@ -184,6 +186,10 @@ def build_provider_request(
         "provider_input_profile_id": PROVIDER_INPUT_PROFILE_ID,
         "provider_output_profile_id": PROVIDER_OUTPUT_PROFILE_ID,
     }
+    if artifact_dir is not None:
+        request["artifact_dir"] = artifact_dir
+    if artifact_prefix is not None:
+        request["artifact_prefix"] = artifact_prefix
     encoded = json.dumps(
         request,
         ensure_ascii=True,

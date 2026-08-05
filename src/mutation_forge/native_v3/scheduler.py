@@ -155,7 +155,6 @@ class SchedulerConfig:
     candidate_shard_size: int = 1
     auxiliary_shard_size: int = 1
     provider_call_timeout_seconds: float | None = None
-    provider_activity_interval_seconds: float = 1.0
 
     def __post_init__(self) -> None:
         values = (
@@ -181,8 +180,6 @@ class SchedulerConfig:
             and self.provider_call_timeout_seconds <= 0
         ):
             raise ValueError("provider call timeout must be positive")
-        if self.provider_activity_interval_seconds <= 0:
-            raise ValueError("provider activity interval must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +367,6 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
         )
         provider_futures: dict[Future[ProviderBatch[ProgramT]], ProviderCall] = {}
         provider_started_ns: dict[str, int] = {}
-        provider_activity_ns: dict[str, int] = {}
         provider_entry_queue: queue.Queue[tuple[ProviderCall, GeneratedEntry[ProgramT]]] = (
             queue.Queue(self.config.candidate_queue_capacity)
         )
@@ -459,7 +455,6 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
 
                 call_started_ns = time.monotonic_ns()
                 provider_started_ns[call_id] = call_started_ns
-                provider_activity_ns[call_id] = call_started_ns
                 # Persist the strict, replayable start record before creating
                 # any external provider work. A local serialization or
                 # persistence failure must not leak a model call.
@@ -488,7 +483,6 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                         )
                 except BaseException:
                     provider_started_ns.pop(call_id, None)
-                    provider_activity_ns.pop(call_id, None)
                     raise
                 provider_futures[future] = call
 
@@ -555,7 +549,6 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                     call.call_id,
                     time.monotonic_ns(),
                 )
-                provider_activity_ns.pop(call.call_id, None)
                 try:
                     batch = future.result()
                 except BaseException as error:
@@ -598,29 +591,6 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                     generation=snapshot.epoch_number,
                 )
             return changed
-
-        def emit_provider_activity() -> None:
-            now_ns = time.monotonic_ns()
-            interval_ns = int(self.config.provider_activity_interval_seconds * 1e9)
-            for call in provider_futures.values():
-                last_ns = provider_activity_ns.get(call.call_id, now_ns)
-                if now_ns - last_ns < interval_ns:
-                    continue
-                provider_activity_ns[call.call_id] = now_ns
-                started_call_ns = provider_started_ns.get(call.call_id, now_ns)
-                emit(
-                    "provider_call_activity",
-                    call_id=call.call_id,
-                    provider_calls_in_flight=len(provider_futures),
-                    slot_ids=",".join(call.slot_ids),
-                    generation=snapshot.epoch_number,
-                    operation_elapsed_ns=now_ns - started_call_ns,
-                    timeout_ns=(
-                        int(self.config.provider_call_timeout_seconds * 1e9)
-                        if self.config.provider_call_timeout_seconds is not None
-                        else None
-                    ),
-                )
 
         def expand_candidates() -> bool:
             nonlocal candidate_seen
@@ -812,7 +782,6 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                 changed = fill_evaluation_queue() or changed
                 changed = dispatch_evaluators() or changed
                 submit_provider_calls()
-                emit_provider_activity()
                 all_slots_terminal = all(
                     status
                     in {

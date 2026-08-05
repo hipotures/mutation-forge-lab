@@ -95,7 +95,6 @@ class RichLiveSink:
             "provider_turn_started",
             "provider_turn_activity",
             "provider_call_started",
-            "provider_call_activity",
         }:
             self.state["phase"] = "repair" if event.payload.get("phase") == "repair" else "provider"
         elif event.event_type == "repair_started":
@@ -123,7 +122,6 @@ class RichLiveSink:
             "provider_turn_completed",
             "provider_turn_failed",
             "provider_call_started",
-            "provider_call_activity",
             "provider_call_completed",
             "provider_call_failed",
             "candidate_validated",
@@ -295,7 +293,6 @@ class RichLiveSink:
             self._last_activity_label = event_type.removesuffix("_started")
         elif event_type in {
             "provider_turn_activity",
-            "provider_call_activity",
             "repair_activity",
         }:
             elapsed_ns = payload.get("operation_elapsed_ns")
@@ -321,8 +318,6 @@ class RichLiveSink:
                     "started": now - operation_elapsed,
                     "timeout": timeout,
                 }
-            elif event_type == "provider_call_activity":
-                self._active_operation["started"] = now - operation_elapsed
             self._last_activity_monotonic = now
             self._last_activity_label = event_type.removesuffix("_activity")
             for key in ("provider_thread_id", "provider_turn_id"):
@@ -470,10 +465,6 @@ class RichLiveSink:
                 else integer("active_model_turns") + 1
             )
             add("provider_turns_attempted")
-        elif event.event_type == "provider_call_activity":
-            in_flight = payload.get("provider_calls_in_flight")
-            if isinstance(in_flight, int) and not isinstance(in_flight, bool):
-                self.state["active_model_turns"] = in_flight
         elif event.event_type in {"provider_call_completed", "provider_call_failed"}:
             in_flight = payload.get("provider_calls_in_flight")
             self.state["active_model_turns"] = (
@@ -842,14 +833,6 @@ class RichLiveSink:
                     detail["_slot_started_at"] = now
                 else:
                     detail.pop("_slot_started_at", None)
-            elif event_type == "provider_call_activity":
-                detail["phase"] = "provider"
-                detail["state"] = "model" if is_call_representative else "batched"
-                if elapsed is not None and is_call_representative:
-                    detail["elapsed_seconds"] = float(elapsed)
-                    detail["_slot_started_at"] = now - float(elapsed)
-                elif not is_call_representative:
-                    detail.pop("elapsed_seconds", None)
             elif event_type == "provider_call_failed":
                 detail["phase"] = "response"
                 detail["state"] = "failed"
@@ -879,7 +862,6 @@ class RichLiveSink:
             "provider_turn_completed",
             "provider_turn_failed",
             "provider_call_started",
-            "provider_call_activity",
             "provider_call_completed",
             "provider_call_failed",
             "candidate_validated",
@@ -945,7 +927,6 @@ class RichLiveSink:
             entry = f"{timestamp} {label}".strip()
         if event.event_type in {
             "provider_turn_activity",
-            "provider_call_activity",
             "repair_activity",
         }:
             # Heartbeats should keep the tail current without consuming all

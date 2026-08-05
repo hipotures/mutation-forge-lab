@@ -869,18 +869,10 @@ def _update_provider_call_slots(
                 state="model" if is_call_representative else "batched",
                 started_monotonic=started,
                 phase_started_monotonic=phase_started,
+                elapsed_seconds=None,
                 timeout_seconds=timeout,
                 provider_request_id=call_id,
                 lifecycle=_lifecycle(slot, "provider", "running"),
-            )
-        elif event_type == "provider_call_activity":
-            updated = replace(
-                slot,
-                phase="provider",
-                state="model" if is_call_representative else "batched",
-                elapsed_seconds=elapsed if is_call_representative else None,
-                timeout_seconds=timeout if timeout is not None else slot.timeout_seconds,
-                provider_request_id=call_id or slot.provider_request_id,
             )
         elif event_type == "provider_call_failed":
             updated = replace(
@@ -1062,7 +1054,6 @@ def _event_activity(event: Event) -> ActivityEntry | None:
     if event_type in {
         "provider_turn_activity",
         "repair_activity",
-        "provider_call_activity",
     }:
         elapsed = _provider_elapsed(payload)
         timeout_ns = _integer(payload.get("timeout_ns"))
@@ -1082,8 +1073,8 @@ def _event_activity(event: Event) -> ActivityEntry | None:
             event.timestamp[11:19],
             "provider",
             "info",
-            f"waiting for provider response{timing}",
-            slot or _text(payload.get("call_id")),
+            f"waiting{timing}",
+            slot,
         )
     if event_type == "provider_turn_failed":
         return ActivityEntry(
@@ -1339,13 +1330,6 @@ def reduce_dashboard_event(
             provider_turns_attempted=state.provider_turns_attempted + 1,
             phase="provider",
         )
-        state = _update_provider_call_slots(
-            state,
-            payload,
-            event_type=event_type,
-            now=now,
-        )
-    elif event_type == "provider_call_activity":
         state = _update_provider_call_slots(
             state,
             payload,
@@ -2033,18 +2017,20 @@ def reduce_dashboard_event(
     activity = _event_activity(event)
     if activity is not None:
         recent = list(state.activity)
-        if (
-            event_type
-            in {
-                "provider_turn_activity",
-                "repair_activity",
-                "provider_call_activity",
-            }
-            and recent
-            and recent[0].slot == activity.slot
-            and "waiting for provider" in recent[0].message
-        ):
-            recent[0] = activity
+        if event_type in {
+            "provider_turn_activity",
+            "repair_activity",
+        }:
+            recent = [
+                item
+                for item in recent
+                if not (
+                    item.component == "provider"
+                    and item.slot == activity.slot
+                    and item.message.startswith("waiting")
+                )
+            ]
+            recent.insert(0, activity)
         else:
             recent.insert(0, activity)
         logs = (*state.logs[-199:], activity)

@@ -74,7 +74,6 @@ EVENT_TYPES = frozenset(
         "counterexample_verified",
         # Native v3 bounded streaming scheduler and scientific commit events.
         "provider_call_started",
-        "provider_call_activity",
         "provider_call_completed",
         "provider_call_failed",
         "candidate_validated",

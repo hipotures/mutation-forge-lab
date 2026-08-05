@@ -951,6 +951,14 @@ class NativeV3ExperimentAdapter:
                             contract_bundle=provider_contract,
                             request_prompt=request_prompt,
                             repair_prompt=repair_prompt,
+                            artifact_dir=str(
+                                layout.artifacts
+                                / "provider-v3"
+                                / call.snapshot.epoch_id
+                                / call.call_id.replace(":", "_")
+                                / "transport"
+                            ),
+                            artifact_prefix="initial",
                         )
 
                     def artifact_sink(

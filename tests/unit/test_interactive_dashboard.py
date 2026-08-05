@@ -189,20 +189,6 @@ def test_provider_call_events_drive_native_v3_slots_and_visible_heartbeat() -> N
         ),
         monotonic=120.0,
     )
-    state = reduce_dashboard_event(
-        state,
-        _event(
-            "provider_call_activity",
-            generation=1,
-            call_id="epoch-0001:provider:0000",
-            slot_ids="slot-00,slot-01,slot-02,slot-03",
-            timeout_ns=600_000_000_000,
-            operation_elapsed_ns=42_000_000_000,
-            provider_calls_in_flight=1,
-        ),
-        monotonic=162.0,
-    )
-
     slots = next(group.slots for group in state.generations if group.generation == 1)
     assert [slot.state for slot in slots[:4]] == [
         "model",
@@ -211,13 +197,18 @@ def test_provider_call_events_drive_native_v3_slots_and_visible_heartbeat() -> N
         "batched",
     ]
     assert [slot.phase for slot in slots[:4]] == ["provider"] * 4
-    assert [slot.elapsed_seconds for slot in slots[:4]] == [42.0, None, None, None]
+    assert [slot.elapsed_seconds for slot in slots[:4]] == [None] * 4
     assert [slot.timeout_seconds for slot in slots[:4]] == [600.0] * 4
     assert [slot.provider_request_id for slot in slots[:4]] == [
         "epoch-0001:provider:0000"
     ] * 4
-    assert state.activity[0].message == "waiting for provider response (42/600s)"
-    assert state.activity[0].slot == "epoch-0001:provider:0000"
+    assert all(
+        not (
+            item.component == "provider"
+            and item.message.startswith("waiting")
+        )
+        for item in state.activity
+    )
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=160, force_terminal=False),
         initial_state=state,
@@ -234,8 +225,6 @@ def test_provider_call_events_drive_native_v3_slots_and_visible_heartbeat() -> N
         assert "usage pending" in text
     finally:
         sink.close()
-
-
 def _adaptive_evaluation_config() -> dict[str, object]:
     return {
         "evaluation": {

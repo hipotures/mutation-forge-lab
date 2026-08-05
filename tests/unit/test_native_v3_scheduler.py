@@ -210,7 +210,7 @@ def test_provider_failure_telemetry_preserves_safe_diagnostics() -> None:
     assert result.epoch_status is EpochStatus.INCONCLUSIVE
 
 
-def test_provider_call_activity_reports_slots_elapsed_time_and_locked_timeout() -> None:
+def test_provider_call_start_is_strict_and_has_no_periodic_telemetry() -> None:
     def provider(call: ProviderCall) -> ProviderBatch[str]:
         time.sleep(0.03)
         entries = tuple(
@@ -228,7 +228,6 @@ def test_provider_call_activity_reports_slots_elapsed_time_and_locked_timeout() 
             evaluation_queue_capacity=16,
             target_evaluation_backlog=8,
             provider_call_timeout_seconds=600.0,
-            provider_activity_interval_seconds=0.005,
         ),
         provider_call=provider,
         build_shards=_shards,
@@ -236,20 +235,12 @@ def test_provider_call_activity_reports_slots_elapsed_time_and_locked_timeout() 
     ).run(_snapshot(slot_count=2))
 
     started = next(event for event in result.telemetry if event.name == "provider_call_started")
-    activities = [
-        event for event in result.telemetry if event.name == "provider_call_activity"
-    ]
     completed = next(
         event for event in result.telemetry if event.name == "provider_call_completed"
     )
     assert started.fields["slot_ids"] == "slot-00,slot-01"
     assert started.fields["timeout_ns"] == 600_000_000_000
-    assert activities
-    assert all(
-        event.fields["operation_elapsed_ns"] > 0
-        and event.fields["timeout_ns"] == 600_000_000_000
-        for event in activities
-    )
+    assert all(event.name != "provider_call_activity" for event in result.telemetry)
     assert completed.fields["slot_ids"] == "slot-00,slot-01"
     for event in result.telemetry:
         canonical_json_bytes(dict(event.fields))

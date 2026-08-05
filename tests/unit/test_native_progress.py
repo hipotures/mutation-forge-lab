@@ -318,7 +318,14 @@ def test_native_profile_is_compact_and_conditional() -> None:
         sink.close()
 
 
-def test_native_v3_provider_call_heartbeat_populates_classic_slot_table() -> None:
+def test_native_v3_provider_call_uses_local_elapsed_without_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(
+        "mutation_forge.output.rich_live.time.monotonic",
+        lambda: now[0],
+    )
     sink = RichLiveSink(
         console=Console(file=io.StringIO(), width=160, height=30, force_terminal=False),
         native=True,
@@ -341,18 +348,7 @@ def test_native_v3_provider_call_heartbeat_populates_classic_slot_table() -> Non
                 timeout_ns=600_000_000_000,
             )
         )
-        sink.write(
-            _event(
-                "provider_call_activity",
-                generation=1,
-                call_id="epoch-0001:provider:0000",
-                slot_ids="slot-00,slot-01,slot-02,slot-03",
-                provider_calls_in_flight=1,
-                operation_elapsed_ns=42_000_000_000,
-                timeout_ns=600_000_000_000,
-            )
-        )
-
+        now[0] = 142.0
         rows = sink._native_slot_rows()  # noqa: SLF001
         assert [row["state"] for row in rows] == [
             "model",
@@ -369,8 +365,9 @@ def test_native_v3_provider_call_heartbeat_populates_classic_slot_table() -> Non
         )
         text = rendered.getvalue()
         assert "waiting for generation" not in text
-        assert "response waiting" in text
-        assert "42s" in text
+        assert "response waiting" not in text
+        assert not any("response waiting" in item for item in sink._recent_events)  # noqa: SLF001
+        assert "42.0s" in text
     finally:
         sink.close()
 
