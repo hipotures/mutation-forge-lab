@@ -835,16 +835,19 @@ class RichLiveSink:
                     detail.pop("_slot_started_at", None)
             elif event_type == "provider_call_failed":
                 detail["phase"] = "response"
-                detail["state"] = "failed"
-                detail["error"] = diagnostic or "provider call failed"
+                detail["state"] = "failed" if is_call_representative else "batched"
+                if is_call_representative:
+                    detail["error"] = diagnostic or "provider call failed"
+                else:
+                    detail.pop("error", None)
                 detail.pop("_slot_started_at", None)
-                if elapsed is not None:
+                if is_call_representative and elapsed is not None:
                     detail["elapsed_seconds"] = float(elapsed)
             else:
-                detail["phase"] = "response"
-                detail["state"] = "validating"
+                detail["phase"] = "response" if is_call_representative else "provider"
+                detail["state"] = "validating" if is_call_representative else "batched"
                 detail.pop("_slot_started_at", None)
-                if elapsed is not None:
+                if is_call_representative and elapsed is not None:
                     detail["elapsed_seconds"] = float(elapsed)
             slots[slot] = detail["state"]
 

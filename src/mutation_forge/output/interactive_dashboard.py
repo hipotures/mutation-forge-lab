@@ -878,20 +878,28 @@ def _update_provider_call_slots(
             updated = replace(
                 slot,
                 phase="response",
-                state="failed",
-                elapsed_seconds=elapsed,
+                state="failed" if is_call_representative else "batched",
+                elapsed_seconds=elapsed if is_call_representative else None,
                 phase_started_monotonic=None,
-                error=diagnostic or "provider call failed",
-                lifecycle=_lifecycle(slot, "provider", "fail", elapsed),
+                error=(diagnostic or "provider call failed") if is_call_representative else None,
+                lifecycle=(
+                    _lifecycle(slot, "provider", "fail", elapsed)
+                    if is_call_representative
+                    else slot.lifecycle
+                ),
             )
         else:
             updated = replace(
                 slot,
-                phase="response",
-                state="validating",
-                elapsed_seconds=elapsed,
+                phase="response" if is_call_representative else "provider",
+                state="validating" if is_call_representative else "batched",
+                elapsed_seconds=elapsed if is_call_representative else None,
                 phase_started_monotonic=None,
-                lifecycle=_lifecycle(slot, "provider", "pass", elapsed),
+                lifecycle=(
+                    _lifecycle(slot, "provider", "pass", elapsed)
+                    if is_call_representative
+                    else slot.lifecycle
+                ),
             )
         state = _replace_slot(state, updated)
     return state
