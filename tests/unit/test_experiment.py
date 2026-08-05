@@ -29,7 +29,11 @@ from mutation_forge.experiment.generation import GenerationConfig, GenerationCoo
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.layout import ExperimentLayout, WorkspaceError
 from mutation_forge.experiment.lock import canonical_bytes, sha256_bytes, verify_lock
-from mutation_forge.experiment.provider import NativeProviderConfig, _CodexTransport
+from mutation_forge.experiment.provider import (
+    AuthenticationError,
+    NativeProviderConfig,
+    _CodexTransport,
+)
 from mutation_forge.experiment.service import (
     ExperimentService,
     NullExperimentAdapter,
@@ -1337,6 +1341,41 @@ def test_native_transport_uses_per_turn_limit_and_retry_prefix(tmp_path: Path) -
         assert adapter.logger.aggregate_root == turn.resolve()
     finally:
         adapter.close(force=True)
+
+
+def test_native_transport_preflight_requires_and_copies_authorized_auth(tmp_path: Path) -> None:
+    missing = _CodexTransport(
+        NativeProviderConfig(),
+        auth_json=None,
+        process_factory=None,
+        auth_checker=lambda _capsule: True,
+        sandbox_mode="danger-full-access",
+        approval_policy="never",
+    )
+    with pytest.raises(AuthenticationError, match="model.auth_json is required"):
+        missing.preflight()
+
+    auth_json = tmp_path / "auth.json"
+    auth_json.write_text('{"tokens":{}}', encoding="utf-8")
+    auth_json.chmod(0o600)
+    observed: list[bool] = []
+    configured = _CodexTransport(
+        NativeProviderConfig(),
+        auth_json=auth_json,
+        process_factory=None,
+        auth_checker=lambda capsule: (
+            observed.append(
+                (capsule.codex_home / "auth.json").read_bytes() == auth_json.read_bytes()
+            )
+            or True
+        ),
+        sandbox_mode="danger-full-access",
+        approval_policy="never",
+    )
+
+    configured.preflight()
+
+    assert observed == [True]
 
 
 def test_artifact_manifest_ignores_atomic_write_temporary_files(tmp_path: Path) -> None:

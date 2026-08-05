@@ -358,6 +358,18 @@ class NativeV3ExperimentAdapter:
             "baselines": root / "configs/native/native-v3-baseline-programs.json",
         }
 
+    @staticmethod
+    def _default_provider(config: ExperimentConfig) -> LocalCodexAppServerProvider:
+        return LocalCodexAppServerProvider(
+            model=config.model.name,
+            effort=config.model.effort,
+            concurrency=config.model.concurrency,
+            max_repairs=config.model.max_repairs,
+            turn_timeout_base_seconds=config.run.turn_timeout_base_seconds,
+            auth_json=config.model.auth_json,
+            persist_artifacts=False,
+        )
+
     def preflight(self, config: ExperimentConfig) -> Mapping[str, Any]:
         if config.kind != "heg" or config.preset != "native":
             raise WorkspaceError("Native v3 supports only kind='heg', preset='native'")
@@ -367,6 +379,14 @@ class NativeV3ExperimentAdapter:
             raise WorkspaceError("Native v3 epoch cohorts require population_size=8")
         if config.model.max_repairs not in {0, 1}:
             raise WorkspaceError("Native v3 permits at most one frozen full-batch repair")
+        if self.provider is None:
+            provider = self._default_provider(config)
+            try:
+                provider.preflight()
+            except Exception as error:
+                raise WorkspaceError(f"Codex authentication preflight failed: {error}") from error
+            finally:
+                provider.close()
         configured_baselines = set(config.evaluation.baselines)
         if configured_baselines != _BASELINE_IDS:
             raise WorkspaceError(
@@ -546,14 +566,13 @@ class NativeV3ExperimentAdapter:
         repair_prompt = assets["repair"].read_text(encoding="utf-8")
         baseline_programs = load_baseline_programs(assets["baselines"])
         heg_repo = self._project_root().parent / "heg"
-        provider = self.provider or LocalCodexAppServerProvider(
-            model=config.model.name,
-            effort=config.model.effort,
-            concurrency=config.model.concurrency,
-            max_repairs=config.model.max_repairs,
-            turn_timeout_base_seconds=config.run.turn_timeout_base_seconds,
-            persist_artifacts=False,
-        )
+        provider = self.provider or self._default_provider(config)
+        if self.provider is None:
+            try:
+                provider.preflight()
+            except Exception as error:
+                provider.close()
+                raise RuntimeError(f"Codex authentication preflight failed: {error}") from error
         artifact_lock = threading.Lock()
         provider_artifacts: list[tuple[ProviderArtifact, Path]] = []
         generated_programs: dict[str, ValidatedProgram] = {}
@@ -1339,6 +1358,24 @@ class NativeV3ExperimentAdapter:
                             snapshot,
                             auxiliary_programs=auxiliary_programs,
                             recovered_entries=tuple(recovered_entries),
+                        )
+                    provider_failures = tuple(
+                        event
+                        for event in epoch_result.telemetry
+                        if event.name == "provider_call_failed"
+                    )
+                    if provider_failures and not epoch_result.program_aliases:
+                        first_failure = provider_failures[0]
+                        error_type = str(first_failure.fields.get("error_type", "ProviderError"))
+                        error_message = str(
+                            first_failure.fields.get(
+                                "error_message",
+                                "provider call failed without diagnostics",
+                            )
+                        )
+                        raise RuntimeError(
+                            "all provider calls failed before producing a valid program: "
+                            f"{error_type}: {error_message}"
                         )
                     with artifact_lock:
                         new_artifacts = [

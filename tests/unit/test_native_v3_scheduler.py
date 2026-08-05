@@ -191,6 +191,24 @@ def test_invalid_batch_entry_does_not_block_valid_sibling() -> None:
     assert result.epoch_status is EpochStatus.DEGRADED
 
 
+def test_provider_failure_telemetry_preserves_safe_diagnostics() -> None:
+    def provider(_call: ProviderCall) -> ProviderBatch[str]:
+        raise RuntimeError("isolated Codex home is not authenticated")
+
+    result = StreamingEpochScheduler(
+        config=_config(provider_concurrency=1, evaluator_workers=2),
+        provider_call=provider,
+        build_shards=_shards,
+        evaluate_shard=lambda shard, _program: (shard.tasks[0].episode_id,),
+    ).run(_snapshot(slot_count=2))
+
+    failure = next(event for event in result.telemetry if event.name == "provider_call_failed")
+    assert failure.fields["error_type"] == "RuntimeError"
+    assert failure.fields["error_message"] == "isolated Codex home is not authenticated"
+    assert failure.fields["provider_calls_in_flight"] == 0
+    assert result.epoch_status is EpochStatus.INCONCLUSIVE
+
+
 def test_late_duplicate_alias_joins_the_in_flight_canonical_evaluation() -> None:
     evaluation_started = threading.Event()
 

@@ -535,6 +535,9 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                         "provider_call_failed",
                         call_id=call.call_id,
                         latency_ns=latency_ns,
+                        error_type=type(error).__name__,
+                        error_message=str(error)[:1000],
+                        provider_calls_in_flight=len(provider_futures),
                     )
                     continue
                 if self.streaming_provider_call is None:

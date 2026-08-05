@@ -90,6 +90,7 @@ name = "gpt-5.6-luna"
 effort = "xhigh"
 concurrency = 8
 max_repairs = 1
+auth_json = "~/.codex/auth.json"
 
 [search]
 population_size = 8
@@ -163,13 +164,17 @@ instead of being silently ignored.
 | --- | --- |
 | top level | Experiment identity, workspace, native kind, and preset |
 | `[run]` | Per-invocation wall budget, rolling token cap, output mode, profiling, and timeout base |
-| `[model]` | Codex model, reasoning effort, model concurrency, and repair limit |
+| `[model]` | Codex model, reasoning effort, concurrency, repair limit, and explicitly authorized `auth.json` path |
 | `[search]` | Population, global generation/turn limits, and parent selection |
 | `[evaluation]` | Development/validation panels, HEG orders, seeds, horizon, baselines, and replay |
 | `[resources]` | Resource reservation (`workers`) and native evaluation pool (`thread_count`) |
 | `[native_v3]` | Provider batching, bounded queue targets, shard sizes, and witness cap |
 
 Important behavior:
+
+- Native v3 requires `model.auth_json`. The file is copied into each private
+  App Server capsule; the user's Codex config, skills, plugins, and other home
+  contents are not copied. Authentication is checked before scheduler work.
 
 - The production open-ended HEG configuration uses `population_size = 8`,
   matching the eight differentiated mutation briefs.

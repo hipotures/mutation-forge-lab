@@ -94,6 +94,41 @@ def test_interactive_dashboard_reduces_native_v3_metrics() -> None:
     assert state.evaluation_shard_queue_depth == 9
 
 
+def test_dashboard_surfaces_native_v3_provider_call_failure() -> None:
+    state = reduce_dashboard_event(
+        DashboardState(),
+        Event(
+            "mforge.experiment.events.v3",
+            "2026-01-01T00:00:00+00:00",
+            "run",
+            "provider_call_started",
+            {"call_id": "epoch-1:provider:0000", "provider_calls_in_flight": 1},
+        ),
+    )
+    state = reduce_dashboard_event(
+        state,
+        Event(
+            "mforge.experiment.events.v3",
+            "2026-01-01T00:00:01+00:00",
+            "run",
+            "provider_call_failed",
+            {
+                "call_id": "epoch-1:provider:0000",
+                "error_type": "AuthenticationError",
+                "error_message": "model.auth_json is not logged in",
+                "provider_calls_in_flight": 0,
+            },
+        ),
+    )
+
+    assert state.active_provider_turns == 0
+    assert state.provider_turns_attempted == 1
+    assert state.phase == "provider error"
+    assert state.status_message == "AuthenticationError: model.auth_json is not logged in"
+    assert state.activity[-1].severity == "error"
+    assert "model.auth_json is not logged in" in state.activity[-1].message
+
+
 def test_dashboard_exposes_verification_backpressure_and_queue_depth() -> None:
     state = reduce_dashboard_event(
         DashboardState(),

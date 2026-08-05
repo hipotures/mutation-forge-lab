@@ -108,6 +108,29 @@ class _CodexTransport:
         self._adapters_lock = threading.RLock()
         self._closed = False
 
+    def preflight(self) -> None:
+        if self.auth_json is None:
+            raise AuthenticationError(
+                "model.auth_json is required for the isolated Codex App Server"
+            )
+        from mutation_forge.stage3.app_server import CodexAppServerAdapter
+        from mutation_forge.stage3.isolation import IsolatedCapsule, secure_capsule_parent
+
+        capsule = IsolatedCapsule.create(
+            secure_capsule_parent(),
+            auth_json=self.auth_json,
+            sandbox_mode=self.sandbox_mode,
+            approval_policy=self.approval_policy,
+        )
+        try:
+            checker = self.auth_checker or CodexAppServerAdapter._login_status
+            if not checker(capsule):
+                raise AuthenticationError(
+                    "Codex authentication copied from model.auth_json is not logged in"
+                )
+        finally:
+            capsule.cleanup()
+
     def _adapter(self, request: Mapping[str, Any]) -> Any:
         # This is the generic JSONL App Server transport.  It has no Stage 4
         # dependency; native prompts/schemas are supplied by the request.
@@ -503,6 +526,11 @@ class LocalCodexAppServerProvider:
         )
         self._retained: dict[str, Mapping[str, Any]] = {}
         self._lock = threading.RLock()
+
+    def preflight(self) -> None:
+        preflight = getattr(self._transport, "preflight", None)
+        if callable(preflight):
+            preflight()
 
     def _key(self, request: Mapping[str, Any], phase: str) -> str:
         value = request.get("idempotency_key", request.get("request_idempotency_key"))

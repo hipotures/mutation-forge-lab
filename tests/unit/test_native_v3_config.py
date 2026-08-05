@@ -23,6 +23,7 @@ name = "gpt-5.6-luna"
 effort = "high"
 concurrency = 2
 max_repairs = 1
+auth_json = "~/.codex/auth.json"
 
 [search]
 population_size = 8
@@ -68,6 +69,8 @@ def test_native_v3_config_locks_scheduler_and_disjoint_panels(tmp_path: Path) ->
     config = load_experiment_config(path)
     assert config.native_v3.provider_batch_size == 4
     assert config.native_v3.target_evaluation_backlog == 16
+    assert config.model.auth_json == Path.home() / ".codex" / "auth.json"
+    assert "auth_json" not in config.immutable_projection()["model"]
     assert set(config.evaluation.graph_seeds).isdisjoint(config.evaluation.validation_graph_seeds)
 
 
@@ -88,4 +91,17 @@ def test_development_and_validation_seed_overlap_is_rejected(tmp_path: Path) -> 
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="must be disjoint"):
+        load_experiment_config(path)
+
+
+def test_native_v3_auth_json_must_resolve_to_an_absolute_path(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.toml"
+    path.write_text(
+        _config().replace(
+            'auth_json = "~/.codex/auth.json"',
+            'auth_json = "relative/auth.json"',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="model.auth_json"):
         load_experiment_config(path)

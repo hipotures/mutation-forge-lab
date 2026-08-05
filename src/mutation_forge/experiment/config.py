@@ -133,6 +133,7 @@ class ExperimentModelConfig:
     effort: str
     concurrency: int
     max_repairs: int
+    auth_json: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,9 +326,17 @@ def _canonicalize_paths(value: object, base: Path) -> object:
             if isinstance(item, str) and (
                 key.endswith("_path")
                 or key.endswith("_file")
-                or key in {"workspace", "run_root", "repo", "project_repo", "heg_repo"}
+                or key
+                in {
+                    "workspace",
+                    "run_root",
+                    "repo",
+                    "project_repo",
+                    "heg_repo",
+                    "auth_json",
+                }
             ):
-                path = Path(item)
+                path = Path(item).expanduser()
                 result[key] = str(
                     (base / path).resolve() if not path.is_absolute() else path.resolve()
                 )
@@ -356,7 +365,7 @@ def mutable_runtime_fields_removed(
     value.pop("resources", None)
     model = value.get("model")
     if isinstance(model, dict):
-        for field_name in ("effort", "concurrency", "max_repairs"):
+        for field_name in ("effort", "concurrency", "max_repairs", "auth_json"):
             model.pop(field_name, None)
     return cast(dict[str, Any], _canonicalize_paths(value, base or Path.cwd()))
 
@@ -365,7 +374,11 @@ def _reject_credentials(value: object, path: str = "") -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             name = f"{path}.{key}" if path else str(key)
-            if str(key) != "max_total_tokens_per_hour" and _CREDENTIAL_KEY.search(str(key)):
+            if (
+                name != "model.auth_json"
+                and str(key) != "max_total_tokens_per_hour"
+                and _CREDENTIAL_KEY.search(str(key))
+            ):
                 raise ValueError(
                     f"credential field {name!r} is not allowed; use local Codex authentication"
                 )
@@ -464,17 +477,26 @@ def load_experiment_config(path: str | Path = "experiment.toml") -> ExperimentCo
     _reject_unknown_fields(
         model_raw,
         "model",
-        {"provider", "name", "effort", "concurrency", "max_repairs"},
+        {"provider", "name", "effort", "concurrency", "max_repairs", "auth_json"},
     )
     provider, name, effort = (model_raw.get(key) for key in ("provider", "name", "effort"))
     if not all(isinstance(item, str) and item for item in (provider, name, effort)):
         raise ValueError("model.provider, model.name, and model.effort must be non-empty strings")
+    auth_json_value = model_raw.get("auth_json")
+    if auth_json_value is not None and (
+        not isinstance(auth_json_value, str) or not auth_json_value
+    ):
+        raise ValueError("model.auth_json must be a non-empty absolute path")
+    auth_json = Path(auth_json_value).expanduser() if isinstance(auth_json_value, str) else None
+    if auth_json is not None and not auth_json.is_absolute():
+        raise ValueError("model.auth_json must resolve to an absolute path")
     model = ExperimentModelConfig(
         cast(str, provider),
         cast(str, name),
         cast(str, effort),
         _positive_int(model_raw.get("concurrency"), "model.concurrency"),
         _positive_int(model_raw.get("max_repairs"), "model.max_repairs", allow_zero=True),
+        auth_json,
     )
 
     search_raw = _table(raw, "search")

@@ -981,6 +981,17 @@ def _event_activity(event: Event) -> ActivityEntry | None:
             _text(payload.get("error")) or "provider turn failed",
             slot,
         )
+    if event_type == "provider_call_failed":
+        error_type = _text(payload.get("error_type"))
+        error_message = _text(payload.get("error_message")) or "provider call failed"
+        message = f"{error_type}: {error_message}" if error_type else error_message
+        return ActivityEntry(
+            event.timestamp[11:19],
+            "provider",
+            "error",
+            message,
+            _text(payload.get("call_id")),
+        )
     if event_type in {
         "experiment_failed",
         "experiment_interrupted",
@@ -1208,6 +1219,29 @@ def reduce_dashboard_event(
             active_provider_turns=state.active_provider_turns + 1,
             provider_turns_attempted=state.provider_turns_attempted + 1,
             phase="repair" if payload.get("phase") == "repair" else "provider",
+        )
+    elif event_type == "provider_call_started":
+        state = replace(
+            state,
+            active_provider_turns=state.active_provider_turns + 1,
+            provider_turns_attempted=state.provider_turns_attempted + 1,
+            phase="provider",
+        )
+    elif event_type in {"provider_call_completed", "provider_call_failed"}:
+        failed = event_type == "provider_call_failed"
+        error_type = _text(payload.get("error_type"))
+        error_message = _text(payload.get("error_message"))
+        diagnostic = (
+            f"{error_type}: {error_message}"
+            if error_type is not None and error_message is not None
+            else error_message or error_type or "Provider call failed"
+        )
+        state = replace(
+            state,
+            active_provider_turns=max(0, state.active_provider_turns - 1),
+            provider_turns_completed=state.provider_turns_completed + (0 if failed else 1),
+            phase="provider error" if failed else state.phase,
+            status_message=diagnostic if failed else state.status_message,
         )
     elif event_type in {"provider_turn_completed", "provider_turn_failed"}:
         state = replace(
