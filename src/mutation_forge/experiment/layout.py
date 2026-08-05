@@ -276,7 +276,7 @@ class ExperimentLayout:
                 if path.is_file():
                     _verify_json_schema(
                         path,
-                        "mforge.experiment.session.v2",
+                        "mforge.experiment.session.v3",
                         f"session {path}",
                     )
             input_config = session / "input-config.toml"

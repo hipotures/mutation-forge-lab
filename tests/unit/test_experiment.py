@@ -412,6 +412,27 @@ def test_first_run_creates_atomic_workspace_and_session(tmp_path: Path) -> None:
     assert started["active_workers"] == 0
 
 
+def test_native_v3_result_schema_cannot_replace_session_schema(tmp_path: Path) -> None:
+    path = _write_config(tmp_path)
+
+    class NativeV3Result:
+        def run(self, *_: object) -> dict[str, str]:
+            return {
+                "schema_version": "mforge.native.run.v3",
+                "state": "idle",
+                "stop_reason": "session_wall_seconds",
+            }
+
+    service = ExperimentService(adapter=NativeV3Result())
+    service.run(path)
+    root = tmp_path / "configs" / "workspace" / "demo"
+    summary = read_json(root / "artifacts" / "sessions" / "session-000001" / "summary.json.gz")
+
+    assert summary["schema_version"] == "mforge.experiment.session.v3"
+    assert summary["result_schema_version"] == "mforge.native.run.v3"
+    assert service.run(path)["session_id"] == "session-000002"
+
+
 def test_second_run_continues_and_invocation_fields_are_mutable(tmp_path: Path) -> None:
     path = _write_config(tmp_path, wall=1)
     ExperimentService(adapter=NullExperimentAdapter()).run(path)
