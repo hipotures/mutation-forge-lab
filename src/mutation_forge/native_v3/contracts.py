@@ -32,7 +32,7 @@ class ValueType(StrEnum):
     VERTEX = "VertexRef"
     EDGE = "EdgeRef"
     NON_EDGE = "NonEdgeRef"
-    PATH2 = "Path2Ref"
+    PATH = "PathRef"
     VERTEX_SET = "VertexSetRef"
     EDGE_SET = "EdgeSetRef"
     MATCHING = "MatchingRef"
@@ -46,9 +46,11 @@ SELECTOR_TYPES: dict[str, ValueType] = {
     "vertices_articulation_risk": ValueType.VERTEX_SET,
     "edges_bridge_risk": ValueType.EDGE_SET,
     "vertices_distance_band": ValueType.VERTEX_SET,
+    "edges_removable": ValueType.EDGE_SET,
+    "non_edges_legal": ValueType.NON_EDGE,
     "non_edges_from_vertex": ValueType.NON_EDGE,
     "non_edges_local_cycle_risk": ValueType.NON_EDGE,
-    "paths_length_two": ValueType.PATH2,
+    "paths_length_two": ValueType.PATH,
     "matching_k_switch_reconnections": ValueType.MATCHING,
 }
 
@@ -60,6 +62,8 @@ SELECTOR_COSTS: dict[str, int] = {
     "vertices_articulation_risk": 16,
     "edges_bridge_risk": 16,
     "vertices_distance_band": 8,
+    "edges_removable": 1,
+    "non_edges_legal": 2,
     "non_edges_from_vertex": 2,
     "non_edges_local_cycle_risk": 4,
     "paths_length_two": 2,
@@ -84,6 +88,8 @@ SELECTOR_ARGUMENT_TYPES: dict[str, dict[str, ValueType]] = {
         "minimum": ValueType.INT,
         "maximum": ValueType.INT,
     },
+    "edges_removable": {},
+    "non_edges_legal": {},
     "non_edges_from_vertex": {"vertex": ValueType.VERTEX},
     "non_edges_local_cycle_risk": {"mode": ValueType.STRING},
     "paths_length_two": {},
@@ -100,7 +106,7 @@ ACTION_ARGUMENT_TYPES: dict[str, dict[str, ValueType]] = {
     },
     "k_switch": {"matching": ValueType.MATCHING},
     "edge_fanout": {"edge": ValueType.EDGE, "w": ValueType.VERTEX},
-    "edge_fold": {"path": ValueType.PATH2},
+    "edge_fold": {"path": ValueType.PATH},
 }
 
 CTX_TYPES: dict[str, ValueType] = {
@@ -371,6 +377,14 @@ def _expression(
                     f"{path}/arguments/mode",
                     "selector mode must be the literal min or max",
                 )
+        if selector_id == "matching_k_switch_reconnections":
+            k = arguments["k"]
+            if not isinstance(k, int) or isinstance(k, bool) or k not in {2, 3, 4}:
+                raise _InvalidProgram(
+                    "selector_argument_value",
+                    f"{path}/arguments/k",
+                    "k-switch requires the literal 2, 3, or 4",
+                )
         stats.selector_calls += 1
         stats.selector_cost += SELECTOR_COSTS[selector_id]
         return SELECTOR_TYPES[selector_id]
@@ -419,7 +433,7 @@ def _expression(
             ValueType.VERTEX_SET: ValueType.VERTEX,
             ValueType.EDGE_SET: ValueType.EDGE,
             ValueType.NON_EDGE: ValueType.NON_EDGE,
-            ValueType.PATH2: ValueType.PATH2,
+            ValueType.PATH: ValueType.PATH,
             ValueType.MATCHING: ValueType.MATCHING,
         }
         if source_type not in result_types:

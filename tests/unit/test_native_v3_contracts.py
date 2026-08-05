@@ -365,6 +365,26 @@ def test_typed_selector_binding_action_and_static_cost_contract() -> None:
     assert invalid_mode.diagnostics[0].code == "selector_argument_value"
 
 
+@pytest.mark.parametrize("k", (1, 5))
+def test_k_switch_selector_rejects_non_2_3_4_literal(k: int) -> None:
+    validation = validate_program(
+        _program(
+            {
+                "op": "let",
+                "name": "matching",
+                "value": {
+                    "op": "selector",
+                    "selector_id": "matching_k_switch_reconnections",
+                    "arguments": {"k": k},
+                },
+                "body": _terminal(),
+            }
+        )
+    )
+    assert not validation.valid
+    assert validation.diagnostics[0].code == "selector_argument_value"
+
+
 def test_program_schema_freezes_non_recursive_envelope_and_recursive_ast() -> None:
     schema = json.loads(
         Path("configs/native/native-v3-program.schema.json").read_text(encoding="utf-8")

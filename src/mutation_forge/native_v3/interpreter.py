@@ -1,12 +1,14 @@
-"""Bounded interpreter for validated Native v3 programs over synthetic fixtures."""
+"""Bounded interpreter for validated Native v3 graph-mutation programs."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from fractions import Fraction
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, NoReturn, cast
+
+from mutation_forge.models import GraphState, RewritePlan
 
 from .contracts import (
     ACTION_ARGUMENT_TYPES,
@@ -19,68 +21,33 @@ from .contracts import (
     ValidatedProgram,
     ValueType,
 )
+from .graph_runtime import (
+    EdgeRef,
+    EdgeSetRef,
+    GraphFeatureInput,
+    GraphFinalStateError,
+    GraphPreconditionError,
+    GraphResourceError,
+    GraphRuntime,
+    MatchingRef,
+    NonEdgeRef,
+    PathRef,
+    Population,
+    ReferenceValue,
+    RewriteHost,
+    SelectionPopulation,
+    VertexRef,
+    VertexSetRef,
+    population_items,
+    population_type,
+    reference_type,
+)
 from .randomness import RANDOM_PROTOCOL_ID, derive_seed64, uniform_below, weighted_index
 
-INTERPRETER_PROTOCOL_ID = "native_v3_synthetic_interpreter_v1"
+INTERPRETER_PROTOCOL_ID = "native_v3_graph_interpreter_v1"
 
-
-@dataclass(frozen=True, slots=True, order=True)
-class VertexRef:
-    value: int
-
-
-@dataclass(frozen=True, slots=True, order=True)
-class EdgeRef:
-    u: int
-    v: int
-
-
-@dataclass(frozen=True, slots=True, order=True)
-class NonEdgeRef:
-    u: int
-    v: int
-
-
-@dataclass(frozen=True, slots=True, order=True)
-class Path2Ref:
-    u: int
-    v: int
-    w: int
-
-
-@dataclass(frozen=True, slots=True)
-class MatchingRef:
-    edges: tuple[EdgeRef, ...]
-
-
-type Selectable = VertexRef | EdgeRef | NonEdgeRef | Path2Ref | MatchingRef
-type Scalar = bool | int | Fraction | str | Selectable
-type OverlayValue = bool | int | str
-type RuntimeValue = Scalar | Selection
-
-
-_SELECTION_ITEM_TYPES: dict[ValueType, ValueType] = {
-    ValueType.VERTEX_SET: ValueType.VERTEX,
-    ValueType.EDGE_SET: ValueType.EDGE,
-    ValueType.NON_EDGE: ValueType.NON_EDGE,
-    ValueType.PATH2: ValueType.PATH2,
-    ValueType.MATCHING: ValueType.MATCHING,
-}
-
-
-@dataclass(frozen=True, slots=True)
-class Selection:
-    """A typed, ordered population returned by a synthetic selector."""
-
-    value_type: ValueType
-    items: tuple[Selectable, ...]
-
-    def __post_init__(self) -> None:
-        expected = _SELECTION_ITEM_TYPES.get(self.value_type)
-        if expected is None:
-            raise ValueError(f"{self.value_type} is not a selector population type")
-        if any(_runtime_type(item) is not expected for item in self.items):
-            raise ValueError(f"selection items do not match {self.value_type}")
+type Scalar = bool | int | Fraction | str | ReferenceValue
+type RuntimeValue = Scalar | Population
 
 
 class BranchFailureCode(StrEnum):
@@ -98,39 +65,6 @@ class CatchableBranchFailure(Exception):
     def __init__(self, code: BranchFailureCode, message: str = "") -> None:
         super().__init__(message or code.value)
         self.code = code
-
-
-class SyntheticFixture(Protocol):
-    """Typed host boundary used only by synthetic interpreter fixtures."""
-
-    fixture_id: str
-
-    def select(
-        self,
-        selector_id: str,
-        arguments: Mapping[str, Scalar],
-        overlay: Mapping[str, OverlayValue],
-    ) -> Selection:
-        """Return an ordered typed selector population."""
-
-    def weight(
-        self,
-        item: Selectable,
-        feature: str,
-        overlay: Mapping[str, OverlayValue],
-    ) -> int:
-        """Return a positive exact integer weight for a selectable item."""
-
-    def apply(
-        self,
-        action_id: str,
-        arguments: Mapping[str, Scalar],
-        overlay: MutableMapping[str, OverlayValue],
-    ) -> None:
-        """Apply one action to the private invocation overlay."""
-
-    def validate_emit(self, overlay: Mapping[str, OverlayValue]) -> None:
-        """Validate the final private overlay before it is emitted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,26 +89,8 @@ class ProgramContext:
             "exploration_window_index": self.exploration_window_index,
             "accepted_rewrites": self.accepted_rewrites,
             "accepted_non_improving_rewrites": self.accepted_non_improving_rewrites,
-            "consecutive_non_improving_rewrites": (
-                self.consecutive_non_improving_rewrites
-            ),
+            "consecutive_non_improving_rewrites": (self.consecutive_non_improving_rewrites),
             "witness_cap": self.witness_cap,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class GraphFeatureInput:
-    order: int
-    edge_count: int
-    minimum_degree: int
-    maximum_degree: int
-
-    def values(self) -> dict[str, Scalar]:
-        return {
-            "order": self.order,
-            "edge_count": self.edge_count,
-            "minimum_degree": self.minimum_degree,
-            "maximum_degree": self.maximum_degree,
         }
 
 
@@ -187,7 +103,9 @@ class InterpreterLimits:
     maximum_selector_calls: int = 64
     maximum_selector_cost_units: int = 128
     maximum_actions: int = 64
-    maximum_random_draws: int = 128
+    maximum_net_added_edges: int = 8
+    maximum_net_removed_edges: int = 8
+    maximum_random_draws: int = 2_048
     maximum_integer_bits: int = 64
     maximum_denominator_bits: int = 32
 
@@ -202,6 +120,8 @@ class InterpreterLimits:
                 self.maximum_selector_calls,
                 self.maximum_selector_cost_units,
                 self.maximum_actions,
+                self.maximum_net_added_edges,
+                self.maximum_net_removed_edges,
                 self.maximum_random_draws,
             )
         ):
@@ -210,16 +130,9 @@ class InterpreterLimits:
             raise ValueError("numeric bit limits must be positive")
 
 
-class OutcomeKind(StrEnum):
-    EMIT = "emit"
-    NO_PLAN = "no_plan"
-
-
 @dataclass(frozen=True, slots=True)
-class InvocationOutcome:
-    kind: OutcomeKind
-    no_plan_reason: str | None
-    overlay: tuple[tuple[str, OverlayValue], ...]
+class NoPlan:
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,13 +156,14 @@ class InvocationCounters:
 
 @dataclass(frozen=True, slots=True)
 class InvocationResult:
-    outcome: InvocationOutcome | None
+    rewrite: RewritePlan | None
+    no_plan: NoPlan | None
     failure: ProgramFailure | None
     counters: InvocationCounters
 
     @property
     def successful(self) -> bool:
-        return self.outcome is not None and self.failure is None
+        return (self.rewrite is not None or self.no_plan is not None) and self.failure is None
 
 
 class _ProgramFault(Exception):
@@ -259,10 +173,9 @@ class _ProgramFault(Exception):
 
 
 class _Terminal(Exception):
-    def __init__(self, kind: OutcomeKind, reason: str | None = None) -> None:
-        super().__init__(kind.value)
-        self.kind = kind
-        self.reason = reason
+    def __init__(self, result: RewritePlan | NoPlan) -> None:
+        super().__init__(type(result).__name__)
+        self.result = result
 
 
 @dataclass(slots=True)
@@ -292,11 +205,11 @@ class _Counters:
 @dataclass(slots=True)
 class _Runtime:
     program: ValidatedProgram
-    fixture: SyntheticFixture
+    graph_runtime: GraphRuntime
+    rewrite_host: RewriteHost
     context: ProgramContext
-    features: GraphFeatureInput
+    episode_id: str
     limits: InterpreterLimits
-    overlay: dict[str, OverlayValue]
     counters: _Counters = field(default_factory=_Counters)
 
     def budget(self, field_name: str, increment: int, maximum: int, path: str) -> None:
@@ -317,7 +230,7 @@ class _Runtime:
             RANDOM_PROTOCOL_ID,
             INTERPRETER_PROTOCOL_ID,
             self.program.program_hash,
-            self.fixture.fixture_id,
+            self.episode_id,
             self.context.step_index,
             self.context.invocation_ordinal,
             path,
@@ -347,18 +260,10 @@ def _runtime_type(value: RuntimeValue) -> ValueType:
         return ValueType.RATIONAL
     if isinstance(value, str):
         return ValueType.STRING
-    if isinstance(value, VertexRef):
-        return ValueType.VERTEX
-    if isinstance(value, EdgeRef):
-        return ValueType.EDGE
-    if isinstance(value, NonEdgeRef):
-        return ValueType.NON_EDGE
-    if isinstance(value, Path2Ref):
-        return ValueType.PATH2
-    if isinstance(value, MatchingRef):
-        return ValueType.MATCHING
-    if isinstance(value, Selection):
-        return value.value_type
+    if isinstance(value, VertexRef | EdgeRef | NonEdgeRef | PathRef | MatchingRef):
+        return reference_type(value)
+    if isinstance(value, VertexSetRef | EdgeSetRef | SelectionPopulation):
+        return population_type(value)
     raise TypeError(f"unsupported runtime value: {type(value).__name__}")
 
 
@@ -415,7 +320,11 @@ def _expression(
         field_name = expression.get("field")
         if not isinstance(field_name, str) or field_name not in FEATURE_TYPES:
             _fault("INVALID_AST", path, "unknown feature field")
-        return _expect(runtime.features.values()[field_name], FEATURE_TYPES[field_name], path)
+        return _expect(
+            runtime.graph_runtime.feature_values()[field_name],
+            FEATURE_TYPES[field_name],
+            path,
+        )
     if operation == "rational":
         numerator = expression.get("numerator")
         denominator = expression.get("denominator")
@@ -460,49 +369,54 @@ def _expression(
             path,
         )
         try:
-            selection = runtime.fixture.select(selector_id, arguments, runtime.overlay)
-        except CatchableBranchFailure:
-            raise
-        except Exception as exc:
-            raise _ProgramFault("INTERPRETER_FAULT", path, str(exc)) from exc
-        if not isinstance(selection, Selection):
-            _fault("TYPE_ERROR", path, "selector did not return a Selection")
+            selection = runtime.graph_runtime.select(
+                selector_id,
+                arguments,
+                path=path,
+                random_index=runtime.random_index,
+            )
+        except GraphPreconditionError as exc:
+            raise CatchableBranchFailure(
+                BranchFailureCode.LOCAL_PRECONDITION_FAILED,
+                str(exc),
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise _ProgramFault("TYPE_ERROR", path, str(exc)) from exc
         _expect(selection, SELECTOR_TYPES[selector_id], path)
         return selection
     if operation == "pick":
         source = _expression(runtime, expression.get("source"), environment, f"{path}/source")
-        if not isinstance(source, Selection):
+        if not isinstance(source, VertexSetRef | EdgeSetRef | SelectionPopulation):
             _fault("TYPE_ERROR", path, "pick source is not a selection")
-        if not source.items:
+        items = population_items(source)
+        if not items:
             raise CatchableBranchFailure(BranchFailureCode.NO_MATCH)
         mode = expression.get("mode")
         if mode == "require_singleton":
-            if len(source.items) != 1:
+            if len(items) != 1:
                 raise CatchableBranchFailure(
                     BranchFailureCode.LOCAL_PRECONDITION_FAILED,
                     "selection is not a singleton",
                 )
-            return source.items[0]
+            return items[0]
         runtime.budget("choices", 1, runtime.limits.maximum_choices, path)
         if mode == "seeded_uniform":
-            index = runtime.random_index(path, [1] * len(source.items))
-            return source.items[index]
+            index = runtime.random_index(path, [1] * len(items))
+            return items[index]
         if mode == "seeded_weighted":
             feature = expression.get("weight_feature")
             if not isinstance(feature, str):
                 _fault("INVALID_AST", path, "weighted pick lacks weight_feature")
             weights: list[int] = []
-            for item in source.items:
+            for item in items:
                 try:
-                    weight = runtime.fixture.weight(item, feature, runtime.overlay)
-                except CatchableBranchFailure:
-                    raise
-                except Exception as exc:
-                    raise _ProgramFault("INTERPRETER_FAULT", path, str(exc)) from exc
+                    weight = runtime.graph_runtime.weight(item, feature)
+                except (TypeError, ValueError) as exc:
+                    raise _ProgramFault("TYPE_ERROR", path, str(exc)) from exc
                 if isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0:
-                    _fault("TYPE_ERROR", path, "fixture weight must be a positive integer")
+                    _fault("TYPE_ERROR", path, "weight must be a positive integer")
                 weights.append(weight)
-            return source.items[runtime.random_index(path, weights)]
+            return items[runtime.random_index(path, weights)]
         _fault("INVALID_AST", path, "unknown pick mode")
     if operation in {
         "add",
@@ -563,8 +477,13 @@ def _expression(
         _expect(value, ValueType.BOOL, path)
         return not cast(bool, value)
     if operation == "exists":
-        value = _expression(runtime, expression.get("value"), environment, f"{path}/value")
-        return bool(value.items) if isinstance(value, Selection) else value is not None
+        try:
+            value = _expression(runtime, expression.get("value"), environment, f"{path}/value")
+        except CatchableBranchFailure:
+            return False
+        if isinstance(value, VertexSetRef | EdgeSetRef | SelectionPopulation):
+            return bool(population_items(value))
+        return value is not None
     _fault("INVALID_AST", path, f"unknown expression: {operation!r}")
 
 
@@ -613,7 +532,7 @@ def _node(
             _fault("INVALID_AST", path, "try branches must be non-empty")
         last_failure: CatchableBranchFailure | None = None
         for index, branch in enumerate(branches):
-            overlay_snapshot = runtime.overlay.copy()
+            graph_snapshot = runtime.graph_runtime.overlay.snapshot()
             environment_snapshot = environment.copy()
             try:
                 _node(
@@ -625,8 +544,7 @@ def _node(
                 return
             except CatchableBranchFailure as exc:
                 last_failure = exc
-                runtime.overlay.clear()
-                runtime.overlay.update(overlay_snapshot)
+                runtime.graph_runtime.overlay.restore(graph_snapshot)
                 environment.clear()
                 environment.update(environment_snapshot)
         if last_failure is None:
@@ -693,25 +611,40 @@ def _node(
             arguments[name] = cast(Scalar, _expect(value, expected, path))
         runtime.budget("actions", 1, runtime.limits.maximum_actions, path)
         try:
-            runtime.fixture.apply(action_id, arguments, runtime.overlay)
-        except CatchableBranchFailure:
-            raise
-        except Exception as exc:
-            raise _ProgramFault("INTERPRETER_FAULT", path, str(exc)) from exc
+            runtime.graph_runtime.apply_action(action_id, arguments)
+        except GraphPreconditionError as exc:
+            raise CatchableBranchFailure(
+                BranchFailureCode.LOCAL_PRECONDITION_FAILED,
+                str(exc),
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise _ProgramFault("TYPE_ERROR", path, str(exc)) from exc
         return
     if operation == "emit":
         try:
-            runtime.fixture.validate_emit(runtime.overlay)
-        except CatchableBranchFailure:
-            raise
-        except Exception as exc:
-            raise _ProgramFault("INTERPRETER_FAULT", path, str(exc)) from exc
-        raise _Terminal(OutcomeKind.EMIT)
+            rewrite = runtime.graph_runtime.emit(
+                host=runtime.rewrite_host,
+                program_hash=runtime.program.program_hash,
+                gross_actions=runtime.counters.actions,
+                selector_cost_units=runtime.counters.selector_cost_units,
+                maximum_net_added_edges=runtime.limits.maximum_net_added_edges,
+                maximum_net_removed_edges=runtime.limits.maximum_net_removed_edges,
+            )
+        except GraphPreconditionError as exc:
+            raise CatchableBranchFailure(BranchFailureCode.NO_EFFECT, str(exc)) from exc
+        except GraphFinalStateError as exc:
+            raise CatchableBranchFailure(
+                BranchFailureCode.ILLEGAL_FINAL_STATE,
+                str(exc),
+            ) from exc
+        except GraphResourceError as exc:
+            raise _ProgramFault("BUDGET_EXHAUSTED", path, str(exc)) from exc
+        raise _Terminal(rewrite)
     if operation == "no_plan":
         reason = node.get("reason")
         if not isinstance(reason, str):
             _fault("INVALID_AST", path, "NoPlan reason must be a string")
-        raise _Terminal(OutcomeKind.NO_PLAN, reason)
+        raise _Terminal(NoPlan(reason))
     _fault("INVALID_AST", path, f"unknown node: {operation!r}")
 
 
@@ -723,25 +656,27 @@ def _no_plan_reason(code: BranchFailureCode) -> str:
 
 def invoke_program(
     program: ValidatedProgram,
+    graph: GraphState,
     *,
-    fixture: SyntheticFixture,
+    rewrite_host: RewriteHost,
     context: ProgramContext,
-    features: GraphFeatureInput,
-    initial_overlay: Mapping[str, OverlayValue] | None = None,
+    episode_id: str,
+    features: GraphFeatureInput | None = None,
     limits: InterpreterLimits | None = None,
 ) -> InvocationResult:
-    """Execute one validated program without mutating fixture or caller state."""
+    """Execute one validated program against a private graph overlay."""
 
-    invocation_snapshot = dict(initial_overlay or {})
-    runtime = _Runtime(
-        program=program,
-        fixture=fixture,
-        context=context,
-        features=features,
-        limits=limits or InterpreterLimits(),
-        overlay=invocation_snapshot.copy(),
-    )
     try:
+        graph_runtime = GraphRuntime(graph, features or GraphFeatureInput())
+        invocation_snapshot = graph_runtime.overlay.snapshot()
+        runtime = _Runtime(
+            program=program,
+            graph_runtime=graph_runtime,
+            rewrite_host=rewrite_host,
+            context=context,
+            episode_id=episode_id,
+            limits=limits or InterpreterLimits(),
+        )
         document = program.ast
         if (
             not isinstance(document, dict)
@@ -752,32 +687,29 @@ def invoke_program(
         _node(runtime, document["entry"], {}, "/entry")
         _fault("INVALID_AST", "/entry", "program completed without a terminal")
     except _Terminal as terminal:
+        rewrite = terminal.result if isinstance(terminal.result, RewritePlan) else None
+        no_plan = terminal.result if isinstance(terminal.result, NoPlan) else None
         return InvocationResult(
-            InvocationOutcome(
-                terminal.kind,
-                terminal.reason,
-                tuple(sorted(runtime.overlay.items())),
-            ),
+            rewrite,
+            no_plan,
             None,
             runtime.counters.frozen(),
         )
     except CatchableBranchFailure as exc:
-        runtime.overlay.clear()
-        runtime.overlay.update(invocation_snapshot)
+        runtime.graph_runtime.overlay.restore(invocation_snapshot)
         return InvocationResult(
-            InvocationOutcome(
-                OutcomeKind.NO_PLAN,
-                _no_plan_reason(exc.code),
-                tuple(sorted(runtime.overlay.items())),
-            ),
+            None,
+            NoPlan(_no_plan_reason(exc.code)),
             None,
             runtime.counters.frozen(),
         )
     except _ProgramFault as exc:
-        return InvocationResult(None, exc.failure, runtime.counters.frozen())
+        return InvocationResult(None, None, exc.failure, runtime.counters.frozen())
     except Exception as exc:
+        counters = runtime.counters.frozen() if "runtime" in locals() else _Counters().frozen()
         return InvocationResult(
             None,
+            None,
             ProgramFailure("INTERPRETER_FAULT", "/entry", str(exc)),
-            runtime.counters.frozen(),
+            counters,
         )

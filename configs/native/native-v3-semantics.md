@@ -1,92 +1,122 @@
-# Native v3 control-flow semantics
+# Native v3 interpreter and graph semantics
 
-Protocol: `native_v3_synthetic_interpreter_v1`
+Interpreter protocol: `native_v3_graph_interpreter_v1`
 
-This document defines the runtime semantics of a statically validated Native v3
-program. The Step 06 interpreter is intentionally isolated: it runs only against
-the `SyntheticFixture` protocol and does not read or mutate a HEG graph, an
-experiment, a provider, or a v2 policy.
+Graph runtime protocol: `native_v3_graph_runtime_v1`
 
-## Invocation boundary
+The interpreter executes one statically validated Native v3 program against a
+private copy-on-write graph overlay. It does not mutate the input `GraphState`.
+It returns exactly one canonical v2 `RewritePlan`, one `NoPlan`, or one
+`ProgramFailure`.
 
-An invocation receives a `ValidatedProgram`, a synthetic fixture, a complete
-`ProgramContext`, exact integer graph-feature inputs, optional scalar overlay
-values, and `InterpreterLimits`. The caller's inputs are never mutated. Actions
-operate on a private overlay. A successful invocation returns exactly one
-`emit` or `no_plan` outcome; a program failure returns no outcome.
+## Typed values
 
-Runtime values are booleans, bounded exact integers, normalized
-`fractions.Fraction` rationals, printable strings, typed synthetic references,
-and ordered typed selections. No floating-point arithmetic is performed.
+Runtime values are booleans, bounded exact integers, normalized rational
+numbers, printable strings, and opaque typed graph references:
 
-## Expressions and control flow
+- `VertexRef` and `VertexSetRef`;
+- `EdgeRef` and `EdgeSetRef`;
+- `NonEdgeRef`;
+- `PathRef`;
+- `MatchingRef`.
 
-- `let` evaluates once and adds an immutable lexical binding for its body.
+The AST can bind and pass references but cannot inspect their raw vertex
+labels. Selectors return complete semantic tie sets or deterministic,
+uniformly sampled reservoirs of at most 64 items. Implementations enumerate
+sets canonically before sampling; relabeling is assessed through canonical
+graph classes or frozen seed distributions rather than raw reference values.
+
+## Graph selectors
+
+All selectors observe the current private overlay, including earlier actions
+in the same successful branch:
+
+- degree extreme and exact degree class;
+- sampled vertex and edge witness-load extreme;
+- articulation and bridge risk;
+- bounded distance bands;
+- all removable edges;
+- all legal non-edges, non-edges from a selected vertex, and local cycle-risk
+  extremes;
+- length-two paths;
+- legal seeded 2-, 3-, and 4-switch reconnections over vertex-disjoint source
+  edges.
+
+Witness-load providers receive only the current immutable overlay
+`GraphState`. Their results are cached by canonical overlay edge tuple.
+
+## Rewrite actions
+
+`add_edge`, `remove_edge`, `relocate_endpoint`, `k_switch`, `edge_fanout`, and
+`edge_fold` mutate only the private overlay. Every reference is checked at the
+point of use, so stale or wrong-type references fail closed. Loops,
+out-of-range vertices, duplicate edges, and existing-edge additions are never
+allowed.
+
+Temporary disconnection or degree below three is permitted inside the private
+overlay. This is necessary for ordered multi-action rewrites. It is never
+permitted in an emitted result.
+
+## Control flow and transactions
+
+- `let` creates an immutable lexical binding for its body.
 - `block` evaluates children in order.
-- `if` evaluates only its selected branch.
-- `repeat` executes its non-terminal body exactly `count` times. The iteration
-  index is part of the dynamic AST path.
-- `choose` selects one branch using positive integer weights and the normative
-  deterministic random protocol.
-- `selector` calls the typed synthetic fixture boundary. Its declared static
-  result type must match the runtime `Selection`.
-- `pick` supports `require_singleton`, `seeded_uniform`, and
-  `seeded_weighted`. An empty population is `NO_MATCH`; a non-singleton
-  `require_singleton` is `LOCAL_PRECONDITION_FAILED`.
-- `apply` evaluates and type-checks all arguments before the fixture action
-  mutates the private overlay.
-- `emit` asks the fixture to validate the overlay and then returns it.
-- `no_plan` terminates with its declared reason.
+- `if` evaluates one branch.
+- `repeat` executes its non-terminal body exactly `count` times.
+- `choose` and seeded `pick` use deterministic integer-only randomness.
+- `try` evaluates branches in order. A catchable failure restores the graph
+  overlay and lexical bindings before the next branch.
+- `emit` validates and canonicalizes the net rewrite.
+- `no_plan` terminates without a rewrite.
 
-Every evaluated node and expression consumes a dynamic step. Repeat iterations,
-choices, bindings, selector calls, selector cost units, actions, random draws,
-integer width, and rational denominator width have separate dynamic bounds.
-Counters are monotonically consumed for the whole invocation.
+Only `NO_MATCH`, `LOCAL_PRECONDITION_FAILED`, `ILLEGAL_FINAL_STATE`, and
+`NO_EFFECT` are catchable. Invalid AST structure, runtime type errors,
+resource-limit exhaustion, and interpreter faults are program failures.
+Actions, selector charges, and random draws consumed by a failed branch are
+not refunded.
 
-## Transactional fallback
+## Emit boundary
 
-`try` evaluates branches in source order. Before each branch it snapshots the
-private overlay and lexical bindings. A catchable branch failure restores both
-snapshots completely and continues with the next branch.
+`emit` computes sorted net removed and added edges relative to the invocation
+input. It rejects:
 
-The closed catchable class is:
+- no-op output;
+- order changes;
+- loops, duplicates, invalid endpoints, or stale references;
+- disconnected output;
+- minimum degree below three;
+- independent net-added or net-removed budget overflow.
 
-- `NO_MATCH`
-- `LOCAL_PRECONDITION_FAILED`
-- `ILLEGAL_FINAL_STATE`
-- `NO_EFFECT`
+The resulting v2 `RewritePlan` is then passed to the injected existing backend
+`apply_rewrite` boundary. The backend-returned graph must exactly equal the
+private overlay and retain the input order. Backend rejection becomes
+`ILLEGAL_FINAL_STATE`; the scorer and backend implementation are not replaced.
 
-No other exception is catchable. In particular, invalid AST structure, runtime
-type mismatches, dynamic budget exhaustion, and interpreter or fixture faults
-terminate the program. Consumed budget counters and random draws are not
-refunded when a branch rolls back.
-
-If the final branch also fails catchably, the invocation produces `NoPlan`.
-`LOCAL_PRECONDITION_FAILED` maps to the public `NO_MATCH` reason; the other
-codes retain their names. An uncaught catchable failure also restores the
-invocation's initial overlay before producing `NoPlan`.
+Gross action count and net added/removed edges have independent dynamic limits.
+Node/expression steps, repeat iterations, choices, bindings, selector calls,
+selector cost, random draws, and numeric widths retain their separate Step 06
+limits.
 
 ## Deterministic randomness
 
-Randomness uses `native_v3_splitmix64_v1`. SHA-256 derives a 64-bit seed from
-length-prefixed typed components:
+SHA-256 derives each SplitMix64 seed from length-prefixed typed components:
 
 1. random protocol ID;
 2. interpreter protocol ID;
 3. canonical program hash;
-4. synthetic episode fixture ID;
+4. episode fixture ID;
 5. step index;
 6. invocation ordinal;
 7. dynamic AST path.
 
-Uniform draws use rejection sampling over SplitMix64 output, so modulo bias is
-not permitted. Weighted choices use positive exact integer weights whose sum is
-at most `2**63 - 1`. The protocol and derivation vectors are frozen in
-`tests/unit/test_native_v3_interpreter.py`.
+Repeat indices, selector reservoir positions, matching attempts, and shuffle
+positions are encoded in the dynamic path. Uniform draws use rejection
+sampling; weighted draws use positive exact integer weights with a signed
+64-bit total bound.
 
-## Deliberate Step 06 limits
+## Deliberate Step 07 limits
 
-The fixture boundary supplies only typed synthetic selector results, integer
-weights, action effects, and final-overlay validation. Production graph
-selectors, graph rewrites, HEG integration, provider calls, evaluation,
-experiment scheduling, and artifact persistence are outside this step.
+This step provides graph construction and host validation only. It does not
+integrate a scorer, provider-generated execution, evaluator, experiment
+scheduler, persistence, or multiprocessing. HEG remains behind the existing
+backend boundary.
