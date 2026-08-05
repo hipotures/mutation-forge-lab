@@ -1288,14 +1288,22 @@ def test_slot_icon_mode_uses_narrow_headers_but_copy_remains_text() -> None:
 
 def test_number_keys_request_stable_panel_copies_but_remain_search_text() -> None:
     state = _running_state()
+    state, action = reduce_dashboard_key(state, "0")
+    assert action == dashboard.DashboardAction(
+        "copy",
+        panel=dashboard.ALL_PANELS_COPY_TARGET,
+    )
     for key, panel in dashboard.PANEL_COPY_KEYS.items():
         state, action = reduce_dashboard_key(state, key)
         assert action == dashboard.DashboardAction("copy", panel=panel)
 
     state = replace(state, search_editing=True, search_query="")
+    state, action = reduce_dashboard_key(state, "0")
+    assert action is None
+    assert state.search_query == "0"
     state, action = reduce_dashboard_key(state, "5")
     assert action is None
-    assert state.search_query == "5"
+    assert state.search_query == "05"
 
 
 def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() -> None:
@@ -1521,10 +1529,10 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
         assert "experiment" in rendered
         assert "session" in rendered
         assert "usage" in rendered
-        assert "[1–8] copy" in rendered
+        assert "[0] all" in rendered
     elif width >= 110:
         assert "session" in rendered
-        assert "[1–8] copy" in rendered
+        assert "[0] all" in rendered
     sink.close()
 
 
@@ -2108,6 +2116,35 @@ def test_pending_panel_copy_writes_fallback_and_expires_notice(
     with sink._lock:
         assert sink._expire_copy_notice_unlocked()
     assert sink.state.status_message == ""
+    sink.close()
+
+
+def test_zero_copies_all_numbered_panels_to_one_clipboard_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    clipboard = Mock(return_value=True)
+    monkeypatch.setattr(dashboard, "PANEL_COPY_TMP_DIR", tmp_path)
+    monkeypatch.setattr(dashboard, "copy_text_to_clipboard_osc52", clipboard)
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        start_live=False,
+    )
+    sink.state = _running_state()
+
+    sink.handle_key("0")
+    assert sink._pending_copy_action == dashboard.ALL_PANELS_COPY_TARGET
+    with sink._lock:
+        sink._handle_pending_panel_copy_unlocked()
+
+    path = tmp_path / "panel-all-panels-dashboard-run.txt"
+    copied = path.read_text(encoding="utf-8")
+    headings = [f"# {key} · " for key in dashboard.PANEL_COPY_KEYS]
+    positions = [copied.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    assert len(positions) == len(dashboard.PANEL_COPY_KEYS)
+    clipboard.assert_called_once_with(copied)
+    assert sink.state.status_message == f"OSC 52 sent · fallback {path}"
     sink.close()
 
 

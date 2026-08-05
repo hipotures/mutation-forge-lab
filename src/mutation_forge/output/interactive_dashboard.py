@@ -135,6 +135,7 @@ PANEL_COPY_KEYS = {
     "7": "activity",
     "8": "quick-view",
 }
+ALL_PANELS_COPY_TARGET = "all-panels"
 PANEL_COPY_WIDTHS = {
     "header": 150,
     "progress": 150,
@@ -1916,6 +1917,11 @@ def reduce_dashboard_key(
         if len(key) == 1 and key.isprintable():
             return replace(state, search_query=state.search_query + key), None
         return state, None
+    if key == "0":
+        return (
+            replace(state, status_message="Preparing all panels copy"),
+            DashboardAction("copy", panel=ALL_PANELS_COPY_TARGET),
+        )
     if key in PANEL_COPY_KEYS:
         panel = PANEL_COPY_KEYS[key]
         return (
@@ -2306,12 +2312,7 @@ class InteractiveDashboardSink:
         self._pending_copy_action = None
         if panel_name is None:
             return
-        title, renderable = self._panel_copy_source(panel_name)
-        text = render_panel_copy_text(
-            title,
-            renderable,
-            width=PANEL_COPY_WIDTHS[panel_name],
-        )
+        text = self._panel_copy_text(panel_name)
         try:
             path = save_panel_copy(
                 panel_name,
@@ -2334,6 +2335,26 @@ class InteractiveDashboardSink:
         self.state = replace(self.state, status_message=notice)
         self._copy_notice_message = notice
         self._copy_notice_until = time.monotonic() + COPY_NOTICE_SECONDS
+
+    def _panel_copy_text(self, panel_name: str) -> str:
+        if panel_name == ALL_PANELS_COPY_TARGET:
+            sections = []
+            for key, numbered_panel_name in PANEL_COPY_KEYS.items():
+                title, renderable = self._panel_copy_source(numbered_panel_name)
+                sections.append(
+                    render_panel_copy_text(
+                        f"{key} · {title}",
+                        renderable,
+                        width=PANEL_COPY_WIDTHS[numbered_panel_name],
+                    ).rstrip()
+                )
+            return "\n\n".join(sections) + "\n"
+        title, renderable = self._panel_copy_source(panel_name)
+        return render_panel_copy_text(
+            title,
+            renderable,
+            width=PANEL_COPY_WIDTHS[panel_name],
+        )
 
     def _expire_copy_notice_unlocked(self) -> bool:
         if self._copy_notice_until is None or time.monotonic() < self._copy_notice_until:
@@ -3370,7 +3391,8 @@ class InteractiveDashboardSink:
                 "  r confirmed retryable slot\n"
                 "  i phase/state icons  c config  l logs  t top  / search  h help\n\n"
                 "Panel copy\n"
-                "  1–8 copy the numbered panel to OSC 52 and /tmp\n\n"
+                "  0 copy all numbered panels in order to OSC 52 and /tmp\n"
+                "  1–8 copy one numbered panel to OSC 52 and /tmp\n\n"
                 "Metrics\n"
                 "  IR uses completed authoritative evaluations only.\n"
                 "  Unknown values are —, never inferred as zero.\n"
@@ -3398,7 +3420,7 @@ class InteractiveDashboardSink:
         compact_pause_label = "[p]resume" if self.state.paused else "[p]pause"
         labels = (
             (
-                "[1–8] copy",
+                "[0] all · [1–8] panel",
                 quit_label,
                 pause_label,
                 "[←/→] gen",
@@ -3412,7 +3434,7 @@ class InteractiveDashboardSink:
             )
             if width >= 110
             else (
-                "[1–8] copy",
+                "[0]all · [1–8]panel",
                 compact_quit_label,
                 compact_pause_label,
                 "[←/→]gen",
