@@ -15,7 +15,7 @@ from mutation_forge.native_v3.preview import (
 
 
 def _config(tmp_path: Path, *, extra: str = "") -> str:
-    return f'''schema_version = "mforge.experiment.v3-preview.v1"
+    return f'''schema_version = "mforge.experiment.v3-preview.v2"
 protocol = "native-v3-preview"
 exp_id = "preview"
 workspace = "{(tmp_path / "workspace").as_posix()}"

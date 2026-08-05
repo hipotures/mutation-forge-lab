@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from mutation_forge.experiment.json_io import read_json
 from mutation_forge.experiment.provider import LocalCodexAppServerProvider
 from mutation_forge.models import (
     ExactVerification,
@@ -37,23 +38,55 @@ FakeProcess = _FIXTURE.FakeProcess
 FakeScenario = _FIXTURE.FakeScenario
 
 
-def _source() -> str:
+def _source(index: int) -> str:
     return json.dumps(
         {
             "schema_version": "mforge.native.program.v3",
-            "entry": {"op": "no_plan", "reason": "EXPLICIT"},
+            "entry": {
+                "op": "if",
+                "condition": {
+                    "op": "less",
+                    "left": {"op": "feature", "field": "order"},
+                    "right": 30 + index,
+                },
+                "then": {"op": "no_plan", "reason": "NO_MATCH"},
+                "else": {"op": "no_plan", "reason": "EXPLICIT"},
+            },
         },
         separators=(",", ":"),
     )
 
 
-def _response() -> str:
+def _response(
+    slot_ids: tuple[str, ...],
+    *,
+    offset: int = 0,
+    sources: dict[str, str] | None = None,
+) -> str:
+    batch = json.dumps(
+        {
+            "schema_version": "mforge.native.program_batch.v3",
+            "programs": [
+                {
+                    "slot_id": slot_id,
+                    "program_json_raw": (
+                        sources[slot_id]
+                        if sources is not None and slot_id in sources
+                        else _source(offset + index)
+                    ),
+                    "design_summary": f"Bounded mechanism {offset + index}.",
+                }
+                for index, slot_id in enumerate(slot_ids)
+            ],
+        },
+        separators=(",", ":"),
+    )
     return json.dumps(
         {
             "schema_version": "mforge.native.generated_policy.v1",
-            "source": _source(),
-            "design_summary": "Return one bounded no-plan program.",
-            "hypothesis": "The preview route reaches authoritative evaluation.",
+            "source": batch,
+            "design_summary": "Return four bounded mutation programs.",
+            "hypothesis": "The cohort reaches authoritative serial evaluation.",
             "used_fields": [],
             "assumptions": [],
             "expected_failure_modes": [],
@@ -67,7 +100,7 @@ def _config(tmp_path: Path, *, extra: str = "") -> Path:
     (heg_repo / "src" / "sglab").mkdir(parents=True, exist_ok=True)
     path = tmp_path / "experiment.toml"
     path.write_text(
-        f'''schema_version = "mforge.experiment.v3-preview.v1"
+        f'''schema_version = "mforge.experiment.v3-preview.v2"
 protocol = "native-v3-preview"
 exp_id = "preview"
 workspace = "{(tmp_path / "workspace").as_posix()}"
@@ -84,21 +117,35 @@ heg_repo = "{heg_repo.as_posix()}"
     return path
 
 
-def _provider(_: NativeV3PreviewConfig) -> LocalCodexAppServerProvider:
-    scenario = FakeScenario(final_text=_response())
+def _provider_with_responses(
+    responses: list[str],
+) -> LocalCodexAppServerProvider:
+    process_index = 0
 
-    def process_factory(*_: Any, **kwargs: Any) -> FakeProcess:
-        return FakeProcess(scenario, **kwargs)
+    def process_factory(*_: Any, **kwargs: Any) -> Any:
+        nonlocal process_index
+        response = responses[process_index]
+        process_index += 1
+        return FakeProcess(FakeScenario(final_text=response), **kwargs)
 
     return LocalCodexAppServerProvider(
         model="gpt-5.6-luna",
         effort="high",
         concurrency=1,
-        max_repairs=0,
+        max_repairs=1,
         turn_timeout_base_seconds=1,
         process_factory=process_factory,
         auth_checker=lambda _: True,
         persist_artifacts=False,
+    )
+
+
+def _provider(_: NativeV3PreviewConfig) -> LocalCodexAppServerProvider:
+    return _provider_with_responses(
+        [
+        _response(("slot-00", "slot-01", "slot-02", "slot-03"), offset=0),
+        _response(("slot-04", "slot-05", "slot-06", "slot-07"), offset=4),
+        ]
     )
 
 
@@ -160,7 +207,9 @@ def _backend(_: NativeV3PreviewConfig) -> _Backend:
     return _Backend()
 
 
-def test_preview_completes_one_slot_and_status_is_read_only(tmp_path: Path) -> None:
+def test_preview_completes_eight_slots_and_status_is_read_only(
+    tmp_path: Path,
+) -> None:
     path = _config(tmp_path)
 
     result = run_v3_preview(
@@ -171,15 +220,21 @@ def test_preview_completes_one_slot_and_status_is_read_only(tmp_path: Path) -> N
     )
 
     assert result["state"] == "completed"
-    assert result["protocol_version"] == "native-v3-preview.v1"
-    assert result["provider_turns"] == 1
-    assert result["evaluation_count"] == 1
-    assert result["latest_scientific_stop_reason"] == "smoke_panel_complete"
-    turn = Path(str(result["artifacts"]["provider_turn_directory"]))
-    evaluation = Path(str(result["artifacts"]["evaluation_result"]))
-    assert evaluation.is_file()
-    assert evaluation.parent != turn
-    assert not (turn / evaluation.name).exists()
+    assert result["protocol_version"] == "native-v3-preview.v2"
+    assert result["provider_turns"] == 2
+    assert result["evaluation_count"] == 8
+    assert result["cohort_outcome"] == "COMPLETE"
+    assert result["unique_valid_programs"] == 8
+    assert result["valid_slots"] == 8
+    assert result["latest_scientific_stop_reason"] == "cohort_complete"
+    manifest = Path(str(result["artifacts"]["epoch_manifest"]))
+    report = Path(str(result["artifacts"]["cohort_report"]))
+    assert manifest.is_file()
+    assert report.is_file()
+    report_payload = read_json(report)
+    assert report_payload["selected_program_hash"] == (
+        report_payload["canonical_program_order"][0]
+    )
 
     before = {
         item.relative_to(tmp_path): (item.stat().st_mtime_ns, item.read_bytes())
@@ -236,6 +291,99 @@ def test_auth_preflight_is_blocked_resumable_then_completes(
     assert completed["state"] == "completed"
     assert provider_calls == 1
     assert backend_calls == 1
+
+
+def test_partial_batch_is_not_repaired_and_duplicate_is_evaluated_once(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    first_slots = ("slot-00", "slot-01", "slot-02", "slot-03")
+    responses = [
+        _response(
+            first_slots,
+            sources={
+                "slot-01": _source(0),
+                "slot-02": "{}",
+            },
+        ),
+        _response(("slot-04", "slot-05", "slot-06", "slot-07"), offset=4),
+    ]
+
+    result = run_v3_preview(
+        path,
+        provider_factory=lambda _: _provider_with_responses(responses),
+        backend_factory=_backend,
+        auth_available=lambda _: True,
+    )
+    report = read_json(Path(str(result["artifacts"]["cohort_report"])))
+
+    assert result["state"] == "completed"
+    assert result["provider_turns"] == 2
+    assert result["evaluation_count"] == 6
+    assert report["cohort_outcome"] == "DEGRADED"
+    assert report["unique_valid_programs"] == 6
+    assert report["duplicate_aliases"] == 1
+    assert report["batch_reports"][0]["repaired"] is False
+    duplicate_hash = next(
+        program_hash
+        for program_hash, aliases in report["program_aliases"].items()
+        if len(aliases) == 2
+    )
+    program_artifact = read_json(
+        Path(str(result["artifacts"]["cohort_report"])).parent
+        / "programs"
+        / duplicate_hash
+        / "program.json.gz"
+    )
+    assert [item["slot_id"] for item in program_artifact["lineage"]] == [
+        "slot-00",
+        "slot-01",
+    ]
+    assert all(
+        item["provider_attempts"][0]["turn_directory"]
+        for item in program_artifact["lineage"]
+    )
+
+
+def test_wholly_invalid_batch_gets_exactly_one_frozen_repair(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    first_slots = ("slot-00", "slot-01", "slot-02", "slot-03")
+    responses = [
+        _response(
+            first_slots,
+            sources={slot_id: "{}" for slot_id in first_slots},
+        ),
+        _response(first_slots, offset=0),
+        _response(("slot-04", "slot-05", "slot-06", "slot-07"), offset=4),
+    ]
+
+    result = run_v3_preview(
+        path,
+        provider_factory=lambda _: _provider_with_responses(responses),
+        backend_factory=_backend,
+        auth_available=lambda _: True,
+    )
+    report = read_json(Path(str(result["artifacts"]["cohort_report"])))
+
+    assert result["state"] == "completed"
+    assert result["provider_turns"] == 3
+    assert result["evaluation_count"] == 8
+    assert report["cohort_outcome"] == "COMPLETE"
+    assert report["batch_reports"][0]["repaired"] is True
+    assert report["batch_reports"][1]["repaired"] is False
+    attempts = report["batch_reports"][0]["attempts"]
+    assert [attempt["phase"] for attempt in attempts] == [
+        "initial",
+        "repair-01",
+    ]
+    initial_source = Path(attempts[0]["turn_directory"]) / "source.py"
+    repair_source = Path(attempts[1]["turn_directory"]) / "source.py"
+    assert initial_source.is_file()
+    assert repair_source.is_file()
+    assert initial_source.read_bytes() != repair_source.read_bytes()
+    assert all(attempt["provider_turn_id"] for attempt in attempts)
 
 
 def test_v2_workspace_is_rejected_by_preview_without_mutation(

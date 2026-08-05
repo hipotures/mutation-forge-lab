@@ -1,4 +1,4 @@
-"""Explicit one-slot Native v3 preview routing for the public experiment CLI."""
+"""Explicit Native v3 cohort preview routing for the public experiment CLI."""
 
 from __future__ import annotations
 
@@ -18,14 +18,13 @@ from mutation_forge.experiment.config import validate_experiment_id
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.provider import LocalCodexAppServerProvider
 
-from .provider_evaluation import run_provider_evaluation_smoke
-from .serial_evaluator import SerialEpisodeConfig
+from .cohort import run_sequential_cohort
 
 V2_PROTOCOL = "native-v2"
 V3_PREVIEW_SELECTOR = "native-v3-preview"
-V3_PREVIEW_CONFIG_SCHEMA_VERSION = "mforge.experiment.v3-preview.v1"
-V3_PREVIEW_PROTOCOL_VERSION = "native-v3-preview.v1"
-V3_PREVIEW_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3-preview.v1"
+V3_PREVIEW_CONFIG_SCHEMA_VERSION = "mforge.experiment.v3-preview.v2"
+V3_PREVIEW_PROTOCOL_VERSION = "native-v3-preview.v2"
+V3_PREVIEW_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3-preview.v2"
 _STATE_NAME = "native-v3-preview-state.json.gz"
 _V2_TOP_LEVEL_FIELDS = frozenset(
     {"kind", "preset", "run", "model", "search", "evaluation", "resources"}
@@ -190,6 +189,11 @@ def _base_status(config: NativeV3PreviewConfig) -> dict[str, Any]:
         "provider_turns": 0,
         "evaluation_count": 0,
         "valid_ast": False,
+        "cohort_outcome": None,
+        "valid_slots": 0,
+        "unique_valid_programs": 0,
+        "duplicate_aliases": 0,
+        "selected_program_hash": None,
         "scientific_terminal_result": False,
         "usage": None,
         "artifacts": {},
@@ -308,7 +312,7 @@ def _default_provider(
         model=config.model,
         effort=config.effort,
         concurrency=1,
-        max_repairs=0,
+        max_repairs=1,
         turn_timeout_base_seconds=config.timeout_seconds / 2,
         auth_json=Path.home() / ".codex" / "auth.json",
         persist_artifacts=False,
@@ -343,6 +347,13 @@ def _status_from_report(
         "provider_turns": int(report.get("model_turns", 0)),
         "evaluation_count": int(report.get("graph_evaluations", 0)),
         "valid_ast": report.get("valid_ast") is True,
+        "cohort_outcome": report.get("cohort_outcome"),
+        "valid_slots": int(report.get("valid_slots", 0)),
+        "unique_valid_programs": int(
+            report.get("unique_valid_programs", 0)
+        ),
+        "duplicate_aliases": int(report.get("duplicate_aliases", 0)),
+        "selected_program_hash": report.get("selected_program_hash"),
         "scientific_terminal_result": (
             report.get("scientific_terminal_result") is True
         ),
@@ -350,9 +361,8 @@ def _status_from_report(
         "artifacts": {
             key: report[key]
             for key in (
-                "provider_turn_directory",
-                "evaluation_result",
-                "provider_report",
+                "epoch_manifest",
+                "cohort_report",
             )
             if isinstance(report.get(key), str)
         },
@@ -363,21 +373,32 @@ def _status_from_report(
             "state": "completed",
             "resumable": False,
             "terminal": True,
-            "latest_scientific_stop_reason": "smoke_panel_complete",
-            "last_stop_reason": "smoke_panel_complete",
+            "latest_scientific_stop_reason": "cohort_complete",
+            "last_stop_reason": "cohort_complete",
+        }
+    if status == "inconclusive":
+        return {
+            **common,
+            "state": "inconclusive",
+            "resumable": False,
+            "terminal": True,
+            "latest_scientific_stop_reason": "cohort_inconclusive",
+            "last_stop_reason": "cohort_inconclusive",
         }
     if status == "provider_error":
         authentication = report.get("error_classification") == "authentication"
         stop_reason = "preflight_failed" if authentication else "provider_failed"
+        resumable = report.get("resumable") is True
         return {
             **common,
-            "state": "blocked",
-            "resumable": True,
+            "state": "blocked" if resumable else "failed",
+            "resumable": resumable,
+            "terminal": not resumable,
             "latest_infrastructure_stop_reason": stop_reason,
             "last_stop_reason": stop_reason,
             "last_error": report.get("error"),
         }
-    if status == "evaluation_failed":
+    if status in {"evaluation_error", "evaluation_failed"}:
         return {
             **common,
             "state": "blocked",
@@ -403,7 +424,7 @@ def run_v3_preview(
     backend_factory: BackendFactory = _default_backend,
     auth_available: AuthAvailable = Path.is_file,
 ) -> dict[str, Any]:
-    """Run or resume the bounded one-slot Native v3 preview."""
+    """Run or resume the bounded sequential Native v3 cohort preview."""
 
     config = load_v3_preview_config(config_path)
     if config.experiment_root.exists():
@@ -444,18 +465,11 @@ def run_v3_preview(
     provider: LocalCodexAppServerProvider | None = None
     try:
         provider = provider_factory(config)
-        report = run_provider_evaluation_smoke(
+        report = run_sequential_cohort(
             provider,
             config.experiment_root,
             backend_factory=lambda: backend_factory(config),
-            config=SerialEpisodeConfig(
-                order=30,
-                graph_seed=101,
-                policy_seed=17,
-                horizon=1,
-                witness_cap=64,
-                episode_id=f"{config.exp_id}/slot-00",
-            ),
+            episode_id=f"{config.exp_id}/epoch-0000",
         )
     except Exception as error:
         status = {
@@ -475,8 +489,9 @@ def run_v3_preview(
             except Exception as error:
                 status = {
                     **_base_status(config),
-                    "state": "blocked",
-                    "resumable": True,
+                    "state": "failed",
+                    "resumable": False,
+                    "terminal": True,
                     "latest_infrastructure_stop_reason": "provider_close_failed",
                     "last_stop_reason": "provider_close_failed",
                     "last_error": f"{type(error).__name__}: {error}",
