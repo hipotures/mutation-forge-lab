@@ -511,7 +511,7 @@ def test_rebuild_accepts_strict_initial_record_for_incomplete_session(
             "schema_version": "mforge.experiment.session.v2",
             "session_id": "session-000001",
             "session_number": 1,
-            "start_time": "2026-08-04T11:00:00+00:00",
+            "start_time": "2026-08-04T11:00:00.005632+00:00",
             "starting_checkpoint": None,
             "starting_state": "idle",
             "wall_seconds": 60.0,

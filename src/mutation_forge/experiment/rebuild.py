@@ -153,11 +153,19 @@ def _is_initial_session_record(
     record: Mapping[str, Any],
     row: sqlite3.Row,
 ) -> bool:
-    return dict(record) == {
+    observed = dict(record)
+    start_time = observed.pop("start_time", None)
+    try:
+        start_delta = (
+            datetime.fromisoformat(str(start_time))
+            - datetime.fromisoformat(str(row["started_at"]))
+        ).total_seconds()
+    except ValueError:
+        return False
+    return 0 <= start_delta <= 1 and observed == {
         "schema_version": "mforge.experiment.session.v2",
         "session_id": row["session_id"],
         "session_number": row["number"],
-        "start_time": row["started_at"],
         "starting_checkpoint": row["starting_checkpoint"],
         "starting_state": row["starting_state"],
         "wall_seconds": row["wall_seconds"],
