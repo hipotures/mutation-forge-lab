@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 
 import pytest
 
+from mutation_forge.native_v3.canonical import canonical_json_bytes
 from mutation_forge.native_v3.scheduler import (
     EpisodeShard,
     EpisodeSpec,
@@ -242,14 +243,42 @@ def test_provider_call_activity_reports_slots_elapsed_time_and_locked_timeout() 
         event for event in result.telemetry if event.name == "provider_call_completed"
     )
     assert started.fields["slot_ids"] == "slot-00,slot-01"
-    assert started.fields["timeout_seconds"] == 600.0
+    assert started.fields["timeout_ns"] == 600_000_000_000
     assert activities
     assert all(
-        event.fields["operation_elapsed_seconds"] > 0
-        and event.fields["timeout_seconds"] == 600.0
+        event.fields["operation_elapsed_ns"] > 0
+        and event.fields["timeout_ns"] == 600_000_000_000
         for event in activities
     )
     assert completed.fields["slot_ids"] == "slot-00,slot-01"
+    for event in result.telemetry:
+        canonical_json_bytes(dict(event.fields))
+
+
+def test_provider_is_not_invoked_until_started_event_is_accepted() -> None:
+    provider_calls = 0
+
+    def provider(call: ProviderCall) -> ProviderBatch[str]:
+        nonlocal provider_calls
+        provider_calls += 1
+        return ProviderBatch(call.call_id, (), 0)
+
+    def reject_started_event(event: object) -> None:
+        if getattr(event, "name", None) == "provider_call_started":
+            raise RuntimeError("semantic event persistence rejected")
+
+    scheduler = StreamingEpochScheduler(
+        config=_config(provider_concurrency=1, evaluator_workers=2),
+        provider_call=provider,
+        build_shards=_shards,
+        evaluate_shard=lambda shard, _program: (shard.tasks[0].episode_id,),
+        telemetry_sink=reject_started_event,
+    )
+
+    with pytest.raises(RuntimeError, match="semantic event persistence rejected"):
+        scheduler.run(_snapshot(slot_count=2))
+
+    assert provider_calls == 0
 
 
 def test_late_duplicate_alias_joins_the_in_flight_canonical_evaluation() -> None:

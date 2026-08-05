@@ -446,35 +446,51 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                 call = ProviderCall(call_id, slot_ids, snapshot)
                 for slot_id in slot_ids:
                     slot_statuses[slot_id] = SlotStatus.GENERATING
-                if self.streaming_provider_call is None:
-                    future = provider_executor.submit(self.provider_call, call)
-                else:
-
-                    def entry_sink(
+                entry_sink: Callable[[GeneratedEntry[ProgramT]], None] | None = None
+                if self.streaming_provider_call is not None:
+                    def stream_entry_sink(
                         entry: GeneratedEntry[ProgramT],
                         *,
                         frozen_call: ProviderCall = call,
                     ) -> None:
                         provider_entry_queue.put((frozen_call, entry), block=True)
 
-                    future = provider_executor.submit(
-                        self.streaming_provider_call,
-                        call,
-                        entry_sink,
-                    )
-                provider_futures[future] = call
+                    entry_sink = stream_entry_sink
+
                 call_started_ns = time.monotonic_ns()
                 provider_started_ns[call_id] = call_started_ns
                 provider_activity_ns[call_id] = call_started_ns
+                # Persist the strict, replayable start record before creating
+                # any external provider work. A local serialization or
+                # persistence failure must not leak a model call.
                 emit(
                     "provider_call_started",
                     call_id=call_id,
-                    provider_calls_in_flight=len(provider_futures),
+                    provider_calls_in_flight=len(provider_futures) + 1,
                     slot_count=len(slot_ids),
                     slot_ids=",".join(slot_ids),
                     generation=snapshot.epoch_number,
-                    timeout_seconds=self.config.provider_call_timeout_seconds,
+                    timeout_ns=(
+                        int(self.config.provider_call_timeout_seconds * 1e9)
+                        if self.config.provider_call_timeout_seconds is not None
+                        else None
+                    ),
                 )
+                try:
+                    if self.streaming_provider_call is None:
+                        future = provider_executor.submit(self.provider_call, call)
+                    else:
+                        assert entry_sink is not None
+                        future = provider_executor.submit(
+                            self.streaming_provider_call,
+                            call,
+                            entry_sink,
+                        )
+                except BaseException:
+                    provider_started_ns.pop(call_id, None)
+                    provider_activity_ns.pop(call_id, None)
+                    raise
+                provider_futures[future] = call
 
         def consume_entry(
             call: ProviderCall,
@@ -598,8 +614,12 @@ class StreamingEpochScheduler[ProgramT, ResultT]:
                     provider_calls_in_flight=len(provider_futures),
                     slot_ids=",".join(call.slot_ids),
                     generation=snapshot.epoch_number,
-                    operation_elapsed_seconds=(now_ns - started_call_ns) / 1e9,
-                    timeout_seconds=self.config.provider_call_timeout_seconds,
+                    operation_elapsed_ns=now_ns - started_call_ns,
+                    timeout_ns=(
+                        int(self.config.provider_call_timeout_seconds * 1e9)
+                        if self.config.provider_call_timeout_seconds is not None
+                        else None
+                    ),
                 )
 
         def expand_candidates() -> bool:

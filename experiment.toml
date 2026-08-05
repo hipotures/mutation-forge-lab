@@ -1,6 +1,6 @@
 schema_version = "mforge.experiment.v3"
 
-exp_id = "exp_005"
+exp_id = "exp_006"
 workspace = "./workspace"
 
 kind = "heg"

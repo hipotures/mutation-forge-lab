@@ -338,7 +338,7 @@ def test_native_v3_provider_call_heartbeat_populates_classic_slot_table() -> Non
                 call_id="epoch-0001:provider:0000",
                 slot_ids="slot-00,slot-01,slot-02,slot-03",
                 provider_calls_in_flight=1,
-                timeout_seconds=600.0,
+                timeout_ns=600_000_000_000,
             )
         )
         sink.write(
@@ -348,8 +348,8 @@ def test_native_v3_provider_call_heartbeat_populates_classic_slot_table() -> Non
                 call_id="epoch-0001:provider:0000",
                 slot_ids="slot-00,slot-01,slot-02,slot-03",
                 provider_calls_in_flight=1,
-                operation_elapsed_seconds=42.0,
-                timeout_seconds=600.0,
+                operation_elapsed_ns=42_000_000_000,
+                timeout_ns=600_000_000_000,
             )
         )
 

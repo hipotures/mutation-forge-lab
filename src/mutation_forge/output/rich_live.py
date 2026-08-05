@@ -276,12 +276,18 @@ class RichLiveSink:
         }:
             slot = payload.get("slot", payload.get("slot_ids"))
             phase = "repair" if event_type == "repair_started" else "provider"
+            timeout_ns = payload.get("timeout_ns")
+            timeout = (
+                float(timeout_ns) / 1e9
+                if isinstance(timeout_ns, int) and not isinstance(timeout_ns, bool)
+                else payload.get("timeout_seconds", 120.0)
+            )
             self._active_operation = {
                 "phase": phase,
                 "slot": slot if isinstance(slot, str) else "?",
                 "generation": payload.get("generation"),
                 "started": now,
-                "timeout": payload.get("timeout_seconds", 120.0),
+                "timeout": timeout,
                 "thread": payload.get("provider_thread_id"),
                 "turn": payload.get("provider_turn_id"),
             }
@@ -292,11 +298,20 @@ class RichLiveSink:
             "provider_call_activity",
             "repair_activity",
         }:
+            elapsed_ns = payload.get("operation_elapsed_ns")
             elapsed_value = payload.get("operation_elapsed_seconds")
             operation_elapsed = (
-                float(elapsed_value)
+                float(elapsed_ns) / 1e9
+                if isinstance(elapsed_ns, int) and not isinstance(elapsed_ns, bool)
+                else float(elapsed_value)
                 if isinstance(elapsed_value, (int, float)) and not isinstance(elapsed_value, bool)
                 else 0.0
+            )
+            timeout_ns = payload.get("timeout_ns")
+            timeout = (
+                float(timeout_ns) / 1e9
+                if isinstance(timeout_ns, int) and not isinstance(timeout_ns, bool)
+                else payload.get("timeout_seconds", 120.0)
             )
             if self._active_operation is None:
                 self._active_operation = {
@@ -304,7 +319,7 @@ class RichLiveSink:
                     "slot": payload.get("slot", payload.get("slot_ids", "?")),
                     "generation": payload.get("generation"),
                     "started": now - operation_elapsed,
-                    "timeout": payload.get("timeout_seconds", 120.0),
+                    "timeout": timeout,
                 }
             elif event_type == "provider_call_activity":
                 self._active_operation["started"] = now - operation_elapsed
@@ -787,7 +802,12 @@ class RichLiveSink:
             return
         now = time.monotonic()
         event_type = event.event_type
-        elapsed = payload.get("operation_elapsed_seconds")
+        elapsed_ns = payload.get("operation_elapsed_ns")
+        elapsed = (
+            float(elapsed_ns) / 1e9
+            if isinstance(elapsed_ns, int) and not isinstance(elapsed_ns, bool)
+            else payload.get("operation_elapsed_seconds")
+        )
         if not isinstance(elapsed, int | float) or isinstance(elapsed, bool):
             latency_ns = payload.get("latency_ns")
             elapsed = (
@@ -921,7 +941,12 @@ class RichLiveSink:
         }:
             # Heartbeats should keep the tail current without consuming all
             # six rows during a long model turn.
-            elapsed = payload.get("operation_elapsed_seconds")
+            elapsed_ns = payload.get("operation_elapsed_ns")
+            elapsed = (
+                float(elapsed_ns) / 1e9
+                if isinstance(elapsed_ns, int) and not isinstance(elapsed_ns, bool)
+                else payload.get("operation_elapsed_seconds")
+            )
             elapsed_label = (
                 f" {float(elapsed):.0f}s"
                 if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)

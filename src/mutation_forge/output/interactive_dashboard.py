@@ -804,6 +804,9 @@ def _rational_number(value: object) -> float | None:
 
 
 def _provider_elapsed(payload: Mapping[str, JsonValue]) -> float | None:
+    elapsed_ns = _integer(payload.get("operation_elapsed_ns"))
+    if elapsed_ns is not None and elapsed_ns >= 0:
+        return elapsed_ns / 1e9
     duration_ms = _number(payload.get("provider_duration_ms"))
     if duration_ms is not None and duration_ms >= 0:
         return duration_ms / 1000.0
@@ -832,7 +835,12 @@ def _update_provider_call_slots(
     generation = _integer(payload.get("generation"))
     target_generation = state.generation if generation is None else generation
     elapsed = _provider_elapsed(payload)
-    timeout = _number(payload.get("timeout_seconds"))
+    timeout_ns = _integer(payload.get("timeout_ns"))
+    timeout = (
+        timeout_ns / 1e9
+        if timeout_ns is not None and timeout_ns >= 0
+        else _number(payload.get("timeout_seconds"))
+    )
     error_type = _text(payload.get("error_type"))
     error_message = _text(payload.get("error_message"))
     diagnostic = (
@@ -1050,8 +1058,13 @@ def _event_activity(event: Event) -> ActivityEntry | None:
         "repair_activity",
         "provider_call_activity",
     }:
-        elapsed = _number(payload.get("operation_elapsed_seconds"))
-        timeout = _number(payload.get("timeout_seconds"))
+        elapsed = _provider_elapsed(payload)
+        timeout_ns = _integer(payload.get("timeout_ns"))
+        timeout = (
+            timeout_ns / 1e9
+            if timeout_ns is not None and timeout_ns >= 0
+            else _number(payload.get("timeout_seconds"))
+        )
         timing = ""
         if elapsed is not None:
             timing = (
