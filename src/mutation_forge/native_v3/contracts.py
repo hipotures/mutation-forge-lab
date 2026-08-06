@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from fractions import Fraction
 from typing import Any, cast
@@ -36,6 +36,10 @@ class ValueType(StrEnum):
     VERTEX_SET = "VertexSetRef"
     EDGE_SET = "EdgeSetRef"
     MATCHING = "MatchingRef"
+    RELOCATION_SET = "RelocationSetRef"
+    RELOCATION = "RelocationRef"
+    FANOUT_SET = "FanoutSetRef"
+    FANOUT = "FanoutRef"
 
 
 SELECTOR_TYPES: dict[str, ValueType] = {
@@ -127,6 +131,119 @@ FEATURE_TYPES: dict[str, ValueType] = {
     "minimum_degree": ValueType.INT,
     "maximum_degree": ValueType.INT,
 }
+
+PICK_MODES = ("seeded_uniform", "seeded_weighted", "require_singleton")
+WEIGHT_FEATURES = ("uniform", "degree", "inverse_degree")
+BINARY_OPERATIONS = (
+    "add",
+    "subtract",
+    "multiply",
+    "minimum",
+    "maximum",
+    "equal",
+    "less",
+    "less_equal",
+    "greater",
+    "greater_equal",
+    "and",
+    "or",
+)
+UNARY_OPERATIONS = ("not", "exists")
+NO_PLAN_REASONS = ("EXPLICIT", "NO_MATCH", "ILLEGAL_FINAL_STATE", "NO_EFFECT")
+
+type LiteralValue = str | int
+
+
+@dataclass(frozen=True, slots=True)
+class SelectorDefinition:
+    result_type: ValueType
+    cost: int
+    arguments: dict[str, ValueType]
+    literal_domains: dict[str, tuple[LiteralValue, ...]] = field(default_factory=dict)
+    relation: str = ""
+    ordered_nonnegative_bounds: tuple[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActionDefinition:
+    arguments: dict[str, ValueType]
+    relation: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramContract:
+    selectors: dict[str, SelectorDefinition]
+    actions: dict[str, ActionDefinition]
+    context_fields: dict[str, ValueType]
+    graph_features: dict[str, ValueType]
+    pick_results: dict[ValueType, ValueType]
+
+
+DEFAULT_SELECTOR_DEFINITIONS = {
+    selector_id: SelectorDefinition(
+        result_type=SELECTOR_TYPES[selector_id],
+        cost=SELECTOR_COSTS[selector_id],
+        arguments=SELECTOR_ARGUMENT_TYPES[selector_id],
+        literal_domains={
+            **({"mode": ("min", "max")} if "mode" in SELECTOR_ARGUMENT_TYPES[selector_id] else {}),
+            **(
+                {"k": (2, 3, 4)}
+                if selector_id == "matching_k_switch_reconnections"
+                else {}
+            ),
+        },
+    )
+    for selector_id in SELECTOR_TYPES
+}
+
+DEFAULT_ACTION_DEFINITIONS = {
+    "add_edge": ActionDefinition(
+        arguments=ACTION_ARGUMENT_TYPES["add_edge"],
+        relation="edge must be absent from the current overlay",
+    ),
+    "remove_edge": ActionDefinition(
+        arguments=ACTION_ARGUMENT_TYPES["remove_edge"],
+        relation="edge must be present in the current overlay",
+    ),
+    "relocate_endpoint": ActionDefinition(
+        arguments=ACTION_ARGUMENT_TYPES["relocate_endpoint"],
+        relation=(
+            "keep must be an endpoint of edge; new must not be an endpoint; "
+            "the replacement edge must be absent"
+        ),
+    ),
+    "k_switch": ActionDefinition(
+        arguments=ACTION_ARGUMENT_TYPES["k_switch"],
+        relation=(
+            "matching contains 2, 3, or 4 vertex-disjoint source edges and "
+            "endpoint-preserving absent target edges"
+        ),
+    ),
+    "edge_fanout": ActionDefinition(
+        arguments=ACTION_ARGUMENT_TYPES["edge_fanout"],
+        relation=(
+            "w must not be an endpoint of edge and both replacement edges must be absent"
+        ),
+    ),
+    "edge_fold": ActionDefinition(
+        arguments=ACTION_ARGUMENT_TYPES["edge_fold"],
+        relation="path contains two present edges and its endpoint edge must be absent",
+    ),
+}
+
+DEFAULT_PROGRAM_CONTRACT = ProgramContract(
+    selectors=DEFAULT_SELECTOR_DEFINITIONS,
+    actions=DEFAULT_ACTION_DEFINITIONS,
+    context_fields=CTX_TYPES,
+    graph_features=FEATURE_TYPES,
+    pick_results={
+        ValueType.VERTEX_SET: ValueType.VERTEX,
+        ValueType.EDGE_SET: ValueType.EDGE,
+        ValueType.NON_EDGE: ValueType.NON_EDGE,
+        ValueType.PATH: ValueType.PATH,
+        ValueType.MATCHING: ValueType.MATCHING,
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +414,7 @@ def _expression(
     environment: dict[str, ValueType],
     stats: _Stats,
     limits: ProgramLimits,
+    contract: ProgramContract,
 ) -> ValueType:
     _record_node(stats, path=path, depth=depth, limits=limits)
     if isinstance(value, bool):
@@ -320,7 +438,11 @@ def _expression(
     if operation in {"ctx", "feature"}:
         _exact_keys(expression, required={"op", "field"}, path=path)
         field = _identifier(expression["field"], f"{path}/field")
-        registry = CTX_TYPES if operation == "ctx" else FEATURE_TYPES
+        registry = (
+            contract.context_fields
+            if operation == "ctx"
+            else contract.graph_features
+        )
         if field not in registry:
             raise _InvalidProgram("unknown_field", path, f"unsupported {operation} field: {field}")
         return registry[field]
@@ -344,10 +466,11 @@ def _expression(
     if operation == "selector":
         _exact_keys(expression, required={"op", "selector_id", "arguments"}, path=path)
         selector_id = _identifier(expression["selector_id"], f"{path}/selector_id")
-        if selector_id not in SELECTOR_TYPES:
+        if selector_id not in contract.selectors:
             raise _InvalidProgram("unknown_selector", path, f"unknown selector: {selector_id}")
+        selector = contract.selectors[selector_id]
         arguments = _object(expression["arguments"], f"{path}/arguments")
-        expected_arguments = SELECTOR_ARGUMENT_TYPES[selector_id]
+        expected_arguments = selector.arguments
         if set(arguments) != set(expected_arguments):
             raise _InvalidProgram(
                 "selector_arguments",
@@ -362,6 +485,7 @@ def _expression(
                 environment=environment,
                 stats=stats,
                 limits=limits,
+                contract=contract,
             )
             if actual_type != expected_type:
                 raise _InvalidProgram(
@@ -369,25 +493,48 @@ def _expression(
                     f"{path}/arguments/{key}",
                     f"expected {expected_type}, got {actual_type}",
                 )
-        if "mode" in arguments:
-            mode = arguments["mode"]
-            if not isinstance(mode, str) or mode not in {"min", "max"}:
+        for argument_name, allowed_values in selector.literal_domains.items():
+            argument_value = arguments[argument_name]
+            if (
+                isinstance(argument_value, bool)
+                or argument_value not in allowed_values
+            ):
+                if argument_name == "mode":
+                    message = "selector mode must be the literal min or max"
+                elif (
+                    selector_id == "matching_k_switch_reconnections"
+                    and argument_name == "k"
+                ):
+                    message = "k-switch requires the literal 2, 3, or 4"
+                else:
+                    message = (
+                        f"{selector_id}.{argument_name} must be one of "
+                        f"{list(allowed_values)}"
+                    )
                 raise _InvalidProgram(
                     "selector_argument_value",
-                    f"{path}/arguments/mode",
-                    "selector mode must be the literal min or max",
+                    f"{path}/arguments/{argument_name}",
+                    message,
                 )
-        if selector_id == "matching_k_switch_reconnections":
-            k = arguments["k"]
-            if not isinstance(k, int) or isinstance(k, bool) or k not in {2, 3, 4}:
+        if selector.ordered_nonnegative_bounds is not None:
+            minimum_name, maximum_name = selector.ordered_nonnegative_bounds
+            minimum = arguments[minimum_name]
+            maximum = arguments[maximum_name]
+            if (
+                isinstance(minimum, int)
+                and not isinstance(minimum, bool)
+                and isinstance(maximum, int)
+                and not isinstance(maximum, bool)
+                and (minimum < 0 or maximum < minimum)
+            ):
                 raise _InvalidProgram(
                     "selector_argument_value",
-                    f"{path}/arguments/k",
-                    "k-switch requires the literal 2, 3, or 4",
+                    f"{path}/arguments",
+                    "distance band literals must satisfy 0 <= minimum <= maximum",
                 )
         stats.selector_calls += 1
-        stats.selector_cost += SELECTOR_COSTS[selector_id]
-        return SELECTOR_TYPES[selector_id]
+        stats.selector_cost += selector.cost
+        return selector.result_type
     if operation == "pick":
         _exact_keys(
             expression,
@@ -402,16 +549,17 @@ def _expression(
             environment=environment,
             stats=stats,
             limits=limits,
+            contract=contract,
         )
         mode = expression["mode"]
-        if mode not in {"seeded_uniform", "seeded_weighted", "require_singleton"}:
+        if mode not in PICK_MODES:
             raise _InvalidProgram("pick_mode", path, "unsupported pick mode")
         if mode == "seeded_weighted":
             weight_feature = _identifier(
                 expression.get("weight_feature"),
                 f"{path}/weight_feature",
             )
-            if weight_feature not in {"uniform", "degree", "inverse_degree"}:
+            if weight_feature not in WEIGHT_FEATURES:
                 raise _InvalidProgram(
                     "weight_feature",
                     f"{path}/weight_feature",
@@ -429,31 +577,10 @@ def _expression(
                 f"{path}/weight_feature",
                 "weight_feature is valid only for seeded_weighted",
             )
-        result_types = {
-            ValueType.VERTEX_SET: ValueType.VERTEX,
-            ValueType.EDGE_SET: ValueType.EDGE,
-            ValueType.NON_EDGE: ValueType.NON_EDGE,
-            ValueType.PATH: ValueType.PATH,
-            ValueType.MATCHING: ValueType.MATCHING,
-        }
-        if source_type not in result_types:
+        if source_type not in contract.pick_results:
             raise _InvalidProgram("pick_type", path, f"cannot pick from {source_type}")
-        return result_types[source_type]
-    binary_types = {
-        "add",
-        "subtract",
-        "multiply",
-        "minimum",
-        "maximum",
-        "equal",
-        "less",
-        "less_equal",
-        "greater",
-        "greater_equal",
-        "and",
-        "or",
-    }
-    if operation in binary_types:
+        return contract.pick_results[source_type]
+    if operation in BINARY_OPERATIONS:
         _exact_keys(expression, required={"op", "left", "right"}, path=path)
         left = _expression(
             expression["left"],
@@ -462,6 +589,7 @@ def _expression(
             environment=environment,
             stats=stats,
             limits=limits,
+            contract=contract,
         )
         right = _expression(
             expression["right"],
@@ -470,6 +598,7 @@ def _expression(
             environment=environment,
             stats=stats,
             limits=limits,
+            contract=contract,
         )
         if operation in {"and", "or"}:
             if left != ValueType.BOOL or right != ValueType.BOOL:
@@ -485,7 +614,7 @@ def _expression(
         }:
             raise _InvalidProgram("expression_type", path, "numeric operands required")
         return ValueType.RATIONAL if ValueType.RATIONAL in {left, right} else ValueType.INT
-    if operation in {"not", "exists"}:
+    if operation in UNARY_OPERATIONS:
         _exact_keys(expression, required={"op", "value"}, path=path)
         operand = _expression(
             expression["value"],
@@ -494,6 +623,7 @@ def _expression(
             environment=environment,
             stats=stats,
             limits=limits,
+            contract=contract,
         )
         if operation == "not" and operand != ValueType.BOOL:
             raise _InvalidProgram("expression_type", path, "not requires a boolean")
@@ -509,6 +639,7 @@ def _node(
     environment: dict[str, ValueType],
     stats: _Stats,
     limits: ProgramLimits,
+    contract: ProgramContract,
     allow_terminal: bool = True,
 ) -> frozenset[str]:
     _record_node(stats, path=path, depth=depth, limits=limits)
@@ -534,6 +665,7 @@ def _node(
                 environment=environment.copy(),
                 stats=stats,
                 limits=limits,
+                contract=contract,
                 allow_terminal=allow_terminal,
             )
             block_outcomes.discard("continue")
@@ -551,6 +683,7 @@ def _node(
             environment=environment,
             stats=stats,
             limits=limits,
+            contract=contract,
         )
         nested = environment.copy()
         nested[name] = value_type
@@ -562,6 +695,7 @@ def _node(
             environment=nested,
             stats=stats,
             limits=limits,
+            contract=contract,
             allow_terminal=allow_terminal,
         )
     if operation == "if":
@@ -573,6 +707,7 @@ def _node(
             environment=environment,
             stats=stats,
             limits=limits,
+            contract=contract,
         )
         if condition_type != ValueType.BOOL:
             raise _InvalidProgram("condition", path, "if condition must be boolean")
@@ -584,6 +719,7 @@ def _node(
             environment=environment.copy(),
             stats=then_stats,
             limits=limits,
+            contract=contract,
             allow_terminal=allow_terminal,
         )
         else_stats = _Stats()
@@ -594,6 +730,7 @@ def _node(
             environment=environment.copy(),
             stats=else_stats,
             limits=limits,
+            contract=contract,
             allow_terminal=allow_terminal,
         )
         _merge_runtime_max(stats, [then_stats, else_stats])
@@ -614,6 +751,7 @@ def _node(
                 environment=environment.copy(),
                 stats=current_stats,
                 limits=limits,
+                contract=contract,
                 allow_terminal=allow_terminal,
             )
             try_branch_stats.append(current_stats)
@@ -632,6 +770,7 @@ def _node(
             environment=environment.copy(),
             stats=body_stats,
             limits=limits,
+            contract=contract,
             allow_terminal=False,
         )
         if repeat_outcomes != frozenset({"continue"}):
@@ -677,6 +816,7 @@ def _node(
                 environment=environment.copy(),
                 stats=current_stats,
                 limits=limits,
+                contract=contract,
                 allow_terminal=allow_terminal,
             )
             choose_branch_stats.append(current_stats)
@@ -685,10 +825,10 @@ def _node(
     if operation == "apply":
         _exact_keys(node, required={"op", "action_id", "arguments"}, path=path)
         action_id = _identifier(node["action_id"], f"{path}/action_id")
-        if action_id not in ACTION_ARGUMENT_TYPES:
+        if action_id not in contract.actions:
             raise _InvalidProgram("unknown_action", path, f"unknown action: {action_id}")
         arguments = _object(node["arguments"], f"{path}/arguments")
-        expected = ACTION_ARGUMENT_TYPES[action_id]
+        expected = contract.actions[action_id].arguments
         if set(arguments) != set(expected):
             raise _InvalidProgram(
                 "action_arguments",
@@ -703,6 +843,7 @@ def _node(
                 environment=environment,
                 stats=stats,
                 limits=limits,
+                contract=contract,
             )
             if actual != expected_type:
                 raise _InvalidProgram(
@@ -719,7 +860,7 @@ def _node(
         return frozenset({"terminal"})
     if operation == "no_plan":
         _exact_keys(node, required={"op", "reason"}, path=path)
-        if node["reason"] not in {"EXPLICIT", "NO_MATCH", "ILLEGAL_FINAL_STATE", "NO_EFFECT"}:
+        if node["reason"] not in NO_PLAN_REASONS:
             raise _InvalidProgram("no_plan_reason", path, "unsupported NoPlan reason")
         if not allow_terminal:
             raise _InvalidProgram("terminal", path, "terminal node is forbidden here")
@@ -744,8 +885,10 @@ def validate_program(
     raw: str,
     *,
     limits: ProgramLimits | None = None,
+    contract: ProgramContract | None = None,
 ) -> ProgramValidation:
     effective_limits = limits or ProgramLimits()
+    effective_contract = contract or DEFAULT_PROGRAM_CONTRACT
     try:
         parsed = parse_strict_json(
             raw,
@@ -767,6 +910,7 @@ def validate_program(
             environment={},
             stats=stats,
             limits=effective_limits,
+            contract=effective_contract,
         )
         if outcomes != frozenset({"terminal"}):
             raise _InvalidProgram(
