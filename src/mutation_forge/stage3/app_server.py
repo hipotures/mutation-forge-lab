@@ -130,6 +130,16 @@ class GenerationResult:
     duration_ms: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CompactionResult:
+    thread_id: str
+    turn_id: str
+    item_id: str
+    request_id: int
+    usage: TokenUsage | None
+    duration_ms: int
+
+
 ProcessFactory = Callable[..., Any]
 AuthChecker = Callable[[IsolatedCapsule], bool]
 
@@ -716,6 +726,36 @@ class CodexAppServerAdapter:
             allow_server_retry=True,
         )
 
+    def compact_persistent_thread(self) -> CompactionResult:
+        """Run one explicit compaction turn on an experimental durable thread."""
+
+        if self._thread is None or self._thread.get("ephemeral") is not False:
+            raise IsolationError("compaction requires a durable thread")
+        if self._turns >= self.limits.max_turns:
+            raise TurnError("turn limit exceeded")
+        thread_id = cast(str, self._thread["id"])
+        self._turns += 1
+        try:
+            result = self._run_compaction(thread_id)
+            self._last_status = "completed"
+            return result
+        except Exception:
+            self._last_status = "failed"
+            self._failed = True
+            if self._current_thread_id and self._current_turn_id and self._process is not None:
+                with suppress(Exception):
+                    self._request(
+                        "turn/interrupt",
+                        {
+                            "threadId": self._current_thread_id,
+                            "turnId": self._current_turn_id,
+                        },
+                        timeout=min(1.0, self.limits.usage_grace),
+                    )
+            self._drain_evidence()
+            self.close(force=True)
+            raise
+
     def _generate_on_thread(
         self,
         prompt: str,
@@ -1010,6 +1050,197 @@ class CodexAppServerAdapter:
             cast(str | None, cast(Json, self._thread).get("path")),
             tuple(self._diag),
             turn_duration_ms,
+        )
+
+    def _run_compaction(self, thread_id: str) -> CompactionResult:
+        self._current_thread_id = thread_id
+        self._current_turn_id = None
+        self._last_usage_raw = None
+        request_id = self._send("thread/compact/start", {"threadId": thread_id})
+        response_received = False
+        turn_id = None
+        pending = None
+        item_id = None
+        item_completed = False
+        terminal = False
+        usage_raw = None
+        duration_ms = None
+        started = time.monotonic()
+        deadline = started + self.limits.turn_timeout
+        self._active.clear()
+        self._completed.clear()
+        while time.monotonic() < deadline:
+            msg = self._read_message(deadline)
+            if msg is None:
+                if self._stdout_overflow:
+                    raise ProtocolError("incoming message exceeds limit")
+                if self._stderr_exceeded:
+                    raise ProtocolError("output limit exceeded")
+                if (
+                    time.monotonic() >= deadline
+                    and self._process is not None
+                    and self._process.poll() is None
+                ):
+                    raise TurnError("compaction timed out")
+                raise TurnError("app-server EOF before compaction completion")
+            if "id" in msg and "method" in msg:
+                self._deny_server_request(msg)
+            if "id" in msg:
+                if msg.get("id") != request_id:
+                    self._deny_server_request(msg)
+                elif "error" in msg:
+                    raise TurnError("thread/compact/start failed")
+                elif msg.get("result") != {}:
+                    raise ProtocolError("thread/compact/start returned malformed response")
+                else:
+                    response_received = True
+                    if terminal:
+                        break
+                continue
+            method = msg.get("method")
+            event = msg.get("params")
+            if not isinstance(method, str) or not isinstance(event, Mapping):
+                raise ProtocolError("malformed compaction notification")
+            if self._consume_global_notification(method, event):
+                continue
+            if method == "warning":
+                if (
+                    not isinstance(event.get("message"), str)
+                    or not event["message"]
+                    or event.get("threadId") != thread_id
+                ):
+                    raise ProtocolError("malformed app-server warning")
+                continue
+            if method == "thread/compacted":
+                self._correlate_thread_started(event, thread_id)
+                continue
+            if method not in {
+                "turn/started",
+                "item/started",
+                "item/completed",
+                "thread/tokenUsage/updated",
+                "thread/status/changed",
+                "turn/completed",
+                "error",
+            }:
+                raise ProtocolError(f"unknown compaction notification: {method}")
+            observed = self._correlate_event(method, event, thread_id, turn_id)
+            if turn_id is None and observed is not None:
+                if pending is not None and observed != pending:
+                    raise ProtocolError("foreign compaction event before response")
+                pending = observed
+            if method == "turn/started":
+                turn, _ = self._validated_turn(event, source="turn/started")
+                if turn.get("status") != "inProgress":
+                    raise ProtocolError("compaction turn started non-running")
+                turn_id = cast(str, turn["id"])
+                self._current_turn_id = turn_id
+            elif method == "item/started":
+                current_id, item_type, _ = self._item_payload(event)
+                if item_type != "contextCompaction":
+                    raise IsolationError(
+                        f"unsupported compaction item type: {item_type}"
+                    )
+                if item_id is not None or current_id in self._completed:
+                    raise ProtocolError("duplicate compaction item")
+                item_id = current_id
+                self._active[current_id] = item_type
+            elif method == "item/completed":
+                item = self._complete_item(event)
+                if item.get("type") != "contextCompaction" or item.get("id") != item_id:
+                    raise ProtocolError("completed a different compaction item")
+                item_completed = True
+            elif method == "thread/tokenUsage/updated":
+                token = event.get("tokenUsage")
+                last = token.get("last") if isinstance(token, Mapping) else None
+                if isinstance(last, Mapping):
+                    usage_raw = dict(last)
+                    self._last_usage_raw = usage_raw
+            elif method == "thread/status/changed":
+                status = event.get("status")
+                status_type = status.get("type") if isinstance(status, Mapping) else status
+                if status_type in {
+                    "systemError",
+                    "failed",
+                    "interrupted",
+                    "cancelled",
+                }:
+                    raise TurnError(f"terminal compaction status: {status_type}")
+            elif method == "turn/completed":
+                turn, ids = self._validated_turn(event, source="turn/completed")
+                if turn.get("status") != "completed":
+                    raise TurnError(
+                        f"compaction ended with status {turn.get('status')!r}"
+                    )
+                if not item_completed or item_id is None or self._active:
+                    raise ProtocolError("compaction item did not complete")
+                if turn.get("itemsView") != "notLoaded" and item_id not in ids:
+                    raise ProtocolError(
+                        "contextCompaction item absent from completed turn"
+                    )
+                reported_duration = turn.get("durationMs")
+                if reported_duration is not None and (
+                    not isinstance(reported_duration, int)
+                    or isinstance(reported_duration, bool)
+                    or reported_duration < 0
+                ):
+                    raise ProtocolError(
+                        "compaction turn returned invalid durationMs"
+                    )
+                duration_ms = (
+                    reported_duration
+                    if reported_duration is not None
+                    else round((time.monotonic() - started) * 1000)
+                )
+                turn_id = cast(str, turn["id"])
+                self._current_turn_id = turn_id
+                terminal = True
+                if response_received:
+                    break
+            elif method == "error":
+                if not isinstance(event.get("error"), Mapping) or not isinstance(
+                    event.get("willRetry"), bool
+                ):
+                    raise ProtocolError("malformed app-server error")
+                if event["willRetry"]:
+                    continue
+                raise TurnError("terminal compaction error")
+        if not terminal or not response_received:
+            raise TurnError("compaction timed out")
+        if turn_id is None or item_id is None:
+            raise ProtocolError("compaction completion lacked correlated identity")
+        end = time.monotonic() + self.limits.usage_grace
+        while time.monotonic() < end:
+            msg = self._read_message(end)
+            if msg is None:
+                break
+            if "id" in msg:
+                self._deny_server_request(msg)
+            method = msg.get("method")
+            event = msg.get("params")
+            if method in _GLOBAL and isinstance(event, Mapping):
+                self._consume_global_notification(method, event)
+                continue
+            if method == "thread/tokenUsage/updated" and isinstance(event, Mapping):
+                self._correlate_event(method, event, thread_id, turn_id)
+                token = event.get("tokenUsage")
+                last = token.get("last") if isinstance(token, Mapping) else None
+                if isinstance(last, Mapping):
+                    usage_raw = dict(last)
+                    self._last_usage_raw = usage_raw
+            elif method == "thread/status/changed" and isinstance(event, Mapping):
+                self._correlate_event(method, event, thread_id, turn_id)
+            elif method == "thread/compacted" and isinstance(event, Mapping):
+                self._correlate_thread_started(event, thread_id)
+            else:
+                raise ProtocolError("unexpected notification after compaction")
+        return CompactionResult(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=item_id,
+            request_id=request_id,
+            usage=self._usage(usage_raw) if usage_raw is not None else None,
+            duration_ms=cast(int, duration_ms),
         )
 
     def _usage(self, raw: Mapping[str, Any] | None) -> TokenUsage:

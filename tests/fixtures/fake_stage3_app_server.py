@@ -81,6 +81,14 @@ class FakeScenario:
     dangling_reasoning: bool = False
     warning_message: str | None = None
     thread_id: str = "thread-1"
+    compaction_terminal_status: str = "completed"
+    compaction_item_type: str = "contextCompaction"
+    compaction_omit_item_completion: bool = False
+    compaction_omit_turn_completion: bool = False
+    compaction_close_after_events: bool = False
+    compaction_hang: bool = False
+    compaction_usage_before_completion: bool = False
+    compaction_deprecated_notification: bool = False
 
 
 class FakeProcess:
@@ -92,6 +100,8 @@ class FakeProcess:
         self.stdin = _In(self)
         self.returncode = None
         self.turn_index = 0
+        self.compaction_index = 0
+        self.received_requests: list[dict[str, Any]] = []
 
     def receive(self, line: bytes):
         if self.scenario.crash:
@@ -108,6 +118,7 @@ class FakeProcess:
         s = self.scenario
         q = self.stdout
         thread_id = s.thread_id
+        self.received_requests.append(r)
 
         def response(result):
             q.put({"id": i, "result": result})
@@ -196,6 +207,105 @@ class FakeProcess:
                     }
                 }
             )
+        elif m == "thread/compact/start":
+            self.compaction_index += 1
+            turn_id = f"compact-{self.compaction_index}"
+            item_id = f"context-compaction-{self.compaction_index}"
+            response({})
+            if s.compaction_hang:
+                return
+            q.put(
+                {
+                    "method": "turn/started",
+                    "params": {
+                        "threadId": thread_id,
+                        "turn": {
+                            "id": turn_id,
+                            "items": [],
+                            "status": "inProgress",
+                        },
+                    },
+                }
+            )
+            q.put(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "item": {
+                            "id": item_id,
+                            "type": s.compaction_item_type,
+                        },
+                    },
+                }
+            )
+            if s.compaction_usage_before_completion and s.usage:
+                q.put(
+                    {
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "tokenUsage": {"last": s.usage},
+                        },
+                    }
+                )
+            if not s.compaction_omit_item_completion:
+                q.put(
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "item": {
+                                "id": item_id,
+                                "type": s.compaction_item_type,
+                            },
+                        },
+                    }
+                )
+            if s.compaction_deprecated_notification:
+                q.put(
+                    {
+                        "method": "thread/compacted",
+                        "params": {"threadId": thread_id},
+                    }
+                )
+            if not s.compaction_omit_turn_completion:
+                q.put(
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turn": {
+                                "id": turn_id,
+                                "items": [
+                                    {
+                                        "id": item_id,
+                                        "type": s.compaction_item_type,
+                                    }
+                                ],
+                                "itemsView": "loaded",
+                                "status": s.compaction_terminal_status,
+                            },
+                        },
+                    }
+                )
+            if not s.compaction_usage_before_completion and s.usage:
+                q.put(
+                    {
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "tokenUsage": {"last": s.usage},
+                        },
+                    }
+                )
+            if s.compaction_close_after_events:
+                self.returncode = 0
+                q.close()
         elif m == "turn/start":
             self.turn_index += 1
             tid = f"turn-{self.turn_index}"
