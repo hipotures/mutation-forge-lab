@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -26,6 +27,32 @@ class SearchMemoryError(ValueError):
 
 class DuplicateCandidateError(SearchMemoryError):
     """A generated candidate repeats an identity already held by the host."""
+
+
+def program_families(
+    ast: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return bounded selector and action family names from a validated AST."""
+
+    selectors: set[str] = set()
+    actions: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, Mapping):
+            selector = value.get("selector_id")
+            action = value.get("action_id")
+            if isinstance(selector, str):
+                selectors.add(selector)
+            if isinstance(action, str):
+                actions.add(action)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(ast)
+    return tuple(sorted(selectors)), tuple(sorted(actions))
 
 
 def _validated_hash(value: str, field: str) -> str:

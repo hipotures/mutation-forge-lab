@@ -7,6 +7,8 @@ import pytest
 
 from mutation_forge import cli
 from mutation_forge.native_v3.experiment import (
+    MULTI_PROGRAM_BATCH,
+    PERSISTENT_SINGLE_AST,
     V2_PROTOCOL,
     V3_SELECTOR,
     experiment_protocol,
@@ -46,6 +48,30 @@ def test_v3_config_is_explicit_and_bounded(tmp_path: Path) -> None:
     assert config.exp_id == "v3-run"
     assert config.workspace == tmp_path / "workspace"
     assert config.heg_repo == tmp_path / "heg"
+    assert config.communication_mode == PERSISTENT_SINGLE_AST
+
+
+def test_v3_communication_mode_is_explicitly_selectable(tmp_path: Path) -> None:
+    path = tmp_path / "experiment.toml"
+    path.write_text(
+        _config(tmp_path).replace(
+            'heg_repo = "',
+            f'communication_mode = "{MULTI_PROGRAM_BATCH}"\nheg_repo = "',
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_v3_config(path).communication_mode == MULTI_PROGRAM_BATCH
+
+    path.write_text(
+        _config(tmp_path).replace(
+            'heg_repo = "',
+            'communication_mode = "unknown"\nheg_repo = "',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="communication_mode must be one of"):
+        load_v3_config(path)
 
 
 @pytest.mark.parametrize("field", ["model", "search", "evaluation", "resources"])

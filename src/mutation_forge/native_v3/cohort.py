@@ -646,6 +646,215 @@ def _attempt_reference(
     }
 
 
+def finalize_cohort(
+    experiment_root: str | Path,
+    *,
+    entries: Sequence[CohortEntry],
+    generation_reports: Sequence[Mapping[str, Any]],
+    slot_lineage: Mapping[str, Mapping[str, Any]],
+    usages: Sequence[Mapping[str, Any]],
+    model_turns: int,
+    backend_factory: Callable[[], GraphBackend],
+    episode_id: str,
+    communication_mode: str,
+) -> dict[str, Any]:
+    """Evaluate an already generated cohort without changing scientific semantics."""
+
+    root = Path(experiment_root)
+    output_root = root / "native-v3-output" / "epoch-0000"
+    report_path = output_root / "cohort-report.json.gz"
+    programs, aliases = deduplicate_entries(entries)
+    outcome = cohort_outcome(len(programs))
+    backend: GraphBackend | None = None
+    evaluation_records: list[dict[str, Any]] = []
+    graph_evaluations = 0
+    try:
+        if programs:
+            backend = backend_factory()
+            scorer = scorer_for_backend(backend)
+            for evaluation_index, program in enumerate(programs):
+                program_root = output_root / "programs" / program.program_hash
+                program_payload: dict[str, Any] = {
+                    **validated_program_artifact(program),
+                    "slot_aliases": list(aliases[program.program_hash]),
+                    "lineage": [
+                        slot_lineage[slot_id]
+                        for slot_id in aliases[program.program_hash]
+                    ],
+                }
+                write_json(
+                    program_root / "program.json.gz",
+                    program_payload,
+                    exclusive=True,
+                )
+                evaluation = evaluate_serial_program(
+                    backend=backend,
+                    scorer=scorer,
+                    program=program,
+                    config=SerialEpisodeConfig(
+                        order=30,
+                        graph_seed=101,
+                        policy_seed=17,
+                        horizon=1,
+                        witness_cap=64,
+                        episode_id=(
+                            f"{episode_id}/program-{evaluation_index:02d}"
+                        ),
+                    ),
+                    counterexample_pipeline=CounterexamplePipeline(
+                        backend=backend,
+                        artifact_root=program_root,
+                    ),
+                    provenance_source_kind="native_v3_provider_cohort",
+                )
+                graph_evaluations += _graph_evaluations(evaluation)
+                record = {
+                    "program_hash": program.program_hash,
+                    "slot_aliases": list(aliases[program.program_hash]),
+                    "evaluation_index": evaluation_index,
+                    "evaluation": evaluation.as_dict(),
+                }
+                evaluation_records.append(record)
+                write_json(
+                    program_root / "evaluation.json.gz",
+                    {
+                        "schema_version": COHORT_SCHEMA_VERSION,
+                        "protocols": _protocols(),
+                        "program": validated_program_artifact(program),
+                        "slot_aliases": list(aliases[program.program_hash]),
+                        "lineage": [
+                            slot_lineage[slot_id]
+                            for slot_id in aliases[program.program_hash]
+                        ],
+                        "backend": {
+                            "graph_backend_id": backend.backend_id,
+                            "score_implementation": getattr(
+                                backend,
+                                "score_implementation",
+                                None,
+                            ),
+                            "repo": str(getattr(backend, "repo", ""))
+                            or None,
+                            "commit": getattr(backend, "commit", None),
+                            "dirty": getattr(backend, "dirty", None),
+                        },
+                        "mutation_forge": git_state(PROJECT_ROOT),
+                        "evaluation": evaluation.as_dict(),
+                    },
+                    exclusive=True,
+                )
+    except Exception as error:
+        report = {
+            "schema_version": COHORT_SCHEMA_VERSION,
+            "status": "evaluation_error",
+            "communication_mode": communication_mode,
+            "cohort_outcome": outcome,
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "valid_ast": bool(programs),
+            "valid_slots": sum(entry.program is not None for entry in entries),
+            "unique_valid_programs": len(programs),
+            "duplicate_aliases": sum(
+                max(0, len(slot_aliases) - 1)
+                for slot_aliases in aliases.values()
+            ),
+            "model_turns": model_turns,
+            "graph_evaluations": graph_evaluations,
+            "scientific_terminal_result": False,
+            "usage": _usage_total(usages),
+            "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),
+            "cohort_report": str(report_path),
+            "resumable": False,
+        }
+        write_json(report_path, report)
+        return report
+    finally:
+        if backend is not None:
+            backend.close()
+
+    def selection_key(
+        record: Mapping[str, Any],
+    ) -> tuple[Fraction, bool, Fraction, Fraction, str]:
+        evaluation = cast(Mapping[str, Any], record["evaluation"])
+        fitness = cast(Mapping[str, Any], evaluation["fitness_interval"])
+        lower = cast(Mapping[str, int], fitness["lower"])
+        upper = cast(Mapping[str, int], fitness["upper"])
+
+        return conservative_fitness_key(
+            fitness=RationalInterval(
+                Fraction(lower["numerator"], lower["denominator"]),
+                Fraction(upper["numerator"], upper["denominator"]),
+            ),
+            program_hash=(
+                f"{int(record['evaluation_index']):08d}:"
+                f"{record['program_hash']}"
+            ),
+        )
+
+    ranked = sorted(evaluation_records, key=selection_key)
+    all_scientifically_comparable = all(
+        cast(Mapping[str, Any], record["evaluation"]).get("status")
+        in {
+            SerialEvaluationStatus.COMPLETE.value,
+            SerialEvaluationStatus.PROGRAM_FAILURE.value,
+        }
+        for record in ranked
+    )
+    selected_program_hash = (
+        str(ranked[0]["program_hash"])
+        if (
+            ranked
+            and outcome != "INCONCLUSIVE"
+            and all_scientifically_comparable
+        )
+        else None
+    )
+    report = {
+        "schema_version": COHORT_SCHEMA_VERSION,
+        "status": (
+            "completed"
+            if outcome != "INCONCLUSIVE" and all_scientifically_comparable
+            else "inconclusive"
+        ),
+        "communication_mode": communication_mode,
+        "cohort_outcome": outcome,
+        "valid_ast": bool(programs),
+        "valid_slots": sum(entry.program is not None for entry in entries),
+        "unique_valid_programs": len(programs),
+        "duplicate_aliases": sum(
+            max(0, len(slot_aliases) - 1)
+            for slot_aliases in aliases.values()
+        ),
+        "model_turns": model_turns,
+        "graph_evaluations": graph_evaluations,
+        "scientific_terminal_result": (
+            outcome != "INCONCLUSIVE" and all_scientifically_comparable
+        ),
+        "selected_program_hash": selected_program_hash,
+        "canonical_program_order": [
+            program.program_hash for program in programs
+        ],
+        "program_aliases": {
+            program_hash: list(slot_aliases)
+            for program_hash, slot_aliases in aliases.items()
+        },
+        "slot_lineage": [
+            slot_lineage[slot_id] for slot_id in SLOT_IDS
+        ],
+        "usage": _usage_total(usages),
+        "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),
+        "cohort_report": str(report_path),
+        "resumable": False,
+    }
+    report[
+        "batch_reports"
+        if communication_mode == "multi_program_batch"
+        else "turn_reports"
+    ] = [dict(item) for item in generation_reports]
+    write_json(report_path, report)
+    return report
+
+
 def run_sequential_cohort(
     provider: LocalCodexAppServerProvider,
     experiment_root: str | Path,
@@ -823,184 +1032,17 @@ def run_sequential_cohort(
         write_json(report_path, report)
         return report
 
-    programs, aliases = deduplicate_entries(entries)
-    outcome = cohort_outcome(len(programs))
-    backend: GraphBackend | None = None
-    evaluation_records: list[dict[str, Any]] = []
-    graph_evaluations = 0
-    try:
-        if programs:
-            backend = backend_factory()
-            scorer = scorer_for_backend(backend)
-            for evaluation_index, program in enumerate(programs):
-                program_root = output_root / "programs" / program.program_hash
-                program_payload: dict[str, Any] = {
-                    **validated_program_artifact(program),
-                    "slot_aliases": list(aliases[program.program_hash]),
-                    "lineage": [
-                        slot_lineage[slot_id]
-                        for slot_id in aliases[program.program_hash]
-                    ],
-                }
-                write_json(
-                    program_root / "program.json.gz",
-                    program_payload,
-                    exclusive=True,
-                )
-                evaluation = evaluate_serial_program(
-                    backend=backend,
-                    scorer=scorer,
-                    program=program,
-                    config=SerialEpisodeConfig(
-                        order=30,
-                        graph_seed=101,
-                        policy_seed=17,
-                        horizon=1,
-                        witness_cap=64,
-                        episode_id=(
-                            f"{episode_id}/program-{evaluation_index:02d}"
-                        ),
-                    ),
-                    counterexample_pipeline=CounterexamplePipeline(
-                        backend=backend,
-                        artifact_root=program_root,
-                    ),
-                    provenance_source_kind="native_v3_provider_cohort",
-                )
-                graph_evaluations += _graph_evaluations(evaluation)
-                record = {
-                    "program_hash": program.program_hash,
-                    "slot_aliases": list(aliases[program.program_hash]),
-                    "evaluation_index": evaluation_index,
-                    "evaluation": evaluation.as_dict(),
-                }
-                evaluation_records.append(record)
-                write_json(
-                    program_root / "evaluation.json.gz",
-                    {
-                        "schema_version": COHORT_SCHEMA_VERSION,
-                        "protocols": _protocols(),
-                        "program": validated_program_artifact(program),
-                        "slot_aliases": list(aliases[program.program_hash]),
-                        "lineage": [
-                            slot_lineage[slot_id]
-                            for slot_id in aliases[program.program_hash]
-                        ],
-                        "backend": {
-                            "graph_backend_id": backend.backend_id,
-                            "score_implementation": getattr(
-                                backend,
-                                "score_implementation",
-                                None,
-                            ),
-                            "repo": str(getattr(backend, "repo", ""))
-                            or None,
-                            "commit": getattr(backend, "commit", None),
-                            "dirty": getattr(backend, "dirty", None),
-                        },
-                        "mutation_forge": git_state(PROJECT_ROOT),
-                        "evaluation": evaluation.as_dict(),
-                    },
-                    exclusive=True,
-                )
-    except Exception as error:
-        report = {
-            "schema_version": COHORT_SCHEMA_VERSION,
-            "status": "evaluation_error",
-            "cohort_outcome": outcome,
-            "error_type": type(error).__name__,
-            "error": str(error),
-            "valid_ast": bool(programs),
-            "unique_valid_programs": len(programs),
-            "model_turns": model_turns,
-            "graph_evaluations": graph_evaluations,
-            "scientific_terminal_result": False,
-            "usage": _usage_total(usages),
-            "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),
-            "resumable": False,
-        }
-        write_json(report_path, report)
-        return report
-    finally:
-        if backend is not None:
-            backend.close()
-
-    def selection_key(
-        record: Mapping[str, Any],
-    ) -> tuple[Fraction, bool, Fraction, Fraction, str]:
-        evaluation = cast(Mapping[str, Any], record["evaluation"])
-        fitness = cast(Mapping[str, Any], evaluation["fitness_interval"])
-        lower = cast(Mapping[str, int], fitness["lower"])
-        upper = cast(Mapping[str, int], fitness["upper"])
-
-        return conservative_fitness_key(
-            fitness=RationalInterval(
-                Fraction(lower["numerator"], lower["denominator"]),
-                Fraction(upper["numerator"], upper["denominator"]),
-            ),
-            program_hash=(
-                f"{int(record['evaluation_index']):08d}:"
-                f"{record['program_hash']}"
-            ),
-        )
-
-    ranked = sorted(evaluation_records, key=selection_key)
-    all_scientifically_comparable = all(
-        cast(Mapping[str, Any], record["evaluation"]).get("status")
-        in {
-            SerialEvaluationStatus.COMPLETE.value,
-            SerialEvaluationStatus.PROGRAM_FAILURE.value,
-        }
-        for record in ranked
+    return finalize_cohort(
+        root,
+        entries=entries,
+        generation_reports=batch_reports,
+        slot_lineage=slot_lineage,
+        usages=usages,
+        model_turns=model_turns,
+        backend_factory=backend_factory,
+        episode_id=episode_id,
+        communication_mode="multi_program_batch",
     )
-    selected_program_hash = (
-        str(ranked[0]["program_hash"])
-        if (
-            ranked
-            and outcome != "INCONCLUSIVE"
-            and all_scientifically_comparable
-        )
-        else None
-    )
-    report = {
-        "schema_version": COHORT_SCHEMA_VERSION,
-        "status": (
-            "completed"
-            if outcome != "INCONCLUSIVE" and all_scientifically_comparable
-            else "inconclusive"
-        ),
-        "cohort_outcome": outcome,
-        "valid_ast": bool(programs),
-        "valid_slots": sum(entry.program is not None for entry in entries),
-        "unique_valid_programs": len(programs),
-        "duplicate_aliases": sum(
-            max(0, len(slot_aliases) - 1)
-            for slot_aliases in aliases.values()
-        ),
-        "model_turns": model_turns,
-        "graph_evaluations": graph_evaluations,
-        "scientific_terminal_result": (
-            outcome != "INCONCLUSIVE" and all_scientifically_comparable
-        ),
-        "selected_program_hash": selected_program_hash,
-        "canonical_program_order": [
-            program.program_hash for program in programs
-        ],
-        "program_aliases": {
-            program_hash: list(slot_aliases)
-            for program_hash, slot_aliases in aliases.items()
-        },
-        "slot_lineage": [
-            slot_lineage[slot_id] for slot_id in SLOT_IDS
-        ],
-        "batch_reports": batch_reports,
-        "usage": _usage_total(usages),
-        "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),
-        "cohort_report": str(report_path),
-        "resumable": False,
-    }
-    write_json(report_path, report)
-    return report
 
 
 __all__ = [
@@ -1017,6 +1059,7 @@ __all__ = [
     "build_epoch_manifest",
     "cohort_outcome",
     "deduplicate_entries",
+    "finalize_cohort",
     "parse_batch_response",
     "render_batch_prompt",
     "record_batch_turn",

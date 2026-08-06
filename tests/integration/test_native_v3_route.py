@@ -128,6 +128,7 @@ model = "gpt-5.6-luna"
 effort = "high"
 timeout_seconds = 30
 heg_repo = "{heg_repo.as_posix()}"
+communication_mode = "multi_program_batch"
 ''',
         encoding="utf-8",
     )
@@ -267,6 +268,89 @@ class _Backend:
 
 def _backend(_: V3Config) -> _Backend:
     return _Backend()
+
+
+def test_v3_routes_selected_preview_without_constructing_batch_provider(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'communication_mode = "multi_program_batch"',
+            'communication_mode = "persistent_single_ast"',
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, object]] = []
+
+    def provider(_: V3Config) -> LocalCodexAppServerProvider:
+        raise AssertionError("selected preview must not construct the batch provider")
+
+    def preview_runner(
+        experiment_root: Path,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        calls.append({"experiment_root": experiment_root, **kwargs})
+        return {
+            "status": "completed",
+            "cohort_outcome": "COMPLETE",
+            "valid_ast": True,
+            "valid_slots": 8,
+            "unique_valid_programs": 8,
+            "duplicate_aliases": 0,
+            "model_turns": 9,
+            "graph_evaluations": 8,
+            "scientific_terminal_result": True,
+            "selected_program_hash": "a" * 64,
+            "usage": {},
+            "epoch_manifest": str(tmp_path / "epoch-manifest.json.gz"),
+            "cohort_report": str(tmp_path / "cohort-report.json.gz"),
+        }
+
+    result = run_v3(
+        path,
+        provider_factory=provider,
+        backend_factory=_backend,
+        auth_available=lambda _: True,
+        preview_runner=preview_runner,
+    )
+
+    assert result["state"] == "completed"
+    assert result["communication_mode"] == "persistent_single_ast"
+    assert result["provider_turns"] == 9
+    assert len(calls) == 1
+    assert calls[0]["experiment_root"] == tmp_path / "workspace" / "v3-run"
+
+
+def test_selected_preview_auth_failure_is_resumable_before_scientific_work(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'communication_mode = "multi_program_batch"',
+            'communication_mode = "persistent_single_ast"',
+        ),
+        encoding="utf-8",
+    )
+    preview_calls = 0
+
+    def preview_runner(*_: object, **__: object) -> dict[str, object]:
+        nonlocal preview_calls
+        preview_calls += 1
+        raise AssertionError("auth preflight must run first")
+
+    result = run_v3(
+        path,
+        backend_factory=_backend,
+        auth_available=lambda _: False,
+        preview_runner=preview_runner,
+    )
+
+    assert result["state"] == "blocked"
+    assert result["resumable"] is True
+    assert result["communication_mode"] == "persistent_single_ast"
+    assert preview_calls == 0
 
 
 def test_v3_completes_eight_slots_and_status_is_read_only(

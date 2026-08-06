@@ -17,6 +17,7 @@ model = "gpt-5.6-luna"
 effort = "high"
 timeout_seconds = 300
 heg_repo = "../heg"
+communication_mode = "persistent_single_ast"
 ```
 
 The v3 configuration deliberately rejects the Native v2 `kind`, `preset`,
@@ -41,6 +42,8 @@ Status is read-only and does not construct a provider, backend, scorer, oracle,
 or evaluator. It reports `protocol`, `protocol_version`, state, resumability,
 and the latest infrastructure and scientific stop reasons.
 
-Step 11 superseded the original one-slot behavior with the deterministic
-cohort described in `step11-sequential-cohort.md`. The selector still does not
-change the Native v2 default.
+Step 12E superseded the original v3 batch default with the guarded
+`persistent_single_ast` preview described in
+`step12e-guarded-communication-mode.md`. The unchanged Step 11 batch remains
+available through `communication_mode = "multi_program_batch"`. The selector
+still does not change the Native v2 default.

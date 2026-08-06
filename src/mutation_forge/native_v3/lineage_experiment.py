@@ -31,6 +31,7 @@ from .search_memory import (
     LineageSummary,
     PatternSummary,
     SearchMemoryV1,
+    program_families,
     reject_duplicate,
 )
 from .single_program_contract import (
@@ -69,28 +70,6 @@ def _ack(ack: str) -> dict[str, str]:
     return {"schema_version": ACK_SCHEMA_VERSION, "ack": ack}
 
 
-def _families(ast: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    selectors: set[str] = set()
-    actions: set[str] = set()
-
-    def visit(value: object) -> None:
-        if isinstance(value, Mapping):
-            selector = value.get("selector_id")
-            action = value.get("action_id")
-            if isinstance(selector, str):
-                selectors.add(selector)
-            if isinstance(action, str):
-                actions.add(action)
-            for child in value.values():
-                visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-
-    visit(ast)
-    return tuple(sorted(selectors)), tuple(sorted(actions))
-
-
 def build_search_memory(
     candidate_responses: Mapping[str, Mapping[str, Any]],
     *,
@@ -107,7 +86,7 @@ def build_search_memory(
     lineages: list[LineageSummary] = []
     for index, raw in enumerate(reference["candidates"]):
         candidate = dict(raw)
-        selectors, actions = _families(candidate["canonical_ast"])
+        selectors, actions = program_families(candidate["canonical_ast"])
         accepted = candidate["evaluation_outcome"] in {"ACCEPTED", "ACTIVE_PARENT"}
         pattern = PatternSummary(
             pattern_id=f"pattern-{index:02d}",

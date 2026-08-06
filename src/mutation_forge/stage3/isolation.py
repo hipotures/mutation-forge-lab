@@ -284,6 +284,56 @@ class IsolatedCapsule:
             shutil.rmtree(base, ignore_errors=True)
             raise
 
+    @classmethod
+    def reopen(cls, root: str | Path) -> IsolatedCapsule:
+        """Reopen one previously created capsule for durable thread resume."""
+
+        base = Path(root)
+        if base.is_symlink():
+            raise IsolationError("capsule root must be a real directory")
+        base = base.resolve(strict=True)
+        parent = secure_capsule_parent()
+        try:
+            base.relative_to(parent)
+        except ValueError as exc:
+            raise IsolationError("capsule root is outside the managed parent") from exc
+        if not base.name.startswith("mutation-forge-codex-"):
+            raise IsolationError("capsule root has an invalid name")
+        homes = (base / "codex-home", base / "codex-sqlite", base / "codex-work")
+        for path in homes:
+            if path.is_symlink() or not path.is_dir():
+                raise IsolationError("capsule layout is invalid")
+        config_path = homes[0] / "config.toml"
+        if config_path.is_symlink() or not config_path.is_file():
+            raise IsolationError("capsule configuration is unavailable")
+        executable = shutil.which("codex")
+        if executable is None:
+            raise IsolationError("trusted codex executable was not found")
+        executable_path = Path(executable).resolve()
+        if not executable_path.is_file() or not executable_path.stat().st_mode & stat.S_IXUSR:
+            raise IsolationError("trusted codex executable is not executable")
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(base),
+            "CODEX_HOME": str(homes[0]),
+            "CODEX_SQLITE_HOME": str(homes[1]),
+            **APP_SERVER_THREAD_LIMITS,
+        }
+        managed_root = os.environ.get("CODEX_MANAGED_PACKAGE_ROOT")
+        if managed_root:
+            managed_path = Path(managed_root)
+            if not managed_path.is_absolute() or not managed_path.is_dir():
+                raise IsolationError("Codex managed package root is invalid")
+            env["CODEX_MANAGED_PACKAGE_ROOT"] = str(managed_path.resolve(strict=True))
+        if os.environ.get("CODEX_MANAGED_BY_NPM") == "1":
+            env["CODEX_MANAGED_BY_NPM"] = "1"
+        if os.environ.get("CODEX_CI") == "1":
+            env["CODEX_CI"] = "1"
+        for key in ("LANG", "LC_ALL", "TZ"):
+            if os.environ.get(key):
+                env[key] = os.environ[key]
+        return cls(base, homes[0], homes[1], homes[2], env, str(executable_path))
+
     def cleanup(self) -> None:
         if self.root.name.startswith("mutation-forge-codex-") and self.root.is_dir():
             shutil.rmtree(self.root, ignore_errors=True)

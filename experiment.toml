@@ -9,3 +9,4 @@ model = "gpt-5.6-luna"
 effort = "max"
 timeout_seconds = 600
 heg_repo = "../heg"
+communication_mode = "persistent_single_ast"

@@ -19,12 +19,18 @@ from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.provider import LocalCodexAppServerProvider
 
 from .cohort import run_sequential_cohort
+from .preview import PERSISTENT_SINGLE_AST, run_persistent_single_ast_cohort
 
 V2_PROTOCOL = "native-v2"
 V3_SELECTOR = "v3"
 V3_CONFIG_SCHEMA_VERSION = "mforge.experiment.v3"
 V3_PROTOCOL_VERSION = "v3"
 V3_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3"
+MULTI_PROGRAM_BATCH = "multi_program_batch"
+V3_COMMUNICATION_MODES = frozenset(
+    {PERSISTENT_SINGLE_AST, MULTI_PROGRAM_BATCH}
+)
+V3_DEFAULT_COMMUNICATION_MODE = PERSISTENT_SINGLE_AST
 _STATE_NAME = "v3-state.json.gz"
 _V2_TOP_LEVEL_FIELDS = frozenset(
     {"kind", "preset", "run", "model", "search", "evaluation", "resources"}
@@ -33,6 +39,7 @@ _V2_TOP_LEVEL_FIELDS = frozenset(
 type ProviderFactory = Callable[["V3Config"], LocalCodexAppServerProvider]
 type BackendFactory = Callable[["V3Config"], GraphBackend]
 type AuthAvailable = Callable[[Path], bool]
+type PreviewRunner = Callable[..., dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +52,7 @@ class V3Config:
     effort: str
     timeout_seconds: float
     heg_repo: Path
+    communication_mode: str
     source_path: Path
     source_bytes: bytes = field(repr=False, compare=False)
 
@@ -135,7 +143,13 @@ def load_v3_config(
     if not isinstance(v3_value, dict):
         raise ValueError("[v3] must be a table")
     v3 = cast(dict[str, Any], v3_value)
-    allowed_v3 = {"model", "effort", "timeout_seconds", "heg_repo"}
+    allowed_v3 = {
+        "model",
+        "effort",
+        "timeout_seconds",
+        "heg_repo",
+        "communication_mode",
+    }
     unknown_v3 = sorted(set(v3).difference(allowed_v3))
     if unknown_v3:
         raise ValueError(f"unsupported [v3] fields: {unknown_v3}")
@@ -152,6 +166,15 @@ def load_v3_config(
         "v3.heg_repo",
         source_path.parent,
     )
+    communication_mode = _string(
+        v3.get("communication_mode", V3_DEFAULT_COMMUNICATION_MODE),
+        "v3.communication_mode",
+    )
+    if communication_mode not in V3_COMMUNICATION_MODES:
+        raise ValueError(
+            "v3.communication_mode must be one of "
+            f"{sorted(V3_COMMUNICATION_MODES)}"
+        )
     return V3Config(
         V3_CONFIG_SCHEMA_VERSION,
         V3_SELECTOR,
@@ -161,6 +184,7 @@ def load_v3_config(
         effort,
         timeout_seconds,
         heg_repo,
+        communication_mode,
         source_path,
         source_bytes,
     )
@@ -173,6 +197,7 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "protocol_version": V3_PROTOCOL_VERSION,
         "exp_id": config.exp_id,
         "workspace": str(config.experiment_root),
+        "communication_mode": config.communication_mode,
         "state": "not_created",
         "resumable": True,
         "terminal": False,
@@ -417,6 +442,7 @@ def run_v3(
     provider_factory: ProviderFactory = _default_provider,
     backend_factory: BackendFactory = _default_backend,
     auth_available: AuthAvailable = Path.is_file,
+    preview_runner: PreviewRunner = run_persistent_single_ast_cohort,
 ) -> dict[str, Any]:
     """Run or resume the bounded sequential v3 cohort."""
 
@@ -458,13 +484,24 @@ def run_v3(
     _persist_state(config, running)
     provider: LocalCodexAppServerProvider | None = None
     try:
-        provider = provider_factory(config)
-        report = run_sequential_cohort(
-            provider,
-            config.experiment_root,
-            backend_factory=lambda: backend_factory(config),
-            episode_id=f"{config.exp_id}/epoch-0000",
-        )
+        if config.communication_mode == MULTI_PROGRAM_BATCH:
+            provider = provider_factory(config)
+            report = run_sequential_cohort(
+                provider,
+                config.experiment_root,
+                backend_factory=lambda: backend_factory(config),
+                episode_id=f"{config.exp_id}/epoch-0000",
+            )
+        else:
+            report = preview_runner(
+                config.experiment_root,
+                model=config.model,
+                effort=config.effort,
+                timeout_seconds=config.timeout_seconds,
+                auth_json=Path.home() / ".codex" / "auth.json",
+                backend_factory=lambda: backend_factory(config),
+                episode_id=f"{config.exp_id}/epoch-0000",
+            )
     except Exception as error:
         status = {
             **_base_status(config),
@@ -497,11 +534,15 @@ def run_v3(
 __all__ = [
     "V2_PROTOCOL",
     "V3_CONFIG_SCHEMA_VERSION",
+    "V3_DEFAULT_COMMUNICATION_MODE",
+    "V3_COMMUNICATION_MODES",
     "V3_PROTOCOL_VERSION",
     "V3_SELECTOR",
     "V3_STATUS_SCHEMA_VERSION",
     "V3Config",
     "V3WorkspaceError",
+    "MULTI_PROGRAM_BATCH",
+    "PERSISTENT_SINGLE_AST",
     "experiment_protocol",
     "load_v3_config",
     "run_v3",
