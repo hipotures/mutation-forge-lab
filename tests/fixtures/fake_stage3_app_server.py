@@ -56,6 +56,7 @@ class FakeScenario:
         }
     )
     terminal_status: str = "completed"
+    terminal_statuses: list[str] | None = None
     interleave: bool = True
     server_request: bool = False
     malformed: bool = False
@@ -76,6 +77,10 @@ class FakeScenario:
     item_started_before_response: bool = False
     turn_completed_item_id: str | None = None
     completed_items_view: str = "loaded"
+    final_texts: list[str] | None = None
+    dangling_reasoning: bool = False
+    warning_message: str | None = None
+    thread_id: str = "thread-1"
 
 
 class FakeProcess:
@@ -86,6 +91,7 @@ class FakeProcess:
         self.stderr = _Out()
         self.stdin = _In(self)
         self.returncode = None
+        self.turn_index = 0
 
     def receive(self, line: bytes):
         if self.scenario.crash:
@@ -101,6 +107,7 @@ class FakeProcess:
         p = r.get("params", {})
         s = self.scenario
         q = self.stdout
+        thread_id = s.thread_id
 
         def response(result):
             q.put({"id": i, "result": result})
@@ -137,7 +144,7 @@ class FakeProcess:
             )
         elif m == "thread/start":
             if s.thread_started_notification == "nested-before-thread-response":
-                q.put({"method": "thread/started", "params": {"thread": {"id": "thread-1"}}})
+                q.put({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
             sandbox = (
                 {"type": "readOnly", "networkAccess": False}
                 if p["sandbox"] == "read-only"
@@ -155,7 +162,7 @@ class FakeProcess:
                     "runtimeWorkspaceRoots": [],
                     "sandbox": sandbox,
                     "thread": {
-                        "id": "thread-1",
+                        "id": thread_id,
                         "sessionId": "session-1",
                         "path": str(
                             Path(self.environment["CODEX_HOME"]) / "rollout.jsonl"
@@ -169,13 +176,29 @@ class FakeProcess:
                 q.put(
                     {
                         "method": "thread/started",
-                        "params": {"threadId": "thread-1"}
+                        "params": {"threadId": thread_id}
                         if s.thread_started_notification == "top-level"
-                        else {"thread": {"id": "thread-1"}},
+                        else {"thread": {"id": thread_id}},
                     }
                 )
+        elif m == "thread/resume":
+            response(
+                {
+                    "thread": {
+                        "id": p["threadId"],
+                        "sessionId": "session-1",
+                        "path": p.get(
+                            "path",
+                            str(Path(self.environment["CODEX_HOME"]) / "rollout.jsonl"),
+                        ),
+                        "cwd": p["cwd"],
+                        "ephemeral": False,
+                    }
+                }
+            )
         elif m == "turn/start":
-            tid = "turn-1"
+            self.turn_index += 1
+            tid = f"turn-{self.turn_index}"
             iid = s.item_id
             if s.server_request:
                 q.put({"id": 901, "method": "item/toolCall", "params": {}})
@@ -184,7 +207,7 @@ class FakeProcess:
                     {
                         "method": "turn/started",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turn": {"id": tid, "items": [], "status": "inProgress"},
                         },
                     }
@@ -194,7 +217,7 @@ class FakeProcess:
                     {
                         "method": "item/started",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turnId": tid,
                             "item": {"id": iid, "type": s.item_type},
                         },
@@ -202,13 +225,13 @@ class FakeProcess:
                 )
             response({"turn": {"id": tid, "items": [], "status": "inProgress"}})
             if s.thread_started_notification == "nested-after-turn-response":
-                q.put({"method": "thread/started", "params": {"thread": {"id": "thread-1"}}})
+                q.put({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
             if not s.turn_started_before_response:
                 q.put(
                     {
                         "method": "turn/started",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turn": {"id": tid, "items": [], "status": "inProgress"},
                         },
                     }
@@ -216,7 +239,7 @@ class FakeProcess:
             q.put(
                 {
                     "method": "thread/status/changed",
-                    "params": {"threadId": "thread-1", "status": {"type": "active"}},
+                    "params": {"threadId": thread_id, "status": {"type": "active"}},
                 }
             )
             if s.global_notification and not s.global_after_completion:
@@ -229,11 +252,22 @@ class FakeProcess:
                     }
                 )
             if not s.item_started_before_response:
+                if s.dangling_reasoning:
+                    q.put(
+                        {
+                            "method": "item/started",
+                            "params": {
+                                "threadId": thread_id,
+                                "turnId": tid,
+                                "item": {"id": "reasoning-pending", "type": "reasoning"},
+                            },
+                        }
+                    )
                 q.put(
                     {
                         "method": "item/started",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turnId": tid,
                             "item": {"id": iid, "type": s.item_type},
                         },
@@ -241,21 +275,31 @@ class FakeProcess:
                 )
             if s.unknown_notification:
                 q.put(
-                    {"method": "fixture/unknown", "params": {"threadId": "thread-1", "turnId": tid}}
+                    {"method": "fixture/unknown", "params": {"threadId": thread_id, "turnId": tid}}
                 )
             if s.model_rerouted:
                 q.put(
-                    {"method": "model/rerouted", "params": {"threadId": "thread-1", "turnId": tid}}
+                    {"method": "model/rerouted", "params": {"threadId": thread_id, "turnId": tid}}
                 )
             if s.error_will_retry is not None:
                 q.put(
                     {
                         "method": "error",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turnId": tid,
                             "error": {},
                             "willRetry": s.error_will_retry,
+                        },
+                    }
+                )
+            if s.warning_message is not None:
+                q.put(
+                    {
+                        "method": "warning",
+                        "params": {
+                            "threadId": thread_id,
+                            "message": s.warning_message,
                         },
                     }
                 )
@@ -264,7 +308,7 @@ class FakeProcess:
                     {
                         "method": "item/agentMessage/delta",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turnId": tid,
                             "itemId": s.delta_item_id or iid,
                             "delta": "fixture",
@@ -275,13 +319,17 @@ class FakeProcess:
                 {
                     "method": "item/completed",
                     "params": {
-                        "threadId": "thread-1",
+                        "threadId": thread_id,
                         "turnId": tid,
                         "item": {
                             "id": s.completed_item_id or iid,
                             "type": s.item_type,
                             "phase": "final_answer",
-                            "text": s.final_text,
+                            "text": (
+                                s.final_texts[self.turn_index - 1]
+                                if s.final_texts is not None
+                                else s.final_text
+                            ),
                         },
                     },
                 }
@@ -290,7 +338,7 @@ class FakeProcess:
                 {
                     "method": "turn/completed",
                     "params": {
-                        "threadId": "thread-1",
+                        "threadId": thread_id,
                         "turn": {
                             "id": tid,
                             "items": (
@@ -308,7 +356,11 @@ class FakeProcess:
                                 ]
                             ),
                             "itemsView": s.completed_items_view,
-                            "status": s.terminal_status,
+                            "status": (
+                                s.terminal_statuses[self.turn_index - 1]
+                                if s.terminal_statuses is not None
+                                else s.terminal_status
+                            ),
                         },
                     },
                 }
@@ -318,7 +370,7 @@ class FakeProcess:
                     {
                         "method": "item/started",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turnId": tid,
                             "item": {"id": iid, "type": s.item_type},
                         },
@@ -338,7 +390,7 @@ class FakeProcess:
                     {
                         "method": "thread/tokenUsage/updated",
                         "params": {
-                            "threadId": "thread-1",
+                            "threadId": thread_id,
                             "turnId": tid,
                             "tokenUsage": {"last": s.usage},
                         },

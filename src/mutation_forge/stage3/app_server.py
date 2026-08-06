@@ -598,6 +598,72 @@ class CodexAppServerAdapter:
             self.close(force=True)
             raise
 
+    def resume_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        thread_id: str,
+        thread_path: str | None = None,
+    ) -> Json:
+        """Resume one durable thread in an experimental replacement process."""
+
+        if self._thread is not None or self._campaigns >= self.limits.max_campaigns:
+            raise TurnError("campaign limit exceeded")
+        selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
+        if selected.provider != "codex":
+            raise ValueError("only the installed Codex provider is supported")
+        if not self.auth_checker(self.capsule):
+            raise IsolationError("isolated Codex home is not authenticated")
+        self.start()
+        params: Json = {
+            "threadId": thread_id,
+            "model": selected.model,
+            "cwd": str(self.capsule.workdir),
+            "sandbox": self.sandbox_mode,
+            "approvalPolicy": self.approval_policy,
+            "baseInstructions": self.base_instructions,
+            "developerInstructions": "",
+            "runtimeWorkspaceRoots": [],
+            "config": {"model_reasoning_effort": selected.effort},
+        }
+        if thread_path is not None:
+            params["path"] = thread_path
+        result = self._request("thread/resume", params, timeout=self.limits.startup_timeout)
+        thread = result.get("thread")
+        if (
+            not isinstance(thread, Mapping)
+            or thread.get("id") != thread_id
+            or thread.get("ephemeral") is not False
+        ):
+            raise IsolationError("thread/resume returned a different or ephemeral thread")
+        self._thread = dict(thread)
+        self._campaigns += 1
+        return dict(thread)
+
+    def rotate_logger(
+        self,
+        artifact_dir: str | Path,
+        artifact_prefix: str,
+        *,
+        compress_json: bool = True,
+    ) -> None:
+        """Start an isolated artifact prefix for the next experimental turn."""
+
+        if self._current_turn_id is not None and self._last_status not in {
+            "completed",
+            "initialized",
+            "new",
+        }:
+            raise TurnError("cannot rotate artifacts during an active turn")
+        self.logger = TransportLogger(
+            Path(artifact_dir),
+            artifact_prefix,
+            max_bytes=self.limits.transcript_limit,
+            max_events=self.limits.max_events,
+            max_line_bytes=self.limits.message_limit,
+            compress_json=compress_json,
+        )
+
     def generate(
         self,
         prompt: str,
@@ -605,12 +671,68 @@ class CodexAppServerAdapter:
         *,
         output_schema: Mapping[str, Any] | None = None,
     ) -> GenerationResult:
+        return self._generate_on_thread(
+            prompt,
+            profile,
+            output_schema=output_schema,
+            persistent=False,
+            allow_completed_reasoning=False,
+            allow_server_retry=False,
+        )
+
+    def generate_ephemeral_experiment(
+        self,
+        prompt: str,
+        profile: ModelProfile | str,
+        *,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> GenerationResult:
+        """Run one isolated experimental turn against current CLI event ordering."""
+
+        return self._generate_on_thread(
+            prompt,
+            profile,
+            output_schema=output_schema,
+            persistent=False,
+            allow_completed_reasoning=True,
+            allow_server_retry=False,
+        )
+
+    def generate_persistent(
+        self,
+        prompt: str,
+        profile: ModelProfile | str,
+        *,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> GenerationResult:
+        """Run one turn on a durable experimental thread."""
+
+        return self._generate_on_thread(
+            prompt,
+            profile,
+            output_schema=output_schema,
+            persistent=True,
+            allow_completed_reasoning=True,
+            allow_server_retry=True,
+        )
+
+    def _generate_on_thread(
+        self,
+        prompt: str,
+        profile: ModelProfile | str,
+        *,
+        output_schema: Mapping[str, Any] | None,
+        persistent: bool,
+        allow_completed_reasoning: bool,
+        allow_server_retry: bool,
+    ) -> GenerationResult:
         if not isinstance(prompt, str) or not prompt:
             raise ValueError("prompt must be non-empty")
         if self._thread is None:
-            self.start_thread(profile)
-        elif self._thread.get("ephemeral") is not True:
-            raise IsolationError("generation requires an ephemeral thread")
+            self.start_thread(profile, ephemeral=not persistent)
+        elif self._thread.get("ephemeral") is persistent:
+            expected = "durable" if persistent else "ephemeral"
+            raise IsolationError(f"generation requires an {expected} thread")
         if self._turns >= self.limits.max_turns:
             raise TurnError("turn limit exceeded")
         thread = cast(Json, self._thread)
@@ -628,7 +750,12 @@ class CodexAppServerAdapter:
             params["outputSchema"] = dict(output_schema)
         self._turns += 1
         try:
-            r = self._run_turn(params, cast(str, thread["id"]))
+            r = self._run_turn(
+                params,
+                cast(str, thread["id"]),
+                allow_completed_reasoning=allow_completed_reasoning,
+                allow_server_retry=allow_server_retry,
+            )
             self._last_status = "completed"
             return r
         except Exception:
@@ -671,7 +798,14 @@ class CodexAppServerAdapter:
             except (ValueError, TypeError, UnicodeDecodeError):
                 continue
 
-    def _run_turn(self, params: Json, thread_id: str) -> GenerationResult:
+    def _run_turn(
+        self,
+        params: Json,
+        thread_id: str,
+        *,
+        allow_completed_reasoning: bool = False,
+        allow_server_retry: bool = False,
+    ) -> GenerationResult:
         self._current_thread_id = thread_id
         request_id = self._send("turn/start", params)
         turn_id = None
@@ -715,6 +849,14 @@ class CodexAppServerAdapter:
             if not isinstance(method, str) or not isinstance(ev, Mapping):
                 raise ProtocolError("malformed notification")
             if self._consume_global_notification(method, ev):
+                continue
+            if method == "warning" and allow_server_retry:
+                if (
+                    not isinstance(ev.get("message"), str)
+                    or not ev["message"]
+                    or ev.get("threadId") != thread_id
+                ):
+                    raise ProtocolError("malformed app-server warning")
                 continue
             if method == "thread/started":
                 if turn_id is not None:
@@ -790,8 +932,13 @@ class CodexAppServerAdapter:
                 ):
                     raise ProtocolError("turn/completed returned invalid durationMs")
                 turn_duration_ms = duration_ms
-                if self._active:
+                if self._active and not (
+                    allow_completed_reasoning
+                    and final is not None
+                    and set(self._active.values()) == {"reasoning"}
+                ):
                     raise ProtocolError("turn completed with active items")
+                self._active.clear()
                 if (
                     t.get("itemsView") != "notLoaded"
                     and final_item is not None
@@ -807,6 +954,8 @@ class CodexAppServerAdapter:
                 ):
                     raise ProtocolError("malformed app-server error")
                 if ev["willRetry"]:
+                    if allow_server_retry:
+                        continue
                     raise IsolationError("server retry is forbidden")
                 raise TurnError("terminal app-server error")
             else:
@@ -1197,6 +1346,11 @@ class CodexAppServerAdapter:
             "partial": self._last_status != "completed" and self._last_usage_raw is not None,
             "raw": dict(self._last_usage_raw) if self._last_usage_raw is not None else None,
         }
+
+    def experimental_turn_identity(self) -> tuple[str | None, str | None]:
+        """Expose the correlated identity needed by an opt-in experiment report."""
+
+        return self._current_thread_id, self._current_turn_id
 
     def flush(self) -> None:
         if self._process and self._process.stdin:

@@ -342,7 +342,7 @@ def _action_schema(
 
 def _expression_schema(contract: ProgramContract) -> dict[str, Any]:
     return {
-        "oneOf": [
+        "anyOf": [
             {
                 "type": "integer",
                 "minimum": -(1 << 63),
@@ -430,7 +430,7 @@ def _expression_schema(contract: ProgramContract) -> dict[str, Any]:
 def _node_schema(contract: ProgramContract) -> dict[str, Any]:
     node = {"$ref": "#/$defs/node"}
     return {
-        "oneOf": [
+        "anyOf": [
             _exact_object(
                 {
                     "op": {"const": "block"},
@@ -519,13 +519,39 @@ def _node_schema(contract: ProgramContract) -> dict[str, Any]:
     }
 
 
+def _literal_type(value: object) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, str):
+        return "string"
+    raise ValueError("structured-output literals must be bool, int, or str")
+
+
+def _add_strict_literal_types(value: object) -> None:
+    if isinstance(value, dict):
+        if "type" not in value and "const" in value:
+            value["type"] = _literal_type(value["const"])
+        if "type" not in value and isinstance(value.get("enum"), list):
+            literal_types = {_literal_type(item) for item in value["enum"]}
+            if len(literal_types) != 1:
+                raise ValueError("structured-output enums must use one JSON type")
+            value["type"] = literal_types.pop()
+        for item in value.values():
+            _add_strict_literal_types(item)
+    elif isinstance(value, list):
+        for item in value:
+            _add_strict_literal_types(item)
+
+
 def build_single_program_output_schema(
     forbidden_lengths: tuple[int, ...],
 ) -> dict[str, Any]:
     """Build the direct one-program outputSchema supplied to App Server."""
 
     contract = build_single_program_contract(forbidden_lengths)
-    return {
+    schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": (
             "https://mutation-forge.invalid/schemas/"
@@ -563,6 +589,8 @@ def build_single_program_output_schema(
             ),
         },
     }
+    _add_strict_literal_types(schema)
+    return schema
 
 
 def build_single_program_request(

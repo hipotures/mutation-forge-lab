@@ -100,6 +100,18 @@ def test_direct_output_schema_has_one_program_and_no_string_encoded_program() ->
     assert "program_json_raw" not in serialized
     Draft202012Validator.check_schema(schema)
 
+    def assert_strict_literals(value: object) -> None:
+        if isinstance(value, dict):
+            if "const" in value or "enum" in value:
+                assert "type" in value
+            for item in value.values():
+                assert_strict_literals(item)
+        elif isinstance(value, list):
+            for item in value:
+                assert_strict_literals(item)
+
+    assert_strict_literals(schema)
+
 
 @pytest.mark.parametrize("brief_id", ("add-edge", "remove-edge", "relocation", "fanout"))
 def test_golden_single_program_responses_match_schema_and_validator(

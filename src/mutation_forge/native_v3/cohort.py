@@ -605,6 +605,25 @@ def _record_turn(
     return turn, manifest
 
 
+def record_batch_turn(
+    store: TurnArtifactStore,
+    request: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
+    parsed: ParsedBatch,
+    *,
+    phase: str,
+) -> tuple[Path, Mapping[str, Any]]:
+    """Finalize one provider batch through the production turn-artifact writer."""
+
+    return _record_turn(
+        store,
+        request,
+        raw_result,
+        parsed,
+        phase=phase,
+    )
+
+
 def _graph_evaluations(result: SerialEpisodeResult) -> int:
     return result.score_attempts
 
@@ -1000,5 +1019,6 @@ __all__ = [
     "deduplicate_entries",
     "parse_batch_response",
     "render_batch_prompt",
+    "record_batch_turn",
     "run_sequential_cohort",
 ]

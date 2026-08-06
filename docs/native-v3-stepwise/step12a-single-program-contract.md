@@ -56,10 +56,10 @@ including the framing newline, are:
 
 | Brief | Bytes |
 | --- | ---: |
-| add-edge | 18,533 |
-| remove-edge | 18,546 |
-| relocation | 18,535 |
-| fanout | 18,532 |
+| add-edge | 19,720 |
+| remove-edge | 19,733 |
+| relocation | 19,722 |
+| fanout | 19,719 |
 
 ## Boundaries and limitations
 
