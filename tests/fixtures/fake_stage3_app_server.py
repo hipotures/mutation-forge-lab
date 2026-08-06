@@ -73,6 +73,10 @@ class FakeScenario:
     global_after_completion: bool = False
     error_will_retry: bool | None = None
     thread_started_notification: str | None = None
+    resume_status_before_response: str | None = None
+    resume_status_thread_id: str | None = None
+    resume_usage_after_response: bool = False
+    resume_usage_turn_id: str = "resume-history-turn"
     turn_started_before_response: bool = False
     item_started_before_response: bool = False
     turn_completed_item_id: str | None = None
@@ -202,10 +206,25 @@ class FakeProcess:
                     }
                 )
         elif m == "thread/resume":
+            resumed_thread_id = p["threadId"]
+            if s.resume_status_before_response is not None:
+                q.put(
+                    {
+                        "method": "thread/status/changed",
+                        "params": {
+                            "threadId": (
+                                s.resume_status_thread_id or resumed_thread_id
+                            ),
+                            "status": {
+                                "type": s.resume_status_before_response,
+                            },
+                        },
+                    }
+                )
             response(
                 {
                     "thread": {
-                        "id": p["threadId"],
+                        "id": resumed_thread_id,
                         "sessionId": "session-1",
                         "path": p.get(
                             "path",
@@ -216,6 +235,28 @@ class FakeProcess:
                     }
                 }
             )
+            if s.resume_usage_after_response:
+                usage = s.usage or {
+                    "inputTokens": 0,
+                    "cachedInputTokens": 0,
+                    "cacheWriteInputTokens": 0,
+                    "outputTokens": 0,
+                    "reasoningOutputTokens": 0,
+                    "totalTokens": 0,
+                }
+                q.put(
+                    {
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": resumed_thread_id,
+                            "turnId": s.resume_usage_turn_id,
+                            "tokenUsage": {
+                                "last": usage,
+                                "total": usage,
+                            },
+                        },
+                    }
+                )
         elif m == "thread/fork":
             source_thread_id = p.get("threadId")
             last_turn_id = p.get("lastTurnId")

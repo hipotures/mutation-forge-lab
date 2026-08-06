@@ -200,6 +200,7 @@ _DELTAS = {
 _SETUP_NOTIFICATIONS = {"initialized"}
 _WAITING_NOTIFICATIONS = _GLOBAL | {
     "thread/started",
+    "thread/status/changed",
     "thread/tokenUsage/updated",
 }
 
@@ -665,6 +666,7 @@ class CodexAppServerAdapter:
             raise IsolationError("thread/resume returned a different or ephemeral thread")
         self._thread = dict(thread)
         self._campaigns += 1
+        self._drain_resume_notifications(thread_id)
         return dict(thread)
 
     def rotate_logger(
@@ -1653,7 +1655,15 @@ class CodexAppServerAdapter:
                 "thread/tokenUsage/updated",
             }:
                 self._validate_fork_waiting_notification(method, params, p)
-            elif method == "thread/tokenUsage/updated":
+            elif m == "thread/resume" and method in {
+                "thread/status/changed",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_resume_waiting_notification(method, params, p)
+            elif method in {
+                "thread/status/changed",
+                "thread/tokenUsage/updated",
+            }:
                 raise ProtocolError(f"unsupported notification while waiting for {m}")
             if m == "thread/start" and method == "thread/started":
                 raise ProtocolError("thread/started arrived before thread/start response")
@@ -1665,6 +1675,47 @@ class CodexAppServerAdapter:
             self._record("notification_while_waiting", request=m, method=method)
             continue
         raise ProtocolError(f"timeout waiting for {m}")
+
+    def _validate_resume_waiting_notification(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> None:
+        expected_thread_id = request.get("threadId")
+        thread_id = params.get("threadId")
+        if (
+            not isinstance(expected_thread_id, str)
+            or not expected_thread_id
+            or thread_id != expected_thread_id
+        ):
+            raise ProtocolError("missing or foreign thread/resume notification")
+        if method == "thread/status/changed":
+            status = params.get("status")
+            status_type = status.get("type") if isinstance(status, Mapping) else None
+            if not isinstance(status_type, str) or not status_type:
+                raise ProtocolError("malformed thread status during thread/resume")
+            if status_type in {
+                "systemError",
+                "failed",
+                "interrupted",
+                "cancelled",
+            }:
+                raise TurnError(f"terminal thread/resume status: {status_type}")
+            return
+        token_usage = params.get("tokenUsage")
+        turn_id = params.get("turnId")
+        last = token_usage.get("last") if isinstance(token_usage, Mapping) else None
+        total = token_usage.get("total") if isinstance(token_usage, Mapping) else None
+        if (
+            not isinstance(turn_id, str)
+            or not turn_id
+            or not isinstance(last, Mapping)
+            or not isinstance(total, Mapping)
+        ):
+            raise ProtocolError("malformed token usage during thread/resume")
+        self._usage(last)
+        self._usage(total)
 
     def _validate_fork_waiting_notification(
         self,
@@ -1748,6 +1799,34 @@ class CodexAppServerAdapter:
             else:
                 raise ProtocolError(f"unsupported notification after thread/fork: {method}")
             self._record("notification_after_fork", method=method)
+
+    def _drain_resume_notifications(self, thread_id: str) -> None:
+        """Consume bounded history notifications emitted after a resume response."""
+
+        end = time.monotonic() + min(1.0, self.limits.usage_grace)
+        request = {"threadId": thread_id}
+        while time.monotonic() < end:
+            msg = self._read_message(end)
+            if msg is None:
+                return
+            if "id" in msg:
+                raise ProtocolError("unexpected response after thread/resume")
+            method = msg.get("method")
+            params = msg.get("params")
+            if not isinstance(method, str) or not isinstance(params, Mapping):
+                raise ProtocolError("malformed notification after thread/resume")
+            if method in _GLOBAL:
+                self._consume_global_notification(method, params)
+            elif method in {
+                "thread/status/changed",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_resume_waiting_notification(method, params, request)
+            else:
+                raise ProtocolError(
+                    f"unsupported notification after thread/resume: {method}"
+                )
+            self._record("notification_after_resume", method=method)
 
     def _read_message(self, end: float) -> Json | None:
         if self._stderr_exceeded or self._stdout_overflow:

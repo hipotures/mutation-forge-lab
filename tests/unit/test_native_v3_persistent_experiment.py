@@ -20,6 +20,7 @@ from mutation_forge.stage3.app_server import (
     IsolationError,
     ModelProfile,
     ProtocolError,
+    TurnError,
 )
 from mutation_forge.stage3.isolation import IsolatedCapsule
 
@@ -312,7 +313,12 @@ def test_durable_thread_resumes_after_process_restart(tmp_path: Path) -> None:
 
         second = _adapter(
             tmp_path,
-            FakeScenario(final_text="second"),
+            FakeScenario(
+                final_text="second",
+                resume_status_before_response="idle",
+                resume_usage_after_response=True,
+                resume_usage_turn_id=first_result.turn_id,
+            ),
             "Persistent test.",
             capsule=capsule,
         )
@@ -328,6 +334,47 @@ def test_durable_thread_resumes_after_process_restart(tmp_path: Path) -> None:
         assert second_result.text == "second"
     finally:
         capsule.cleanup()
+
+
+def test_resume_rejects_foreign_and_terminal_status_notifications(
+    tmp_path: Path,
+) -> None:
+    profile = ModelProfile("codex", "gpt-5.6-luna", "high")
+    cases = (
+        (
+            FakeScenario(
+                resume_status_before_response="idle",
+                resume_status_thread_id="foreign-thread",
+            ),
+            ProtocolError,
+            "foreign thread/resume",
+        ),
+        (
+            FakeScenario(resume_status_before_response="systemError"),
+            TurnError,
+            "terminal thread/resume status",
+        ),
+    )
+    for index, (scenario, error_type, message) in enumerate(cases):
+        parent = tmp_path / f"case-{index}"
+        parent.mkdir()
+        capsule = IsolatedCapsule.create(parent)
+        adapter = _adapter(
+            tmp_path,
+            scenario,
+            "Persistent test.",
+            capsule=capsule,
+        )
+        try:
+            with pytest.raises(error_type, match=message):
+                adapter.resume_thread(
+                    profile,
+                    thread_id="thread-1",
+                    thread_path=str(capsule.codex_home / "rollout.jsonl"),
+                )
+        finally:
+            adapter.close()
+            capsule.cleanup()
 
 
 def test_cli_0146_dangling_reasoning_is_tolerated_only_experimentally(
