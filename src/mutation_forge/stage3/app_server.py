@@ -140,6 +140,16 @@ class CompactionResult:
     duration_ms: int
 
 
+@dataclass(frozen=True, slots=True)
+class ForkResult:
+    source_thread_id: str
+    child_thread_id: str
+    session_id: str
+    thread_path: str | None
+    last_turn_id: str
+    included_turn_ids: tuple[str, ...]
+
+
 ProcessFactory = Callable[..., Any]
 AuthChecker = Callable[[IsolatedCapsule], bool]
 
@@ -188,7 +198,10 @@ _DELTAS = {
     "item/reasoning/textDelta",
 }
 _SETUP_NOTIFICATIONS = {"initialized"}
-_WAITING_NOTIFICATIONS = _GLOBAL | {"thread/started"}
+_WAITING_NOTIFICATIONS = _GLOBAL | {
+    "thread/started",
+    "thread/tokenUsage/updated",
+}
 
 
 class CodexAppServerAdapter:
@@ -214,6 +227,7 @@ class CodexAppServerAdapter:
         protocol_audit_sha256: str | None = None,
         sandbox_mode: str = "danger-full-access",
         approval_policy: str = "never",
+        copy_rollout_artifact: bool = True,
     ):
         if not base_instructions.strip():
             raise ValueError("base_instructions must be non-empty")
@@ -243,9 +257,12 @@ class CodexAppServerAdapter:
         self.protocol_audit_sha256 = protocol_audit_sha256
         self.sandbox_mode = sandbox_mode
         self.approval_policy = approval_policy
+        self.copy_rollout_artifact = copy_rollout_artifact
         self._process: _Proc | None = None
         self._next_id = 0
         self._thread: Json | None = None
+        self._forked_threads: dict[str, Json] = {}
+        self._completed_turn_ids: dict[str, list[str]] = {}
         self._turns = 0
         self._campaigns = 0
         self._failed = False
@@ -756,6 +773,149 @@ class CodexAppServerAdapter:
             self.close(force=True)
             raise
 
+    def fork_persistent_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        last_turn_id: str,
+        activate: bool = False,
+    ) -> ForkResult:
+        """Fork an experimental durable thread at one completed inclusive turn."""
+
+        if (
+            self._thread is None
+            or self._thread.get("ephemeral") is not False
+            or self._last_status != "completed"
+        ):
+            raise IsolationError("fork requires an idle durable thread")
+        if not isinstance(last_turn_id, str) or not last_turn_id:
+            raise ValueError("last_turn_id must be non-empty")
+        if self._campaigns >= self.limits.max_campaigns:
+            raise TurnError("campaign limit exceeded")
+        selected = (
+            resolve_model_profile(profile) if isinstance(profile, str) else profile
+        )
+        if selected.provider != "codex":
+            raise ValueError("only the installed Codex provider is supported")
+        source = self._thread
+        source_thread_id = cast(str, source["id"])
+        result = self._request(
+            "thread/fork",
+            {
+                "threadId": source_thread_id,
+                "lastTurnId": last_turn_id,
+                "model": selected.model,
+                "cwd": str(self.capsule.workdir),
+                "sandbox": self.sandbox_mode,
+                "approvalPolicy": self.approval_policy,
+                "baseInstructions": self.base_instructions,
+                "developerInstructions": "",
+                "runtimeWorkspaceRoots": [],
+                "ephemeral": False,
+                "excludeTurns": False,
+                "config": {"model_reasoning_effort": selected.effort},
+            },
+            timeout=self.limits.startup_timeout,
+        )
+        thread = result.get("thread")
+        if not isinstance(thread, Mapping):
+            raise ProtocolError("thread/fork returned no child thread")
+        child_thread_id = thread.get("id")
+        session_id = thread.get("sessionId")
+        turns = thread.get("turns")
+        if (
+            not isinstance(child_thread_id, str)
+            or not child_thread_id
+            or child_thread_id == source_thread_id
+            or thread.get("forkedFromId") != source_thread_id
+            or thread.get("ephemeral") is not False
+            or not isinstance(session_id, str)
+            or not session_id
+            or not isinstance(turns, list)
+        ):
+            raise ProtocolError("thread/fork returned invalid child identity")
+        included_turn_ids: list[str] = []
+        for raw_turn in turns:
+            if not isinstance(raw_turn, Mapping):
+                raise ProtocolError("thread/fork returned malformed history")
+            turn, _ = self._validated_turn(
+                {"turn": raw_turn},
+                source="thread/fork",
+            )
+            if turn.get("status") != "completed":
+                raise ProtocolError("thread/fork returned non-completed history")
+            included_turn_ids.append(cast(str, turn["id"]))
+        if not included_turn_ids or included_turn_ids[-1] != last_turn_id:
+            raise ProtocolError("thread/fork did not honor lastTurnId")
+        for key, expected in (
+            ("approvalPolicy", self.approval_policy),
+            ("approvalsReviewer", "user"),
+            ("cwd", str(self.capsule.workdir)),
+            ("model", selected.model),
+        ):
+            if result.get(key) != expected:
+                raise IsolationError(f"thread/fork returned invalid {key}")
+        if (
+            result.get("instructionSources", []) != []
+            or result.get("runtimeWorkspaceRoots", []) != []
+        ):
+            raise IsolationError("forked thread returned non-empty context")
+        sandbox = result.get("sandbox")
+        expected_sandbox_type = (
+            "readOnly" if self.sandbox_mode == "read-only" else "dangerFullAccess"
+        )
+        if (
+            not isinstance(sandbox, Mapping)
+            or sandbox.get("type") != expected_sandbox_type
+            or (
+                self.sandbox_mode == "read-only"
+                and sandbox.get("networkAccess") is not False
+            )
+        ):
+            raise IsolationError("forked thread capabilities do not match")
+        thread_path = thread.get("path")
+        if (
+            not isinstance(thread_path, str)
+            or not Path(thread_path).is_absolute()
+            or thread.get("cwd") != str(self.capsule.workdir)
+        ):
+            raise ProtocolError("forked thread returned invalid path or cwd")
+        try:
+            Path(thread_path).resolve(strict=False).relative_to(
+                self.capsule.root.resolve(strict=True)
+            )
+        except ValueError as exc:
+            raise IsolationError("forked rollout path escapes capsule") from exc
+        fork = ForkResult(
+            source_thread_id=source_thread_id,
+            child_thread_id=child_thread_id,
+            session_id=session_id,
+            thread_path=thread_path,
+            last_turn_id=last_turn_id,
+            included_turn_ids=tuple(included_turn_ids),
+        )
+        self._forked_threads[child_thread_id] = dict(thread)
+        self._completed_turn_ids[child_thread_id] = list(included_turn_ids)
+        self._drain_fork_notifications(source_thread_id)
+        self._campaigns += 1
+        if activate:
+            self.activate_forked_thread(child_thread_id)
+        return fork
+
+    def activate_forked_thread(self, child_thread_id: str) -> None:
+        """Select one child previously returned by thread/fork."""
+
+        thread = self._forked_threads.get(child_thread_id)
+        if thread is None:
+            raise ValueError("unknown forked thread")
+        self._thread = dict(thread)
+        self._current_thread_id = child_thread_id
+        self._current_turn_id = None
+        self._last_usage_raw = None
+        self._active.clear()
+        self._completed.clear()
+        self._last_status = "initialized"
+
     def _generate_on_thread(
         self,
         prompt: str,
@@ -1040,6 +1200,10 @@ class CodexAppServerAdapter:
         if len(final.encode("utf-8")) > self.limits.response_limit:
             raise ProtocolError("structured response exceeds limit")
         usage = self._usage(usage_raw)
+        completed_turns = self._completed_turn_ids.setdefault(thread_id, [])
+        if turn_id in completed_turns:
+            raise ProtocolError("duplicate completed turn identity")
+        completed_turns.append(turn_id)
         return GenerationResult(
             final,
             usage,
@@ -1484,6 +1648,13 @@ class CodexAppServerAdapter:
                 raise ProtocolError(f"unsupported notification while waiting for {m}")
             if method in _GLOBAL:
                 self._consume_global_notification(method, params)
+            elif m == "thread/fork" and method in {
+                "thread/started",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_fork_waiting_notification(method, params, p)
+            elif method == "thread/tokenUsage/updated":
+                raise ProtocolError(f"unsupported notification while waiting for {m}")
             if m == "thread/start" and method == "thread/started":
                 raise ProtocolError("thread/started arrived before thread/start response")
             # The installed app-server may emit config, remote-control, account,
@@ -1494,6 +1665,89 @@ class CodexAppServerAdapter:
             self._record("notification_while_waiting", request=m, method=method)
             continue
         raise ProtocolError(f"timeout waiting for {m}")
+
+    def _validate_fork_waiting_notification(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> None:
+        source_thread_id = request.get("threadId")
+        if not isinstance(source_thread_id, str) or not source_thread_id:
+            raise ProtocolError("fork notification has no source thread")
+        if method == "thread/tokenUsage/updated":
+            thread_id = params.get("threadId")
+            turn_id = params.get("turnId")
+            token_usage = params.get("tokenUsage")
+            last = token_usage.get("last") if isinstance(token_usage, Mapping) else None
+            total = token_usage.get("total") if isinstance(token_usage, Mapping) else None
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id
+                or not isinstance(turn_id, str)
+                or not turn_id
+                or not isinstance(last, Mapping)
+                or not isinstance(total, Mapping)
+            ):
+                raise ProtocolError("malformed token usage while waiting for fork")
+            self._usage(last)
+            self._usage(total)
+            known_turns = set(self._completed_turn_ids.get(source_thread_id, []))
+            known_turns.update(self._completed_turn_ids.get(thread_id, []))
+            if turn_id not in known_turns:
+                raise ProtocolError("foreign token usage while waiting for fork")
+            return
+        thread = params.get("thread")
+        if (
+            not isinstance(thread, Mapping)
+            or not isinstance(thread.get("id"), str)
+            or not thread["id"]
+            or thread.get("forkedFromId") != source_thread_id
+            or thread.get("ephemeral") is not False
+            or thread.get("cwd") != str(self.capsule.workdir)
+        ):
+            raise ProtocolError("malformed thread/started while waiting for fork")
+        raw_path = thread.get("path")
+        if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+            raise ProtocolError("fork thread/started has no absolute path")
+        try:
+            Path(raw_path).resolve(strict=False).relative_to(
+                self.capsule.root.resolve(strict=True)
+            )
+        except ValueError as exc:
+            raise IsolationError("fork thread/started path escapes capsule") from exc
+        known = self._forked_threads.get(cast(str, thread["id"]))
+        if known is not None and any(
+            thread.get(key) != known.get(key)
+            for key in ("forkedFromId", "id", "path", "sessionId")
+        ):
+            raise ProtocolError("late fork thread/started changed child identity")
+
+    def _drain_fork_notifications(self, source_thread_id: str) -> None:
+        """Consume bounded notifications emitted just after a fork response."""
+
+        end = time.monotonic() + min(1.0, self.limits.usage_grace)
+        request = {"threadId": source_thread_id}
+        while time.monotonic() < end:
+            msg = self._read_message(end)
+            if msg is None:
+                return
+            if "id" in msg:
+                raise ProtocolError("unexpected response after thread/fork")
+            method = msg.get("method")
+            params = msg.get("params")
+            if not isinstance(method, str) or not isinstance(params, Mapping):
+                raise ProtocolError("malformed notification after thread/fork")
+            if method in _GLOBAL:
+                self._consume_global_notification(method, params)
+            elif method in {
+                "thread/started",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_fork_waiting_notification(method, params, request)
+            else:
+                raise ProtocolError(f"unsupported notification after thread/fork: {method}")
+            self._record("notification_after_fork", method=method)
 
     def _read_message(self, end: float) -> Json | None:
         if self._stderr_exceeded or self._stdout_overflow:
@@ -1614,7 +1868,8 @@ class CodexAppServerAdapter:
         self._reader_thread = None
         self._stderr_thread = None
         self._drain_evidence()
-        self._copy_rollout()
+        if self.copy_rollout_artifact:
+            self._copy_rollout()
         if self.logger:
             self.logger.cleanup_temporary_files()
         if self._owns_capsule:

@@ -120,19 +120,19 @@ def protocol_hash(forbidden_lengths: tuple[int, ...]) -> str:
 def bootstrap_prompt(forbidden_lengths: tuple[int, ...]) -> str:
     contract = model_facing_contract(build_single_program_contract(forbidden_lengths))
     identity = protocol_hash(forbidden_lengths)
-    return (
-        "Retain this mathematical program-synthesis contract for later turns. "
-        "Do not generate a program. Return only the required acknowledgement.\n\n"
-        + json.dumps(
-            {
-                "protocol_hash": identity,
-                "active_forbidden_lengths": list(forbidden_lengths),
-                "contract": contract,
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+    return json.dumps(
+        {
+            "instruction": (
+                "Retain this mathematical program-synthesis contract for later turns. "
+                "Do not generate a program. Return only the required acknowledgement."
+            ),
+            "protocol_hash": identity,
+            "active_forbidden_lengths": list(forbidden_lengths),
+            "contract": contract,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 

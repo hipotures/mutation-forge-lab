@@ -1,0 +1,285 @@
+"""Bounded host-owned Search Memory for the Native v3 Step 12D experiment."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from .canonical import canonical_json_bytes
+
+SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.v1"
+MAX_SEEN_IDENTITIES = 64
+MAX_PATTERNS_PER_OUTCOME = 8
+MAX_ACTIVE_LINEAGES = 16
+MAX_ARCHIVE_IDS = 16
+MAX_SEARCH_MEMORY_BYTES = 16 * 1024
+_HASH = re.compile(r"^[0-9a-f]{64}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_PRINTABLE = re.compile(r"^[\x20-\x7e]+$")
+
+
+class SearchMemoryError(ValueError):
+    """The host Search Memory is invalid or exceeds its fixed bound."""
+
+
+class DuplicateCandidateError(SearchMemoryError):
+    """A generated candidate repeats an identity already held by the host."""
+
+
+def _validated_hash(value: str, field: str) -> str:
+    if not isinstance(value, str) or _HASH.fullmatch(value) is None:
+        raise SearchMemoryError(f"{field} must be a lowercase SHA-256")
+    return value
+
+
+def _validated_identifier(value: str, field: str) -> str:
+    if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
+        raise SearchMemoryError(f"{field} is invalid")
+    return value
+
+
+def _validated_summary(value: str, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > 600
+        or _PRINTABLE.fullmatch(value) is None
+    ):
+        raise SearchMemoryError(f"{field} must be 1-600 printable ASCII characters")
+    sentence_count = sum(value.count(mark) for mark in ".!?")
+    if sentence_count < 1 or sentence_count > 3:
+        raise SearchMemoryError(f"{field} must contain one to three sentences")
+    return value
+
+
+def _bounded_unique(
+    values: tuple[str, ...],
+    *,
+    field: str,
+    maximum: int,
+    hash_values: bool = False,
+) -> tuple[str, ...]:
+    if len(values) > maximum:
+        raise SearchMemoryError(f"{field} exceeds {maximum} entries")
+    checked = tuple(
+        _validated_hash(value, field)
+        if hash_values
+        else _validated_identifier(value, field)
+        for value in values
+    )
+    if len(set(checked)) != len(checked):
+        raise SearchMemoryError(f"{field} contains duplicates")
+    return tuple(sorted(checked))
+
+
+@dataclass(frozen=True, slots=True)
+class PatternSummary:
+    pattern_id: str
+    selector_families: tuple[str, ...]
+    action_families: tuple[str, ...]
+    description: str
+    description_source: Literal["host", "model"]
+    evaluation_outcome: str
+    evidence_kind: Literal["strength", "weakness"]
+    main_evidence: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "pattern_id",
+            _validated_identifier(self.pattern_id, "pattern_id"),
+        )
+        for field in ("selector_families", "action_families"):
+            values = _bounded_unique(
+                getattr(self, field),
+                field=field,
+                maximum=32,
+            )
+            object.__setattr__(self, field, values)
+        if not self.selector_families and not self.action_families:
+            raise SearchMemoryError("pattern must name a selector or action family")
+        _validated_summary(self.description, "description")
+        _validated_identifier(self.evaluation_outcome, "evaluation_outcome")
+        _validated_summary(self.main_evidence, "main_evidence")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "pattern_id": self.pattern_id,
+            "selector_families": list(self.selector_families),
+            "action_families": list(self.action_families),
+            "description": self.description,
+            "description_source": self.description_source,
+            "evaluation_outcome": self.evaluation_outcome,
+            "evidence_kind": self.evidence_kind,
+            "main_evidence": self.main_evidence,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LineageSummary:
+    candidate_id: str
+    parent_id: str | None
+    program_hash: str
+    behavior_signature: str
+    generation: int
+    slot: int
+    evaluation_outcome: str
+    summary: str
+
+    def __post_init__(self) -> None:
+        _validated_identifier(self.candidate_id, "candidate_id")
+        if self.parent_id is not None:
+            _validated_identifier(self.parent_id, "parent_id")
+        _validated_hash(self.program_hash, "program_hash")
+        _validated_hash(self.behavior_signature, "behavior_signature")
+        if (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 0
+            or isinstance(self.slot, bool)
+            or not isinstance(self.slot, int)
+            or self.slot < 0
+        ):
+            raise SearchMemoryError("generation and slot must be non-negative integers")
+        _validated_identifier(self.evaluation_outcome, "evaluation_outcome")
+        _validated_summary(self.summary, "summary")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "parent_id": self.parent_id,
+            "program_hash": self.program_hash,
+            "behavior_signature": self.behavior_signature,
+            "generation": self.generation,
+            "slot": self.slot,
+            "evaluation_outcome": self.evaluation_outcome,
+            "summary": self.summary,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveParentReference:
+    candidate_id: str
+    program_hash: str
+
+    def __post_init__(self) -> None:
+        _validated_identifier(self.candidate_id, "active_parent.candidate_id")
+        _validated_hash(self.program_hash, "active_parent.program_hash")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "candidate_id": self.candidate_id,
+            "program_hash": self.program_hash,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SearchMemoryV1:
+    protocol_hash: str
+    seen_program_hashes: tuple[str, ...]
+    seen_behavior_signatures: tuple[str, ...]
+    successful_patterns: tuple[PatternSummary, ...]
+    failed_patterns: tuple[PatternSummary, ...]
+    active_lineages: tuple[LineageSummary, ...]
+    validated_archive_ids: tuple[str, ...]
+    active_parent: ActiveParentReference | None = None
+
+    def __post_init__(self) -> None:
+        _validated_hash(self.protocol_hash, "protocol_hash")
+        object.__setattr__(
+            self,
+            "seen_program_hashes",
+            _bounded_unique(
+                self.seen_program_hashes,
+                field="seen_program_hashes",
+                maximum=MAX_SEEN_IDENTITIES,
+                hash_values=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "seen_behavior_signatures",
+            _bounded_unique(
+                self.seen_behavior_signatures,
+                field="seen_behavior_signatures",
+                maximum=MAX_SEEN_IDENTITIES,
+                hash_values=True,
+            ),
+        )
+        for field in ("successful_patterns", "failed_patterns"):
+            patterns = getattr(self, field)
+            if len(patterns) > MAX_PATTERNS_PER_OUTCOME:
+                raise SearchMemoryError(
+                    f"{field} exceeds {MAX_PATTERNS_PER_OUTCOME} entries"
+                )
+            ordered = tuple(sorted(patterns, key=lambda item: item.pattern_id))
+            if len({item.pattern_id for item in ordered}) != len(ordered):
+                raise SearchMemoryError(f"{field} contains duplicate pattern IDs")
+            object.__setattr__(self, field, ordered)
+        if len(self.active_lineages) > MAX_ACTIVE_LINEAGES:
+            raise SearchMemoryError(
+                f"active_lineages exceeds {MAX_ACTIVE_LINEAGES} entries"
+            )
+        lineages = tuple(
+            sorted(
+                self.active_lineages,
+                key=lambda item: (item.generation, item.slot, item.candidate_id),
+            )
+        )
+        if len({item.candidate_id for item in lineages}) != len(lineages):
+            raise SearchMemoryError("active_lineages contains duplicate candidates")
+        object.__setattr__(self, "active_lineages", lineages)
+        object.__setattr__(
+            self,
+            "validated_archive_ids",
+            _bounded_unique(
+                self.validated_archive_ids,
+                field="validated_archive_ids",
+                maximum=MAX_ARCHIVE_IDS,
+            ),
+        )
+        if len(self.canonical_bytes()) > MAX_SEARCH_MEMORY_BYTES:
+            raise SearchMemoryError(
+                f"Search Memory exceeds {MAX_SEARCH_MEMORY_BYTES} canonical bytes"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SEARCH_MEMORY_SCHEMA_VERSION,
+            "protocol_hash": self.protocol_hash,
+            "seen_program_hashes": list(self.seen_program_hashes),
+            "seen_behavior_signatures": list(self.seen_behavior_signatures),
+            "successful_patterns": [
+                item.as_dict() for item in self.successful_patterns
+            ],
+            "failed_patterns": [item.as_dict() for item in self.failed_patterns],
+            "active_lineages": [item.as_dict() for item in self.active_lineages],
+            "validated_archive_ids": list(self.validated_archive_ids),
+            "active_parent": (
+                None if self.active_parent is None else self.active_parent.as_dict()
+            ),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.as_dict())
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
+def reject_duplicate(
+    memory: SearchMemoryV1,
+    *,
+    program_hash: str,
+    behavior_signature: str,
+) -> None:
+    """Apply the authoritative host duplicate gate."""
+
+    _validated_hash(program_hash, "program_hash")
+    _validated_hash(behavior_signature, "behavior_signature")
+    if program_hash in memory.seen_program_hashes:
+        raise DuplicateCandidateError("canonical program hash already exists")
+    if behavior_signature in memory.seen_behavior_signatures:
+        raise DuplicateCandidateError("behavior signature already exists")
