@@ -180,14 +180,8 @@ class _Backend:
 
     def generate_seed(self, *, order: int, seed: int) -> GraphState:
         del seed
-        edges = {
-            tuple(sorted((vertex, (vertex + 1) % order)))
-            for vertex in range(order)
-        }
-        edges.update(
-            (vertex, vertex + order // 2)
-            for vertex in range(order // 2)
-        )
+        edges = {tuple(sorted((vertex, (vertex + 1) % order))) for vertex in range(order)}
+        edges.update((vertex, vertex + order // 2) for vertex in range(order // 2))
         return GraphState(order, tuple(sorted(edges)))
 
     def validate(self, graph: GraphState) -> GraphValidation:
@@ -322,6 +316,73 @@ def test_v3_routes_selected_preview_without_constructing_batch_provider(
     assert calls[0]["experiment_root"] == tmp_path / "workspace" / "v3-run"
 
 
+def test_preview_provider_failure_preserves_attempt_and_retry_progress(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'communication_mode = "multi_program_batch"',
+            'communication_mode = "persistent_single_ast"',
+        ),
+        encoding="utf-8",
+    )
+
+    def preview_runner(
+        experiment_root: Path,
+        **_: object,
+    ) -> dict[str, object]:
+        state_path = (
+            experiment_root / "native-v3-output" / "epoch-0000" / "communication-state.json.gz"
+        )
+        state_path.parent.mkdir(parents=True)
+        write_json(
+            state_path,
+            {
+                "model_turns": 2,
+                "provider_attempts": 3,
+                "failed_provider_attempts": 1,
+                "provider_retries": 7,
+                "provider_warnings": 1,
+                "provider_process_restarts": 1,
+                "thread_resume_attempts": 2,
+                "failed_thread_resume_attempts": 0,
+                "active_provider_attempt": None,
+                "last_provider_attempt": {
+                    "phase": "program",
+                    "status": "failed",
+                    "slot_id": "slot-01",
+                    "worker_index": 1,
+                    "thread_id": "worker-1",
+                    "turn_id": "turn-3",
+                    "provider_retries": 7,
+                    "provider_warnings": 1,
+                    "error": "TurnError: turn timed out",
+                },
+            },
+        )
+        raise RuntimeError("fixture provider failure")
+
+    result = run_v3(
+        path,
+        backend_factory=_backend,
+        auth_available=lambda _: True,
+        preview_runner=preview_runner,
+    )
+
+    assert result["state"] == "blocked"
+    assert result["provider_turns"] == 2
+    assert result["provider_attempts"] == 3
+    assert result["failed_provider_attempts"] == 1
+    assert result["provider_retries"] == 7
+    assert result["provider_warnings"] == 1
+    assert result["provider_process_restarts"] == 1
+    assert result["thread_resume_attempts"] == 2
+    assert result["last_provider_attempt"]["slot_id"] == "slot-01"
+    assert result["last_provider_attempt"]["turn_id"] == "turn-3"
+    assert v3_status(path) == result
+
+
 def test_selected_preview_auth_failure_is_resumable_before_scientific_work(
     tmp_path: Path,
 ) -> None:
@@ -379,23 +440,12 @@ def test_v3_completes_eight_slots_and_status_is_read_only(
     assert manifest.is_file()
     assert report.is_file()
     report_payload = read_json(report)
-    assert report_payload["selected_program_hash"] == (
-        report_payload["canonical_program_order"][0]
-    )
+    assert report_payload["selected_program_hash"] == (report_payload["canonical_program_order"][0])
     selected_evaluation = read_json(
-        report.parent
-        / "programs"
-        / report_payload["selected_program_hash"]
-        / "evaluation.json.gz"
+        report.parent / "programs" / report_payload["selected_program_hash"] / "evaluation.json.gz"
     )
-    assert (
-        selected_evaluation["protocols"]["score_evidence"]
-        == "native_v3_score_50k_200k_v1"
-    )
-    assert (
-        selected_evaluation["protocols"]["fitness"]
-        == "native_v3_interval_utility_auc_v1"
-    )
+    assert selected_evaluation["protocols"]["score_evidence"] == "native_v3_score_50k_200k_v1"
+    assert selected_evaluation["protocols"]["fitness"] == "native_v3_interval_utility_auc_v1"
     assert selected_evaluation["evaluation"]["status"] == "COMPLETE"
     fitness = selected_evaluation["evaluation"]["fitness_interval"]
     assert set(fitness) == {"lower", "upper"}
@@ -527,8 +577,7 @@ def test_partial_batch_is_not_repaired_and_duplicate_is_evaluated_once(
         "slot-01",
     ]
     assert all(
-        item["provider_attempts"][0]["turn_directory"]
-        for item in program_artifact["lineage"]
+        item["provider_attempts"][0]["turn_directory"] for item in program_artifact["lineage"]
     )
 
 
@@ -575,9 +624,7 @@ def test_wholly_invalid_batch_gets_exactly_one_frozen_repair(
     assert not (repair_turn / "source.py").exists()
     assert initial_source.read_bytes() != repair_source.read_bytes()
     assert "```json\n" in (repair_turn / "slot-00.response.md").read_text()
-    assert "```python\n" not in (
-        repair_turn / "slot-00.response.md"
-    ).read_text()
+    assert "```python\n" not in (repair_turn / "slot-00.response.md").read_text()
     assert all(attempt["provider_turn_id"] for attempt in attempts)
 
 

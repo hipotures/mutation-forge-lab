@@ -284,6 +284,8 @@ class CodexAppServerAdapter:
         self._active: dict[str, str] = {}
         self._completed: set[str] = set()
         self._diag: list[Mapping[str, Any]] = []
+        self._server_retries = 0
+        self._server_warnings = 0
         self._last_status = "new"
         self.logger = (
             TransportLogger(
@@ -573,9 +575,8 @@ class CodexAppServerAdapter:
             thread = result.get("thread")
             if not isinstance(thread, Mapping) or not isinstance(thread.get("id"), str):
                 raise ProtocolError("thread/start returned no thread id")
-            if (
-                thread.get("ephemeral") is not ephemeral
-                or thread.get("cwd") != str(self.capsule.workdir)
+            if thread.get("ephemeral") is not ephemeral or thread.get("cwd") != str(
+                self.capsule.workdir
             ):
                 raise IsolationError("thread identity violates capsule persistence settings")
             thread_path = thread.get("path")
@@ -597,10 +598,7 @@ class CodexAppServerAdapter:
             if (
                 not isinstance(sandbox, Mapping)
                 or sandbox.get("type") != expected_sandbox_type
-                or (
-                    self.sandbox_mode == "read-only"
-                    and sandbox.get("networkAccess") is not False
-                )
+                or (self.sandbox_mode == "read-only" and sandbox.get("networkAccess") is not False)
             ):
                 raise IsolationError("thread capabilities do not match configured sandbox mode")
             for key, expected in (
@@ -635,7 +633,43 @@ class CodexAppServerAdapter:
     ) -> Json:
         """Resume one durable thread in an experimental replacement process."""
 
-        if self._thread is not None or self._campaigns >= self.limits.max_campaigns:
+        if self._thread is not None:
+            raise TurnError("a durable thread is already active")
+        thread = self._resume_thread(
+            profile,
+            thread_id=thread_id,
+            thread_path=thread_path,
+        )
+        self._thread = dict(thread)
+        return dict(thread)
+
+    def resume_forked_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        thread_id: str,
+        thread_path: str | None = None,
+    ) -> Json:
+        """Load another durable worker into the same replacement process."""
+
+        if self._thread is None:
+            raise TurnError("additional resume requires an active durable thread")
+        if thread_id in self._forked_threads:
+            raise ValueError("durable thread is already loaded")
+        return self._resume_thread(
+            profile,
+            thread_id=thread_id,
+            thread_path=thread_path,
+        )
+
+    def _resume_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        thread_id: str,
+        thread_path: str | None,
+    ) -> Json:
+        if self._campaigns >= self.limits.max_campaigns:
             raise TurnError("campaign limit exceeded")
         selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
         if selected.provider != "codex":
@@ -664,7 +698,7 @@ class CodexAppServerAdapter:
             or thread.get("ephemeral") is not False
         ):
             raise IsolationError("thread/resume returned a different or ephemeral thread")
-        self._thread = dict(thread)
+        self._forked_threads[thread_id] = dict(thread)
         self._campaigns += 1
         self._drain_resume_notifications(thread_id)
         return dict(thread)
@@ -684,6 +718,8 @@ class CodexAppServerAdapter:
             "new",
         }:
             raise TurnError("cannot rotate artifacts during an active turn")
+        self._stdout_lines.clear()
+        self._stderr_lines.clear()
         self.logger = TransportLogger(
             Path(artifact_dir),
             artifact_prefix,
@@ -794,9 +830,7 @@ class CodexAppServerAdapter:
             raise ValueError("last_turn_id must be non-empty")
         if self._campaigns >= self.limits.max_campaigns:
             raise TurnError("campaign limit exceeded")
-        selected = (
-            resolve_model_profile(profile) if isinstance(profile, str) else profile
-        )
+        selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
         if selected.provider != "codex":
             raise ValueError("only the installed Codex provider is supported")
         source = self._thread
@@ -869,10 +903,7 @@ class CodexAppServerAdapter:
         if (
             not isinstance(sandbox, Mapping)
             or sandbox.get("type") != expected_sandbox_type
-            or (
-                self.sandbox_mode == "read-only"
-                and sandbox.get("networkAccess") is not False
-            )
+            or (self.sandbox_mode == "read-only" and sandbox.get("networkAccess") is not False)
         ):
             raise IsolationError("forked thread capabilities do not match")
         thread_path = thread.get("path")
@@ -1027,6 +1058,12 @@ class CodexAppServerAdapter:
                     raise ProtocolError("incoming message exceeds limit")
                 if self._stderr_exceeded:
                     raise ProtocolError("output limit exceeded")
+                if (
+                    time.monotonic() >= deadline
+                    and self._process is not None
+                    and self._process.poll() is None
+                ):
+                    raise TurnError("turn timed out")
                 raise TurnError("app-server EOF before turn completion")
             if "id" in msg and "method" in msg:
                 self._deny_server_request(msg)
@@ -1059,6 +1096,7 @@ class CodexAppServerAdapter:
                     or ev.get("threadId") != thread_id
                 ):
                     raise ProtocolError("malformed app-server warning")
+                self._server_warnings += 1
                 continue
             if method == "thread/started":
                 if turn_id is not None:
@@ -1066,7 +1104,8 @@ class CodexAppServerAdapter:
                 self._correlate_thread_started(ev, thread_id)
                 continue
             if (
-                method not in {
+                method
+                not in {
                     "turn/started",
                     "item/started",
                     "item/completed",
@@ -1077,8 +1116,7 @@ class CodexAppServerAdapter:
                     "model/rerouted",
                     "error",
                 }
-                and
-                ev.get("threadId", ev.get("thread_id")) is None
+                and ev.get("threadId", ev.get("thread_id")) is None
                 and ev.get("turnId", ev.get("turn_id")) is None
                 and not isinstance(ev.get("turn"), Mapping)
             ):
@@ -1157,6 +1195,7 @@ class CodexAppServerAdapter:
                     raise ProtocolError("malformed app-server error")
                 if ev["willRetry"]:
                     if allow_server_retry:
+                        self._server_retries += 1
                         continue
                     raise IsolationError("server retry is forbidden")
                 raise TurnError("terminal app-server error")
@@ -1304,9 +1343,7 @@ class CodexAppServerAdapter:
             elif method == "item/started":
                 current_id, item_type, _ = self._item_payload(event)
                 if item_type != "contextCompaction":
-                    raise IsolationError(
-                        f"unsupported compaction item type: {item_type}"
-                    )
+                    raise IsolationError(f"unsupported compaction item type: {item_type}")
                 if item_id is not None or current_id in self._completed:
                     raise ProtocolError("duplicate compaction item")
                 item_id = current_id
@@ -1335,24 +1372,18 @@ class CodexAppServerAdapter:
             elif method == "turn/completed":
                 turn, ids = self._validated_turn(event, source="turn/completed")
                 if turn.get("status") != "completed":
-                    raise TurnError(
-                        f"compaction ended with status {turn.get('status')!r}"
-                    )
+                    raise TurnError(f"compaction ended with status {turn.get('status')!r}")
                 if not item_completed or item_id is None or self._active:
                     raise ProtocolError("compaction item did not complete")
                 if turn.get("itemsView") != "notLoaded" and item_id not in ids:
-                    raise ProtocolError(
-                        "contextCompaction item absent from completed turn"
-                    )
+                    raise ProtocolError("contextCompaction item absent from completed turn")
                 reported_duration = turn.get("durationMs")
                 if reported_duration is not None and (
                     not isinstance(reported_duration, int)
                     or isinstance(reported_duration, bool)
                     or reported_duration < 0
                 ):
-                    raise ProtocolError(
-                        "compaction turn returned invalid durationMs"
-                    )
+                    raise ProtocolError("compaction turn returned invalid durationMs")
                 duration_ms = (
                     reported_duration
                     if reported_duration is not None
@@ -1567,23 +1598,13 @@ class CodexAppServerAdapter:
                         raise ProtocolError("malformed config warning notification")
                     for coordinate in ("line", "column"):
                         value = position.get(coordinate)
-                        if (
-                            not isinstance(value, int)
-                            or isinstance(value, bool)
-                            or value < 0
-                        ):
+                        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                             raise ProtocolError("malformed config warning notification")
-        if (
-            m == "remoteControl/status/changed"
-            and (
-                p.get("status") not in {"disabled", "connecting", "connected", "errored"}
-                or not isinstance(p.get("serverName"), str)
-                or not isinstance(p.get("installationId"), str)
-                or (
-                    p.get("environmentId") is not None
-                    and not isinstance(p.get("environmentId"), str)
-                )
-            )
+        if m == "remoteControl/status/changed" and (
+            p.get("status") not in {"disabled", "connecting", "connected", "errored"}
+            or not isinstance(p.get("serverName"), str)
+            or not isinstance(p.get("installationId"), str)
+            or (p.get("environmentId") is not None and not isinstance(p.get("environmentId"), str))
         ):
             raise ProtocolError("malformed remote-control status notification")
         return True
@@ -1762,15 +1783,12 @@ class CodexAppServerAdapter:
         if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
             raise ProtocolError("fork thread/started has no absolute path")
         try:
-            Path(raw_path).resolve(strict=False).relative_to(
-                self.capsule.root.resolve(strict=True)
-            )
+            Path(raw_path).resolve(strict=False).relative_to(self.capsule.root.resolve(strict=True))
         except ValueError as exc:
             raise IsolationError("fork thread/started path escapes capsule") from exc
         known = self._forked_threads.get(cast(str, thread["id"]))
         if known is not None and any(
-            thread.get(key) != known.get(key)
-            for key in ("forkedFromId", "id", "path", "sessionId")
+            thread.get(key) != known.get(key) for key in ("forkedFromId", "id", "path", "sessionId")
         ):
             raise ProtocolError("late fork thread/started changed child identity")
 
@@ -1823,9 +1841,7 @@ class CodexAppServerAdapter:
             }:
                 self._validate_resume_waiting_notification(method, params, request)
             else:
-                raise ProtocolError(
-                    f"unsupported notification after thread/resume: {method}"
-                )
+                raise ProtocolError(f"unsupported notification after thread/resume: {method}")
             self._record("notification_after_resume", method=method)
 
     def _read_message(self, end: float) -> Json | None:
@@ -1900,6 +1916,8 @@ class CodexAppServerAdapter:
             "threadPath": self._thread.get("path") if self._thread else None,
             "status": self._last_status,
             "turns": self._turns,
+            "serverRetries": self._server_retries,
+            "serverWarnings": self._server_warnings,
             "usage_final": self._last_status == "completed" and self._last_usage_raw is not None,
             "usage_partial": self._last_status != "completed" and self._last_usage_raw is not None,
         }
@@ -2130,9 +2148,7 @@ class AppServerGenerationProvider:
                         "request_id": r.request_id,
                         "thread_path": r.thread_path,
                         "usage": self._usage(r.usage),
-                        "transport_sha256": (
-                            ad.logger.transcript_sha256 if ad.logger else None
-                        ),
+                        "transport_sha256": (ad.logger.transcript_sha256 if ad.logger else None),
                         "appserver_doctor_sha256": protocol_audit_sha256,
                     },
                 )
@@ -2150,9 +2166,7 @@ class AppServerGenerationProvider:
                         "metadata": dict(ad.inspect_metadata()),
                         "usage": dict(ad.inspect_usage()),
                         "diagnostics": list(ad.diagnostics),
-                        "transport_sha256": (
-                            ad.logger.transcript_sha256 if ad.logger else None
-                        ),
+                        "transport_sha256": (ad.logger.transcript_sha256 if ad.logger else None),
                         "appserver_doctor_sha256": protocol_audit_sha256,
                     },
                 )

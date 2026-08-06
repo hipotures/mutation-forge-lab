@@ -159,9 +159,7 @@ def test_json_transport_text_is_retained_without_markdown_wrapper(tmp_path: Path
     )
     with adapter:
         adapter.generate("prompt", "codex/gpt-5.6-luna:high")
-    response_markdown = (tmp_path / "logs" / "slot-00.response.md").read_text(
-        encoding="utf-8"
-    )
+    response_markdown = (tmp_path / "logs" / "slot-00.response.md").read_text(encoding="utf-8")
     assert response_markdown == '{"z":1,"a":{"b":2}}'
 
 
@@ -210,9 +208,7 @@ def test_matching_id_server_request_is_rejected_before_response_handling(tmp_pat
     def receive(line: bytes) -> None:
         value = json.loads(line)
         if value.get("method") == "turn/start":
-            process.stdout.put(
-                {"id": value["id"], "method": "item/toolCall", "params": {}}
-            )
+            process.stdout.put({"id": value["id"], "method": "item/toolCall", "params": {}})
         original_receive(line)
 
     process.receive = receive  # type: ignore[method-assign]
@@ -419,7 +415,7 @@ def test_timeout_interrupts_and_failed_adapter_is_not_reused(tmp_path: Path) -> 
         auth_checker=lambda _: True,
         limits=AppServerLimits(turn_timeout=0.02, usage_grace=0.01),
     )
-    with adapter, pytest.raises(TurnError, match="EOF before turn completion|timed out"):
+    with adapter, pytest.raises(TurnError, match="turn timed out"):
         adapter.generate("prompt", "codex/gpt-5.6-luna:high")
     assert process.returncode in {-15, -9}
     with pytest.raises(AppServerError, match="failed adapter cannot be reused"):
@@ -510,9 +506,9 @@ def test_rollout_outside_capsule_is_never_copied_and_rollout_text_is_redacted(
     assert not (tmp_path / "logs" / "slot-00.rollout.jsonl").exists()
     assert adapter.logger is not None
     adapter.logger.text("rollout.jsonl", "Bearer private-rollout-token")
-    assert "private-rollout-token" not in (
-        tmp_path / "logs" / "slot-00.rollout.jsonl"
-    ).read_text(encoding="utf-8")
+    assert "private-rollout-token" not in (tmp_path / "logs" / "slot-00.rollout.jsonl").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_provider_persists_theml_style_initial_and_repair_artifacts(tmp_path: Path) -> None:
@@ -576,9 +572,7 @@ def test_exact_v8_bundle_completes_nested_thread_started_structured_path(
         semantics_glossary=config.semantic_glossary_path,
         output_schema=config.output_schema_path,
     )
-    brief = json.loads(
-        (config.slot_briefs_dir / "slot-00.json").read_text(encoding="utf-8")
-    )
+    brief = json.loads((config.slot_briefs_dir / "slot-00.json").read_text(encoding="utf-8"))
     prompt = bundle.render_slot_request(
         brief["slot_id"],
         brief["brief"],
@@ -589,9 +583,7 @@ def test_exact_v8_bundle_completes_nested_thread_started_structured_path(
     envelope = {
         "schema_version": "stage3.generated_policy.v1",
         "source": "def priority(ctx, proposal):\n    return 0.0\n",
-        "design_summary": (
-            "Hypothesis: a constant ranker matches an unstructured selection rule."
-        ),
+        "design_summary": ("Hypothesis: a constant ranker matches an unstructured selection rule."),
         "used_fields": [],
         "assumptions": [],
     }

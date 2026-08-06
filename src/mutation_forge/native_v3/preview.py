@@ -58,6 +58,7 @@ PREVIEW_PROGRAM_RECORD_SCHEMA_VERSION = "mforge.native-v3.program-record.v1"
 FORBIDDEN_LENGTHS = (4, 8, 16)
 WORKER_COUNT = 2
 MAX_REPAIRS = 1
+MAX_PROVIDER_TURNS = 1 + len(SLOT_IDS) * (MAX_REPAIRS + 1)
 
 AdapterFactory = Callable[
     [str, IsolatedCapsule, Path, str, float],
@@ -98,7 +99,7 @@ def _default_adapter_factory(
     return CodexAppServerAdapter(
         capsule=capsule,
         limits=AppServerLimits(
-            max_turns=1,
+            max_turns=MAX_PROVIDER_TURNS,
             max_campaigns=3,
             turn_timeout=timeout_seconds,
         ),
@@ -179,9 +180,7 @@ def _extend_memory(
     return SearchMemoryV1(
         protocol_hash=memory.protocol_hash,
         seen_program_hashes=memory.seen_program_hashes + (program.program_hash,),
-        seen_behavior_signatures=(
-            memory.seen_behavior_signatures + (behavior_signature,)
-        ),
+        seen_behavior_signatures=(memory.seen_behavior_signatures + (behavior_signature,)),
         successful_patterns=patterns,
         failed_patterns=memory.failed_patterns,
         active_lineages=memory.active_lineages + (lineage,),
@@ -249,8 +248,7 @@ def _artifact_complete(turns_dir: Path, prefix: str) -> bool:
 
 def _available_prefix(turns_dir: Path, base: str) -> str:
     if not any(
-        path.name == base or path.name.startswith(f"{base}.")
-        for path in turns_dir.iterdir()
+        path.name == base or path.name.startswith(f"{base}.") for path in turns_dir.iterdir()
     ):
         return base
     attempt = 1
@@ -367,6 +365,8 @@ def _new_state(
     source_identity: Mapping[str, Any],
     forks: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    bootstrap_retries = int(source_identity.get("serverRetries", 0))
+    bootstrap_warnings = int(source_identity.get("serverWarnings", 0))
     return {
         "schema_version": PREVIEW_STATE_SCHEMA_VERSION,
         "communication_mode": PERSISTENT_SINGLE_AST,
@@ -383,6 +383,28 @@ def _new_state(
         "next_slot": 0,
         "slot_reports": [],
         "model_turns": 1,
+        "provider_attempts": 1,
+        "failed_provider_attempts": 0,
+        "provider_retries": bootstrap_retries,
+        "provider_warnings": bootstrap_warnings,
+        "provider_process_restarts": 0,
+        "thread_resume_attempts": 0,
+        "failed_thread_resume_attempts": 0,
+        "active_provider_attempt": None,
+        "last_provider_attempt": {
+            "phase": "bootstrap",
+            "status": "completed",
+            "prefix": anchor.prefix,
+            "slot_id": None,
+            "brief_id": None,
+            "worker_index": None,
+            "repair_index": None,
+            "thread_id": anchor.thread_id,
+            "turn_id": anchor.turn_id,
+            "provider_retries": bootstrap_retries,
+            "provider_warnings": bootstrap_warnings,
+            "error": None,
+        },
         "usages": [anchor.usage],
     }
 
@@ -396,6 +418,29 @@ def _worker_record(value: Mapping[str, Any]) -> dict[str, Any]:
         "fork_parent_turn_id": value["last_turn_id"],
         "included_turn_ids": list(cast(Sequence[str], value["included_turn_ids"])),
     }
+
+
+def _ensure_progress_state(state: dict[str, Any]) -> None:
+    model_turns = int(state.get("model_turns", 0))
+    state.setdefault("provider_attempts", model_turns)
+    state.setdefault("failed_provider_attempts", 0)
+    state.setdefault("provider_retries", 0)
+    state.setdefault("provider_warnings", 0)
+    state.setdefault("provider_process_restarts", 0)
+    state.setdefault("thread_resume_attempts", 0)
+    state.setdefault("failed_thread_resume_attempts", 0)
+    state.setdefault("active_provider_attempt", None)
+    state.setdefault("last_provider_attempt", None)
+
+
+def _adapter_event_counts(
+    adapter: CodexAppServerAdapter,
+) -> tuple[int, int]:
+    metadata = adapter.inspect_metadata()
+    return (
+        int(metadata.get("serverRetries", 0)),
+        int(metadata.get("serverWarnings", 0)),
+    )
 
 
 def run_persistent_single_ast_cohort(
@@ -428,6 +473,7 @@ def run_persistent_single_ast_cohort(
     system_prompt = request.system_prompt
     schema = request.output_schema
 
+    adapter: CodexAppServerAdapter | None = None
     if state_path.is_file():
         raw_state = read_json(state_path)
         if not isinstance(raw_state, Mapping):
@@ -439,6 +485,89 @@ def run_persistent_single_ast_cohort(
         ):
             raise ValueError("preview communication state is incompatible")
         capsule = capsule_reopener(str(state["capsule_root"]))
+        _ensure_progress_state(state)
+        state.update(
+            {
+                "status": "generating",
+                "last_error": None,
+                "active_provider_attempt": None,
+                "provider_process_restarts": int(state["provider_process_restarts"]) + 1,
+            }
+        )
+        workers = cast(list[dict[str, Any]], state["workers"])
+        resume_prefix = _available_prefix(turns_dir, "00-worker-00-resume")
+        adapter = adapter_factory(
+            system_prompt,
+            capsule,
+            turns_dir,
+            resume_prefix,
+            timeout_seconds,
+        )
+        for worker_index, worker in enumerate(workers):
+            prefix = _available_prefix(
+                turns_dir,
+                f"00-worker-{worker_index:02d}-resume",
+            )
+            resume_attempt = {
+                "phase": "thread_resume",
+                "status": "running",
+                "prefix": prefix,
+                "slot_id": None,
+                "brief_id": None,
+                "worker_index": worker_index,
+                "repair_index": None,
+                "thread_id": worker["thread_id"],
+                "turn_id": None,
+                "provider_retries": 0,
+                "provider_warnings": 0,
+                "error": None,
+            }
+            state["thread_resume_attempts"] = int(state["thread_resume_attempts"]) + 1
+            state["active_provider_attempt"] = resume_attempt
+            write_json(state_path, state)
+            if worker_index:
+                adapter.rotate_logger(turns_dir, prefix)
+            try:
+                if worker_index == 0:
+                    adapter.resume_thread(
+                        profile,
+                        thread_id=str(worker["thread_id"]),
+                        thread_path=str(worker["thread_path"]),
+                    )
+                else:
+                    adapter.resume_forked_thread(
+                        profile,
+                        thread_id=str(worker["thread_id"]),
+                        thread_path=str(worker["thread_path"]),
+                    )
+            except Exception as resume_error:
+                resume_attempt.update(
+                    {
+                        "status": "failed",
+                        "error": (f"{type(resume_error).__name__}: {resume_error}"),
+                    }
+                )
+                state.update(
+                    {
+                        "status": "provider_failed",
+                        "last_error": resume_attempt["error"],
+                        "failed_thread_resume_attempts": int(state["failed_thread_resume_attempts"])
+                        + 1,
+                        "active_provider_attempt": None,
+                        "last_provider_attempt": resume_attempt,
+                    }
+                )
+                write_json(state_path, state)
+                adapter.close(force=True)
+                raise
+            resume_attempt["status"] = "completed"
+            state.update(
+                {
+                    "active_provider_attempt": None,
+                    "last_provider_attempt": resume_attempt,
+                }
+            )
+            write_json(state_path, state)
     else:
         expected_manifest = _manifest(model, effort)
         if manifest_path.is_file():
@@ -457,7 +586,7 @@ def run_persistent_single_ast_cohort(
             )
         )
         anchor_prefix = _available_prefix(turns_dir, "00-spec-anchor")
-        setup = adapter_factory(
+        adapter = adapter_factory(
             system_prompt,
             capsule,
             turns_dir,
@@ -466,7 +595,7 @@ def run_persistent_single_ast_cohort(
         )
         try:
             anchor = _run_adapter_turn(
-                setup,
+                adapter,
                 artifact_dir=turns_dir,
                 prefix=anchor_prefix,
                 prompt=bootstrap_prompt(FORBIDDEN_LENGTHS),
@@ -479,7 +608,7 @@ def run_persistent_single_ast_cohort(
             )
             forks = [
                 _fork(
-                    setup,
+                    adapter,
                     turns_dir=turns_dir,
                     prefix=_available_prefix(
                         turns_dir,
@@ -491,14 +620,13 @@ def run_persistent_single_ast_cohort(
                 )
                 for index in range(WORKER_COUNT)
             ]
-            source_identity = dict(setup.inspect_metadata())
+            source_identity = dict(adapter.inspect_metadata())
         except Exception:
-            setup.close(force=True)
+            adapter.close(force=True)
             capsule.cleanup()
             raise
-        else:
-            setup.close()
         if not _artifact_complete(turns_dir, anchor.prefix):
+            adapter.close(force=True)
             capsule.cleanup()
             raise ValueError("bootstrap turn artifact contract is incomplete")
         fork_records = [
@@ -513,10 +641,10 @@ def run_persistent_single_ast_cohort(
             for fork in forks
         ]
         if any(
-            tuple(cast(Sequence[str], item["included_turn_ids"]))
-            != (anchor.turn_id,)
+            tuple(cast(Sequence[str], item["included_turn_ids"])) != (anchor.turn_id,)
             for item in fork_records
         ):
+            adapter.close(force=True)
             capsule.cleanup()
             raise ValueError("worker fork crossed the specification boundary")
         state = _new_state(
@@ -526,6 +654,8 @@ def run_persistent_single_ast_cohort(
             [_worker_record(item) for item in fork_records],
         )
         write_json(state_path, state)
+    assert adapter is not None
+    _ensure_progress_state(state)
 
     raw_reports = state.get("slot_reports", [])
     if not isinstance(raw_reports, list):
@@ -534,10 +664,7 @@ def run_persistent_single_ast_cohort(
     memory, entries = _memory_from_reports(reports, turns_dir)
     workers = cast(list[dict[str, Any]], state["workers"])
     model_turns = int(state["model_turns"])
-    usages = [
-        cast(Mapping[str, Any], item)
-        for item in cast(list[Any], state["usages"])
-    ]
+    usages = [cast(Mapping[str, Any], item) for item in cast(list[Any], state["usages"])]
 
     for slot_index in range(int(state["next_slot"]), len(SLOT_IDS)):
         slot_id = SLOT_IDS[slot_index]
@@ -566,19 +693,32 @@ def run_persistent_single_ast_cohort(
                     error or "invalid program",
                 )
             )
-            adapter = adapter_factory(
-                system_prompt,
-                capsule,
-                turns_dir,
-                prefix,
-                timeout_seconds,
+            adapter.activate_forked_thread(str(worker["thread_id"]))
+            retries_before, warnings_before = _adapter_event_counts(adapter)
+            provider_attempt = {
+                "phase": "program",
+                "status": "running",
+                "prefix": prefix,
+                "slot_id": slot_id,
+                "brief_id": brief_id,
+                "worker_index": worker_index,
+                "repair_index": repair_index,
+                "thread_id": worker["thread_id"],
+                "turn_id": None,
+                "provider_retries": 0,
+                "provider_warnings": 0,
+                "error": None,
+            }
+            state.update(
+                {
+                    "status": "generating",
+                    "last_error": None,
+                    "provider_attempts": int(state["provider_attempts"]) + 1,
+                    "active_provider_attempt": provider_attempt,
+                }
             )
+            write_json(state_path, state)
             try:
-                adapter.resume_thread(
-                    profile,
-                    thread_id=str(worker["thread_id"]),
-                    thread_path=str(worker["thread_path"]),
-                )
                 observation = _run_adapter_turn(
                     adapter,
                     artifact_dir=turns_dir,
@@ -591,8 +731,57 @@ def run_persistent_single_ast_cohort(
                     forbidden_lengths=FORBIDDEN_LENGTHS,
                     program_response=True,
                 )
-            finally:
-                adapter.close()
+            except Exception as provider_error:
+                retries_after, warnings_after = _adapter_event_counts(adapter)
+                retry_count = retries_after - retries_before
+                warning_count = warnings_after - warnings_before
+                thread_id, turn_id = adapter.experimental_turn_identity()
+                provider_attempt.update(
+                    {
+                        "status": "failed",
+                        "thread_id": thread_id or worker["thread_id"],
+                        "turn_id": turn_id,
+                        "provider_retries": retry_count,
+                        "provider_warnings": warning_count,
+                        "error": (f"{type(provider_error).__name__}: {provider_error}"),
+                        "usage": dict(adapter.inspect_usage()),
+                    }
+                )
+                state.update(
+                    {
+                        "status": "provider_failed",
+                        "last_error": provider_attempt["error"],
+                        "failed_provider_attempts": int(state["failed_provider_attempts"]) + 1,
+                        "provider_retries": int(state["provider_retries"]) + retry_count,
+                        "provider_warnings": int(state["provider_warnings"]) + warning_count,
+                        "active_provider_attempt": None,
+                        "last_provider_attempt": provider_attempt,
+                    }
+                )
+                write_json(state_path, state)
+                adapter.close(force=True)
+                raise
+            retries_after, warnings_after = _adapter_event_counts(adapter)
+            retry_count = retries_after - retries_before
+            warning_count = warnings_after - warnings_before
+            provider_attempt.update(
+                {
+                    "status": "completed",
+                    "thread_id": observation.thread_id,
+                    "turn_id": observation.turn_id,
+                    "provider_retries": retry_count,
+                    "provider_warnings": warning_count,
+                }
+            )
+            state.update(
+                {
+                    "provider_retries": int(state["provider_retries"]) + retry_count,
+                    "provider_warnings": int(state["provider_warnings"]) + warning_count,
+                    "active_provider_attempt": None,
+                    "last_provider_attempt": provider_attempt,
+                }
+            )
+            write_json(state_path, state)
             model_turns += 1
             usages.append(observation.usage)
             worker["last_turn_id"] = observation.turn_id
@@ -636,14 +825,13 @@ def run_persistent_single_ast_cohort(
                     "attempt": attempt,
                     "valid_ast": candidate is not None,
                     "program": (
-                        None
-                        if candidate is None
-                        else validated_program_artifact(candidate.program)
+                        None if candidate is None else validated_program_artifact(candidate.program)
                     ),
                 },
                 exclusive=True,
             )
             if not attempt["artifact_complete"]:
+                adapter.close(force=True)
                 raise ValueError(f"{prefix} artifact contract is incomplete")
             if candidate is not None:
                 accepted = candidate
@@ -688,9 +876,7 @@ def run_persistent_single_ast_cohort(
                 **slot_report,
                 "search_memory_sha256": memory.sha256,
                 "program": (
-                    None
-                    if accepted is None
-                    else validated_program_artifact(accepted.program)
+                    None if accepted is None else validated_program_artifact(accepted.program)
                 ),
             },
             exclusive=True,
@@ -707,9 +893,10 @@ def run_persistent_single_ast_cohort(
         )
         write_json(state_path, state)
 
+    adapter.close()
+    adapter = None
     slot_lineage = {
-        str(report["slot_id"]): cast(Mapping[str, Any], report["lineage"])
-        for report in reports
+        str(report["slot_id"]): cast(Mapping[str, Any], report["lineage"]) for report in reports
     }
     report = finalize_cohort(
         root,

@@ -261,6 +261,9 @@ def _run_adapter_turn(
             {
                 "status": "failed",
                 "error": f"{type(exc).__name__}: {str(exc)[:512]}",
+                "metadata": dict(adapter.inspect_metadata()),
+                "usage": dict(adapter.inspect_usage()),
+                "diagnostics": list(adapter.diagnostics),
             },
         )
         raise
@@ -400,11 +403,7 @@ def run_ab_experiment(
         )
         base_prefix = f"a-slot-{index:02d}"
         for attempt in range(INFRASTRUCTURE_RETRY_LIMIT + 1):
-            prefix = (
-                base_prefix
-                if attempt == 0
-                else f"{base_prefix}.retry-{attempt:02d}"
-            )
+            prefix = base_prefix if attempt == 0 else f"{base_prefix}.retry-{attempt:02d}"
             adapter = adapter_factory(request.system_prompt, prefix)
             try:
                 observation = _run_adapter_turn(
@@ -420,18 +419,13 @@ def run_ab_experiment(
                     program_response=True,
                 )
             except IsolationError as exc:
-                if (
-                    str(exc) != "server retry is forbidden"
-                    or attempt >= INFRASTRUCTURE_RETRY_LIMIT
-                ):
+                if str(exc) != "server retry is forbidden" or attempt >= INFRASTRUCTURE_RETRY_LIMIT:
                     raise
                 a_failed_attempts.append(prefix)
             else:
                 a_observations.append(observation)
                 if a_time_to_first_valid_ms is None and observation.program_hash is not None:
-                    a_time_to_first_valid_ms = round(
-                        (time.monotonic() - a_started) * 1000
-                    )
+                    a_time_to_first_valid_ms = round((time.monotonic() - a_started) * 1000)
                 break
             finally:
                 adapter.close()
@@ -442,13 +436,7 @@ def run_ab_experiment(
         time_to_first_valid_ast_ms=a_time_to_first_valid_ms,
         time_to_four_valid_unique_ast_ms=(
             a_wall_time_ms
-            if len(
-                {
-                    item.program_hash
-                    for item in a_observations
-                    if item.program_hash is not None
-                }
-            )
+            if len({item.program_hash for item in a_observations if item.program_hash is not None})
             >= 4
             else None
         ),
@@ -474,9 +462,7 @@ def run_ab_experiment(
             program_response=False,
         )
         acknowledgement = json.loads(
-            next(
-                Path(turns_dir).glob("b-bootstrap.response.raw.txt")
-            ).read_text(encoding="utf-8")
+            next(Path(turns_dir).glob("b-bootstrap.response.raw.txt")).read_text(encoding="utf-8")
         )
         if acknowledgement != {
             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
@@ -509,8 +495,7 @@ def run_ab_experiment(
                 usage = {
                     key: (
                         int(raw_usage[key])
-                        if isinstance(raw_usage, Mapping)
-                        and isinstance(raw_usage.get(key), int)
+                        if isinstance(raw_usage, Mapping) and isinstance(raw_usage.get(key), int)
                         else 0
                     )
                     for key in _usage_keys()
@@ -574,10 +559,7 @@ def run_live_batch_reference(
         try:
             raw_result = provider.generate(request)
         except IsolationError as exc:
-            if (
-                str(exc) != "server retry is forbidden"
-                or attempt >= INFRASTRUCTURE_RETRY_LIMIT
-            ):
+            if str(exc) != "server retry is forbidden" or attempt >= INFRASTRUCTURE_RETRY_LIMIT:
                 raise
             failed_attempts += 1
         else:

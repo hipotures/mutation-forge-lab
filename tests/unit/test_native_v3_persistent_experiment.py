@@ -38,9 +38,7 @@ FORBIDDEN_LENGTHS = (4, 8, 16)
 
 def _responses() -> dict[str, dict[str, object]]:
     value = json.loads(
-        Path("tests/fixtures/native_v3_single_program_responses.json").read_text(
-            encoding="utf-8"
-        )
+        Path("tests/fixtures/native_v3_single_program_responses.json").read_text(encoding="utf-8")
     )
     assert isinstance(value, dict)
     return value
@@ -80,10 +78,7 @@ def test_fake_multi_turn_fresh_and_persistent_comparison(tmp_path: Path) -> None
                     },
                     separators=(",", ":"),
                 ),
-                *[
-                    json.dumps(fixtures[brief_id], separators=(",", ":"))
-                    for brief_id in BRIEF_IDS
-                ],
+                *[json.dumps(fixtures[brief_id], separators=(",", ":")) for brief_id in BRIEF_IDS],
             ]
         else:
             brief_id = BRIEF_IDS[int(prefix.rsplit("-", 1)[1])]
@@ -190,10 +185,7 @@ def test_terminal_fourth_persistent_turn_preserves_three_programs_and_report(
                         },
                         separators=(",", ":"),
                     ),
-                    *[
-                        json.dumps(fixtures[brief], separators=(",", ":"))
-                        for brief in BRIEF_IDS
-                    ],
+                    *[json.dumps(fixtures[brief], separators=(",", ":")) for brief in BRIEF_IDS],
                 ],
                 terminal_statuses=[
                     "completed",
@@ -205,9 +197,7 @@ def test_terminal_fourth_persistent_turn_preserves_three_programs_and_report(
             )
         else:
             brief = BRIEF_IDS[int(prefix.rsplit("-", 1)[1])]
-            scenario = FakeScenario(
-                final_text=json.dumps(fixtures[brief], separators=(",", ":"))
-            )
+            scenario = FakeScenario(final_text=json.dumps(fixtures[brief], separators=(",", ":")))
         return _adapter(tmp_path, scenario, base_instructions)
 
     report = run_ab_experiment(
@@ -249,18 +239,13 @@ def test_fresh_thread_uses_the_production_infrastructure_retry_limit(
                         },
                         separators=(",", ":"),
                     ),
-                    *[
-                        json.dumps(fixtures[brief], separators=(",", ":"))
-                        for brief in BRIEF_IDS
-                    ],
+                    *[json.dumps(fixtures[brief], separators=(",", ":")) for brief in BRIEF_IDS],
                 ]
             )
         else:
             slot_text = prefix.split(".retry-", 1)[0]
             brief = BRIEF_IDS[int(slot_text.rsplit("-", 1)[1])]
-            scenario = FakeScenario(
-                final_text=json.dumps(fixtures[brief], separators=(",", ":"))
-            )
+            scenario = FakeScenario(final_text=json.dumps(fixtures[brief], separators=(",", ":")))
         return _adapter(tmp_path, scenario, base_instructions)
 
     report = run_ab_experiment(
@@ -278,8 +263,7 @@ def test_fresh_thread_uses_the_production_infrastructure_retry_limit(
     failed_names = {
         path.name.removeprefix("a-slot-00.")
         for path in (tmp_path / "experiment" / "provider-turns").iterdir()
-        if path.name.startswith("a-slot-00.")
-        and not path.name.startswith("a-slot-00.retry-")
+        if path.name.startswith("a-slot-00.") and not path.name.startswith("a-slot-00.retry-")
     }
     assert failed_names == {
         "codex-profile.json.gz",
@@ -428,8 +412,11 @@ def test_server_retry_is_internal_only_for_the_persistent_experiment(
         "Persistent retry test.",
     )
     result = persistent.generate_persistent("persistent", profile)
+    metadata = persistent.inspect_metadata()
     persistent.close()
     assert result.text == "fixture answer"
+    assert metadata["serverRetries"] == 1
+    assert metadata["serverWarnings"] == 1
 
 
 def test_every_experimental_turn_prefix_has_the_same_artifact_names(
@@ -448,10 +435,7 @@ def test_every_experimental_turn_prefix_has_the_same_artifact_names(
                     },
                     separators=(",", ":"),
                 ),
-                *[
-                    json.dumps(fixtures[brief], separators=(",", ":"))
-                    for brief in BRIEF_IDS
-                ],
+                *[json.dumps(fixtures[brief], separators=(",", ":")) for brief in BRIEF_IDS],
             ]
         else:
             brief = BRIEF_IDS[int(prefix.rsplit("-", 1)[1])]
@@ -460,11 +444,7 @@ def test_every_experimental_turn_prefix_has_the_same_artifact_names(
             tmp_path,
             FakeScenario(
                 final_texts=texts,
-                thread_id=(
-                    "persistent-thread"
-                    if prefix == "b-bootstrap"
-                    else f"thread-{prefix}"
-                ),
+                thread_id=("persistent-thread" if prefix == "b-bootstrap" else f"thread-{prefix}"),
             ),
             base_instructions,
         )

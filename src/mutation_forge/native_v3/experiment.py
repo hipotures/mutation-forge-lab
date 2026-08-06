@@ -27,9 +27,7 @@ V3_CONFIG_SCHEMA_VERSION = "mforge.experiment.v3"
 V3_PROTOCOL_VERSION = "v3"
 V3_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3"
 MULTI_PROGRAM_BATCH = "multi_program_batch"
-V3_COMMUNICATION_MODES = frozenset(
-    {PERSISTENT_SINGLE_AST, MULTI_PROGRAM_BATCH}
-)
+V3_COMMUNICATION_MODES = frozenset({PERSISTENT_SINGLE_AST, MULTI_PROGRAM_BATCH})
 V3_DEFAULT_COMMUNICATION_MODE = PERSISTENT_SINGLE_AST
 _STATE_NAME = "v3-state.json.gz"
 _V2_TOP_LEVEL_FIELDS = frozenset(
@@ -116,10 +114,7 @@ def load_v3_config(
     source_path, source_bytes, raw = _raw_config(path)
     mixed = sorted(_V2_TOP_LEVEL_FIELDS.intersection(raw))
     if mixed:
-        raise ValueError(
-            "v3 configuration cannot contain Native v2 fields: "
-            f"{mixed}"
-        )
+        raise ValueError(f"v3 configuration cannot contain Native v2 fields: {mixed}")
     allowed = {
         "schema_version",
         "protocol",
@@ -131,10 +126,7 @@ def load_v3_config(
     if unknown:
         raise ValueError(f"unsupported top-level fields: {unknown}")
     if raw.get("schema_version") != V3_CONFIG_SCHEMA_VERSION:
-        raise ValueError(
-            "v3 requires schema_version "
-            f"{V3_CONFIG_SCHEMA_VERSION!r}"
-        )
+        raise ValueError(f"v3 requires schema_version {V3_CONFIG_SCHEMA_VERSION!r}")
     if raw.get("protocol") != V3_SELECTOR:
         raise ValueError(f"v3 requires protocol {V3_SELECTOR!r}")
     exp_id = validate_experiment_id(raw.get("exp_id"))
@@ -171,10 +163,7 @@ def load_v3_config(
         "v3.communication_mode",
     )
     if communication_mode not in V3_COMMUNICATION_MODES:
-        raise ValueError(
-            "v3.communication_mode must be one of "
-            f"{sorted(V3_COMMUNICATION_MODES)}"
-        )
+        raise ValueError(f"v3.communication_mode must be one of {sorted(V3_COMMUNICATION_MODES)}")
     return V3Config(
         V3_CONFIG_SCHEMA_VERSION,
         V3_SELECTOR,
@@ -206,6 +195,15 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "last_stop_reason": None,
         "last_error": None,
         "provider_turns": 0,
+        "provider_attempts": 0,
+        "failed_provider_attempts": 0,
+        "provider_retries": 0,
+        "provider_warnings": 0,
+        "provider_process_restarts": 0,
+        "thread_resume_attempts": 0,
+        "failed_thread_resume_attempts": 0,
+        "active_provider_attempt": None,
+        "last_provider_attempt": None,
         "evaluation_count": 0,
         "valid_ast": False,
         "cohort_outcome": None,
@@ -216,6 +214,35 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "scientific_terminal_result": False,
         "usage": None,
         "artifacts": {},
+    }
+
+
+def _preview_progress(config: V3Config) -> dict[str, Any]:
+    if config.communication_mode != PERSISTENT_SINGLE_AST:
+        return {}
+    path = (
+        config.experiment_root / "native-v3-output" / "epoch-0000" / "communication-state.json.gz"
+    )
+    if not path.is_file():
+        return {}
+    try:
+        raw = read_json(path)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, Mapping):
+        return {}
+    model_turns = int(raw.get("model_turns", 0))
+    return {
+        "provider_turns": model_turns,
+        "provider_attempts": int(raw.get("provider_attempts", model_turns)),
+        "failed_provider_attempts": int(raw.get("failed_provider_attempts", 0)),
+        "provider_retries": int(raw.get("provider_retries", 0)),
+        "provider_warnings": int(raw.get("provider_warnings", 0)),
+        "provider_process_restarts": int(raw.get("provider_process_restarts", 0)),
+        "thread_resume_attempts": int(raw.get("thread_resume_attempts", 0)),
+        "failed_thread_resume_attempts": int(raw.get("failed_thread_resume_attempts", 0)),
+        "active_provider_attempt": raw.get("active_provider_attempt"),
+        "last_provider_attempt": raw.get("last_provider_attempt"),
     }
 
 
@@ -252,22 +279,15 @@ def _load_workspace_state(config: V3Config) -> dict[str, Any]:
         or value.get("protocol") != V3_SELECTOR
         or value.get("protocol_version") != V3_PROTOCOL_VERSION
     ):
-        raise V3WorkspaceError(
-            "v3 workspace protocol does not match this runtime"
-        )
+        raise V3WorkspaceError("v3 workspace protocol does not match this runtime")
     if value.get("config_sha256") != config.source_sha256:
-        raise V3WorkspaceError(
-            "v3 configuration changed; create a fresh workspace"
-        )
+        raise V3WorkspaceError("v3 configuration changed; create a fresh workspace")
     stored_config = config.experiment_root / "experiment.toml"
     if (
         not stored_config.is_file()
-        or hashlib.sha256(stored_config.read_bytes()).hexdigest()
-        != config.source_sha256
+        or hashlib.sha256(stored_config.read_bytes()).hexdigest() != config.source_sha256
     ):
-        raise V3WorkspaceError(
-            "v3 workspace configuration identity mismatch"
-        )
+        raise V3WorkspaceError("v3 workspace configuration identity mismatch")
     return _public_state(value)
 
 
@@ -319,7 +339,8 @@ def v3_status(
     if not config.experiment_root.exists():
         return _base_status(config)
     try:
-        return _load_workspace_state(config)
+        status = _load_workspace_state(config)
+        return {**status, **_preview_progress(config)}
     except (OSError, ValueError, V3WorkspaceError) as error:
         return _failed_status(config, error)
 
@@ -363,19 +384,16 @@ def _status_from_report(
     status = str(report.get("status"))
     common = {
         **_base_status(config),
+        **_preview_progress(config),
         "provider_turns": int(report.get("model_turns", 0)),
         "evaluation_count": int(report.get("graph_evaluations", 0)),
         "valid_ast": report.get("valid_ast") is True,
         "cohort_outcome": report.get("cohort_outcome"),
         "valid_slots": int(report.get("valid_slots", 0)),
-        "unique_valid_programs": int(
-            report.get("unique_valid_programs", 0)
-        ),
+        "unique_valid_programs": int(report.get("unique_valid_programs", 0)),
         "duplicate_aliases": int(report.get("duplicate_aliases", 0)),
         "selected_program_hash": report.get("selected_program_hash"),
-        "scientific_terminal_result": (
-            report.get("scientific_terminal_result") is True
-        ),
+        "scientific_terminal_result": (report.get("scientific_terminal_result") is True),
         "usage": report.get("usage"),
         "artifacts": {
             key: report[key]
@@ -452,9 +470,7 @@ def run_v3(
         if status.get("state") == "completed":
             return status
         if status.get("resumable") is not True:
-            raise V3WorkspaceError(
-                "v3 workspace is not resumable"
-            )
+            raise V3WorkspaceError("v3 workspace is not resumable")
     else:
         status = _initialize_workspace(config)
 
@@ -505,6 +521,7 @@ def run_v3(
     except Exception as error:
         status = {
             **_base_status(config),
+            **_preview_progress(config),
             "state": "blocked",
             "resumable": True,
             "latest_infrastructure_stop_reason": "provider_failed",
