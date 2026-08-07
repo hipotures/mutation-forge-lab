@@ -38,6 +38,7 @@ from .contracts import (
     SELECTOR_ARGUMENT_TYPES,
     SELECTOR_TYPES,
     VALIDATOR_PROTOCOL_ID,
+    ProgramContract,
     ValidatedProgram,
     validate_program,
     validated_program_artifact,
@@ -657,6 +658,7 @@ def finalize_cohort(
     backend_factory: Callable[[], GraphBackend],
     episode_id: str,
     communication_mode: str,
+    program_contract: ProgramContract | None = None,
 ) -> dict[str, Any]:
     """Evaluate an already generated cohort without changing scientific semantics."""
 
@@ -706,6 +708,7 @@ def finalize_cohort(
                         artifact_root=program_root,
                     ),
                     provenance_source_kind="native_v3_provider_cohort",
+                    program_contract=program_contract,
                 )
                 graph_evaluations += _graph_evaluations(evaluation)
                 record = {
@@ -839,7 +842,8 @@ def finalize_cohort(
             for program_hash, slot_aliases in aliases.items()
         },
         "slot_lineage": [
-            slot_lineage[slot_id] for slot_id in SLOT_IDS
+            slot_lineage[entry.slot_id]
+            for entry in sorted(entries, key=lambda item: item.slot_id)
         ],
         "usage": _usage_total(usages),
         "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),

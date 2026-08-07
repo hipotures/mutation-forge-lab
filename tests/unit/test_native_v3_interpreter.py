@@ -10,17 +10,20 @@ import pytest
 from mutation_forge.models import Edge, GraphState, GraphValidation, RewritePlan, normalized_edge
 from mutation_forge.native_v3.contracts import (
     PROGRAM_SCHEMA_VERSION,
+    ProgramContract,
     ValidatedProgram,
     validate_program,
 )
 from mutation_forge.native_v3.graph_runtime import (
     EdgeRef,
+    FanoutRef,
     GraphFeatureInput,
     GraphPreconditionError,
     GraphRuntime,
     MatchingRef,
     NonEdgeRef,
     PathRef,
+    RelocationRef,
     RewriteHost,
     VertexRef,
 )
@@ -32,14 +35,20 @@ from mutation_forge.native_v3.interpreter import (
     invoke_program,
 )
 from mutation_forge.native_v3.randomness import derive_seed64, splitmix64
+from mutation_forge.native_v3.single_program_contract import build_single_program_contract
 
 
-def _validated(entry: object) -> ValidatedProgram:
+def _validated(
+    entry: object,
+    *,
+    contract: ProgramContract | None = None,
+) -> ValidatedProgram:
     validation = validate_program(
         json.dumps(
             {"schema_version": PROGRAM_SCHEMA_VERSION, "entry": entry},
             separators=(",", ":"),
-        )
+        ),
+        contract=contract,
     )
     assert validation.valid, validation.diagnostics
     assert validation.program is not None
@@ -150,6 +159,7 @@ def _run(
     context: ProgramContext = CONTEXT,
     features: GraphFeatureInput | None = None,
     limits: InterpreterLimits | None = None,
+    contract: ProgramContract | None = None,
 ) -> InvocationResult:
     return invoke_program(
         program,
@@ -159,6 +169,7 @@ def _run(
         episode_id="fixture-cubic",
         features=features,
         limits=limits,
+        contract=contract,
     )
 
 
@@ -376,6 +387,10 @@ def test_reference_and_action_preconditions_forbid_invalid_graph_resources() -> 
         PathRef(1, 1, 2)
     with pytest.raises(ValueError, match="2/3/4"):
         MatchingRef(((0, 1),), ((0, 2),))
+    with pytest.raises(ValueError, match="kept endpoint"):
+        RelocationRef(EdgeRef((0, 1)), VertexRef(2), VertexRef(3))
+    with pytest.raises(ValueError, match="outside"):
+        FanoutRef(EdgeRef((0, 1)), VertexRef(1))
 
     runtime = GraphRuntime(_cubic_graph(8), GraphFeatureInput())
     runtime.apply_action("edge_fanout", {"edge": EdgeRef((0, 1)), "w": VertexRef(3)})
@@ -391,6 +406,61 @@ def test_reference_and_action_preconditions_forbid_invalid_graph_resources() -> 
     assert (0, 2) in runtime.overlay.edges
     with pytest.raises(GraphPreconditionError, match="cannot be added"):
         runtime.apply_action("add_edge", {"edge": NonEdgeRef((0, 2))})
+
+
+@pytest.mark.parametrize(
+    ("selector_id", "action_id", "argument_name", "order"),
+    (
+        ("relocations_legal", "relocate_endpoint", "relocation", 30),
+        ("edge_fanouts_legal", "edge_fanout", "fanout", 30),
+    ),
+)
+def test_slot_specific_compound_contract_executes_in_interpreter(
+    selector_id: str,
+    action_id: str,
+    argument_name: str,
+    order: int,
+) -> None:
+    contract = build_single_program_contract((4, 8, 16))
+    program = _validated(
+        {
+            "op": "try",
+            "branches": [
+                {
+                    "op": "let",
+                    "name": "selected",
+                    "value": _pick(selector_id, {}),
+                    "body": {
+                        "op": "block",
+                        "children": [
+                            _apply(
+                                action_id,
+                                {
+                                    argument_name: {
+                                        "op": "ref",
+                                        "name": "selected",
+                                    }
+                                },
+                            ),
+                            {"op": "emit"},
+                        ],
+                    },
+                },
+                {"op": "no_plan", "reason": "NO_MATCH"},
+            ],
+        },
+        contract=contract,
+    )
+
+    result = _run(program, _cubic_graph(order), contract=contract)
+
+    assert result.failure is None
+    assert result.counters.random_draws < 10
+    assert any(
+        event.kind == "selector"
+        and event.payload["selector_id"] == selector_id
+        for event in result.semantic_trace
+    )
 
 
 def _canonical_class(graph: GraphState) -> str:

@@ -6,8 +6,10 @@ remains the explicit rollback.
 
 ## Operator decision
 
-The operator selected `persistent_single_ast` as the preview default in
-[issue #47 comment 5208460774](https://github.com/hipotures/mutation-forge-lab/issues/47#issuecomment-5208460774).
+The operator selected `persistent_single_ast` with the `slot_specific`
+model-facing contract after accepting issue #48 at commit `c7dd740`. The final
+decision is recorded in
+[issue #47 comment 5210727373](https://github.com/hipotures/mutation-forge-lab/issues/47#issuecomment-5210727373).
 The decision uses the accepted Step 12B through 12D evidence:
 
 - the persistent arm reached its first valid AST in 57.438 seconds, compared
@@ -27,9 +29,10 @@ The selected preview mode is:
 ```toml
 [v3]
 communication_mode = "persistent_single_ast"
+output_contract = "slot_specific"
 ```
 
-It is also the default when the field is omitted. The rollback is:
+Both values are required. The unchanged v3 default and rollback is:
 
 ```toml
 [v3]
@@ -46,23 +49,38 @@ complete executable contract once. Exactly two durable worker threads are
 forked at the inclusive specification `lastTurnId`. Slots alternate between
 the workers; only one turn is active at a time.
 
-Every program turn:
+The selected preview publishes four program slots in four separate program
+turns. Every program turn:
 
-1. receives one Step 12A direct-program `outputSchema`;
+1. receives the accepted nonrecursive, brief-specific `slot_specific`
+   `outputSchema`;
 2. receives the current bounded `SearchMemoryV1`, without a full program AST;
-3. returns at most one AST;
-4. is validated immediately by the host;
-5. is rejected when its canonical hash or behavior signature is already in
+3. returns one bounded model-facing representation;
+4. is deterministically compiled into the existing AST and validated
+   immediately by the host;
+5. is evaluated with the exact `ProgramContract` used during compilation,
+   including relation-safe typed relocation and fanout references;
+6. is rejected when its canonical hash or behavior signature is already in
    Search Memory;
-6. receives at most one repair turn on the same worker thread;
-7. publishes its semantic attempt and slot record before a later slot starts.
+7. receives at most one repair turn on the same worker thread;
+8. publishes its semantic attempt and slot record before a later slot starts.
 
-The specification anchor, worker thread IDs and rollout paths, exact fork
-parent turn, every program turn ID, prompt and contract hashes, usage, host
-validation, duplicate result, and semantic program record are persisted
-outside transport artifacts. The same deterministic serial evaluator,
-interval fitness, cohort threshold, and program selection used by the rollback
-remain unchanged.
+Large relocation and fanout relation sets are bounded with one seeded cyclic
+window before the ordinary seeded pick. This preserves a uniform marginal
+candidate probability without charging one interpreter random draw per
+enumerated relation. The existing rollback selectors retain their original
+reservoir behavior.
+
+The status, epoch manifest, communication state, attempt records, and program
+records explicitly retain `provider_mode`, `output_contract`, the canonical
+contract hash, each brief-specific output-schema hash, `compaction_mode`,
+rollback mode, specification and worker thread IDs, fork ancestry, turn IDs,
+prompt hashes, usage, validation, duplicates, and publication timing. These
+semantic projections remain outside transport artifacts. The same deterministic
+serial evaluator, interval fitness, cohort threshold, and program selection
+used by the rollback remain unchanged. The selected preview passes its explicit
+program contract into that evaluator; the rollback continues to use the default
+contract.
 
 No automatic compaction is used. A future context rotation must create a fresh
 fork from the specification anchor and inject bounded Search Memory.
@@ -83,15 +101,22 @@ semantic file is added to a provider-turn prefix and no rollout copy is added.
 
 ## Production-preview gate
 
-The bounded real gate uses the same four Step 12A briefs in
-`workspace/step12b_abc_medium_010`:
+The final fresh `medium` smoke used the same four Step 12A briefs:
 
-| Arm | Valid programs | First valid AST | Total tokens per valid program |
+| Arm | Valid unique programs | First valid AST | Total tokens per valid program |
 | --- | ---: | ---: | ---: |
-| Persistent single-AST | 2/4 | 57.438 s | 11,606.5 |
-| Multi-program batch rollback | 0/4 | unavailable | unavailable |
+| `persistent_single_ast + slot_specific` | 4/4 | 16.430 s | 6,157 |
+| `multi_program_batch` rollback | 0/4 | unavailable | unavailable |
 
-This gate selected the communication mechanism, not scientific quality. The
+The selected arm used one bootstrap plus four program turns, exactly two forks
+from the same specification anchor, zero provider retries or warnings, and
+112/112 required App Server artifacts. All four evaluator records completed
+without `INVALID_AST`, unknown selectors, or resource-budget failures. The
+rollback A/B turn retained exact provider artifact parity but omitted all four
+planned slots, so its valid-program rate was 0/4.
+
+This gate validates the communication and model-facing contract integration,
+not scientific quality: the bounded cohort outcome was `DEGRADED`. The
 integrated preview retains Step 12D's two-worker fork and Search Memory
 boundaries while using the unchanged production evaluator.
 
@@ -100,21 +125,37 @@ boundaries while using the unchanged production evaluator.
 ```text
 uv run ruff check src/mutation_forge/native_v3 src/mutation_forge/stage3/isolation.py tests/unit/test_native_v3_preview.py tests/unit/test_native_v3_experiment.py tests/integration/test_native_v3_route.py
 uv run mypy src/mutation_forge/native_v3 src/mutation_forge/stage3/isolation.py
-uv run pytest -q tests/unit/test_native_v3_preview.py tests/unit/test_native_v3_experiment.py tests/integration/test_native_v3_route.py
+uv run pytest -q tests/unit/test_native_v3_interpreter.py tests/unit/test_native_v3_preview.py tests/unit/test_native_v3_experiment.py tests/integration/test_native_v3_route.py
 uv run pytest tests/unit/test_native_v3*.py tests/integration/test_native_v3_route.py -q
 uv run pytest tests/unit/test_native_v2_smoke.py tests/integration/test_native_experiment.py tests/unit/test_native_resume.py tests/unit/test_native_selection.py tests/unit/test_native_progress.py -q
 make appserver-artifact-parity
 ```
 
-The focused tests cover explicit selected and rollback routing, the selected
+The focused tests cover explicit selected and rollback routing, rollback by
 default, authentication failure before provider construction, two exact
-specification forks, eight direct unique AST turns, immediate semantic
-publication, bounded Search Memory without ASTs, exact artifact parity, and
-durable process replacement through persisted thread identities.
+specification forks, four separately published unique compiled AST turns,
+schema-identity fail-closed behavior, bounded Search Memory without ASTs,
+exact artifact parity, and durable process replacement through persisted
+thread identities.
+
+The final full suite collected 820 tests: 793 passed, 25 failed, and two had
+setup errors. A targeted detached run at `c7dd740` reproduced the exact same
+25 failed node IDs and two setup-error node IDs; the four tests added by Step
+12E all pass. The unchanged failures are tied to the known sibling HEG
+checkout mismatch: the suite expects
+`fd97451b0f3d87400d1d955a2c6b1b18303344ff`, while the clean checkout is
+`27cbec9c2307b6ea5f936f858821d11d808b68f3`. Ruff, mypy, diff checks, and
+App Server artifact parity pass.
 
 ## Manual operator command
 
 Use a fresh `exp_id`:
+
+```toml
+[v3]
+communication_mode = "persistent_single_ast"
+output_contract = "slot_specific"
+```
 
 ```console
 uv run mforge experiment run --config experiment.toml --json

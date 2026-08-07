@@ -271,7 +271,10 @@ def test_v3_routes_selected_preview_without_constructing_batch_provider(
     path.write_text(
         path.read_text(encoding="utf-8").replace(
             'communication_mode = "multi_program_batch"',
-            'communication_mode = "persistent_single_ast"',
+            (
+                'communication_mode = "persistent_single_ast"\n'
+                'output_contract = "slot_specific"'
+            ),
         ),
         encoding="utf-8",
     )
@@ -311,9 +314,13 @@ def test_v3_routes_selected_preview_without_constructing_batch_provider(
 
     assert result["state"] == "completed"
     assert result["communication_mode"] == "persistent_single_ast"
+    assert result["provider_mode"] == "persistent_single_ast"
+    assert result["output_contract"] == "slot_specific"
+    assert result["output_schema_sha256"]
     assert result["provider_turns"] == 9
     assert len(calls) == 1
     assert calls[0]["experiment_root"] == tmp_path / "workspace" / "v3-run"
+    assert calls[0]["output_contract"] == "slot_specific"
 
 
 def test_preview_provider_failure_preserves_attempt_and_retry_progress(
@@ -323,7 +330,10 @@ def test_preview_provider_failure_preserves_attempt_and_retry_progress(
     path.write_text(
         path.read_text(encoding="utf-8").replace(
             'communication_mode = "multi_program_batch"',
-            'communication_mode = "persistent_single_ast"',
+            (
+                'communication_mode = "persistent_single_ast"\n'
+                'output_contract = "slot_specific"'
+            ),
         ),
         encoding="utf-8",
     )
@@ -390,7 +400,10 @@ def test_selected_preview_auth_failure_is_resumable_before_scientific_work(
     path.write_text(
         path.read_text(encoding="utf-8").replace(
             'communication_mode = "multi_program_batch"',
-            'communication_mode = "persistent_single_ast"',
+            (
+                'communication_mode = "persistent_single_ast"\n'
+                'output_contract = "slot_specific"'
+            ),
         ),
         encoding="utf-8",
     )
@@ -411,6 +424,8 @@ def test_selected_preview_auth_failure_is_resumable_before_scientific_work(
     assert result["state"] == "blocked"
     assert result["resumable"] is True
     assert result["communication_mode"] == "persistent_single_ast"
+    assert result["provider_mode"] == "persistent_single_ast"
+    assert result["output_contract"] == "slot_specific"
     assert preview_calls == 0
 
 

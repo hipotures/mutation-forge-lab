@@ -15,7 +15,7 @@ from mutation_forge.counterexamples import (
 from mutation_forge.models import GraphScore, GraphState, JsonValue, RewritePlan
 
 from .canonical import canonical_json_bytes, domain_hash
-from .contracts import ValidatedProgram
+from .contracts import ProgramContract, ValidatedProgram
 from .heg_scoring import (
     ScoreEvidenceScorer,
     merge_score_evidence,
@@ -426,6 +426,7 @@ def evaluate_serial_program(
     program: ValidatedProgram,
     config: SerialEpisodeConfig,
     interpreter_limits: InterpreterLimits | None = None,
+    program_contract: ProgramContract | None = None,
     counterexample_pipeline: CounterexampleInspector | None = None,
     provenance_source_kind: str = "native_v3_fixture",
 ) -> SerialEpisodeResult:
@@ -530,6 +531,7 @@ def evaluate_serial_program(
             ),
             episode_id=invocation_episode_id,
             limits=interpreter_limits,
+            contract=program_contract,
         )
         outcome = "failure"
         no_plan_reason: str | None = None

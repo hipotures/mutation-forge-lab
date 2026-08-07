@@ -1,4 +1,4 @@
-"""Experimental non-recursive model-facing contracts for one Native v3 program."""
+"""Non-recursive model-facing contracts for one Native v3 program."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from .single_program_contract import (
 
 CandidateKind = Literal["slot_specific", "flat_ir"]
 
+SLOT_SPECIFIC_OUTPUT_CONTRACT: Literal["slot_specific"] = "slot_specific"
 SLOT_SPECIFIC_SCHEMA_VERSION = "mforge.native.slot_program.v1"
 FLAT_IR_SCHEMA_VERSION = "mforge.native.flat_ir.v1"
 MAXIMUM_FLAT_LOGICAL_STEPS = 8
@@ -234,6 +235,34 @@ def build_slot_specific_output_schema(
     }
     _strict_literal_types(schema)
     return schema
+
+
+def slot_specific_schema_hashes(
+    forbidden_lengths: tuple[int, ...],
+) -> dict[str, str]:
+    """Return the canonical schema identity for every supported brief."""
+
+    return {
+        brief_id: hashlib.sha256(
+            canonical_json_bytes(
+                build_slot_specific_output_schema(
+                    brief_id=brief_id,
+                    forbidden_lengths=forbidden_lengths,
+                )
+            )
+        ).hexdigest()
+        for brief_id in BRIEF_OPERATORS
+    }
+
+
+def slot_specific_contract_sha256(
+    forbidden_lengths: tuple[int, ...],
+) -> str:
+    """Return one canonical identity for the complete slot-specific contract."""
+
+    return hashlib.sha256(
+        canonical_json_bytes(slot_specific_schema_hashes(forbidden_lengths))
+    ).hexdigest()
 
 
 def _flat_selector_variants(contract: ProgramContract) -> list[dict[str, Any]]:

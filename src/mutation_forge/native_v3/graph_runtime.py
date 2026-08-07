@@ -108,7 +108,36 @@ class MatchingRef:
         object.__setattr__(self, "added_edges", added)
 
 
-type ReferenceValue = VertexRef | EdgeRef | NonEdgeRef | PathRef | MatchingRef
+@dataclass(frozen=True, slots=True, order=True)
+class RelocationRef:
+    edge: EdgeRef
+    keep: VertexRef
+    new: VertexRef
+
+    def __post_init__(self) -> None:
+        if self.keep.vertex not in self.edge.edge or self.new.vertex in self.edge.edge:
+            raise ValueError("RelocationRef requires a kept endpoint and a distinct new vertex")
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class FanoutRef:
+    edge: EdgeRef
+    w: VertexRef
+
+    def __post_init__(self) -> None:
+        if self.w.vertex in self.edge.edge:
+            raise ValueError("FanoutRef requires a vertex outside the source edge")
+
+
+type ReferenceValue = (
+    VertexRef
+    | EdgeRef
+    | NonEdgeRef
+    | PathRef
+    | MatchingRef
+    | RelocationRef
+    | FanoutRef
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +163,7 @@ class EdgeSetRef:
 @dataclass(frozen=True, slots=True)
 class SelectionPopulation:
     value_type: ValueType
-    items: tuple[NonEdgeRef | PathRef | MatchingRef, ...]
+    items: tuple[ReferenceValue, ...]
     population_size: int
 
 
@@ -219,7 +248,11 @@ def reference_type(value: ReferenceValue) -> ValueType:
         return ValueType.NON_EDGE
     if isinstance(value, PathRef):
         return ValueType.PATH
-    return ValueType.MATCHING
+    if isinstance(value, MatchingRef):
+        return ValueType.MATCHING
+    if isinstance(value, RelocationRef):
+        return ValueType.RELOCATION
+    return ValueType.FANOUT
 
 
 def _reference_key(value: ReferenceValue) -> tuple[str, str]:
@@ -351,22 +384,37 @@ class GraphRuntime:
     ) -> Population:
         population_size = len(items)
         if population_size > MAXIMUM_TIE_SET:
-            reservoir = list(items[:MAXIMUM_TIE_SET])
-            for index in range(MAXIMUM_TIE_SET, population_size):
-                selected = random_index(
-                    f"{path}/reservoir/{index}",
-                    tuple(1 for _ in range(index + 1)),
+            if value_type in {ValueType.RELOCATION_SET, ValueType.FANOUT_SET}:
+                start = random_index(
+                    f"{path}/bounded-window",
+                    tuple(1 for _ in range(population_size)),
                 )
-                if selected < MAXIMUM_TIE_SET:
-                    reservoir[selected] = items[index]
-            items = tuple(sorted(reservoir, key=_reference_key))
+                items = tuple(
+                    sorted(
+                        (
+                            items[(start + offset) % population_size]
+                            for offset in range(MAXIMUM_TIE_SET)
+                        ),
+                        key=_reference_key,
+                    )
+                )
+            else:
+                reservoir = list(items[:MAXIMUM_TIE_SET])
+                for index in range(MAXIMUM_TIE_SET, population_size):
+                    selected = random_index(
+                        f"{path}/reservoir/{index}",
+                        tuple(1 for _ in range(index + 1)),
+                    )
+                    if selected < MAXIMUM_TIE_SET:
+                        reservoir[selected] = items[index]
+                items = tuple(sorted(reservoir, key=_reference_key))
         if value_type is ValueType.VERTEX_SET:
             return VertexSetRef(tuple(item for item in items if isinstance(item, VertexRef)))
         if value_type is ValueType.EDGE_SET:
             return EdgeSetRef(tuple(item for item in items if isinstance(item, EdgeRef)))
         return SelectionPopulation(
             value_type,
-            tuple(item for item in items if isinstance(item, NonEdgeRef | PathRef | MatchingRef)),
+            items,
             population_size,
         )
 
@@ -560,6 +608,35 @@ class GraphRuntime:
                 raise TypeError("k must be an integer")
             items = self._matching_candidates(k, path=path, random_index=random_index)
             value_type = ValueType.MATCHING
+        elif selector_id == "relocations_legal":
+            relocations: list[ReferenceValue] = []
+            for edge in sorted(self.overlay.edges):
+                for keep in edge:
+                    for new in range(self.overlay.order):
+                        replacement = normalized_edge((keep, new))
+                        if new not in edge and replacement not in self.overlay.edges:
+                            relocations.append(
+                                RelocationRef(
+                                    EdgeRef(edge),
+                                    VertexRef(keep),
+                                    VertexRef(new),
+                                )
+                            )
+            items = tuple(relocations)
+            value_type = ValueType.RELOCATION_SET
+        elif selector_id == "edge_fanouts_legal":
+            fanouts: list[ReferenceValue] = []
+            for edge in sorted(self.overlay.edges):
+                u, v = edge
+                for vertex in range(self.overlay.order):
+                    additions = {
+                        normalized_edge((u, vertex)),
+                        normalized_edge((v, vertex)),
+                    }
+                    if vertex not in edge and additions.isdisjoint(self.overlay.edges):
+                        fanouts.append(FanoutRef(EdgeRef(edge), VertexRef(vertex)))
+            items = tuple(fanouts)
+            value_type = ValueType.FANOUT_SET
         else:
             raise TypeError(f"unknown selector: {selector_id}")
         return self._bounded(
@@ -604,24 +681,30 @@ class GraphRuntime:
             edges.remove(reference.edge)
             return
         if action_id == "relocate_endpoint":
-            reference = arguments.get("edge")
-            keep = arguments.get("keep")
-            new = arguments.get("new")
+            relocation = arguments.get("relocation")
+            if isinstance(relocation, RelocationRef):
+                raw_reference: GraphScalar | None = relocation.edge
+                raw_keep: GraphScalar | None = relocation.keep
+                raw_new: GraphScalar | None = relocation.new
+            else:
+                raw_reference = arguments.get("edge")
+                raw_keep = arguments.get("keep")
+                raw_new = arguments.get("new")
             if (
-                not isinstance(reference, EdgeRef)
-                or not isinstance(keep, VertexRef)
-                or not isinstance(new, VertexRef)
+                not isinstance(raw_reference, EdgeRef)
+                or not isinstance(raw_keep, VertexRef)
+                or not isinstance(raw_new, VertexRef)
             ):
                 raise TypeError("relocate_endpoint received invalid reference types")
-            edge = reference.edge
+            edge = raw_reference.edge
             if (
                 edge not in edges
-                or keep.vertex not in edge
-                or new.vertex >= self.overlay.order
-                or new.vertex in edge
+                or raw_keep.vertex not in edge
+                or raw_new.vertex >= self.overlay.order
+                or raw_new.vertex in edge
             ):
                 raise GraphPreconditionError("invalid relocation references")
-            replacement = normalized_edge((keep.vertex, new.vertex))
+            replacement = normalized_edge((raw_keep.vertex, raw_new.vertex))
             if replacement in edges:
                 raise GraphPreconditionError("replacement edge exists")
             edges.remove(edge)
@@ -640,20 +723,27 @@ class GraphRuntime:
             edges.update(matching.added_edges)
             return
         if action_id == "edge_fanout":
-            reference = arguments.get("edge")
-            vertex = arguments.get("w")
-            if not isinstance(reference, EdgeRef) or not isinstance(vertex, VertexRef):
+            fanout = arguments.get("fanout")
+            if isinstance(fanout, FanoutRef):
+                raw_reference = fanout.edge
+                raw_vertex: GraphScalar | None = fanout.w
+            else:
+                raw_reference = arguments.get("edge")
+                raw_vertex = arguments.get("w")
+            if not isinstance(raw_reference, EdgeRef) or not isinstance(
+                raw_vertex, VertexRef
+            ):
                 raise TypeError("edge_fanout received invalid reference types")
-            edge = reference.edge
+            edge = raw_reference.edge
             u, v = edge
             additions = {
-                normalized_edge((u, vertex.vertex)),
-                normalized_edge((v, vertex.vertex)),
+                normalized_edge((u, raw_vertex.vertex)),
+                normalized_edge((v, raw_vertex.vertex)),
             }
             if (
                 edge not in edges
-                or vertex.vertex >= self.overlay.order
-                or vertex.vertex in edge
+                or raw_vertex.vertex >= self.overlay.order
+                or raw_vertex.vertex in edge
                 or any(addition in edges for addition in additions)
             ):
                 raise GraphPreconditionError("fanout precondition failed")

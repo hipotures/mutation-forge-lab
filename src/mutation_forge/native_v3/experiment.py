@@ -19,7 +19,15 @@ from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.experiment.provider import LocalCodexAppServerProvider
 
 from .cohort import run_sequential_cohort
-from .preview import PERSISTENT_SINGLE_AST, run_persistent_single_ast_cohort
+from .preview import (
+    FORBIDDEN_LENGTHS,
+    PERSISTENT_SINGLE_AST,
+    run_persistent_single_ast_cohort,
+)
+from .single_program_ir import (
+    SLOT_SPECIFIC_OUTPUT_CONTRACT,
+    slot_specific_contract_sha256,
+)
 
 V2_PROTOCOL = "native-v2"
 V3_SELECTOR = "v3"
@@ -28,7 +36,8 @@ V3_PROTOCOL_VERSION = "v3"
 V3_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3"
 MULTI_PROGRAM_BATCH = "multi_program_batch"
 V3_COMMUNICATION_MODES = frozenset({PERSISTENT_SINGLE_AST, MULTI_PROGRAM_BATCH})
-V3_DEFAULT_COMMUNICATION_MODE = PERSISTENT_SINGLE_AST
+V3_OUTPUT_CONTRACTS = frozenset({SLOT_SPECIFIC_OUTPUT_CONTRACT})
+V3_DEFAULT_COMMUNICATION_MODE = MULTI_PROGRAM_BATCH
 _STATE_NAME = "v3-state.json.gz"
 _V2_TOP_LEVEL_FIELDS = frozenset(
     {"kind", "preset", "run", "model", "search", "evaluation", "resources"}
@@ -51,6 +60,7 @@ class V3Config:
     timeout_seconds: float
     heg_repo: Path
     communication_mode: str
+    output_contract: str | None
     source_path: Path
     source_bytes: bytes = field(repr=False, compare=False)
 
@@ -141,6 +151,7 @@ def load_v3_config(
         "timeout_seconds",
         "heg_repo",
         "communication_mode",
+        "output_contract",
     }
     unknown_v3 = sorted(set(v3).difference(allowed_v3))
     if unknown_v3:
@@ -164,6 +175,20 @@ def load_v3_config(
     )
     if communication_mode not in V3_COMMUNICATION_MODES:
         raise ValueError(f"v3.communication_mode must be one of {sorted(V3_COMMUNICATION_MODES)}")
+    raw_output_contract = v3.get("output_contract")
+    output_contract = (
+        None
+        if raw_output_contract is None
+        else _string(raw_output_contract, "v3.output_contract")
+    )
+    if communication_mode == PERSISTENT_SINGLE_AST:
+        if output_contract not in V3_OUTPUT_CONTRACTS:
+            raise ValueError(
+                "v3 persistent_single_ast requires explicit "
+                f"output_contract {SLOT_SPECIFIC_OUTPUT_CONTRACT!r}"
+            )
+    elif output_contract is not None:
+        raise ValueError("v3.output_contract is only valid for persistent_single_ast")
     return V3Config(
         V3_CONFIG_SCHEMA_VERSION,
         V3_SELECTOR,
@@ -174,9 +199,16 @@ def load_v3_config(
         timeout_seconds,
         heg_repo,
         communication_mode,
+        output_contract,
         source_path,
         source_bytes,
     )
+
+
+def _output_schema_sha256(config: V3Config) -> str | None:
+    if config.output_contract != SLOT_SPECIFIC_OUTPUT_CONTRACT:
+        return None
+    return slot_specific_contract_sha256(FORBIDDEN_LENGTHS)
 
 
 def _base_status(config: V3Config) -> dict[str, Any]:
@@ -187,6 +219,16 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "exp_id": config.exp_id,
         "workspace": str(config.experiment_root),
         "communication_mode": config.communication_mode,
+        "provider_mode": config.communication_mode,
+        "output_contract": config.output_contract,
+        "output_schema_sha256": _output_schema_sha256(config),
+        "compaction_mode": (
+            "disabled"
+            if config.communication_mode == PERSISTENT_SINGLE_AST
+            else None
+        ),
+        "rollback_mode": MULTI_PROGRAM_BATCH,
+        "diagnostic_mode": "fresh_single_ast",
         "state": "not_created",
         "resumable": True,
         "terminal": False,
@@ -195,6 +237,9 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "last_stop_reason": None,
         "last_error": None,
         "provider_turns": 0,
+        "program_turns": 0,
+        "time_to_first_valid_ast_ms": None,
+        "first_valid_ast_published_before_cohort_complete": None,
         "provider_attempts": 0,
         "failed_provider_attempts": 0,
         "provider_retries": 0,
@@ -234,6 +279,7 @@ def _preview_progress(config: V3Config) -> dict[str, Any]:
     model_turns = int(raw.get("model_turns", 0))
     return {
         "provider_turns": model_turns,
+        "program_turns": int(raw.get("program_turns", max(0, model_turns - 1))),
         "provider_attempts": int(raw.get("provider_attempts", model_turns)),
         "failed_provider_attempts": int(raw.get("failed_provider_attempts", 0)),
         "provider_retries": int(raw.get("provider_retries", 0)),
@@ -243,6 +289,7 @@ def _preview_progress(config: V3Config) -> dict[str, Any]:
         "failed_thread_resume_attempts": int(raw.get("failed_thread_resume_attempts", 0)),
         "active_provider_attempt": raw.get("active_provider_attempt"),
         "last_provider_attempt": raw.get("last_provider_attempt"),
+        "time_to_first_valid_ast_ms": raw.get("time_to_first_valid_ast_ms"),
     }
 
 
@@ -386,6 +433,11 @@ def _status_from_report(
         **_base_status(config),
         **_preview_progress(config),
         "provider_turns": int(report.get("model_turns", 0)),
+        "program_turns": int(report.get("program_turns", 0)),
+        "time_to_first_valid_ast_ms": report.get("time_to_first_valid_ast_ms"),
+        "first_valid_ast_published_before_cohort_complete": report.get(
+            "first_valid_ast_published_before_cohort_complete"
+        ),
         "evaluation_count": int(report.get("graph_evaluations", 0)),
         "valid_ast": report.get("valid_ast") is True,
         "cohort_outcome": report.get("cohort_outcome"),
@@ -517,6 +569,7 @@ def run_v3(
                 auth_json=Path.home() / ".codex" / "auth.json",
                 backend_factory=lambda: backend_factory(config),
                 episode_id=f"{config.exp_id}/epoch-0000",
+                output_contract=cast(str, config.output_contract),
             )
     except Exception as error:
         status = {
@@ -553,6 +606,7 @@ __all__ = [
     "V3_CONFIG_SCHEMA_VERSION",
     "V3_DEFAULT_COMMUNICATION_MODE",
     "V3_COMMUNICATION_MODES",
+    "V3_OUTPUT_CONTRACTS",
     "V3_PROTOCOL_VERSION",
     "V3_SELECTOR",
     "V3_STATUS_SCHEMA_VERSION",
@@ -560,6 +614,7 @@ __all__ = [
     "V3WorkspaceError",
     "MULTI_PROGRAM_BATCH",
     "PERSISTENT_SINGLE_AST",
+    "SLOT_SPECIFIC_OUTPUT_CONTRACT",
     "experiment_protocol",
     "load_v3_config",
     "run_v3",

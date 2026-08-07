@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -46,19 +48,28 @@ from .search_memory import (
 )
 from .single_program_contract import (
     SINGLE_PROGRAM_BRIEFS,
-    SingleProgramResponse,
-    build_single_program_output_schema,
-    build_single_program_request,
-    validate_single_program_response,
+    build_single_program_contract,
+)
+from .single_program_ir import (
+    SLOT_SPECIFIC_OUTPUT_CONTRACT,
+    CandidateContractError,
+    CompiledCandidateResponse,
+    build_candidate_request,
+    compile_slot_specific_response,
+    slot_specific_contract_sha256,
+    slot_specific_schema_hashes,
 )
 
 PERSISTENT_SINGLE_AST = "persistent_single_ast"
+FRESH_SINGLE_AST = "fresh_single_ast"
+ROLLBACK_MODE = "multi_program_batch"
 PREVIEW_STATE_SCHEMA_VERSION = "mforge.native-v3.preview-state.v1"
 PREVIEW_PROGRAM_RECORD_SCHEMA_VERSION = "mforge.native-v3.program-record.v1"
 FORBIDDEN_LENGTHS = (4, 8, 16)
+PREVIEW_SLOT_IDS = SLOT_IDS[:4]
 WORKER_COUNT = 2
 MAX_REPAIRS = 1
-MAX_PROVIDER_TURNS = 1 + len(SLOT_IDS) * (MAX_REPAIRS + 1)
+MAX_PROVIDER_TURNS = 1 + len(PREVIEW_SLOT_IDS) * (MAX_REPAIRS + 1)
 
 AdapterFactory = Callable[
     [str, IsolatedCapsule, Path, str, float],
@@ -145,7 +156,7 @@ def _empty_memory() -> SearchMemoryV1:
 
 def _extend_memory(
     memory: SearchMemoryV1,
-    response: SingleProgramResponse,
+    response: CompiledCandidateResponse,
     *,
     slot_index: int,
 ) -> SearchMemoryV1:
@@ -197,23 +208,16 @@ def _program_prompt(
     brief_id: str,
     memory: SearchMemoryV1,
 ) -> str:
-    request = build_single_program_request(
+    request = build_candidate_request(
+        candidate=SLOT_SPECIFIC_OUTPUT_CONTRACT,
         slot_id=slot_id,
         brief_id=brief_id,
         forbidden_lengths=FORBIDDEN_LENGTHS,
+        accepted_behavior_signatures=memory.seen_behavior_signatures,
     )
-    payload = {
-        "instruction": (
-            "Generate exactly one program for this slot using the specification "
-            "retained at the fork boundary. Return only the structured one-program "
-            "response. Do not repeat a program or behavior signature in Search Memory."
-        ),
-        "slot_id": slot_id,
-        "brief_id": brief_id,
-        "search_memory": memory.as_dict(),
-    }
-    prompt = request.prompt.split("\n\nRequest:\n", maxsplit=1)[0]
-    return prompt + "\n\nRequest:\n" + _compact_json(payload)
+    return request.prompt + "\n\nSearch Memory:\n" + _compact_json(
+        {"search_memory": memory.as_dict()}
+    )
 
 
 def _repair_prompt(
@@ -225,9 +229,9 @@ def _repair_prompt(
     return _compact_json(
         {
             "instruction": (
-                "The host rejected the preceding AST. Generate exactly one corrected "
-                "complete program for the same brief. Return only the structured "
-                "one-program response and do not repeat the rejected AST."
+                "The host rejected the preceding response. Generate exactly one "
+                "corrected slot-specific response for the same brief. Return only the "
+                "structured response and do not repeat the rejected program."
             ),
             "slot_id": slot_id,
             "brief_id": brief_id,
@@ -261,11 +265,26 @@ def _available_prefix(turns_dir: Path, base: str) -> str:
     return f"{base}.resume-{attempt:02d}"
 
 
-def _response(turns_dir: Path, prefix: str) -> SingleProgramResponse:
-    return validate_single_program_response(
+def _response(
+    turns_dir: Path,
+    prefix: str,
+    *,
+    slot_id: str,
+    brief_id: str,
+) -> CompiledCandidateResponse:
+    return compile_slot_specific_response(
         (turns_dir / f"{prefix}.response.raw.txt").read_text(encoding="utf-8"),
+        slot_id=slot_id,
+        brief_id=brief_id,
         forbidden_lengths=FORBIDDEN_LENGTHS,
     )
+
+
+def _stored_output_schema_sha256(turns_dir: Path, prefix: str) -> str:
+    value = read_json(turns_dir / f"{prefix}.output-schema.json.gz")
+    if not isinstance(value, Mapping):
+        raise ValueError("provider output schema artifact is not an object")
+    return _hash(value)
 
 
 def _memory_from_reports(
@@ -274,9 +293,11 @@ def _memory_from_reports(
 ) -> tuple[SearchMemoryV1, list[CohortEntry]]:
     memory = _empty_memory()
     entries: list[CohortEntry] = []
+    schema_hashes = slot_specific_schema_hashes(FORBIDDEN_LENGTHS)
     for slot_index, raw in enumerate(reports):
         report = dict(raw)
         slot_id = str(report["slot_id"])
+        brief_id = str(report["brief_id"])
         accepted_prefix = report.get("accepted_prefix")
         if not isinstance(accepted_prefix, str):
             entries.append(
@@ -288,7 +309,17 @@ def _memory_from_reports(
                 )
             )
             continue
-        response = _response(turns_dir, accepted_prefix)
+        if (
+            _stored_output_schema_sha256(turns_dir, accepted_prefix)
+            != schema_hashes[brief_id]
+        ):
+            raise ValueError("stored provider output-schema identity mismatch")
+        response = _response(
+            turns_dir,
+            accepted_prefix,
+            slot_id=slot_id,
+            brief_id=brief_id,
+        )
         memory = _extend_memory(memory, response, slot_index=slot_index)
         entries.append(
             CohortEntry(
@@ -301,26 +332,49 @@ def _memory_from_reports(
     return memory, entries
 
 
-def _manifest(model: str, effort: str) -> dict[str, Any]:
+def _manifest(model: str, effort: str, output_contract: str) -> dict[str, Any]:
+    if output_contract != SLOT_SPECIFIC_OUTPUT_CONTRACT:
+        raise ValueError("persistent preview requires slot_specific output contract")
     manifest = build_epoch_manifest(model=model, effort=effort)
-    system_prompt = build_single_program_request(
-        slot_id=SLOT_IDS[0],
+    system_prompt = build_candidate_request(
+        candidate=SLOT_SPECIFIC_OUTPUT_CONTRACT,
+        slot_id=PREVIEW_SLOT_IDS[0],
         brief_id=BRIEF_IDS[0],
         forbidden_lengths=FORBIDDEN_LENGTHS,
     ).system_prompt
-    schema = build_single_program_output_schema(FORBIDDEN_LENGTHS)
+    schema_hashes = slot_specific_schema_hashes(FORBIDDEN_LENGTHS)
+    contract_sha256 = slot_specific_contract_sha256(FORBIDDEN_LENGTHS)
+    protocols = {
+        **cast(dict[str, str], manifest["protocols"]),
+        "provider_input": "native_v3_persistent_single_ast_slot_specific_input_v1",
+        "provider_output": "native_v3_persistent_single_ast_slot_specific_output_v1",
+    }
+    protocol_bundle_hash = _hash(protocols)
     manifest.update(
         {
+            "planned_slot_ids": list(PREVIEW_SLOT_IDS),
             "communication_mode": PERSISTENT_SINGLE_AST,
+            "provider_mode": PERSISTENT_SINGLE_AST,
+            "output_contract": output_contract,
+            "output_schema_sha256": contract_sha256,
+            "output_schema_sha256_by_brief": schema_hashes,
             "worker_count": WORKER_COUNT,
             "programs_per_turn": 1,
             "compaction_used": False,
+            "compaction_mode": "disabled",
             "rotation_policy": "fresh_spec_fork_plus_search_memory",
+            "rollback_mode": ROLLBACK_MODE,
+            "diagnostic_mode": FRESH_SINGLE_AST,
             "single_program_system_prompt_sha256": hashlib.sha256(
                 system_prompt.encode("utf-8")
             ).hexdigest(),
-            "single_program_output_schema_sha256": _hash(schema),
+            "system_prompt_sha256": hashlib.sha256(
+                system_prompt.encode("utf-8")
+            ).hexdigest(),
+            "repair_prompt_sha256": None,
             "search_memory_schema_version": "mforge.native.search_memory.v1",
+            "protocols": protocols,
+            "protocol_bundle_hash": protocol_bundle_hash,
         }
     )
     manifest["provider_calls"] = [
@@ -330,7 +384,7 @@ def _manifest(model: str, effort: str) -> dict[str, Any]:
             "brief_id": BRIEF_IDS[index % len(BRIEF_IDS)],
             "worker_index": index % WORKER_COUNT,
         }
-        for index, slot_id in enumerate(SLOT_IDS)
+        for index, slot_id in enumerate(PREVIEW_SLOT_IDS)
     ]
     manifest["slots"] = [
         {
@@ -342,7 +396,7 @@ def _manifest(model: str, effort: str) -> dict[str, Any]:
                 SINGLE_PROGRAM_BRIEFS[brief_id].encode("utf-8")
             ).hexdigest(),
         }
-        for index, slot_id in enumerate(SLOT_IDS)
+        for index, slot_id in enumerate(PREVIEW_SLOT_IDS)
         for brief_id in (BRIEF_IDS[index % len(BRIEF_IDS)],)
     ]
     manifest["epoch_id"] = _hash(
@@ -350,8 +404,10 @@ def _manifest(model: str, effort: str) -> dict[str, Any]:
             "epoch_number": manifest["epoch_number"],
             "slots": manifest["slots"],
             "provider_calls": manifest["provider_calls"],
-            "protocol_bundle_hash": manifest["protocol_bundle_hash"],
+            "protocol_bundle_hash": protocol_bundle_hash,
             "communication_mode": PERSISTENT_SINGLE_AST,
+            "output_contract": output_contract,
+            "output_schema_sha256": contract_sha256,
             "model": model,
             "effort": effort,
         }
@@ -364,13 +420,24 @@ def _new_state(
     anchor: TurnObservation,
     source_identity: Mapping[str, Any],
     forks: Sequence[Mapping[str, Any]],
+    output_contract: str,
 ) -> dict[str, Any]:
     bootstrap_retries = int(source_identity.get("serverRetries", 0))
     bootstrap_warnings = int(source_identity.get("serverWarnings", 0))
     return {
         "schema_version": PREVIEW_STATE_SCHEMA_VERSION,
         "communication_mode": PERSISTENT_SINGLE_AST,
+        "provider_mode": PERSISTENT_SINGLE_AST,
+        "output_contract": output_contract,
+        "output_schema_sha256": slot_specific_contract_sha256(FORBIDDEN_LENGTHS),
+        "output_schema_sha256_by_brief": slot_specific_schema_hashes(FORBIDDEN_LENGTHS),
+        "compaction_mode": "disabled",
+        "rollback_mode": ROLLBACK_MODE,
+        "diagnostic_mode": FRESH_SINGLE_AST,
         "status": "generating",
+        "started_at_ms": time.time_ns() // 1_000_000,
+        "first_valid_ast_at_ms": None,
+        "cohort_completed_at_ms": None,
         "capsule_root": str(capsule.root),
         "specification_thread": {
             "thread_id": source_identity["threadId"],
@@ -383,6 +450,7 @@ def _new_state(
         "next_slot": 0,
         "slot_reports": [],
         "model_turns": 1,
+        "program_turns": 0,
         "provider_attempts": 1,
         "failed_provider_attempts": 0,
         "provider_retries": bootstrap_retries,
@@ -422,6 +490,7 @@ def _worker_record(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _ensure_progress_state(state: dict[str, Any]) -> None:
     model_turns = int(state.get("model_turns", 0))
+    state.setdefault("program_turns", max(0, model_turns - 1))
     state.setdefault("provider_attempts", model_turns)
     state.setdefault("failed_provider_attempts", 0)
     state.setdefault("provider_retries", 0)
@@ -452,12 +521,15 @@ def run_persistent_single_ast_cohort(
     auth_json: str | Path,
     backend_factory: Callable[[], GraphBackend],
     episode_id: str,
+    output_contract: str,
     adapter_factory: AdapterFactory = _default_adapter_factory,
     capsule_factory: CapsuleFactory | None = None,
     capsule_reopener: CapsuleReopener = IsolatedCapsule.reopen,
 ) -> dict[str, Any]:
     """Generate one AST per durable worker turn, then run the frozen evaluator."""
 
+    if output_contract != SLOT_SPECIFIC_OUTPUT_CONTRACT:
+        raise ValueError("persistent preview requires slot_specific output contract")
     root = Path(experiment_root)
     output_root = root / "native-v3-output" / "epoch-0000"
     turns_dir = root / "provider-turns"
@@ -465,13 +537,15 @@ def run_persistent_single_ast_cohort(
     manifest_path = output_root / "epoch-manifest.json.gz"
     turns_dir.mkdir(parents=True, exist_ok=True)
     profile = ModelProfile("codex", model, effort)
-    request = build_single_program_request(
-        slot_id=SLOT_IDS[0],
+    request = build_candidate_request(
+        candidate=SLOT_SPECIFIC_OUTPUT_CONTRACT,
+        slot_id=PREVIEW_SLOT_IDS[0],
         brief_id=BRIEF_IDS[0],
         forbidden_lengths=FORBIDDEN_LENGTHS,
     )
     system_prompt = request.system_prompt
-    schema = request.output_schema
+    contract_sha256 = slot_specific_contract_sha256(FORBIDDEN_LENGTHS)
+    schema_hashes = slot_specific_schema_hashes(FORBIDDEN_LENGTHS)
 
     adapter: CodexAppServerAdapter | None = None
     if state_path.is_file():
@@ -482,8 +556,16 @@ def run_persistent_single_ast_cohort(
         if (
             state.get("schema_version") != PREVIEW_STATE_SCHEMA_VERSION
             or state.get("communication_mode") != PERSISTENT_SINGLE_AST
+            or state.get("output_contract") != output_contract
+            or state.get("output_schema_sha256") != contract_sha256
+            or state.get("output_schema_sha256_by_brief") != schema_hashes
         ):
             raise ValueError("preview communication state is incompatible")
+        raw_reports = state.get("slot_reports", [])
+        if not isinstance(raw_reports, list):
+            raise ValueError("preview slot reports are invalid")
+        reports = [cast(Mapping[str, Any], item) for item in raw_reports]
+        memory, entries = _memory_from_reports(reports, turns_dir)
         capsule = capsule_reopener(str(state["capsule_root"]))
         _ensure_progress_state(state)
         state.update(
@@ -569,7 +651,7 @@ def run_persistent_single_ast_cohort(
             )
             write_json(state_path, state)
     else:
-        expected_manifest = _manifest(model, effort)
+        expected_manifest = _manifest(model, effort, output_contract)
         if manifest_path.is_file():
             if read_json(manifest_path) != expected_manifest:
                 raise ValueError("preview epoch manifest identity mismatch")
@@ -652,27 +734,25 @@ def run_persistent_single_ast_cohort(
             anchor,
             source_identity,
             [_worker_record(item) for item in fork_records],
+            output_contract,
         )
         write_json(state_path, state)
+        reports = []
+        memory = _empty_memory()
+        entries = []
     assert adapter is not None
     _ensure_progress_state(state)
-
-    raw_reports = state.get("slot_reports", [])
-    if not isinstance(raw_reports, list):
-        raise ValueError("preview slot reports are invalid")
-    reports = [cast(Mapping[str, Any], item) for item in raw_reports]
-    memory, entries = _memory_from_reports(reports, turns_dir)
     workers = cast(list[dict[str, Any]], state["workers"])
     model_turns = int(state["model_turns"])
     usages = [cast(Mapping[str, Any], item) for item in cast(list[Any], state["usages"])]
 
-    for slot_index in range(int(state["next_slot"]), len(SLOT_IDS)):
-        slot_id = SLOT_IDS[slot_index]
+    for slot_index in range(int(state["next_slot"]), len(PREVIEW_SLOT_IDS)):
+        slot_id = PREVIEW_SLOT_IDS[slot_index]
         brief_id = BRIEF_IDS[slot_index % len(BRIEF_IDS)]
         worker_index = slot_index % WORKER_COUNT
         worker = workers[worker_index]
         attempts: list[dict[str, Any]] = []
-        accepted: SingleProgramResponse | None = None
+        accepted: CompiledCandidateResponse | None = None
         accepted_prefix: str | None = None
         error: str | None = None
 
@@ -683,6 +763,17 @@ def run_persistent_single_ast_cohort(
                 else f"{slot_id}.repair-{repair_index:02d}"
             )
             prefix = _available_prefix(turns_dir, prefix_base)
+            candidate_request = build_candidate_request(
+                candidate=SLOT_SPECIFIC_OUTPUT_CONTRACT,
+                slot_id=slot_id,
+                brief_id=brief_id,
+                forbidden_lengths=FORBIDDEN_LENGTHS,
+                accepted_behavior_signatures=memory.seen_behavior_signatures,
+            )
+            schema = candidate_request.output_schema
+            expected_schema_sha256 = schema_hashes[brief_id]
+            if _hash(schema) != expected_schema_sha256:
+                raise ValueError("slot-specific output schema identity mismatch")
             prompt = (
                 _program_prompt(slot_id, brief_id, memory)
                 if repair_index == 0
@@ -707,6 +798,8 @@ def run_persistent_single_ast_cohort(
                 "turn_id": None,
                 "provider_retries": 0,
                 "provider_warnings": 0,
+                "output_contract": output_contract,
+                "output_schema_sha256": expected_schema_sha256,
                 "error": None,
             }
             state.update(
@@ -729,8 +822,13 @@ def run_persistent_single_ast_cohort(
                     profile=profile,
                     persistent=True,
                     forbidden_lengths=FORBIDDEN_LENGTHS,
-                    program_response=True,
+                    program_response=False,
                 )
+                stored_schema_sha256 = _stored_output_schema_sha256(turns_dir, prefix)
+                if stored_schema_sha256 != expected_schema_sha256:
+                    raise ValueError(
+                        "provider output-schema artifact identity mismatch"
+                    )
             except Exception as provider_error:
                 retries_after, warnings_after = _adapter_event_counts(adapter)
                 retry_count = retries_after - retries_before
@@ -783,13 +881,27 @@ def run_persistent_single_ast_cohort(
             )
             write_json(state_path, state)
             model_turns += 1
+            state["program_turns"] = int(state["program_turns"]) + 1
             usages.append(observation.usage)
             worker["last_turn_id"] = observation.turn_id
-            error = observation.error
-            candidate: SingleProgramResponse | None = None
+            candidate: CompiledCandidateResponse | None = None
             duplicate_reason = None
-            if observation.program_hash is not None:
-                candidate = _response(turns_dir, prefix)
+            try:
+                candidate = _response(
+                    turns_dir,
+                    prefix,
+                    slot_id=slot_id,
+                    brief_id=brief_id,
+                )
+            except CandidateContractError as contract_error:
+                error = str(contract_error)
+                observation = replace(observation, error=error)
+            else:
+                observation = replace(
+                    observation,
+                    program_hash=candidate.program.program_hash,
+                    behavior_signature=_behavior_signature(candidate.program.ast),
+                )
                 try:
                     reject_duplicate(
                         memory,
@@ -814,6 +926,10 @@ def run_persistent_single_ast_cohort(
                     "brief_id": brief_id,
                     "worker_index": worker_index,
                     "fork_parent_turn_id": worker["fork_parent_turn_id"],
+                    "provider_mode": PERSISTENT_SINGLE_AST,
+                    "output_contract": output_contract,
+                    "output_schema_sha256": expected_schema_sha256,
+                    "output_schema_contract_sha256": contract_sha256,
                     "prompt_contract_sha256": hashlib.sha256(
                         _compact_json(
                             {
@@ -824,6 +940,11 @@ def run_persistent_single_ast_cohort(
                     ).hexdigest(),
                     "attempt": attempt,
                     "valid_ast": candidate is not None,
+                    "model_representation_sha256": (
+                        None
+                        if candidate is None
+                        else candidate.representation_sha256
+                    ),
                     "program": (
                         None if candidate is None else validated_program_artifact(candidate.program)
                     ),
@@ -840,6 +961,9 @@ def run_persistent_single_ast_cohort(
 
         if accepted is not None:
             memory = _extend_memory(memory, accepted, slot_index=slot_index)
+            published_at_ms = time.time_ns() // 1_000_000
+            if state.get("first_valid_ast_at_ms") is None:
+                state["first_valid_ast_at_ms"] = published_at_ms
             entry = CohortEntry(
                 slot_id,
                 accepted.program,
@@ -847,6 +971,7 @@ def run_persistent_single_ast_cohort(
                 None,
             )
         else:
+            published_at_ms = None
             entry = CohortEntry(slot_id, None, None, error or "invalid program")
         entries.append(entry)
         lineage = {
@@ -856,6 +981,8 @@ def run_persistent_single_ast_cohort(
             "worker_index": worker_index,
             "worker_thread_id": worker["thread_id"],
             "fork_parent_turn_id": worker["fork_parent_turn_id"],
+            "output_contract": output_contract,
+            "output_schema_sha256": schema_hashes[brief_id],
             "provider_attempts": attempts,
         }
         slot_report = {
@@ -863,6 +990,7 @@ def run_persistent_single_ast_cohort(
             "brief_id": brief_id,
             "worker_index": worker_index,
             "accepted_prefix": accepted_prefix,
+            "published_at_ms": published_at_ms,
             "entry": entry.as_dict(),
             "lineage": lineage,
             "error": entry.error,
@@ -875,6 +1003,10 @@ def run_persistent_single_ast_cohort(
                 "schema_version": PREVIEW_PROGRAM_RECORD_SCHEMA_VERSION,
                 **slot_report,
                 "search_memory_sha256": memory.sha256,
+                "provider_mode": PERSISTENT_SINGLE_AST,
+                "output_contract": output_contract,
+                "output_schema_sha256": schema_hashes[brief_id],
+                "output_schema_contract_sha256": contract_sha256,
                 "program": (
                     None if accepted is None else validated_program_artifact(accepted.program)
                 ),
@@ -908,17 +1040,53 @@ def run_persistent_single_ast_cohort(
         backend_factory=backend_factory,
         episode_id=episode_id,
         communication_mode=PERSISTENT_SINGLE_AST,
+        program_contract=build_single_program_contract(FORBIDDEN_LENGTHS),
     )
-    state.update({"status": "completed", "cohort_report": report["cohort_report"]})
+    completed_at_ms = time.time_ns() // 1_000_000
+    first_valid_ast_at_ms = state.get("first_valid_ast_at_ms")
+    time_to_first_valid_ast_ms = (
+        None
+        if not isinstance(first_valid_ast_at_ms, int)
+        else first_valid_ast_at_ms - int(state["started_at_ms"])
+    )
+    report.update(
+        {
+            "provider_mode": PERSISTENT_SINGLE_AST,
+            "output_contract": output_contract,
+            "output_schema_sha256": contract_sha256,
+            "output_schema_sha256_by_brief": schema_hashes,
+            "compaction_mode": "disabled",
+            "rollback_mode": ROLLBACK_MODE,
+            "diagnostic_mode": FRESH_SINGLE_AST,
+            "program_turns": int(state["program_turns"]),
+            "time_to_first_valid_ast_ms": time_to_first_valid_ast_ms,
+            "first_valid_ast_published_before_cohort_complete": (
+                isinstance(first_valid_ast_at_ms, int)
+                and first_valid_ast_at_ms <= completed_at_ms
+            ),
+        }
+    )
+    write_json(Path(str(report["cohort_report"])), report)
+    state.update(
+        {
+            "status": "completed",
+            "cohort_report": report["cohort_report"],
+            "cohort_completed_at_ms": completed_at_ms,
+            "time_to_first_valid_ast_ms": time_to_first_valid_ast_ms,
+        }
+    )
     write_json(state_path, state)
     capsule.cleanup()
     return report
 
 
 __all__ = [
+    "FRESH_SINGLE_AST",
     "FORBIDDEN_LENGTHS",
     "PERSISTENT_SINGLE_AST",
     "PREVIEW_PROGRAM_RECORD_SCHEMA_VERSION",
+    "PREVIEW_SLOT_IDS",
     "PREVIEW_STATE_SCHEMA_VERSION",
+    "ROLLBACK_MODE",
     "run_persistent_single_ast_cohort",
 ]

@@ -11,19 +11,18 @@ from typing import Any, NoReturn, cast
 from mutation_forge.models import GraphState, JsonValue, RewritePlan
 
 from .contracts import (
-    ACTION_ARGUMENT_TYPES,
     CTX_TYPES,
+    DEFAULT_PROGRAM_CONTRACT,
     FEATURE_TYPES,
     PROGRAM_SCHEMA_VERSION,
-    SELECTOR_ARGUMENT_TYPES,
-    SELECTOR_COSTS,
-    SELECTOR_TYPES,
+    ProgramContract,
     ValidatedProgram,
     ValueType,
 )
 from .graph_runtime import (
     EdgeRef,
     EdgeSetRef,
+    FanoutRef,
     GraphFeatureInput,
     GraphFinalStateError,
     GraphPreconditionError,
@@ -34,6 +33,7 @@ from .graph_runtime import (
     PathRef,
     Population,
     ReferenceValue,
+    RelocationRef,
     RewriteHost,
     SelectionPopulation,
     VertexRef,
@@ -221,6 +221,7 @@ class _Runtime:
     context: ProgramContext
     episode_id: str
     limits: InterpreterLimits
+    contract: ProgramContract
     counters: _Counters = field(default_factory=_Counters)
     semantic_trace: list[SemanticEvent] = field(default_factory=list)
 
@@ -275,7 +276,16 @@ def _runtime_type(value: RuntimeValue) -> ValueType:
         return ValueType.RATIONAL
     if isinstance(value, str):
         return ValueType.STRING
-    if isinstance(value, VertexRef | EdgeRef | NonEdgeRef | PathRef | MatchingRef):
+    if isinstance(
+        value,
+        VertexRef
+        | EdgeRef
+        | NonEdgeRef
+        | PathRef
+        | MatchingRef
+        | RelocationRef
+        | FanoutRef,
+    ):
         return reference_type(value)
     if isinstance(value, VertexSetRef | EdgeSetRef | SelectionPopulation):
         return population_type(value)
@@ -307,6 +317,19 @@ def _semantic_value(value: RuntimeValue) -> JsonValue:
             "type": ValueType.MATCHING.value,
             "removed_edges": [list(edge) for edge in value.removed_edges],
             "added_edges": [list(edge) for edge in value.added_edges],
+        }
+    if isinstance(value, RelocationRef):
+        return {
+            "type": ValueType.RELOCATION.value,
+            "edge": list(value.edge.edge),
+            "keep": value.keep.vertex,
+            "new": value.new.vertex,
+        }
+    if isinstance(value, FanoutRef):
+        return {
+            "type": ValueType.FANOUT.value,
+            "edge": list(value.edge.edge),
+            "w": value.w.vertex,
         }
     if isinstance(value, VertexSetRef | EdgeSetRef | SelectionPopulation):
         return {
@@ -388,12 +411,15 @@ def _expression(
         return _number(runtime, Fraction(numerator, denominator), path)
     if operation == "selector":
         selector_id = expression.get("selector_id")
-        if not isinstance(selector_id, str) or selector_id not in SELECTOR_TYPES:
+        if not isinstance(selector_id, str):
+            _fault("INVALID_AST", path, "unknown selector")
+        selector = runtime.contract.selectors.get(selector_id)
+        if selector is None:
             _fault("INVALID_AST", path, "unknown selector")
         raw_arguments = expression.get("arguments")
         if not isinstance(raw_arguments, dict):
             _fault("INVALID_AST", path, "selector arguments must be an object")
-        expected_arguments = SELECTOR_ARGUMENT_TYPES[selector_id]
+        expected_arguments = selector.arguments
         if set(raw_arguments) != set(expected_arguments):
             _fault("INVALID_AST", path, "invalid selector arguments")
         arguments: dict[str, Scalar] = {}
@@ -413,7 +439,7 @@ def _expression(
         )
         runtime.budget(
             "selector_cost_units",
-            SELECTOR_COSTS[selector_id],
+            selector.cost,
             runtime.limits.maximum_selector_cost_units,
             path,
         )
@@ -431,7 +457,7 @@ def _expression(
             ) from exc
         except (TypeError, ValueError) as exc:
             raise _ProgramFault("TYPE_ERROR", path, str(exc)) from exc
-        _expect(selection, SELECTOR_TYPES[selector_id], path)
+        _expect(selection, selector.result_type, path)
         runtime.record(
             "selector",
             path,
@@ -679,12 +705,15 @@ def _node(
         return
     if operation == "apply":
         action_id = node.get("action_id")
-        if not isinstance(action_id, str) or action_id not in ACTION_ARGUMENT_TYPES:
+        if not isinstance(action_id, str):
+            _fault("INVALID_AST", path, "unknown action")
+        action = runtime.contract.actions.get(action_id)
+        if action is None:
             _fault("INVALID_AST", path, "unknown action")
         raw_arguments = node.get("arguments")
         if not isinstance(raw_arguments, dict):
             _fault("INVALID_AST", path, "action arguments must be an object")
-        expected_arguments = ACTION_ARGUMENT_TYPES[action_id]
+        expected_arguments = action.arguments
         if set(raw_arguments) != set(expected_arguments):
             _fault("INVALID_AST", path, "invalid action arguments")
         arguments: dict[str, Scalar] = {}
@@ -770,6 +799,7 @@ def invoke_program(
     episode_id: str,
     features: GraphFeatureInput | None = None,
     limits: InterpreterLimits | None = None,
+    contract: ProgramContract | None = None,
 ) -> InvocationResult:
     """Execute one validated program against a private graph overlay."""
 
@@ -783,6 +813,7 @@ def invoke_program(
             context=context,
             episode_id=episode_id,
             limits=limits or InterpreterLimits(),
+            contract=contract or DEFAULT_PROGRAM_CONTRACT,
         )
         document = program.ast
         if (

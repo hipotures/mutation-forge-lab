@@ -9,6 +9,7 @@ from mutation_forge import cli
 from mutation_forge.native_v3.experiment import (
     MULTI_PROGRAM_BATCH,
     PERSISTENT_SINGLE_AST,
+    SLOT_SPECIFIC_OUTPUT_CONTRACT,
     V2_PROTOCOL,
     V3_SELECTOR,
     experiment_protocol,
@@ -48,7 +49,8 @@ def test_v3_config_is_explicit_and_bounded(tmp_path: Path) -> None:
     assert config.exp_id == "v3-run"
     assert config.workspace == tmp_path / "workspace"
     assert config.heg_repo == tmp_path / "heg"
-    assert config.communication_mode == PERSISTENT_SINGLE_AST
+    assert config.communication_mode == MULTI_PROGRAM_BATCH
+    assert config.output_contract is None
 
 
 def test_v3_communication_mode_is_explicitly_selectable(tmp_path: Path) -> None:
@@ -66,11 +68,46 @@ def test_v3_communication_mode_is_explicitly_selectable(tmp_path: Path) -> None:
     path.write_text(
         _config(tmp_path).replace(
             'heg_repo = "',
+            (
+                f'communication_mode = "{PERSISTENT_SINGLE_AST}"\n'
+                f'output_contract = "{SLOT_SPECIFIC_OUTPUT_CONTRACT}"\n'
+                'heg_repo = "'
+            ),
+        ),
+        encoding="utf-8",
+    )
+    config = load_v3_config(path)
+    assert config.communication_mode == PERSISTENT_SINGLE_AST
+    assert config.output_contract == SLOT_SPECIFIC_OUTPUT_CONTRACT
+
+    path.write_text(
+        _config(tmp_path).replace(
+            'heg_repo = "',
+            f'communication_mode = "{PERSISTENT_SINGLE_AST}"\nheg_repo = "',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="requires explicit output_contract"):
+        load_v3_config(path)
+
+    path.write_text(
+        _config(tmp_path).replace(
+            'heg_repo = "',
             'communication_mode = "unknown"\nheg_repo = "',
         ),
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="communication_mode must be one of"):
+        load_v3_config(path)
+
+    path.write_text(
+        _config(tmp_path).replace(
+            'heg_repo = "',
+            'output_contract = "slot_specific"\nheg_repo = "',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="only valid for persistent_single_ast"):
         load_v3_config(path)
 
 

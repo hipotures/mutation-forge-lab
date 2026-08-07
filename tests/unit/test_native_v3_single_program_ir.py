@@ -23,6 +23,8 @@ from mutation_forge.native_v3.single_program_ir import (
     compile_candidate_response,
     compile_flat_ir_response,
     compile_slot_specific_response,
+    slot_specific_contract_sha256,
+    slot_specific_schema_hashes,
 )
 
 FORBIDDEN_LENGTHS = (4, 8, 16)
@@ -247,6 +249,10 @@ def test_schema_complexity_inventory_is_deterministic_and_has_all_candidates() -
         item["maximum_generated_program_step_count"] == MAXIMUM_FLAT_LOGICAL_STEPS
         for item in flat
     )
+    assert slot_specific_schema_hashes(FORBIDDEN_LENGTHS) == SLOT_SCHEMA_HASHES
+    assert slot_specific_contract_sha256(FORBIDDEN_LENGTHS) == hashlib.sha256(
+        canonical_json_bytes(SLOT_SCHEMA_HASHES)
+    ).hexdigest()
 
 
 @pytest.mark.parametrize("candidate", ("slot_specific", "flat_ir"))
