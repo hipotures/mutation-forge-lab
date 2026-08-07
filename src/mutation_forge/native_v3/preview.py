@@ -191,6 +191,8 @@ def _extend_memory(
                 scientific_outcome="NOT_EVALUATED",
                 model_hypothesis=_summary(response.hypothesis),
                 observed_effect=None,
+                primary_failure_code=None,
+                terminal_fallback_reason=None,
             ),
         )
     lineage = LineageSummary(
@@ -238,6 +240,16 @@ def _memory_with_scientific_outcomes(
             pattern,
             scientific_outcome=str(result["scientific_outcome"]),
             observed_effect=str(result["observed_effect"]),
+            primary_failure_code=(
+                str(result["primary_failure_code"])
+                if result.get("primary_failure_code") is not None
+                else None
+            ),
+            terminal_fallback_reason=(
+                str(result["terminal_fallback_reason"])
+                if result.get("terminal_fallback_reason") is not None
+                else None
+            ),
         )
         (
             successful

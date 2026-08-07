@@ -76,6 +76,14 @@ inconclusive result moves to `tested_patterns`. The model's hypothesis remains
 labelled `model_hypothesis`, while measured evidence is recorded separately as
 `observed_effect`.
 
+Fallback summaries preserve both layers of causality. When a selected rewrite
+fails final graph validation and the compiled fallback returns
+`NoPlan(NO_MATCH)`, the scientific outcome is
+`NO_PLAN_AFTER_ILLEGAL_FINAL_STATE`, with `primary_failure_code =
+ILLEGAL_FINAL_STATE` and `terminal_fallback_reason = NO_MATCH`. The host does
+not misreport this as an empty selector. Contract-valid archive IDs remain
+host-owned and are not repeated in the model-facing projection.
+
 All four preview slots are independent roots. Their model-facing
 `active_parent` is therefore null, and their host lineage has no parent program
 hash. An active parent is reserved for a real descendant fork.

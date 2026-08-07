@@ -57,12 +57,13 @@ from .serial_evaluator import (
     SerialEpisodeConfig,
     SerialEpisodeResult,
     SerialEvaluationStatus,
+    SerialStepTrace,
     evaluate_serial_program,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 COHORT_PROTOCOL_ID = "native_v3_sequential_cohort_v1"
-COHORT_SCHEMA_VERSION = "mforge.native-v3.cohort.v2"
+COHORT_SCHEMA_VERSION = "mforge.native-v3.cohort.v3"
 EPOCH_MANIFEST_SCHEMA_VERSION = "mforge.native-v3.epoch-manifest.v1"
 PROGRAM_BATCH_SCHEMA_VERSION = "mforge.native.program_batch.v3"
 PROVIDER_INPUT_PROFILE_ID = "native_v3_input_4ast_v1"
@@ -597,46 +598,93 @@ def _interval_text(value: object) -> str:
     return str(lower) if lower == upper else f"[{lower},{upper}]"
 
 
+def _fallback_failure_code(step: SerialStepTrace) -> str | None:
+    for event in reversed(step.interpreter_trace):
+        failure_code = event.payload.get("failure_code")
+        if event.kind == "fallback" and isinstance(failure_code, str):
+            return failure_code
+    return None
+
+
 def _scientific_outcome(
     evaluation: SerialEpisodeResult,
-) -> tuple[str, str]:
+) -> tuple[str, str, str | None, str | None]:
     if _verified_counterexample(evaluation):
         return (
             "VERIFIED_COUNTEREXAMPLE",
             "Exact verification accepted a counterexample.",
+            None,
+            None,
         )
     if evaluation.status is SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT:
         return (
             "INCONCLUSIVE_SCORE",
             "Scoring was inconclusive before a safe comparison was available.",
+            None,
+            None,
         )
     if evaluation.status is SerialEvaluationStatus.PROGRAM_FAILURE:
         return (
             "PROGRAM_FAILURE",
             f"Program execution failed: {evaluation.scientific_error}.",
+            None,
+            None,
         )
     if evaluation.accepted_rewrites > 0:
         return (
             "ACCEPTED_IMPROVEMENT",
             (f"Accepted {evaluation.accepted_rewrites} strictly improving rewrite(s)."),
+            None,
+            None,
         )
     if not evaluation.steps:
-        return ("NOT_EVALUATED", "No scientific step was evaluated.")
+        return ("NOT_EVALUATED", "No scientific step was evaluated.", None, None)
     step = evaluation.steps[-1]
     if step.outcome == "score_timeout_without_partial":
         return (
             "INCONCLUSIVE_SCORE",
             "Candidate scoring timed out without safe partial evidence.",
+            None,
+            None,
         )
     if step.outcome == "no_plan":
+        primary_failure_code = _fallback_failure_code(step)
+        terminal_fallback_reason = (
+            step.no_plan_reason if primary_failure_code is not None else None
+        )
+        if primary_failure_code == "ILLEGAL_FINAL_STATE":
+            return (
+                "NO_PLAN_AFTER_ILLEGAL_FINAL_STATE",
+                (
+                    "A candidate was selected, but the emitted rewrite failed final "
+                    "graph validation; fallback returned NoPlan "
+                    f"({step.no_plan_reason or 'unspecified'})."
+                ),
+                primary_failure_code,
+                terminal_fallback_reason,
+            )
         if step.no_plan_reason == "ILLEGAL_FINAL_STATE":
             return (
                 "ILLEGAL_FINAL_STATE",
                 "No rewrite was emitted because the final graph was illegal.",
+                "ILLEGAL_FINAL_STATE",
+                None,
+            )
+        if primary_failure_code is not None:
+            return (
+                "NO_PLAN",
+                (
+                    f"Primary failure {primary_failure_code}; fallback returned "
+                    f"NoPlan ({step.no_plan_reason or 'unspecified'})."
+                ),
+                primary_failure_code,
+                terminal_fallback_reason,
             )
         return (
             "NO_PLAN",
             f"No rewrite was emitted ({step.no_plan_reason or 'unspecified'}).",
+            None,
+            None,
         )
     if step.outcome == "rewrite" and step.candidate_energy is not None:
         candidate = step.candidate_energy
@@ -646,15 +694,15 @@ def _scientific_outcome(
             f"{_interval_text(incumbent)}; rewrite was rejected."
         )
         if candidate.lower > incumbent.upper:
-            return ("REJECTED_WORSE", effect)
+            return ("REJECTED_WORSE", effect, None, None)
         if (
             candidate.lower == candidate.upper
             and incumbent.lower == incumbent.upper
             and candidate.lower == incumbent.lower
         ):
-            return ("REJECTED_EQUAL", effect)
-        return ("REJECTED_NOT_PROVED", effect)
-    return ("NO_PLAN", "No accepted rewrite was produced.")
+            return ("REJECTED_EQUAL", effect, None, None)
+        return ("REJECTED_NOT_PROVED", effect, None, None)
+    return ("NO_PLAN", "No accepted rewrite was produced.", None, None)
 
 
 def _verified_counterexample(evaluation: SerialEpisodeResult) -> bool:
@@ -749,7 +797,12 @@ def finalize_cohort(
                     program_contract=program_contract,
                 )
                 graph_evaluations += _graph_evaluations(evaluation)
-                scientific_outcome, observed_effect = _scientific_outcome(evaluation)
+                (
+                    scientific_outcome,
+                    observed_effect,
+                    primary_failure_code,
+                    terminal_fallback_reason,
+                ) = _scientific_outcome(evaluation)
                 verified_counterexample = _verified_counterexample(evaluation)
                 record = {
                     "program_hash": program.program_hash,
@@ -758,6 +811,8 @@ def finalize_cohort(
                     "contract_status": "VALID",
                     "scientific_outcome": scientific_outcome,
                     "observed_effect": observed_effect,
+                    "primary_failure_code": primary_failure_code,
+                    "terminal_fallback_reason": terminal_fallback_reason,
                     "verified_counterexample": verified_counterexample,
                     "evaluation": evaluation.as_dict(),
                 }
@@ -787,6 +842,8 @@ def finalize_cohort(
                         "contract_status": "VALID",
                         "scientific_outcome": scientific_outcome,
                         "observed_effect": observed_effect,
+                        "primary_failure_code": primary_failure_code,
+                        "terminal_fallback_reason": terminal_fallback_reason,
                         "verified_counterexample": verified_counterexample,
                         "evaluation": evaluation.as_dict(),
                     },
@@ -920,6 +977,8 @@ def finalize_cohort(
                     "contract_status",
                     "scientific_outcome",
                     "observed_effect",
+                    "primary_failure_code",
+                    "terminal_fallback_reason",
                     "verified_counterexample",
                 )
             }

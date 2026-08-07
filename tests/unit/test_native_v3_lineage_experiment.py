@@ -249,6 +249,7 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
     assert '"control_flow":' in model_memory
     assert '"contract_status": "VALID"' in model_memory
     assert '"scientific_outcome":' in model_memory
+    assert "validated_archive_aliases" not in first.model_facing_dict()
 
     reference = build_reference_manifest(
         fixtures,
@@ -282,6 +283,8 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
             scientific_outcome=sample.scientific_outcome,
             model_hypothesis=sample.model_hypothesis,
             observed_effect=sample.observed_effect,
+            primary_failure_code=sample.primary_failure_code,
+            terminal_fallback_reason=sample.terminal_fallback_reason,
         )
         for index in range(MAX_PATTERNS_PER_OUTCOME + 1)
     )

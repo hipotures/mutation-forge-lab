@@ -10,8 +10,8 @@ from typing import Any, Literal
 
 from .canonical import canonical_json_bytes
 
-SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.v2"
-MODEL_SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.model.v2"
+SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.v3"
+MODEL_SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.model.v3"
 MAX_SEEN_IDENTITIES = 64
 MAX_PATTERNS_PER_OUTCOME = 8
 MAX_ACTIVE_LINEAGES = 16
@@ -26,6 +26,7 @@ SCIENTIFIC_OUTCOMES = frozenset(
         "REJECTED_EQUAL",
         "REJECTED_NOT_PROVED",
         "NO_PLAN",
+        "NO_PLAN_AFTER_ILLEGAL_FINAL_STATE",
         "ILLEGAL_FINAL_STATE",
         "INCONCLUSIVE_SCORE",
         "PROGRAM_FAILURE",
@@ -142,6 +143,8 @@ class PatternSummary:
     scientific_outcome: str
     model_hypothesis: str
     observed_effect: str | None
+    primary_failure_code: str | None
+    terminal_fallback_reason: str | None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -175,6 +178,10 @@ class PatternSummary:
         _validated_summary(self.model_hypothesis, "model_hypothesis")
         if self.observed_effect is not None:
             _validated_summary(self.observed_effect, "observed_effect")
+        for field in ("primary_failure_code", "terminal_fallback_reason"):
+            value = getattr(self, field)
+            if value is not None:
+                _validated_identifier(value, field)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -187,10 +194,12 @@ class PatternSummary:
             "scientific_outcome": self.scientific_outcome,
             "model_hypothesis": self.model_hypothesis,
             "observed_effect": self.observed_effect,
+            "primary_failure_code": self.primary_failure_code,
+            "terminal_fallback_reason": self.terminal_fallback_reason,
         }
 
     def model_facing_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.pattern_id,
             "selectors": list(self.selector_families),
             "actions": list(self.action_families),
@@ -201,6 +210,11 @@ class PatternSummary:
             "model_hypothesis": self.model_hypothesis,
             "observed_effect": self.observed_effect,
         }
+        if self.primary_failure_code is not None:
+            result["primary_failure_code"] = self.primary_failure_code
+        if self.terminal_fallback_reason is not None:
+            result["terminal_fallback_reason"] = self.terminal_fallback_reason
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,7 +418,6 @@ class SearchMemoryV1:
             "tested_patterns": [item.model_facing_dict() for item in self.tested_patterns],
             "pending_patterns": [item.model_facing_dict() for item in self.pending_patterns],
             "active_lineages": [item.model_facing_dict() for item in self.active_lineages],
-            "validated_archive_aliases": list(self.validated_archive_ids),
             "active_parent": active_parent,
         }
 

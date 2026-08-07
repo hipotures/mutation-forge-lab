@@ -102,6 +102,8 @@ def build_search_memory(
             observed_effect=(
                 candidate["main_strength"] if accepted else candidate["main_weakness"]
             ),
+            primary_failure_code=None,
+            terminal_fallback_reason=None,
         )
         (successful if accepted else tested).append(pattern)
         lineages.append(

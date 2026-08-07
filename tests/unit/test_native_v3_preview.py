@@ -136,22 +136,29 @@ def test_preview_memory_separates_pending_and_scientific_outcomes() -> None:
         [
             {
                 "slot_aliases": ["slot-00"],
-                "scientific_outcome": "REJECTED_WORSE",
-                "observed_effect": "Candidate energy increased.",
+                "scientific_outcome": "ACCEPTED_IMPROVEMENT",
+                "observed_effect": "Accepted one strict improvement.",
+                "primary_failure_code": None,
+                "terminal_fallback_reason": None,
             },
             {
                 "slot_aliases": ["slot-01"],
-                "scientific_outcome": "ACCEPTED_IMPROVEMENT",
-                "observed_effect": "Accepted one strict improvement.",
+                "scientific_outcome": "NO_PLAN_AFTER_ILLEGAL_FINAL_STATE",
+                "observed_effect": (
+                    "A candidate was selected, but final graph validation failed."
+                ),
+                "primary_failure_code": "ILLEGAL_FINAL_STATE",
+                "terminal_fallback_reason": "NO_MATCH",
             },
         ],
     )
 
     assert classified.pending_patterns == ()
-    assert [item.pattern_id for item in classified.successful_patterns] == ["g0000-s01"]
-    assert [item.pattern_id for item in classified.tested_patterns] == ["g0000-s00"]
+    assert [item.pattern_id for item in classified.successful_patterns] == ["g0000-s00"]
+    assert [item.pattern_id for item in classified.tested_patterns] == ["g0000-s01"]
     assert classified.tested_patterns[0].model_hypothesis
-    assert classified.tested_patterns[0].observed_effect == "Candidate energy increased."
+    assert classified.tested_patterns[0].primary_failure_code == "ILLEGAL_FINAL_STATE"
+    assert classified.tested_patterns[0].terminal_fallback_reason == "NO_MATCH"
     assert classified.active_parent is None
     assert all(lineage.parent_id is None for lineage in classified.active_lineages)
 

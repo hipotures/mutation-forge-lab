@@ -28,6 +28,11 @@ from mutation_forge.native_v3.contracts import (
     validate_program,
 )
 from mutation_forge.native_v3.interpreter import InterpreterLimits
+from mutation_forge.native_v3.preview import (
+    _empty_memory,
+    _extend_memory,
+    _memory_with_scientific_outcomes,
+)
 from mutation_forge.native_v3.scoring import (
     AttemptKind,
     BackendIdentity,
@@ -41,6 +46,14 @@ from mutation_forge.native_v3.serial_evaluator import (
     SerialEpisodeConfig,
     SerialEvaluationStatus,
     evaluate_serial_program,
+)
+from mutation_forge.native_v3.single_program_contract import (
+    build_single_program_contract,
+)
+from mutation_forge.native_v3.single_program_ir import (
+    BRIEF_OPERATORS,
+    SLOT_SPECIFIC_SCHEMA_VERSION,
+    compile_slot_specific_response,
 )
 
 TEST_IDENTITY = BackendIdentity(
@@ -385,6 +398,124 @@ def test_illegal_final_overlay_consumes_step_without_candidate_score() -> None:
     assert len(backend.score_calls) == 1
     assert not backend.apply_calls
     assert _scientific_outcome(result)[0] == "ILLEGAL_FINAL_STATE"
+
+
+def _assert_illegal_final_fallback_is_preserved(
+    *,
+    slot_id: str,
+    brief_id: str,
+    selector_arguments: dict[str, object],
+    action_argument: str,
+) -> None:
+    forbidden_lengths = (4, 8, 16)
+    operators = BRIEF_OPERATORS[brief_id]
+    response = json.dumps(
+        {
+            "schema_version": SLOT_SPECIFIC_SCHEMA_VERSION,
+            "slot_id": slot_id,
+            "brief_id": brief_id,
+            "active_forbidden_lengths": list(forbidden_lengths),
+            "design_summary": f"Exercise the {brief_id} fallback.",
+            "hypothesis": "The primary fallback failure remains observable.",
+            "plan": {
+                "selector": {
+                    "selector_id": operators.selector_id,
+                    "arguments": selector_arguments,
+                },
+                "pick": {"mode": "seeded_uniform"},
+                "action": {
+                    "action_id": operators.action_id,
+                    "arguments": {action_argument: "selected"},
+                },
+                "terminal": {"kind": "emit"},
+            },
+        },
+        separators=(",", ":"),
+    )
+    candidate = compile_slot_specific_response(
+        response,
+        slot_id=slot_id,
+        brief_id=brief_id,
+        forbidden_lengths=forbidden_lengths,
+    )
+    backend = _Backend()
+    result = evaluate_serial_program(
+        backend=backend,
+        scorer=backend,
+        program=candidate.program,
+        config=SerialEpisodeConfig(
+            order=30,
+            graph_seed=101,
+            policy_seed=17,
+            horizon=1,
+            witness_cap=64,
+            episode_id=f"fallback-{brief_id}",
+        ),
+        program_contract=build_single_program_contract(forbidden_lengths),
+    )
+
+    step = result.steps[0]
+    assert step.no_plan_reason == "NO_MATCH"
+    assert any(
+        event.kind == "fallback"
+        and event.payload["failure_code"] == "ILLEGAL_FINAL_STATE"
+        for event in step.interpreter_trace
+    )
+    summary = _scientific_outcome(result)
+    assert summary == (
+        "NO_PLAN_AFTER_ILLEGAL_FINAL_STATE",
+        (
+            "A candidate was selected, but the emitted rewrite failed final "
+            "graph validation; fallback returned NoPlan (NO_MATCH)."
+        ),
+        "ILLEGAL_FINAL_STATE",
+        "NO_MATCH",
+    )
+    memory = _extend_memory(
+        _empty_memory(),
+        candidate,
+        slot_index=int(slot_id.removeprefix("slot-")),
+    )
+    classified = _memory_with_scientific_outcomes(
+        memory,
+        [
+            {
+                "slot_aliases": [slot_id],
+                "scientific_outcome": summary[0],
+                "observed_effect": summary[1],
+                "primary_failure_code": summary[2],
+                "terminal_fallback_reason": summary[3],
+            }
+        ],
+    )
+    assert classified.successful_patterns == ()
+    assert classified.pending_patterns == ()
+    assert len(classified.tested_patterns) == 1
+    pattern = classified.tested_patterns[0]
+    assert pattern.scientific_outcome == "NO_PLAN_AFTER_ILLEGAL_FINAL_STATE"
+    assert pattern.primary_failure_code == "ILLEGAL_FINAL_STATE"
+    assert pattern.terminal_fallback_reason == "NO_MATCH"
+    model_pattern = pattern.model_facing_dict()
+    assert model_pattern["primary_failure_code"] == "ILLEGAL_FINAL_STATE"
+    assert model_pattern["terminal_fallback_reason"] == "NO_MATCH"
+
+
+def test_remove_edge_fallback_preserves_illegal_final_state() -> None:
+    _assert_illegal_final_fallback_is_preserved(
+        slot_id="slot-01",
+        brief_id="remove-edge",
+        selector_arguments={"mode": "min"},
+        action_argument="edge",
+    )
+
+
+def test_relocation_fallback_preserves_illegal_final_state() -> None:
+    _assert_illegal_final_fallback_is_preserved(
+        slot_id="slot-02",
+        brief_id="relocation",
+        selector_arguments={},
+        action_argument="relocation",
+    )
 
 
 def test_legal_degree_change_uses_one_authoritative_candidate_score() -> None:
