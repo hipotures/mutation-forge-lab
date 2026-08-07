@@ -13,7 +13,7 @@ from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.native_v3.canonical import canonical_json_bytes
 from mutation_forge.native_v3.persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
-    protocol_hash,
+    BOOTSTRAP_ACK_VALUE,
 )
 from mutation_forge.native_v3.preview import (
     FORBIDDEN_LENGTHS,
@@ -130,7 +130,7 @@ def test_persistent_preview_publishes_one_unique_ast_per_turn(
                 json.dumps(
                     {
                         "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                        "protocol_hash": protocol_hash(FORBIDDEN_LENGTHS),
+                        "ack": BOOTSTRAP_ACK_VALUE,
                     },
                     separators=(",", ":"),
                 ),
@@ -298,7 +298,7 @@ def test_persistent_preview_uses_one_replacement_process_for_both_workers(
                     json.dumps(
                         {
                             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                            "protocol_hash": protocol_hash(FORBIDDEN_LENGTHS),
+                            "ack": BOOTSTRAP_ACK_VALUE,
                         },
                         separators=(",", ":"),
                     ),

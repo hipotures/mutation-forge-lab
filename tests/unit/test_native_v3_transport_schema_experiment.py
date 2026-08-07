@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 import sys
@@ -9,12 +8,12 @@ from typing import Any
 
 from mutation_forge.native_v3.persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
+    BOOTSTRAP_ACK_VALUE,
 )
 from mutation_forge.native_v3.single_program_ir import (
     BRIEF_OPERATORS,
     FLAT_IR_SCHEMA_VERSION,
     SLOT_SPECIFIC_SCHEMA_VERSION,
-    schema_experiment_anchor_prompt,
 )
 from mutation_forge.stage3.app_server import (
     AppServerLimits,
@@ -136,12 +135,10 @@ def _response(candidate: str, brief_id: str, slot_id: str) -> str:
 def test_fake_lifecycle_gates_max_and_preserves_artifact_parity(
     tmp_path: Path,
 ) -> None:
-    anchor = schema_experiment_anchor_prompt(FORBIDDEN_LENGTHS)
-    identity = hashlib.sha256(anchor.encode("utf-8")).hexdigest()
     acknowledgement = json.dumps(
         {
             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-            "protocol_hash": identity,
+            "ack": BOOTSTRAP_ACK_VALUE,
         },
         separators=(",", ":"),
     )
@@ -214,12 +211,10 @@ def test_fake_lifecycle_gates_max_and_preserves_artifact_parity(
 
 
 def test_medium_failure_blocks_max_without_fallback(tmp_path: Path) -> None:
-    anchor = schema_experiment_anchor_prompt(FORBIDDEN_LENGTHS)
-    identity = hashlib.sha256(anchor.encode("utf-8")).hexdigest()
     acknowledgement = json.dumps(
         {
             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-            "protocol_hash": identity,
+            "ack": BOOTSTRAP_ACK_VALUE,
         },
         sort_keys=True,
         separators=(",", ":"),

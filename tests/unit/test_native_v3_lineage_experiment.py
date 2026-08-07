@@ -9,13 +9,24 @@ from typing import Any
 
 import pytest
 
+from mutation_forge.native_v3.compaction_experiment import (
+    build_reference_manifest,
+)
 from mutation_forge.native_v3.lineage_experiment import (
     ACK_SCHEMA_VERSION,
+    _child_prompt,
+    _child_repair_prompt,
+    _feedback_prompt,
+    _fixture_prompt,
+    _fresh_prompt,
+    _memory_prompt,
     build_search_memory,
     run_lineage_experiment,
 )
 from mutation_forge.native_v3.persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
+    BOOTSTRAP_ACK_VALUE,
+    assert_model_facing_payload,
 )
 from mutation_forge.native_v3.search_memory import (
     MAX_PATTERNS_PER_OUTCOME,
@@ -232,6 +243,37 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
     assert b'"entry"' not in encoded
     assert len(first.successful_patterns) <= MAX_PATTERNS_PER_OUTCOME
     assert len(first.failed_patterns) <= MAX_PATTERNS_PER_OUTCOME
+    host_memory = json.dumps(first.as_dict(), sort_keys=True)
+    model_memory = json.dumps(first.model_facing_dict(), sort_keys=True)
+    assert first.protocol_hash in host_memory
+    assert first.seen_program_hashes[0] in host_memory
+    assert first.seen_behavior_signatures[0] in host_memory
+    assert first.protocol_hash not in model_memory
+    assert first.seen_program_hashes[0] not in model_memory
+    assert first.seen_behavior_signatures[0] not in model_memory
+    assert '"selectors":' in model_memory
+    assert '"actions":' in model_memory
+    assert '"control_flow":' in model_memory
+
+    reference = build_reference_manifest(
+        fixtures,
+        forbidden_lengths=FORBIDDEN_LENGTHS,
+    )
+    parent = reference["candidates"][-1]
+    prompts = (
+        _fixture_prompt(parent, role="active-parent"),
+        _feedback_prompt(parent),
+        _child_prompt(parent),
+        _child_repair_prompt(parent, "missing terminal"),
+        _memory_prompt(first),
+        _fresh_prompt(),
+    )
+    for prompt in prompts:
+        assert_model_facing_payload(
+            prompt=prompt,
+            system_prompt="Return only the requested structured response.",
+            schema={"type": "object"},
+        )
 
     sample = first.successful_patterns[0]
     too_many = tuple(
@@ -239,6 +281,7 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
             pattern_id=f"extra-{index:02d}",
             selector_families=sample.selector_families,
             action_families=sample.action_families,
+            control_flow=sample.control_flow,
             description=sample.description,
             description_source=sample.description_source,
             evaluation_outcome=sample.evaluation_outcome,
@@ -282,7 +325,6 @@ def test_fake_lineage_experiment_proves_both_boundaries_and_artifacts(
     tmp_path: Path,
 ) -> None:
     fixtures = _candidate_responses()
-    memory = build_search_memory(fixtures, forbidden_lengths=FORBIDDEN_LENGTHS)
     child = _novel_response(fixtures["add-edge"], extra_fallbacks=1)
     fresh = _novel_response(fixtures["remove-edge"], extra_fallbacks=2)
     invalid_child = _unterminated_response(fixtures["add-edge"])
@@ -300,7 +342,7 @@ def test_fake_lineage_experiment_proves_both_boundaries_and_artifacts(
             json.dumps(
                 {
                     "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                    "protocol_hash": memory.protocol_hash,
+                    "ack": BOOTSTRAP_ACK_VALUE,
                 },
                 separators=(",", ":"),
             ),

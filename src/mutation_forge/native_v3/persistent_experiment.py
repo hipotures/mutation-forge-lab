@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -39,6 +40,11 @@ from .single_program_contract import (
 
 PERSISTENT_EXPERIMENT_SCHEMA_VERSION = "mforge.native.persistent_thread_experiment.v1"
 BOOTSTRAP_ACK_SCHEMA_VERSION = "mforge.native.persistent_bootstrap_ack.v1"
+BOOTSTRAP_ACK_VALUE = "specification-retained"
+_CRYPTOGRAPHIC_DIGEST = re.compile(r"\b[0-9a-fA-F]{64}\b")
+_TRANSPORT_IDENTIFIER = re.compile(
+    r'"(?:request_id|thread_id|turn_id|requestId|threadId|turnId)"\s*:'
+)
 BRIEF_IDS = ("add-edge", "remove-edge", "relocation", "fanout")
 INFRASTRUCTURE_RETRY_LIMIT = 3
 
@@ -119,14 +125,12 @@ def protocol_hash(forbidden_lengths: tuple[int, ...]) -> str:
 
 def bootstrap_prompt(forbidden_lengths: tuple[int, ...]) -> str:
     contract = model_facing_contract(build_single_program_contract(forbidden_lengths))
-    identity = protocol_hash(forbidden_lengths)
     return json.dumps(
         {
             "instruction": (
                 "Retain this mathematical program-synthesis contract for later turns. "
                 "Do not generate a program. Return only the required acknowledgement."
             ),
-            "protocol_hash": identity,
             "active_forbidden_lengths": list(forbidden_lengths),
             "contract": contract,
         },
@@ -136,22 +140,22 @@ def bootstrap_prompt(forbidden_lengths: tuple[int, ...]) -> str:
     )
 
 
-def bootstrap_schema(identity: str) -> dict[str, Any]:
+def bootstrap_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "protocol_hash"],
+        "required": ["schema_version", "ack"],
         "properties": {
             "schema_version": {
                 "type": "string",
                 "const": BOOTSTRAP_ACK_SCHEMA_VERSION,
             },
-            "protocol_hash": {"type": "string", "const": identity},
+            "ack": {"type": "string", "const": BOOTSTRAP_ACK_VALUE},
         },
     }
 
 
-def followup_prompt(brief_id: str, accepted_signatures: tuple[str, ...]) -> str:
+def followup_prompt(brief_id: str) -> str:
     return (
         "Generate exactly one program using the contract retained from the bootstrap turn.\n"
         "Return the direct structured response. Prefer valid no_plan over an illegal rewrite.\n\n"
@@ -159,13 +163,37 @@ def followup_prompt(brief_id: str, accepted_signatures: tuple[str, ...]) -> str:
             {
                 "brief_id": brief_id,
                 "slot_objective": SINGLE_PROGRAM_BRIEFS[brief_id],
-                "accepted_behavior_signatures": list(accepted_signatures),
             },
             ensure_ascii=True,
             sort_keys=True,
             separators=(",", ":"),
         )
     )
+
+
+def assert_model_facing_payload(
+    *,
+    prompt: str,
+    system_prompt: str,
+    schema: Mapping[str, Any],
+) -> None:
+    """Fail closed before a host identity can reach the model."""
+
+    payloads = {
+        "prompt": prompt,
+        "system prompt": system_prompt,
+        "output schema": json.dumps(
+            schema,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    for label, payload in payloads.items():
+        if _CRYPTOGRAPHIC_DIGEST.search(payload):
+            raise ValueError(f"{label} contains a cryptographic digest")
+        if _TRANSPORT_IDENTIFIER.search(payload):
+            raise ValueError(f"{label} contains a transport identifier")
 
 
 def _record_turn_payloads(
@@ -223,6 +251,11 @@ def _run_adapter_turn(
     forbidden_lengths: tuple[int, ...],
     program_response: bool,
 ) -> TurnObservation:
+    assert_model_facing_payload(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        schema=schema,
+    )
     adapter.rotate_logger(artifact_dir, prefix)
     assert adapter.logger is not None
     adapter.logger.profile(
@@ -455,7 +488,7 @@ def run_ab_experiment(
             prefix="b-bootstrap",
             prompt=bootstrap_prompt(forbidden_lengths),
             system_prompt=system,
-            schema=bootstrap_schema(identity),
+            schema=bootstrap_schema(),
             profile=profile,
             persistent=True,
             forbidden_lengths=forbidden_lengths,
@@ -466,13 +499,12 @@ def run_ab_experiment(
         )
         if acknowledgement != {
             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-            "protocol_hash": identity,
+            "ack": BOOTSTRAP_ACK_VALUE,
         }:
-            raise ValueError("bootstrap acknowledgement does not match protocol hash")
-        signatures: list[str] = []
+            raise ValueError("bootstrap acknowledgement does not match")
         for index, brief_id in enumerate(BRIEF_IDS):
             prefix = f"b-slot-{index:02d}"
-            prompt = followup_prompt(brief_id, tuple(signatures))
+            prompt = followup_prompt(brief_id)
             turn_started = time.monotonic()
             try:
                 observation = _run_adapter_turn(
@@ -514,8 +546,6 @@ def run_ab_experiment(
                     usage_final=False,
                 )
             b_observations.append(observation)
-            if observation.behavior_signature is not None:
-                signatures.append(observation.behavior_signature)
             if observation.terminal_status != "completed":
                 break
     finally:

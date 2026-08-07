@@ -55,7 +55,8 @@ turns. Every program turn:
 
 1. receives the accepted nonrecursive, brief-specific `slot_specific`
    `outputSchema`;
-2. receives the current bounded `SearchMemoryV1`, without a full program AST;
+2. receives a semantic projection of the current bounded `SearchMemoryV1`,
+   without a full program AST or any cryptographic identity;
 3. returns one bounded model-facing representation;
 4. is deterministically compiled into the existing AST and validated
    immediately by the host;
@@ -82,6 +83,16 @@ serial evaluator, interval fitness, cohort threshold, and program selection
 used by the rollback remain unchanged. The selected preview passes its explicit
 program contract into that evaluator; the rollback continues to use the default
 contract.
+
+The host/model boundary is strict. Protocol, program, behavior-signature, and
+schema hashes plus App Server request, thread, and turn IDs remain exclusively
+in host-owned semantic metadata. Model-facing prompts contain short candidate
+aliases, selector and action families, control-flow summaries, evaluation
+outcomes, strengths, weaknesses, rejection reasons, and the exact parent AST
+only when a mutation requires it. The bootstrap uses a readable acknowledgement;
+the model never copies or interprets a digest. Every Native v3 App Server turn
+fails closed before dispatch if its prompt, system prompt, or output schema
+contains a 64-character hexadecimal digest or a transport-identifier field.
 
 No automatic compaction is used. A future context rotation must create a fresh
 fork from the specification anchor and inject bounded Search Memory.

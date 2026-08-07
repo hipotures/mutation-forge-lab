@@ -21,11 +21,14 @@ host program contract, the same child fork receives the exact bounded
 validation error and gets one repair attempt; no further retry is allowed.
 
 The fresh history must contain only the specification anchor. It receives a
-host-owned `SearchMemoryV1`, then generates one structurally different fresh
-root. The memory contains protocol and program identities, behavior
-signatures, at most eight successful and eight failed structured pattern
-summaries, active lineage summaries, validated archive IDs, and one active
-parent reference. It never contains a full AST.
+semantic projection of the host-owned `SearchMemoryV1`, then generates one
+structurally different fresh root. The host record contains protocol and
+program identities, behavior signatures, at most eight successful and eight
+failed structured pattern summaries, active lineage summaries, validated
+archive IDs, and one active parent reference. The model projection contains
+only short aliases and semantic summaries: selector and action families,
+control flow, outcomes, strengths, weaknesses, and lineage descriptions. It
+contains neither a full AST nor any cryptographic identity.
 
 App Server `thread/fork` responses are accepted only when the child is durable,
 the source identity matches, the child path remains inside the isolated
@@ -54,7 +57,8 @@ The experiment writes:
 
 All request Markdown files are exact JSON documents. In particular, the
 specification anchor and Search Memory requests can be parsed directly as
-JSON. Search Memory canonical bytes and SHA-256 are recorded in the report.
+JSON. The full host Search Memory canonical bytes and SHA-256 are recorded in
+the report but are not copied into the model-facing request.
 
 ## Bounded live result
 

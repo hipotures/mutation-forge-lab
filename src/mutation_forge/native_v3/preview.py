@@ -43,6 +43,7 @@ from .search_memory import (
     LineageSummary,
     PatternSummary,
     SearchMemoryV1,
+    program_control_flow,
     program_families,
     reject_duplicate,
 )
@@ -171,6 +172,7 @@ def _extend_memory(
                 pattern_id=f"validated-{slot_index:02d}",
                 selector_families=selectors,
                 action_families=actions,
+                control_flow=program_control_flow(program.ast),
                 description=_summary(response.design_summary),
                 description_source="model",
                 evaluation_outcome="VALIDATED",
@@ -213,10 +215,9 @@ def _program_prompt(
         slot_id=slot_id,
         brief_id=brief_id,
         forbidden_lengths=FORBIDDEN_LENGTHS,
-        accepted_behavior_signatures=memory.seen_behavior_signatures,
     )
     return request.prompt + "\n\nSearch Memory:\n" + _compact_json(
-        {"search_memory": memory.as_dict()}
+        {"search_memory": memory.model_facing_dict()}
     )
 
 
@@ -236,7 +237,7 @@ def _repair_prompt(
             "slot_id": slot_id,
             "brief_id": brief_id,
             "host_validation_error": error[:512],
-            "search_memory": memory.as_dict(),
+            "search_memory": memory.model_facing_dict(),
         }
     )
 
@@ -676,7 +677,7 @@ def run_persistent_single_ast_cohort(
                 prefix=anchor_prefix,
                 prompt=bootstrap_prompt(FORBIDDEN_LENGTHS),
                 system_prompt=system_prompt,
-                schema=bootstrap_schema(protocol_hash(FORBIDDEN_LENGTHS)),
+                schema=bootstrap_schema(),
                 profile=profile,
                 persistent=True,
                 forbidden_lengths=FORBIDDEN_LENGTHS,
@@ -761,7 +762,6 @@ def run_persistent_single_ast_cohort(
                 slot_id=slot_id,
                 brief_id=brief_id,
                 forbidden_lengths=FORBIDDEN_LENGTHS,
-                accepted_behavior_signatures=memory.seen_behavior_signatures,
             )
             schema = candidate_request.output_schema
             expected_schema_sha256 = schema_hashes[brief_id]

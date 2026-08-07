@@ -20,8 +20,10 @@ from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.native_v3.canonical import canonical_json_bytes
 from mutation_forge.native_v3.persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
+    BOOTSTRAP_ACK_VALUE,
     BRIEF_IDS,
     _behavior_signature,
+    assert_model_facing_payload,
     bootstrap_schema,
 )
 from mutation_forge.native_v3.single_program_ir import (
@@ -287,6 +289,11 @@ def _run_turn(
     forbidden_lengths: tuple[int, ...],
     schema_first_use: bool,
 ) -> dict[str, Any]:
+    assert_model_facing_payload(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        schema=schema,
+    )
     adapter.rotate_logger(artifact_directory, prefix)
     assert adapter.logger is not None
     adapter.logger.profile(
@@ -568,8 +575,8 @@ def _max_passed(cohort: Mapping[str, Any]) -> bool:
     )
 
 
-def _anchor_schema(identity: str) -> dict[str, Any]:
-    return bootstrap_schema(identity)
+def _anchor_schema() -> dict[str, Any]:
+    return bootstrap_schema()
 
 
 def _run_candidate_cohort(
@@ -593,10 +600,9 @@ def _run_candidate_cohort(
     profile = ModelProfile("codex", model, effort)
     adapter = adapter_factory(system_prompt, candidate, effort)
     anchor = schema_experiment_anchor_prompt(forbidden_lengths)
-    identity = hashlib.sha256(anchor.encode("utf-8")).hexdigest()
     expected_acknowledgement = {
         "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-        "protocol_hash": identity,
+        "ack": BOOTSTRAP_ACK_VALUE,
     }
     bootstrap_prefix = f"{candidate}-{effort}-bootstrap"
     seen_schema_hashes: set[str] = set()
@@ -609,7 +615,7 @@ def _run_candidate_cohort(
             prefix=bootstrap_prefix,
             prompt=anchor,
             system_prompt=system_prompt,
-            schema=_anchor_schema(identity),
+            schema=_anchor_schema(),
             profile=profile,
             candidate=None,
             slot_id=None,
@@ -633,7 +639,6 @@ def _run_candidate_cohort(
                 "bootstrap": bootstrap,
                 "medium_eligible": False,
             }
-        accepted_signatures: list[str] = []
         for index, brief_id in enumerate(brief_ids):
             slot_id = f"slot-{index:02d}"
             request = build_candidate_request(
@@ -641,7 +646,6 @@ def _run_candidate_cohort(
                 slot_id=slot_id,
                 brief_id=brief_id,
                 forbidden_lengths=forbidden_lengths,
-                accepted_behavior_signatures=tuple(accepted_signatures),
             )
             schema_hash = hashlib.sha256(
                 canonical_json_bytes(request.output_schema)
@@ -663,9 +667,6 @@ def _run_candidate_cohort(
             )
             seen_schema_hashes.add(schema_hash)
             turns.append(turn)
-            signature = turn["behavior_signature"]
-            if isinstance(signature, str):
-                accepted_signatures.append(signature)
             if turn["terminal_transport_status"] != "completed":
                 break
     finally:

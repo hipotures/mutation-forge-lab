@@ -15,7 +15,7 @@ neutral checkpoint instead.
 
 Each repetition uses one durable thread for:
 
-1. one full-specification bootstrap and protocol-hash acknowledgement;
+1. one full-specification bootstrap and a readable acknowledgement;
 2. two fixture-AST population turns;
 3. two host evaluation-summary turns;
 4. one directive or control checkpoint;
@@ -26,14 +26,15 @@ Each repetition uses one durable thread for:
 The host-held reference contains the protocol hash, specification invariants,
 active generation, exact active-parent AST and canonical hash, three earlier
 candidate IDs, one-sentence strategy summaries, outcomes, integer scores,
-strengths, weaknesses, lineage relationships, rejected behavior signatures,
-and the pending next action.
+strengths, weaknesses, lineage relationships, behavior signatures, and the
+pending next action. Its model-facing fixture and manifest projection omit all
+hashes and behavior signatures.
 
 The manifest probe does not reveal reference values in its output schema. It
-detects omitted and altered values as well as unknown candidate IDs, hashes,
-scores, and relationships. The parent probe is accepted only when the returned
-program passes the Native v3 contract and its canonical hash equals the host
-reference.
+detects omitted and altered values as well as unknown candidate IDs, scores,
+and relationships. The parent probe is accepted only when the returned program
+passes the Native v3 contract and its host-computed canonical hash equals the
+host reference; that hash is never shown to the model.
 
 Classification is:
 
@@ -42,7 +43,7 @@ Classification is:
 - `BEST_EFFORT_ONLY` when at least one directive repetition retains useful
   evidence but exact retention is not unanimous;
 - `UNUSABLE` when the directive arm retains neither an exact parent nor useful
-  summaries/signatures.
+  semantic summaries.
 
 ## Bounded live result
 

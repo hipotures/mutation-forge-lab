@@ -9,9 +9,12 @@ import pytest
 
 from mutation_forge.native_v3.persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
+    BOOTSTRAP_ACK_VALUE,
     BRIEF_IDS,
+    assert_model_facing_payload,
+    bootstrap_prompt,
     bootstrap_schema,
-    protocol_hash,
+    followup_prompt,
     run_ab_experiment,
 )
 from mutation_forge.stage3.app_server import (
@@ -66,7 +69,6 @@ def _adapter(
 
 def test_fake_multi_turn_fresh_and_persistent_comparison(tmp_path: Path) -> None:
     fixtures = _responses()
-    identity = protocol_hash(FORBIDDEN_LENGTHS)
 
     def factory(base_instructions: str, prefix: str) -> CodexAppServerAdapter:
         if prefix == "b-bootstrap":
@@ -74,7 +76,7 @@ def test_fake_multi_turn_fresh_and_persistent_comparison(tmp_path: Path) -> None
                 json.dumps(
                     {
                         "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                        "protocol_hash": identity,
+                        "ack": BOOTSTRAP_ACK_VALUE,
                     },
                     separators=(",", ":"),
                 ),
@@ -111,24 +113,48 @@ def test_fake_multi_turn_fresh_and_persistent_comparison(tmp_path: Path) -> None
 
 
 def test_bootstrap_schema_uses_provider_accepted_literal_types() -> None:
-    identity = protocol_hash(FORBIDDEN_LENGTHS)
-    schema = bootstrap_schema(identity)
+    schema = bootstrap_schema()
 
     assert schema["properties"]["schema_version"] == {
         "type": "string",
         "const": BOOTSTRAP_ACK_SCHEMA_VERSION,
     }
-    assert schema["properties"]["protocol_hash"] == {
+    assert schema["properties"]["ack"] == {
         "type": "string",
-        "const": identity,
+        "const": BOOTSTRAP_ACK_VALUE,
     }
+
+
+def test_model_facing_payload_gate_rejects_host_identities() -> None:
+    assert_model_facing_payload(
+        prompt=bootstrap_prompt(FORBIDDEN_LENGTHS),
+        system_prompt="Return only the requested structured response.",
+        schema=bootstrap_schema(),
+    )
+    assert_model_facing_payload(
+        prompt=followup_prompt("add-edge"),
+        system_prompt="Return only the requested structured response.",
+        schema={"type": "object"},
+    )
+
+    with pytest.raises(ValueError, match="cryptographic digest"):
+        assert_model_facing_payload(
+            prompt=f"private identity: {'a' * 64}",
+            system_prompt="Return only the requested structured response.",
+            schema={"type": "object"},
+        )
+    with pytest.raises(ValueError, match="transport identifier"):
+        assert_model_facing_payload(
+            prompt='{"thread_id":"private-thread"}',
+            system_prompt="Return only the requested structured response.",
+            schema={"type": "object"},
+        )
 
 
 def test_one_invalid_program_turn_preserves_other_persistent_results(
     tmp_path: Path,
 ) -> None:
     fixtures = _responses()
-    identity = protocol_hash(FORBIDDEN_LENGTHS)
 
     def factory(base_instructions: str, prefix: str) -> CodexAppServerAdapter:
         if prefix == "b-bootstrap":
@@ -136,7 +162,7 @@ def test_one_invalid_program_turn_preserves_other_persistent_results(
                 json.dumps(
                     {
                         "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                        "protocol_hash": identity,
+                        "ack": BOOTSTRAP_ACK_VALUE,
                     },
                     separators=(",", ":"),
                 ),
@@ -172,7 +198,6 @@ def test_terminal_fourth_persistent_turn_preserves_three_programs_and_report(
     tmp_path: Path,
 ) -> None:
     fixtures = _responses()
-    identity = protocol_hash(FORBIDDEN_LENGTHS)
 
     def factory(base_instructions: str, prefix: str) -> CodexAppServerAdapter:
         if prefix == "b-bootstrap":
@@ -181,7 +206,7 @@ def test_terminal_fourth_persistent_turn_preserves_three_programs_and_report(
                     json.dumps(
                         {
                             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                            "protocol_hash": identity,
+                            "ack": BOOTSTRAP_ACK_VALUE,
                         },
                         separators=(",", ":"),
                     ),
@@ -224,7 +249,6 @@ def test_fresh_thread_uses_the_production_infrastructure_retry_limit(
     tmp_path: Path,
 ) -> None:
     fixtures = _responses()
-    identity = protocol_hash(FORBIDDEN_LENGTHS)
 
     def factory(base_instructions: str, prefix: str) -> CodexAppServerAdapter:
         if prefix == "a-slot-00":
@@ -235,7 +259,7 @@ def test_fresh_thread_uses_the_production_infrastructure_retry_limit(
                     json.dumps(
                         {
                             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                            "protocol_hash": identity,
+                            "ack": BOOTSTRAP_ACK_VALUE,
                         },
                         separators=(",", ":"),
                     ),
@@ -423,7 +447,6 @@ def test_every_experimental_turn_prefix_has_the_same_artifact_names(
     tmp_path: Path,
 ) -> None:
     fixtures = _responses()
-    identity = protocol_hash(FORBIDDEN_LENGTHS)
 
     def factory(base_instructions: str, prefix: str) -> CodexAppServerAdapter:
         if prefix == "b-bootstrap":
@@ -431,7 +454,7 @@ def test_every_experimental_turn_prefix_has_the_same_artifact_names(
                 json.dumps(
                     {
                         "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                        "protocol_hash": identity,
+                        "ack": BOOTSTRAP_ACK_VALUE,
                     },
                     separators=(",", ":"),
                 ),

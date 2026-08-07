@@ -17,6 +17,7 @@ from mutation_forge.native_v3.compaction_experiment import (
 )
 from mutation_forge.native_v3.persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
+    BOOTSTRAP_ACK_VALUE,
 )
 from mutation_forge.stage3.app_server import (
     AppServerLimits,
@@ -89,7 +90,7 @@ def _fake_final_texts(
         json.dumps(
             {
                 "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-                "protocol_hash": reference["protocol_hash"],
+                "ack": BOOTSTRAP_ACK_VALUE,
             },
             separators=(",", ":"),
         ),

@@ -9,6 +9,9 @@ import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from mutation_forge.native_v3.canonical import canonical_json_bytes
+from mutation_forge.native_v3.persistent_experiment import (
+    assert_model_facing_payload,
+)
 from mutation_forge.native_v3.single_program_ir import (
     BRIEF_OPERATORS,
     FLAT_IR_SCHEMA_VERSION,
@@ -218,6 +221,12 @@ def test_candidate_request_is_non_recursive_and_does_not_change_rich_builder() -
     assert "#/$defs/" not in _text(flat.output_schema)
     assert '"prefixItems"' not in _text(slot_specific.output_schema)
     assert '"items":false' not in _text(slot_specific.output_schema)
+    for request in (slot_specific, flat):
+        assert_model_facing_payload(
+            prompt=request.prompt,
+            system_prompt=request.system_prompt,
+            schema=request.output_schema,
+        )
     assert '"oneOf"' not in _text(slot_specific.output_schema)
     assert '"prefixItems"' not in _text(flat.output_schema)
     assert '"items":false' not in _text(flat.output_schema)

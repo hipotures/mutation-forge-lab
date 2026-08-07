@@ -18,12 +18,12 @@ from mutation_forge.stage3.app_server import (
 from .compaction_experiment import build_reference_manifest
 from .persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
+    BOOTSTRAP_ACK_VALUE,
     TurnObservation,
     _run_adapter_turn,
     _usage_keys,
     bootstrap_prompt,
     bootstrap_schema,
-    protocol_hash,
 )
 from .search_memory import (
     ActiveParentReference,
@@ -31,6 +31,7 @@ from .search_memory import (
     LineageSummary,
     PatternSummary,
     SearchMemoryV1,
+    program_control_flow,
     program_families,
     reject_duplicate,
 )
@@ -92,6 +93,7 @@ def build_search_memory(
             pattern_id=f"pattern-{index:02d}",
             selector_families=selectors,
             action_families=actions,
+            control_flow=program_control_flow(candidate["canonical_ast"]),
             description=candidate["strategy_summary"],
             description_source="host",
             evaluation_outcome=candidate["evaluation_outcome"],
@@ -150,7 +152,6 @@ def _fixture_prompt(candidate: Mapping[str, Any], *, role: str) -> str:
             "role": role,
             "candidate_id": candidate["candidate_id"],
             "canonical_program": candidate["canonical_ast"],
-            "program_hash": candidate["canonical_hash"],
         }
     )
 
@@ -182,7 +183,6 @@ def _child_prompt(parent: Mapping[str, Any]) -> str:
                 "no_plan fallback for any branch that can fail to bind or apply."
             ),
             "parent_id": parent["candidate_id"],
-            "parent_program_hash": parent["canonical_hash"],
             "forbid_exact_parent_duplicate": True,
         }
     )
@@ -202,7 +202,6 @@ def _child_repair_prompt(
                 "rejected AST."
             ),
             "parent_id": parent["candidate_id"],
-            "parent_program_hash": parent["canonical_hash"],
             "host_validation_error": validation_error[:512],
         }
     )
@@ -215,7 +214,7 @@ def _memory_prompt(memory: SearchMemoryV1) -> str:
                 "Retain this host Search Memory. It is advisory context only; the host "
                 "remains authoritative for duplicate rejection. Do not generate a program."
             ),
-            "search_memory": memory.as_dict(),
+            "search_memory": memory.model_facing_dict(),
         }
     )
 
@@ -230,8 +229,7 @@ def _fresh_prompt() -> str:
                 "Return only the structured one-program response."
             ),
             "parent_id": None,
-            "forbid_recorded_program_hashes": True,
-            "forbid_recorded_behavior_signatures": True,
+            "avoid_recorded_strategies": True,
         }
     )
 
@@ -476,7 +474,7 @@ def run_lineage_experiment(
             prefix="00-spec-anchor",
             prompt=bootstrap_prompt(forbidden_lengths),
             system_prompt=system_prompt,
-            schema=bootstrap_schema(protocol_hash(forbidden_lengths)),
+            schema=bootstrap_schema(),
             profile=profile,
             persistent=True,
             forbidden_lengths=forbidden_lengths,
@@ -485,7 +483,7 @@ def run_lineage_experiment(
         observations.append(anchor)
         expected_bootstrap = {
             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-            "protocol_hash": memory.protocol_hash,
+            "ack": BOOTSTRAP_ACK_VALUE,
         }
         if _read_response(turns_dir, "00-spec-anchor") != expected_bootstrap:
             raise ValueError("specification anchor acknowledgement does not match")

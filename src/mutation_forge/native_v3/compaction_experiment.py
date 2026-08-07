@@ -18,6 +18,7 @@ from mutation_forge.stage3.app_server import (
 from .canonical import CANONICAL_PROTOCOL_ID
 from .persistent_experiment import (
     BOOTSTRAP_ACK_SCHEMA_VERSION,
+    BOOTSTRAP_ACK_VALUE,
     _behavior_signature,
     _run_adapter_turn,
     bootstrap_prompt,
@@ -176,11 +177,6 @@ def retention_manifest_projection(reference: Mapping[str, Any]) -> dict[str, Any
         candidates.append(
             {
                 "candidate_id": candidate["candidate_id"],
-                "canonical_hash": (
-                    candidate["canonical_hash"]
-                    if candidate["candidate_id"] == active_id
-                    else ""
-                ),
                 "strategy_summary": candidate["strategy_summary"],
                 "evaluation_outcome": candidate["evaluation_outcome"],
                 "score_micros": candidate["score_micros"],
@@ -191,7 +187,6 @@ def retention_manifest_projection(reference: Mapping[str, Any]) -> dict[str, Any
             }
         )
     return {
-        "protocol_hash": reference["protocol_hash"],
         "active_forbidden_lengths": reference["specification"][
             "active_forbidden_lengths"
         ],
@@ -203,14 +198,8 @@ def retention_manifest_projection(reference: Mapping[str, Any]) -> dict[str, Any
         ],
         "active_generation": reference["active_generation"],
         "active_parent_candidate_id": active_id,
-        "active_parent_canonical_hash": reference[
-            "active_parent_canonical_hash"
-        ],
         "earlier_candidate_ids": reference["earlier_candidate_ids"],
         "candidates": candidates,
-        "rejected_behavior_signatures": reference[
-            "rejected_behavior_signatures"
-        ],
         "pending_next_action": reference["pending_next_action"],
     }
 
@@ -221,7 +210,6 @@ def manifest_probe_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "required": [
             "candidate_id",
-            "canonical_hash",
             "strategy_summary",
             "evaluation_outcome",
             "score_micros",
@@ -232,7 +220,6 @@ def manifest_probe_schema() -> dict[str, Any]:
         ],
         "properties": {
             "candidate_id": {"type": "string"},
-            "canonical_hash": {"type": "string"},
             "strategy_summary": {"type": "string"},
             "evaluation_outcome": {"type": "string"},
             "score_micros": {"type": "integer"},
@@ -246,20 +233,16 @@ def manifest_probe_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "required": [
-            "protocol_hash",
             "active_forbidden_lengths",
             "program_schema_version",
             "canonical_protocol_id",
             "active_generation",
             "active_parent_candidate_id",
-            "active_parent_canonical_hash",
             "earlier_candidate_ids",
             "candidates",
-            "rejected_behavior_signatures",
             "pending_next_action",
         ],
         "properties": {
-            "protocol_hash": {"type": "string"},
             "active_forbidden_lengths": {
                 "type": "array",
                 "items": {"type": "integer"},
@@ -268,7 +251,6 @@ def manifest_probe_schema() -> dict[str, Any]:
             "canonical_protocol_id": {"type": "string"},
             "active_generation": {"type": "integer"},
             "active_parent_candidate_id": {"type": "string"},
-            "active_parent_canonical_hash": {"type": "string"},
             "earlier_candidate_ids": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -278,10 +260,6 @@ def manifest_probe_schema() -> dict[str, Any]:
                 "items": candidate,
                 "minItems": 4,
                 "maxItems": 4,
-            },
-            "rejected_behavior_signatures": {
-                "type": "array",
-                "items": {"type": "string"},
             },
             "pending_next_action": {"type": "string"},
         },
@@ -298,7 +276,6 @@ def _fixture_ast_prompt(
         candidates.append(
             {
                 "candidate_id": candidate["candidate_id"],
-                "canonical_hash": candidate["canonical_hash"],
                 "canonical_ast": candidate["canonical_ast"],
             }
         )
@@ -325,7 +302,6 @@ def _evaluation_prompt(reference: Mapping[str, Any], start: int) -> str:
                     "main_weakness",
                     "parent_id",
                     "relationship",
-                    "behavior_signature",
                 )
             }
         )
@@ -342,11 +318,11 @@ def _checkpoint_prompt(arm: str) -> tuple[str, str]:
             "retention-directive",
             "[CONTEXT COMPACTION RETENTION DIRECTIVE]\n"
             "Before the host triggers context compaction, preserve the full "
-            "mathematical specification and protocol identity; preserve the exact "
-            "active-parent AST and canonical hash; preserve compact strategy "
+            "mathematical specification and the exact active-parent AST; preserve "
+            "compact strategy "
             "summaries, evaluation outcomes, strengths, weaknesses, scores, "
-            "relationships, and rejected behavior signatures for other candidates; "
-            "and preserve the pending next action. Discard full non-parent ASTs, raw "
+            "relationships, and rejection reasons for other candidates; preserve "
+            "the pending next action. Discard full non-parent ASTs, raw "
             "responses, repeated schemas, detailed traces, and transport chatter. "
             "Return only the required acknowledgement.",
         )
@@ -360,8 +336,7 @@ def _checkpoint_prompt(arm: str) -> tuple[str, str]:
 def _manifest_probe_prompt() -> str:
     return (
         "After compaction, reproduce the retained host manifest from context. "
-        "Use an empty canonical_hash for every non-active candidate. Do not invent "
-        "candidate IDs, hashes, scores, or relationships."
+        "Do not invent candidate IDs, scores, or relationships."
     )
 
 
@@ -492,18 +467,14 @@ def compare_manifest(
             "altered": [],
             "hallucinated": [],
             "summaries_retained": False,
-            "signatures_retained": False,
         }
     scalar_fields = (
-        "protocol_hash",
         "active_forbidden_lengths",
         "program_schema_version",
         "canonical_protocol_id",
         "active_generation",
         "active_parent_candidate_id",
-        "active_parent_canonical_hash",
         "earlier_candidate_ids",
-        "rejected_behavior_signatures",
         "pending_next_action",
     )
     retained: list[str] = []
@@ -538,7 +509,6 @@ def compare_manifest(
         if candidate_id not in expected_candidates:
             hallucinated.append(f"candidate_id:{candidate_id}")
     candidate_fields = (
-        "canonical_hash",
         "strategy_summary",
         "evaluation_outcome",
         "score_micros",
@@ -565,7 +535,6 @@ def compare_manifest(
             else:
                 altered.append(marker)
                 if field in {
-                    "canonical_hash",
                     "score_micros",
                     "parent_id",
                     "relationship",
@@ -584,7 +553,6 @@ def compare_manifest(
             "relationship",
         )
     )
-    signatures_retained = "rejected_behavior_signatures" in retained
     return {
         "exact": not omitted and not altered and not hallucinated,
         "retained": sorted(retained),
@@ -592,7 +560,6 @@ def compare_manifest(
         "altered": sorted(altered),
         "hallucinated": sorted(set(hallucinated)),
         "summaries_retained": summaries_retained,
-        "signatures_retained": signatures_retained,
     }
 
 
@@ -626,10 +593,9 @@ def _run_repetition(
     comparison = None
     started = time.monotonic()
     try:
-        identity = reference["protocol_hash"]
         bootstrap_ack = {
             "schema_version": BOOTSTRAP_ACK_SCHEMA_VERSION,
-            "protocol_hash": identity,
+            "ack": BOOTSTRAP_ACK_VALUE,
         }
         observations.append(
             _run_ack_turn(
@@ -641,7 +607,7 @@ def _run_repetition(
                 profile=profile,
                 forbidden_lengths=forbidden_lengths,
                 acknowledgement=bootstrap_ack,
-                schema=bootstrap_schema(identity),
+                schema=bootstrap_schema(),
             )
         )
         for index, start in enumerate((0, 2)):
@@ -857,10 +823,7 @@ def _classify(repetitions: Sequence[Mapping[str, Any]]) -> str:
             item["active_parent_exact_hash_match"] is True
             or (
                 isinstance(item.get("manifest_comparison"), Mapping)
-                and (
-                    item["manifest_comparison"].get("summaries_retained") is True
-                    or item["manifest_comparison"].get("signatures_retained") is True
-                )
+                and item["manifest_comparison"].get("summaries_retained") is True
             )
         )
         for item in directive
@@ -924,10 +887,6 @@ def _arm_summary(
         ),
         "summary_retention_matches": sum(
             comparison.get("summaries_retained") is True
-            for comparison in manifest_comparisons
-        ),
-        "signature_retention_matches": sum(
-            comparison.get("signatures_retained") is True
             for comparison in manifest_comparisons
         ),
         "hallucination_count": sum(

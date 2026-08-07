@@ -12,8 +12,9 @@ four add-edge, remove-edge, relocation, and fanout mechanisms.
 - A starts four fresh processes and ephemeral threads. Infrastructure retries
   retain separate failure prefixes and use the production limit of three.
 - B starts one process and one durable thread. It sends one structured
-  protocol-hash acknowledgement followed by four direct Step 12A program
-  turns. App Server reconnects stay inside this persistent thread.
+  readable acknowledgement followed by four direct Step 12A program turns.
+  The host retains the protocol hash outside the conversation. App Server
+  reconnects stay inside this persistent thread.
 - C uses the unchanged production provider and `TurnArtifactStore` for exactly
   one four-program batch. It performs no repair, graph evaluation, HEG call, or
   scoring.

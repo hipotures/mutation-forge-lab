@@ -432,7 +432,6 @@ def candidate_followup_prompt(
     slot_id: str,
     brief_id: str,
     forbidden_lengths: tuple[int, ...],
-    accepted_behavior_signatures: tuple[str, ...] = (),
 ) -> str:
     if candidate not in {"slot_specific", "flat_ir"}:
         raise ValueError(f"unknown candidate: {candidate}")
@@ -451,7 +450,6 @@ def candidate_followup_prompt(
                 "slot_id": slot_id,
                 "brief": projection,
                 "active_forbidden_lengths": list(forbidden_lengths),
-                "accepted_behavior_signatures": list(accepted_behavior_signatures),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -466,7 +464,6 @@ def build_candidate_request(
     slot_id: str,
     brief_id: str,
     forbidden_lengths: tuple[int, ...],
-    accepted_behavior_signatures: tuple[str, ...] = (),
 ) -> SingleProgramRequest:
     """Build an experimental request without changing the production request builder."""
 
@@ -490,7 +487,6 @@ def build_candidate_request(
             slot_id=slot_id,
             brief_id=brief_id,
             forbidden_lengths=forbidden_lengths,
-            accepted_behavior_signatures=accepted_behavior_signatures,
         ),
         output_schema=schema,
     )

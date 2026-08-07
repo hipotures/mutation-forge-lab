@@ -11,6 +11,7 @@ from typing import Any, Literal
 from .canonical import canonical_json_bytes
 
 SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.v1"
+MODEL_SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.model.v1"
 MAX_SEEN_IDENTITIES = 64
 MAX_PATTERNS_PER_OUTCOME = 8
 MAX_ACTIVE_LINEAGES = 16
@@ -53,6 +54,28 @@ def program_families(
 
     visit(ast)
     return tuple(sorted(selectors)), tuple(sorted(actions))
+
+
+def program_control_flow(ast: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return a bounded preorder summary of AST operation kinds."""
+
+    operations: list[str] = []
+
+    def visit(value: object) -> None:
+        if len(operations) >= 32:
+            return
+        if isinstance(value, Mapping):
+            operation = value.get("op")
+            if isinstance(operation, str):
+                operations.append(operation)
+            for key in sorted(value):
+                visit(value[key])
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(ast)
+    return tuple(operations)
 
 
 def _validated_hash(value: str, field: str) -> str:
@@ -105,6 +128,7 @@ class PatternSummary:
     pattern_id: str
     selector_families: tuple[str, ...]
     action_families: tuple[str, ...]
+    control_flow: tuple[str, ...]
     description: str
     description_source: Literal["host", "model"]
     evaluation_outcome: str
@@ -124,8 +148,20 @@ class PatternSummary:
                 maximum=32,
             )
             object.__setattr__(self, field, values)
+        if len(self.control_flow) > 32:
+            raise SearchMemoryError("control_flow exceeds 32 entries")
+        object.__setattr__(
+            self,
+            "control_flow",
+            tuple(
+                _validated_identifier(value, "control_flow")
+                for value in self.control_flow
+            ),
+        )
         if not self.selector_families and not self.action_families:
             raise SearchMemoryError("pattern must name a selector or action family")
+        if not self.control_flow:
+            raise SearchMemoryError("pattern must summarize control flow")
         _validated_summary(self.description, "description")
         _validated_identifier(self.evaluation_outcome, "evaluation_outcome")
         _validated_summary(self.main_evidence, "main_evidence")
@@ -135,11 +171,24 @@ class PatternSummary:
             "pattern_id": self.pattern_id,
             "selector_families": list(self.selector_families),
             "action_families": list(self.action_families),
+            "control_flow": list(self.control_flow),
             "description": self.description,
             "description_source": self.description_source,
             "evaluation_outcome": self.evaluation_outcome,
             "evidence_kind": self.evidence_kind,
             "main_evidence": self.main_evidence,
+        }
+
+    def model_facing_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.pattern_id,
+            "selectors": list(self.selector_families),
+            "actions": list(self.action_families),
+            "control_flow": list(self.control_flow),
+            "summary": self.description,
+            "outcome": self.evaluation_outcome,
+            "evidence_kind": self.evidence_kind,
+            "evidence": self.main_evidence,
         }
 
 
@@ -181,6 +230,16 @@ class LineageSummary:
             "generation": self.generation,
             "slot": self.slot,
             "evaluation_outcome": self.evaluation_outcome,
+            "summary": self.summary,
+        }
+
+    def model_facing_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.candidate_id,
+            "parent_id": self.parent_id,
+            "generation": self.generation,
+            "slot": self.slot,
+            "outcome": self.evaluation_outcome,
             "summary": self.summary,
         }
 
@@ -286,6 +345,45 @@ class SearchMemoryV1:
             "active_parent": (
                 None if self.active_parent is None else self.active_parent.as_dict()
             ),
+        }
+
+    def model_facing_dict(self) -> dict[str, Any]:
+        """Project semantic guidance without exposing host-owned identities."""
+
+        active_parent: dict[str, Any] | None = None
+        if self.active_parent is not None:
+            lineage = next(
+                (
+                    item
+                    for item in self.active_lineages
+                    if item.candidate_id == self.active_parent.candidate_id
+                ),
+                None,
+            )
+            active_parent = {
+                "id": self.active_parent.candidate_id,
+                **(
+                    {}
+                    if lineage is None
+                    else {
+                        "summary": lineage.summary,
+                        "outcome": lineage.evaluation_outcome,
+                    }
+                ),
+            }
+        return {
+            "schema_version": MODEL_SEARCH_MEMORY_SCHEMA_VERSION,
+            "successful_patterns": [
+                item.model_facing_dict() for item in self.successful_patterns
+            ],
+            "failed_patterns": [
+                item.model_facing_dict() for item in self.failed_patterns
+            ],
+            "active_lineages": [
+                item.model_facing_dict() for item in self.active_lineages
+            ],
+            "validated_archive_aliases": list(self.validated_archive_ids),
+            "active_parent": active_parent,
         }
 
     def canonical_bytes(self) -> bytes:
