@@ -1,0 +1,76 @@
+{
+  "schema_version": "mforge.native.python_policy_contract_fixture.v1",
+  "cases": [
+    {
+      "name": "valid_no_plan",
+      "response": {
+        "schema_version": "mforge.native.python_policy_response.v1",
+        "source": "def propose(ctx, graph, api, seed):\n    return api.no_plan()\n"
+      },
+      "expected": {
+        "valid": true,
+        "response": {
+          "schema_version": "mforge.native.python_policy_response.v1",
+          "source": "def propose(ctx, graph, api, seed):\n    return api.no_plan()\n"
+        },
+        "identity": {
+          "source_sha256": "da5d80c0e016ec10f115bf1190abe6050bcbc50ae1e177369de1d469110a2027",
+          "canonical_ast_sha256": "8c07bc5994f8eade7cbfc902fd847185f8319f66c42a3a39c6f71bc565a7bd47",
+          "program_hash": "baaf286d1d128cbdc07a7f3845356bb3b2cebde11ee02866ac105e0b8eaf9d68",
+          "ast_node_count": 13,
+          "helper_function_count": 0,
+          "protocol_id": "mforge.native.python_policy.v1",
+          "identity_protocol": "mforge.native.python_policy_identity.v1",
+          "validator_version": "mforge.native.python_policy_validator.v1",
+          "python_syntax_version": "3.12"
+        },
+        "diagnostics": []
+      }
+    },
+    {
+      "name": "invalid_import",
+      "response": {
+        "schema_version": "mforge.native.python_policy_response.v1",
+        "source": "def propose(ctx, graph, api, seed):\n    import os\n    return api.no_plan()\n"
+      },
+      "expected": {
+        "valid": false,
+        "response": {
+          "schema_version": "mforge.native.python_policy_response.v1",
+          "source": "def propose(ctx, graph, api, seed):\n    import os\n    return api.no_plan()\n"
+        },
+        "identity": {
+          "source_sha256": "629efac066802692238e7125825017959cd188e8a981412bad92051c43d755ba",
+          "canonical_ast_sha256": "7b44f43df2cd8cee690282a51c62a58861720b4ba4402bb3866a52932bdc4486",
+          "program_hash": "5a715a7491ad6eb59e632241abfb90617bf771ead3b62551f50e136fa8b1f2b2",
+          "ast_node_count": 15,
+          "helper_function_count": 0,
+          "protocol_id": "mforge.native.python_policy.v1",
+          "identity_protocol": "mforge.native.python_policy_identity.v1",
+          "validator_version": "mforge.native.python_policy_validator.v1",
+          "python_syntax_version": "3.12"
+        },
+        "diagnostics": [
+          {
+            "code": "FORBIDDEN_AST_NODE",
+            "path": "$.source",
+            "message": "AST node Import is not allowlisted",
+            "line": 2,
+            "column": 4,
+            "end_line": 2,
+            "end_column": 13
+          },
+          {
+            "code": "FORBIDDEN_AST_NODE",
+            "path": "$.source",
+            "message": "AST node alias is not allowlisted",
+            "line": 2,
+            "column": 11,
+            "end_line": 2,
+            "end_column": 13
+          }
+        ]
+      }
+    }
+  ]
+}
