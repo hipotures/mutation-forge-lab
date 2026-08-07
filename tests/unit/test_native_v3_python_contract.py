@@ -625,7 +625,9 @@ def test_inactive_python_protocol_rejects_json_dsl_workspace_and_leaves_v2_defau
     assert "native_v3_python" not in active_routing_source
 
 
-def test_m1_validation_never_executes_generated_source(tmp_path: Path) -> None:
+def test_validation_never_executes_source_and_only_worker_has_execution_calls(
+    tmp_path: Path,
+) -> None:
     marker = tmp_path / "must-not-exist"
     source = (
         "def propose(ctx, graph, api, seed):\n"
@@ -640,11 +642,20 @@ def test_m1_validation_never_executes_generated_source(tmp_path: Path) -> None:
     forbidden_calls = {"exec", "eval", "compile"}
     for path in sorted(package.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        observed: set[str] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                assert node.func.id not in forbidden_calls, (path, node.lineno, node.func.id)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in forbidden_calls
+            ):
+                observed.add(node.func.id)
             if isinstance(node, ast.Name):
                 assert node.id != "importlib", (path, node.lineno)
+        if path.name == "worker_main.py":
+            assert observed == {"compile", "exec"}
+        else:
+            assert not observed, (path, observed)
 
 
 def test_unencodable_source_fails_closed() -> None:
