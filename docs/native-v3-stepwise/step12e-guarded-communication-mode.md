@@ -29,10 +29,11 @@ The selected preview mode is:
 ```toml
 [v3]
 communication_mode = "persistent_single_ast"
-output_contract = "slot_specific"
 ```
 
-Both values are required. The unchanged v3 default and rollback is:
+The mode has one fixed model-facing contract, `slot_specific`. It is reported
+in status and semantic artifacts, but is not a separate user option. The
+unchanged v3 default and rollback is:
 
 ```toml
 [v3]
@@ -154,7 +155,6 @@ Use a fresh `exp_id`:
 ```toml
 [v3]
 communication_mode = "persistent_single_ast"
-output_contract = "slot_specific"
 ```
 
 ```console

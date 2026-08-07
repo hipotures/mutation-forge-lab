@@ -332,9 +332,7 @@ def _memory_from_reports(
     return memory, entries
 
 
-def _manifest(model: str, effort: str, output_contract: str) -> dict[str, Any]:
-    if output_contract != SLOT_SPECIFIC_OUTPUT_CONTRACT:
-        raise ValueError("persistent preview requires slot_specific output contract")
+def _manifest(model: str, effort: str) -> dict[str, Any]:
     manifest = build_epoch_manifest(model=model, effort=effort)
     system_prompt = build_candidate_request(
         candidate=SLOT_SPECIFIC_OUTPUT_CONTRACT,
@@ -355,7 +353,7 @@ def _manifest(model: str, effort: str, output_contract: str) -> dict[str, Any]:
             "planned_slot_ids": list(PREVIEW_SLOT_IDS),
             "communication_mode": PERSISTENT_SINGLE_AST,
             "provider_mode": PERSISTENT_SINGLE_AST,
-            "output_contract": output_contract,
+            "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
             "output_schema_sha256": contract_sha256,
             "output_schema_sha256_by_brief": schema_hashes,
             "worker_count": WORKER_COUNT,
@@ -406,7 +404,7 @@ def _manifest(model: str, effort: str, output_contract: str) -> dict[str, Any]:
             "provider_calls": manifest["provider_calls"],
             "protocol_bundle_hash": protocol_bundle_hash,
             "communication_mode": PERSISTENT_SINGLE_AST,
-            "output_contract": output_contract,
+            "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
             "output_schema_sha256": contract_sha256,
             "model": model,
             "effort": effort,
@@ -420,7 +418,6 @@ def _new_state(
     anchor: TurnObservation,
     source_identity: Mapping[str, Any],
     forks: Sequence[Mapping[str, Any]],
-    output_contract: str,
 ) -> dict[str, Any]:
     bootstrap_retries = int(source_identity.get("serverRetries", 0))
     bootstrap_warnings = int(source_identity.get("serverWarnings", 0))
@@ -428,7 +425,7 @@ def _new_state(
         "schema_version": PREVIEW_STATE_SCHEMA_VERSION,
         "communication_mode": PERSISTENT_SINGLE_AST,
         "provider_mode": PERSISTENT_SINGLE_AST,
-        "output_contract": output_contract,
+        "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
         "output_schema_sha256": slot_specific_contract_sha256(FORBIDDEN_LENGTHS),
         "output_schema_sha256_by_brief": slot_specific_schema_hashes(FORBIDDEN_LENGTHS),
         "compaction_mode": "disabled",
@@ -521,15 +518,12 @@ def run_persistent_single_ast_cohort(
     auth_json: str | Path,
     backend_factory: Callable[[], GraphBackend],
     episode_id: str,
-    output_contract: str,
     adapter_factory: AdapterFactory = _default_adapter_factory,
     capsule_factory: CapsuleFactory | None = None,
     capsule_reopener: CapsuleReopener = IsolatedCapsule.reopen,
 ) -> dict[str, Any]:
     """Generate one AST per durable worker turn, then run the frozen evaluator."""
 
-    if output_contract != SLOT_SPECIFIC_OUTPUT_CONTRACT:
-        raise ValueError("persistent preview requires slot_specific output contract")
     root = Path(experiment_root)
     output_root = root / "native-v3-output" / "epoch-0000"
     turns_dir = root / "provider-turns"
@@ -556,7 +550,7 @@ def run_persistent_single_ast_cohort(
         if (
             state.get("schema_version") != PREVIEW_STATE_SCHEMA_VERSION
             or state.get("communication_mode") != PERSISTENT_SINGLE_AST
-            or state.get("output_contract") != output_contract
+            or state.get("output_contract") != SLOT_SPECIFIC_OUTPUT_CONTRACT
             or state.get("output_schema_sha256") != contract_sha256
             or state.get("output_schema_sha256_by_brief") != schema_hashes
         ):
@@ -651,7 +645,7 @@ def run_persistent_single_ast_cohort(
             )
             write_json(state_path, state)
     else:
-        expected_manifest = _manifest(model, effort, output_contract)
+        expected_manifest = _manifest(model, effort)
         if manifest_path.is_file():
             if read_json(manifest_path) != expected_manifest:
                 raise ValueError("preview epoch manifest identity mismatch")
@@ -734,7 +728,6 @@ def run_persistent_single_ast_cohort(
             anchor,
             source_identity,
             [_worker_record(item) for item in fork_records],
-            output_contract,
         )
         write_json(state_path, state)
         reports = []
@@ -798,7 +791,7 @@ def run_persistent_single_ast_cohort(
                 "turn_id": None,
                 "provider_retries": 0,
                 "provider_warnings": 0,
-                "output_contract": output_contract,
+                "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
                 "output_schema_sha256": expected_schema_sha256,
                 "error": None,
             }
@@ -927,7 +920,7 @@ def run_persistent_single_ast_cohort(
                     "worker_index": worker_index,
                     "fork_parent_turn_id": worker["fork_parent_turn_id"],
                     "provider_mode": PERSISTENT_SINGLE_AST,
-                    "output_contract": output_contract,
+                    "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
                     "output_schema_sha256": expected_schema_sha256,
                     "output_schema_contract_sha256": contract_sha256,
                     "prompt_contract_sha256": hashlib.sha256(
@@ -981,7 +974,7 @@ def run_persistent_single_ast_cohort(
             "worker_index": worker_index,
             "worker_thread_id": worker["thread_id"],
             "fork_parent_turn_id": worker["fork_parent_turn_id"],
-            "output_contract": output_contract,
+            "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
             "output_schema_sha256": schema_hashes[brief_id],
             "provider_attempts": attempts,
         }
@@ -1004,7 +997,7 @@ def run_persistent_single_ast_cohort(
                 **slot_report,
                 "search_memory_sha256": memory.sha256,
                 "provider_mode": PERSISTENT_SINGLE_AST,
-                "output_contract": output_contract,
+                "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
                 "output_schema_sha256": schema_hashes[brief_id],
                 "output_schema_contract_sha256": contract_sha256,
                 "program": (
@@ -1052,7 +1045,7 @@ def run_persistent_single_ast_cohort(
     report.update(
         {
             "provider_mode": PERSISTENT_SINGLE_AST,
-            "output_contract": output_contract,
+            "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
             "output_schema_sha256": contract_sha256,
             "output_schema_sha256_by_brief": schema_hashes,
             "compaction_mode": "disabled",

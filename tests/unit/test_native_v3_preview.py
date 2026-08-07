@@ -175,7 +175,6 @@ def test_persistent_preview_publishes_one_unique_ast_per_turn(
         auth_json=tmp_path / "unused-auth.json",
         backend_factory=backend_factory,
         episode_id="test/epoch-0000",
-        output_contract=SLOT_SPECIFIC_OUTPUT_CONTRACT,
         adapter_factory=adapter_factory,
         capsule_factory=lambda: capsule,
     )
@@ -346,7 +345,6 @@ def test_persistent_preview_uses_one_replacement_process_for_both_workers(
             RuntimeError("bounded generation test does not run HEG")
         ),
         "episode_id": "test/epoch-0000",
-        "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
         "adapter_factory": adapter_factory,
         "capsule_factory": lambda: capsule,
         "capsule_reopener": lambda _: capsule,

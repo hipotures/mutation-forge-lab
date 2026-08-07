@@ -18,7 +18,6 @@ effort = "high"
 timeout_seconds = 300
 heg_repo = "../heg"
 communication_mode = "persistent_single_ast"
-output_contract = "slot_specific"
 ```
 
 The v3 configuration deliberately rejects the Native v2 `kind`, `preset`,
@@ -45,7 +44,8 @@ and the latest infrastructure and scientific stop reasons.
 
 Step 12E keeps the Step 11 batch as the v3 default and rollback. The guarded
 `persistent_single_ast` preview described in
-`step12e-guarded-communication-mode.md` is enabled only when both
-`communication_mode = "persistent_single_ast"` and
-`output_contract = "slot_specific"` are explicit. The selector still does not
-change the Native v2 default.
+`step12e-guarded-communication-mode.md` is enabled only when
+`communication_mode = "persistent_single_ast"` is explicit. That mode has one
+fixed model-facing contract, `slot_specific`, which remains visible in status
+and artifacts rather than as a redundant configuration field. The selector
+still does not change the Native v2 default.

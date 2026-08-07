@@ -36,7 +36,6 @@ V3_PROTOCOL_VERSION = "v3"
 V3_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3"
 MULTI_PROGRAM_BATCH = "multi_program_batch"
 V3_COMMUNICATION_MODES = frozenset({PERSISTENT_SINGLE_AST, MULTI_PROGRAM_BATCH})
-V3_OUTPUT_CONTRACTS = frozenset({SLOT_SPECIFIC_OUTPUT_CONTRACT})
 V3_DEFAULT_COMMUNICATION_MODE = MULTI_PROGRAM_BATCH
 _STATE_NAME = "v3-state.json.gz"
 _V2_TOP_LEVEL_FIELDS = frozenset(
@@ -60,7 +59,6 @@ class V3Config:
     timeout_seconds: float
     heg_repo: Path
     communication_mode: str
-    output_contract: str | None
     source_path: Path
     source_bytes: bytes = field(repr=False, compare=False)
 
@@ -151,7 +149,6 @@ def load_v3_config(
         "timeout_seconds",
         "heg_repo",
         "communication_mode",
-        "output_contract",
     }
     unknown_v3 = sorted(set(v3).difference(allowed_v3))
     if unknown_v3:
@@ -175,20 +172,6 @@ def load_v3_config(
     )
     if communication_mode not in V3_COMMUNICATION_MODES:
         raise ValueError(f"v3.communication_mode must be one of {sorted(V3_COMMUNICATION_MODES)}")
-    raw_output_contract = v3.get("output_contract")
-    output_contract = (
-        None
-        if raw_output_contract is None
-        else _string(raw_output_contract, "v3.output_contract")
-    )
-    if communication_mode == PERSISTENT_SINGLE_AST:
-        if output_contract not in V3_OUTPUT_CONTRACTS:
-            raise ValueError(
-                "v3 persistent_single_ast requires explicit "
-                f"output_contract {SLOT_SPECIFIC_OUTPUT_CONTRACT!r}"
-            )
-    elif output_contract is not None:
-        raise ValueError("v3.output_contract is only valid for persistent_single_ast")
     return V3Config(
         V3_CONFIG_SCHEMA_VERSION,
         V3_SELECTOR,
@@ -199,14 +182,19 @@ def load_v3_config(
         timeout_seconds,
         heg_repo,
         communication_mode,
-        output_contract,
         source_path,
         source_bytes,
     )
 
 
+def _output_contract(config: V3Config) -> str | None:
+    if config.communication_mode == PERSISTENT_SINGLE_AST:
+        return SLOT_SPECIFIC_OUTPUT_CONTRACT
+    return None
+
+
 def _output_schema_sha256(config: V3Config) -> str | None:
-    if config.output_contract != SLOT_SPECIFIC_OUTPUT_CONTRACT:
+    if _output_contract(config) is None:
         return None
     return slot_specific_contract_sha256(FORBIDDEN_LENGTHS)
 
@@ -220,7 +208,7 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "workspace": str(config.experiment_root),
         "communication_mode": config.communication_mode,
         "provider_mode": config.communication_mode,
-        "output_contract": config.output_contract,
+        "output_contract": _output_contract(config),
         "output_schema_sha256": _output_schema_sha256(config),
         "compaction_mode": (
             "disabled"
@@ -569,7 +557,6 @@ def run_v3(
                 auth_json=Path.home() / ".codex" / "auth.json",
                 backend_factory=lambda: backend_factory(config),
                 episode_id=f"{config.exp_id}/epoch-0000",
-                output_contract=cast(str, config.output_contract),
             )
     except Exception as error:
         status = {
@@ -606,7 +593,6 @@ __all__ = [
     "V3_CONFIG_SCHEMA_VERSION",
     "V3_DEFAULT_COMMUNICATION_MODE",
     "V3_COMMUNICATION_MODES",
-    "V3_OUTPUT_CONTRACTS",
     "V3_PROTOCOL_VERSION",
     "V3_SELECTOR",
     "V3_STATUS_SCHEMA_VERSION",
