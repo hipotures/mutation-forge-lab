@@ -21,6 +21,7 @@ from mutation_forge.models import (
     RewritePlan,
     normalized_edge,
 )
+from mutation_forge.native_v3.cohort import _scientific_outcome
 from mutation_forge.native_v3.contracts import (
     PROGRAM_SCHEMA_VERSION,
     ValidatedProgram,
@@ -125,10 +126,7 @@ def _remove_program() -> ValidatedProgram:
 
 
 def _cubic_graph(order: int = 6) -> GraphState:
-    edges = {
-        normalized_edge((vertex, (vertex + 1) % order))
-        for vertex in range(order)
-    }
+    edges = {normalized_edge((vertex, (vertex + 1) % order)) for vertex in range(order)}
     edges.update((vertex, vertex + order // 2) for vertex in range(order // 2))
     return GraphState(order, tuple(sorted(edges)))
 
@@ -165,8 +163,7 @@ class _Backend:
             graph.order > 0
             and len(edge_set) == len(graph.edges)
             and all(
-                u != v and 0 <= u < graph.order and 0 <= v < graph.order
-                for u, v in graph.edges
+                u != v and 0 <= u < graph.order and 0 <= v < graph.order for u, v in graph.edges
             )
             and min(_degrees(graph)) >= 3
         )
@@ -207,10 +204,7 @@ class _Backend:
         self.raw_graph_score_calls += 1
         self.unique_graph_scores += 1
         total = max(0, 20 - len(graph.edges))
-        if (
-            self.zero_after_edges is not None
-            and len(graph.edges) >= self.zero_after_edges
-        ):
+        if self.zero_after_edges is not None and len(graph.edges) >= self.zero_after_edges:
             total = 0
         total = min(total, witness_cap)
         return ScoreEvidence(
@@ -225,11 +219,7 @@ class _Backend:
                     lower_bound=total,
                     upper_bound=total,
                     status=EvidenceStatus.EXACT,
-                    node_budget=(
-                        50_000
-                        if attempt_kind is AttemptKind.INITIAL
-                        else 200_000
-                    ),
+                    node_budget=(50_000 if attempt_kind is AttemptKind.INITIAL else 200_000),
                     nodes_visited=1,
                     wall_time_ns=0,
                     attempt_kind=attempt_kind,
@@ -353,10 +343,7 @@ def test_fixed_fixture_replays_identical_semantic_trace_and_hash() -> None:
     assert first.semantic_trace_hash == second.semantic_trace_hash
     assert len(first.semantic_trace_hash) == 64
     binding_events = [
-        event
-        for step in first.steps
-        for event in step.interpreter_trace
-        if event.kind == "binding"
+        event for step in first.steps for event in step.interpreter_trace if event.kind == "binding"
     ]
     assert binding_events
     assert binding_events[0].payload["value"] is not None
@@ -375,6 +362,7 @@ def test_no_plan_consumes_horizon_without_scoring_nonexistent_graph() -> None:
     assert all(step.no_plan_reason == "EXPLICIT" for step in result.steps)
     assert len(backend.score_calls) == 1
     assert not backend.apply_calls
+    assert _scientific_outcome(result)[0] == "NO_PLAN"
 
 
 def test_illegal_final_overlay_consumes_step_without_candidate_score() -> None:
@@ -396,6 +384,7 @@ def test_illegal_final_overlay_consumes_step_without_candidate_score() -> None:
     assert result.steps[0].no_plan_reason == "ILLEGAL_FINAL_STATE"
     assert len(backend.score_calls) == 1
     assert not backend.apply_calls
+    assert _scientific_outcome(result)[0] == "ILLEGAL_FINAL_STATE"
 
 
 def test_legal_degree_change_uses_one_authoritative_candidate_score() -> None:
@@ -417,6 +406,7 @@ def test_legal_degree_change_uses_one_authoritative_candidate_score() -> None:
     assert len(backend.apply_calls) == 1
     assert result.steps[0].accepted
     assert result.accepted_rewrites == 1
+    assert _scientific_outcome(result)[0] == "ACCEPTED_IMPROVEMENT"
     assert sorted(_degrees(backend.score_calls[1])) == [3, 3, 3, 3, 4, 4]
 
 
@@ -525,6 +515,7 @@ def test_equal_score_is_not_accepted_under_strict_improvement() -> None:
     assert not result.steps[0].accepted
     assert result.accepted_rewrites == 0
     assert result.terminal_identity == result.initial_identity
+    assert _scientific_outcome(result)[0] == "REJECTED_EQUAL"
 
 
 def test_overlapping_budget_bounds_retry_selected_length_and_reject() -> None:
@@ -544,16 +535,10 @@ def test_overlapping_budget_bounds_retry_selected_length_and_reject() -> None:
             self.score_calls.append(graph)
             self.raw_graph_score_calls += 1
             self.unique_graph_scores += 1
-            self.attempts.append(
-                (len(graph.edges), attempt_kind, forbidden_lengths)
-            )
+            self.attempts.append((len(graph.edges), attempt_kind, forbidden_lengths))
             candidate = len(graph.edges) > len(_cubic_graph(graph.order).edges)
             lower = 4 if candidate else 5
-            upper = (
-                8
-                if attempt_kind is AttemptKind.EXPANDED
-                else (9 if candidate else 10)
-            )
+            upper = 8 if attempt_kind is AttemptKind.EXPANDED else (9 if candidate else 10)
             return ScoreEvidence(
                 self.state_hash(graph),
                 graph.order,
@@ -570,11 +555,7 @@ def test_overlapping_budget_bounds_retry_selected_length_and_reject() -> None:
                             if attempt_kind is AttemptKind.EXPANDED
                             else EvidenceStatus.SEARCH_BUDGET_EXHAUSTED
                         ),
-                        (
-                            200_000
-                            if attempt_kind is AttemptKind.EXPANDED
-                            else 50_000
-                        ),
+                        (200_000 if attempt_kind is AttemptKind.EXPANDED else 50_000),
                         1,
                         0,
                         attempt_kind,
@@ -601,10 +582,7 @@ def test_overlapping_budget_bounds_retry_selected_length_and_reject() -> None:
     assert not result.steps[0].accepted
     assert not result.steps[0].acceptance_proved
     assert result.score_attempts == 4
-    expanded = [
-        attempt for attempt in backend.attempts
-        if attempt[1] is AttemptKind.EXPANDED
-    ]
+    expanded = [attempt for attempt in backend.attempts if attempt[1] is AttemptKind.EXPANDED]
     assert len(expanded) == 2
     assert all(attempt[2] == (4,) for attempt in expanded)
 
@@ -624,7 +602,7 @@ def test_safe_timeout_partial_can_win_only_by_proved_interval_dominance() -> Non
             self.raw_graph_score_calls += 1
             self.unique_graph_scores += 1
             candidate = len(graph.edges) > len(_cubic_graph(graph.order).edges)
-            lower, upper = ((0, 1) if candidate else (10, 10))
+            lower, upper = (0, 1) if candidate else (10, 10)
             return ScoreEvidence(
                 self.state_hash(graph),
                 graph.order,

@@ -23,12 +23,13 @@ validation error and gets one repair attempt; no further retry is allowed.
 The fresh history must contain only the specification anchor. It receives a
 semantic projection of the host-owned `SearchMemoryV1`, then generates one
 structurally different fresh root. The host record contains protocol and
-program identities, behavior signatures, at most eight successful and eight
-failed structured pattern summaries, active lineage summaries, validated
-archive IDs, and one active parent reference. The model projection contains
-only short aliases and semantic summaries: selector and action families,
-control flow, outcomes, strengths, weaknesses, and lineage descriptions. It
-contains neither a full AST nor any cryptographic identity.
+program identities, behavior signatures, bounded successful, tested, and
+pending pattern summaries, active lineage summaries, validated archive IDs,
+and one active parent reference. The model projection contains only short
+aliases and semantic summaries: selector and action families, control flow,
+contract status, scientific outcome, model hypothesis, observed effect, and
+lineage descriptions. It contains neither a full AST nor any cryptographic
+identity.
 
 App Server `thread/fork` responses are accepted only when the child is durable,
 the source identity matches, the child path remains inside the isolated
@@ -74,8 +75,8 @@ The accepted evidence is
   valid, non-duplicate program.
 - The fresh root was valid, non-duplicate, and behaviorally different from the
   four Search Memory entries.
-- Search Memory used 3,690 canonical bytes for three successful and one failed
-  pattern summary. Its request contained no full program AST.
+- The accepted run used three successful and one tested pattern summary. Its
+  request contained no full program AST or host-owned cryptographic identity.
 - The run used eight provider turns and two fork RPCs. All ten executed
   prefixes had exactly the standard 16 artifacts; no rollout copy was added.
 

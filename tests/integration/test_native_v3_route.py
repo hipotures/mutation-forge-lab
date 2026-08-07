@@ -293,9 +293,17 @@ def test_v3_routes_selected_preview_without_constructing_batch_provider(
             "unique_valid_programs": 8,
             "duplicate_aliases": 0,
             "model_turns": 9,
-            "graph_evaluations": 8,
-            "scientific_terminal_result": True,
+            "program_evaluations": 8,
+            "graph_score_attempts": 8,
+            "planned_slots": 8,
+            "manifest_complete": True,
+            "scientific_result_kind": "NONE",
+            "verified_counterexample": False,
+            "terminal_reason": "preview_cohort_complete",
             "selected_program_hash": "a" * 64,
+            "selection_reason": "DETERMINISTIC_TIEBREAK",
+            "selection_tie_count": 8,
+            "scientifically_better_than_peers": False,
             "usage": {},
             "epoch_manifest": str(tmp_path / "epoch-manifest.json.gz"),
             "cohort_report": str(tmp_path / "cohort-report.json.gz"),
@@ -313,7 +321,7 @@ def test_v3_routes_selected_preview_without_constructing_batch_provider(
     assert result["communication_mode"] == "persistent_single_ast"
     assert result["provider_mode"] == "persistent_single_ast"
     assert result["output_contract"] == "slot_specific"
-    assert result["output_schema_sha256"]
+    assert result["output_schema_contract_sha256"]
     assert result["provider_turns"] == 9
     assert len(calls) == 1
     assert calls[0]["experiment_root"] == tmp_path / "workspace" / "v3-run"
@@ -435,17 +443,30 @@ def test_v3_completes_eight_slots_and_status_is_read_only(
     assert result["protocol"] == "v3"
     assert result["protocol_version"] == "v3"
     assert result["provider_turns"] == 2
-    assert result["evaluation_count"] == 8
+    assert result["program_evaluations"] == 8
+    assert result["graph_score_attempts"] == 8
     assert result["cohort_outcome"] == "COMPLETE"
+    assert result["planned_slots"] == 8
+    assert result["manifest_complete"] is True
     assert result["unique_valid_programs"] == 8
     assert result["valid_slots"] == 8
-    assert result["latest_scientific_stop_reason"] == "cohort_complete"
+    assert result["run_terminal"] is True
+    assert result["terminal_reason"] == "cohort_complete"
+    assert result["scientific_result_kind"] == "NONE"
+    assert result["verified_counterexample"] is False
+    assert result["latest_scientific_stop_reason"] is None
     manifest = Path(str(result["artifacts"]["epoch_manifest"]))
     report = Path(str(result["artifacts"]["cohort_report"]))
     assert manifest.is_file()
     assert report.is_file()
     report_payload = read_json(report)
     assert report_payload["selected_program_hash"] == (report_payload["canonical_program_order"][0])
+    assert report_payload["selection_reason"] == "DETERMINISTIC_TIEBREAK"
+    assert report_payload["selection_tie_count"] == 8
+    assert report_payload["scientifically_better_than_peers"] is False
+    assert {outcome["scientific_outcome"] for outcome in report_payload["program_outcomes"]} == {
+        "NO_PLAN"
+    }
     selected_evaluation = read_json(
         report.parent / "programs" / report_payload["selected_program_hash"] / "evaluation.json.gz"
     )
@@ -561,7 +582,8 @@ def test_partial_batch_is_not_repaired_and_duplicate_is_evaluated_once(
 
     assert result["state"] == "completed"
     assert result["provider_turns"] == 2
-    assert result["evaluation_count"] == 6
+    assert result["program_evaluations"] == 6
+    assert result["graph_score_attempts"] == 6
     assert report["cohort_outcome"] == "DEGRADED"
     assert report["unique_valid_programs"] == 6
     assert report["duplicate_aliases"] == 1
@@ -610,7 +632,8 @@ def test_wholly_invalid_batch_gets_exactly_one_frozen_repair(
 
     assert result["state"] == "completed"
     assert result["provider_turns"] == 3
-    assert result["evaluation_count"] == 8
+    assert result["program_evaluations"] == 8
+    assert result["graph_score_attempts"] == 8
     assert report["cohort_outcome"] == "COMPLETE"
     assert report["batch_reports"][0]["repaired"] is True
     assert report["batch_reports"][1]["repaired"] is False
@@ -694,6 +717,48 @@ def test_old_preview_workspace_marker_is_rejected_without_mutation(
     }
 
     with pytest.raises(V3WorkspaceError, match="not a v3 workspace"):
+        run_v3(
+            path,
+            provider_factory=_provider,
+            backend_factory=_backend,
+            auth_available=lambda _: True,
+        )
+
+    after = {
+        item.relative_to(root): (item.stat().st_mtime_ns, item.read_bytes())
+        for item in root.rglob("*")
+        if item.is_file()
+    }
+    assert after == before
+
+
+def test_obsolete_v3_status_semantics_are_rejected_without_mutation(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    root = tmp_path / "workspace" / "v3-run"
+    root.mkdir(parents=True)
+    (root / "experiment.toml").write_bytes(path.read_bytes())
+    write_json(
+        root / "v3-state.json.gz",
+        {
+            "schema_version": "mforge.experiment.status.v3",
+            "protocol": "v3",
+            "protocol_version": "v3",
+            "config_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "state": "completed",
+            "terminal": True,
+            "evaluation_count": 4,
+            "scientific_terminal_result": True,
+        },
+    )
+    before = {
+        item.relative_to(root): (item.stat().st_mtime_ns, item.read_bytes())
+        for item in root.rglob("*")
+        if item.is_file()
+    }
+
+    with pytest.raises(V3WorkspaceError, match="status semantics"):
         run_v3(
             path,
             provider_factory=_provider,

@@ -18,6 +18,9 @@ from mutation_forge.native_v3.persistent_experiment import (
 from mutation_forge.native_v3.preview import (
     FORBIDDEN_LENGTHS,
     PREVIEW_SLOT_IDS,
+    _empty_memory,
+    _extend_memory,
+    _memory_with_scientific_outcomes,
     run_persistent_single_ast_cohort,
 )
 from mutation_forge.native_v3.single_program_ir import (
@@ -25,6 +28,7 @@ from mutation_forge.native_v3.single_program_ir import (
     SLOT_SPECIFIC_OUTPUT_CONTRACT,
     SLOT_SPECIFIC_SCHEMA_VERSION,
     build_candidate_request,
+    compile_slot_specific_response,
     slot_specific_contract_sha256,
     slot_specific_schema_hashes,
 )
@@ -107,6 +111,51 @@ def _responses() -> list[str]:
     return result
 
 
+def test_preview_memory_separates_pending_and_scientific_outcomes() -> None:
+    responses = _responses()
+    memory = _empty_memory()
+    for index, brief_id in enumerate(("add-edge", "remove-edge")):
+        candidate = compile_slot_specific_response(
+            responses[index],
+            slot_id=f"slot-{index:02d}",
+            brief_id=brief_id,
+            forbidden_lengths=FORBIDDEN_LENGTHS,
+        )
+        memory = _extend_memory(memory, candidate, slot_index=index)
+
+    assert memory.active_parent is None
+    assert memory.successful_patterns == ()
+    assert memory.tested_patterns == ()
+    assert [item.scientific_outcome for item in memory.pending_patterns] == [
+        "NOT_EVALUATED",
+        "NOT_EVALUATED",
+    ]
+
+    classified = _memory_with_scientific_outcomes(
+        memory,
+        [
+            {
+                "slot_aliases": ["slot-00"],
+                "scientific_outcome": "REJECTED_WORSE",
+                "observed_effect": "Candidate energy increased.",
+            },
+            {
+                "slot_aliases": ["slot-01"],
+                "scientific_outcome": "ACCEPTED_IMPROVEMENT",
+                "observed_effect": "Accepted one strict improvement.",
+            },
+        ],
+    )
+
+    assert classified.pending_patterns == ()
+    assert [item.pattern_id for item in classified.successful_patterns] == ["g0000-s01"]
+    assert [item.pattern_id for item in classified.tested_patterns] == ["g0000-s00"]
+    assert classified.tested_patterns[0].model_hypothesis
+    assert classified.tested_patterns[0].observed_effect == "Candidate energy increased."
+    assert classified.active_parent is None
+    assert all(lineage.parent_id is None for lineage in classified.active_lineages)
+
+
 def test_persistent_preview_publishes_one_unique_ast_per_turn(
     tmp_path: Path,
 ) -> None:
@@ -181,19 +230,23 @@ def test_persistent_preview_publishes_one_unique_ast_per_turn(
 
     assert report["status"] == "evaluation_error"
     assert report["communication_mode"] == "persistent_single_ast"
+    assert report["cohort_outcome"] == "COMPLETE"
+    assert report["planned_slots"] == 4
+    assert report["manifest_complete"] is True
     assert report["valid_slots"] == 4
     assert report["unique_valid_programs"] == 4
     assert report["model_turns"] == 5
     assert report["program_turns"] == 4
     assert report["output_contract"] == SLOT_SPECIFIC_OUTPUT_CONTRACT
-    assert report["output_schema_sha256"] == slot_specific_contract_sha256(
+    assert report["output_schema_contract_sha256"] == slot_specific_contract_sha256(
         FORBIDDEN_LENGTHS
     )
+    assert report["usage"]["final"] is True
     assert report["time_to_first_valid_ast_ms"] is not None
     assert report["first_valid_ast_published_before_cohort_complete"] is True
     assert adapter_calls == 1
     state = read_json(root / "native-v3-output/epoch-0000/communication-state.json.gz")
-    assert state["status"] == "completed"
+    assert state["status"] == "evaluation_error"
     assert state["next_slot"] == 4
     assert len(state["workers"]) == 2
     assert state["specification_thread"]["thread_id"] == "thread-1"
@@ -205,7 +258,7 @@ def test_persistent_preview_publishes_one_unique_ast_per_turn(
     assert state["provider_attempts"] == 5
     assert state["program_turns"] == 4
     assert state["output_contract"] == SLOT_SPECIFIC_OUTPUT_CONTRACT
-    assert state["output_schema_sha256"] == slot_specific_contract_sha256(
+    assert state["output_schema_contract_sha256"] == slot_specific_contract_sha256(
         FORBIDDEN_LENGTHS
     )
     assert state["failed_provider_attempts"] == 0
@@ -218,6 +271,7 @@ def test_persistent_preview_publishes_one_unique_ast_per_turn(
     assert len(manifest["provider_calls"]) == 4
     assert manifest["provider_mode"] == "persistent_single_ast"
     assert manifest["output_contract"] == SLOT_SPECIFIC_OUTPUT_CONTRACT
+    assert "output_schema_sha256" not in manifest
     assert manifest["output_schema_sha256_by_brief"] == slot_specific_schema_hashes(
         FORBIDDEN_LENGTHS
     )
@@ -259,12 +313,18 @@ def test_persistent_preview_publishes_one_unique_ast_per_turn(
         brief_id = ("add-edge", "remove-edge", "relocation", "fanout")[index]
         assert record["output_schema_sha256"] == schema_hashes[brief_id]
         output_schema = read_json(turns_dir / f"{slot_id}.initial.output-schema.json.gz")
-        assert hashlib.sha256(canonical_json_bytes(output_schema)).hexdigest() == (
-            schema_hashes[brief_id]
+        assert (
+            hashlib.sha256(canonical_json_bytes(output_schema)).hexdigest()
+            == (schema_hashes[brief_id])
         )
         prompt = (turns_dir / f"{slot_id}.initial.request.md").read_text(encoding="utf-8")
         assert '"search_memory"' in prompt
         assert '"entry"' not in prompt
+        assert '"active_parent":null' in prompt
+        assert '"successful_patterns":[]' in prompt
+        if index:
+            assert '"pending_patterns":[' in prompt
+            assert '"scientific_outcome":"NOT_EVALUATED"' in prompt
         stdout = [
             json.loads(line)
             for line in (turns_dir / f"{slot_id}.initial.stdout.jsonl")
@@ -361,7 +421,7 @@ def test_persistent_preview_uses_one_replacement_process_for_both_workers(
     assert failed_state["last_provider_attempt"]["status"] == "failed"
 
     mismatched_state = dict(failed_state)
-    mismatched_state["output_schema_sha256"] = "0" * 64
+    mismatched_state["output_schema_contract_sha256"] = "0" * 64
     write_json(
         root / "native-v3-output/epoch-0000/communication-state.json.gz",
         mismatched_state,

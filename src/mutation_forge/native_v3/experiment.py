@@ -27,6 +27,7 @@ from .preview import (
 from .single_program_ir import (
     SLOT_SPECIFIC_OUTPUT_CONTRACT,
     slot_specific_contract_sha256,
+    slot_specific_schema_hashes,
 )
 
 V2_PROTOCOL = "native-v2"
@@ -193,7 +194,7 @@ def _output_contract(config: V3Config) -> str | None:
     return None
 
 
-def _output_schema_sha256(config: V3Config) -> str | None:
+def _output_schema_contract_sha256(config: V3Config) -> str | None:
     if _output_contract(config) is None:
         return None
     return slot_specific_contract_sha256(FORBIDDEN_LENGTHS)
@@ -209,20 +210,24 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "communication_mode": config.communication_mode,
         "provider_mode": config.communication_mode,
         "output_contract": _output_contract(config),
-        "output_schema_sha256": _output_schema_sha256(config),
-        "compaction_mode": (
-            "disabled"
-            if config.communication_mode == PERSISTENT_SINGLE_AST
+        "output_schema_contract_sha256": _output_schema_contract_sha256(config),
+        "output_schema_sha256_by_brief": (
+            slot_specific_schema_hashes(FORBIDDEN_LENGTHS)
+            if _output_contract(config) is not None
             else None
+        ),
+        "search_memory_sha256": None,
+        "compaction_mode": (
+            "disabled" if config.communication_mode == PERSISTENT_SINGLE_AST else None
         ),
         "rollback_mode": MULTI_PROGRAM_BATCH,
         "diagnostic_mode": "fresh_single_ast",
         "state": "not_created",
         "resumable": True,
-        "terminal": False,
+        "run_terminal": False,
+        "terminal_reason": None,
         "latest_infrastructure_stop_reason": None,
         "latest_scientific_stop_reason": None,
-        "last_stop_reason": None,
         "last_error": None,
         "provider_turns": 0,
         "program_turns": 0,
@@ -237,14 +242,21 @@ def _base_status(config: V3Config) -> dict[str, Any]:
         "failed_thread_resume_attempts": 0,
         "active_provider_attempt": None,
         "last_provider_attempt": None,
-        "evaluation_count": 0,
+        "program_evaluations": 0,
+        "graph_score_attempts": 0,
         "valid_ast": False,
         "cohort_outcome": None,
+        "planned_slots": 0,
+        "manifest_complete": False,
         "valid_slots": 0,
         "unique_valid_programs": 0,
         "duplicate_aliases": 0,
         "selected_program_hash": None,
-        "scientific_terminal_result": False,
+        "selection_reason": None,
+        "selection_tie_count": 0,
+        "scientifically_better_than_peers": False,
+        "scientific_result_kind": "NONE",
+        "verified_counterexample": False,
         "usage": None,
         "artifacts": {},
     }
@@ -278,6 +290,7 @@ def _preview_progress(config: V3Config) -> dict[str, Any]:
         "active_provider_attempt": raw.get("active_provider_attempt"),
         "last_provider_attempt": raw.get("last_provider_attempt"),
         "time_to_first_valid_ast_ms": raw.get("time_to_first_valid_ast_ms"),
+        "search_memory_sha256": raw.get("search_memory_sha256"),
     }
 
 
@@ -315,6 +328,16 @@ def _load_workspace_state(config: V3Config) -> dict[str, Any]:
         or value.get("protocol_version") != V3_PROTOCOL_VERSION
     ):
         raise V3WorkspaceError("v3 workspace protocol does not match this runtime")
+    required_status_fields = {
+        "run_terminal",
+        "terminal_reason",
+        "program_evaluations",
+        "graph_score_attempts",
+        "scientific_result_kind",
+        "output_schema_contract_sha256",
+    }
+    if not required_status_fields.issubset(value):
+        raise V3WorkspaceError("v3 workspace status semantics do not match this runtime")
     if value.get("config_sha256") != config.source_sha256:
         raise V3WorkspaceError("v3 configuration changed; create a fresh workspace")
     stored_config = config.experiment_root / "experiment.toml"
@@ -360,7 +383,8 @@ def _failed_status(
         **_base_status(config),
         "state": "failed",
         "resumable": False,
-        "last_stop_reason": "workspace_mismatch",
+        "run_terminal": True,
+        "terminal_reason": "workspace_mismatch",
         "last_error": str(error),
     }
 
@@ -407,7 +431,6 @@ def _blocked_preflight(
         "state": "blocked",
         "resumable": True,
         "latest_infrastructure_stop_reason": "preflight_failed",
-        "last_stop_reason": "preflight_failed",
         "last_error": message,
     }
 
@@ -426,14 +449,23 @@ def _status_from_report(
         "first_valid_ast_published_before_cohort_complete": report.get(
             "first_valid_ast_published_before_cohort_complete"
         ),
-        "evaluation_count": int(report.get("graph_evaluations", 0)),
+        "program_evaluations": int(report.get("program_evaluations", 0)),
+        "graph_score_attempts": int(report.get("graph_score_attempts", 0)),
         "valid_ast": report.get("valid_ast") is True,
         "cohort_outcome": report.get("cohort_outcome"),
+        "planned_slots": int(report.get("planned_slots", 0)),
+        "manifest_complete": report.get("manifest_complete") is True,
         "valid_slots": int(report.get("valid_slots", 0)),
         "unique_valid_programs": int(report.get("unique_valid_programs", 0)),
         "duplicate_aliases": int(report.get("duplicate_aliases", 0)),
         "selected_program_hash": report.get("selected_program_hash"),
-        "scientific_terminal_result": (report.get("scientific_terminal_result") is True),
+        "selection_reason": report.get("selection_reason"),
+        "selection_tie_count": int(report.get("selection_tie_count", 0)),
+        "scientifically_better_than_peers": (
+            report.get("scientifically_better_than_peers") is True
+        ),
+        "scientific_result_kind": str(report.get("scientific_result_kind", "NONE")),
+        "verified_counterexample": (report.get("verified_counterexample") is True),
         "usage": report.get("usage"),
         "artifacts": {
             key: report[key]
@@ -449,18 +481,26 @@ def _status_from_report(
             **common,
             "state": "completed",
             "resumable": False,
-            "terminal": True,
-            "latest_scientific_stop_reason": "cohort_complete",
-            "last_stop_reason": "cohort_complete",
+            "run_terminal": True,
+            "terminal_reason": report.get(
+                "terminal_reason",
+                "cohort_complete",
+            ),
+            "latest_scientific_stop_reason": (
+                "verified_counterexample" if report.get("verified_counterexample") is True else None
+            ),
         }
     if status == "inconclusive":
         return {
             **common,
             "state": "inconclusive",
             "resumable": False,
-            "terminal": True,
-            "latest_scientific_stop_reason": "cohort_inconclusive",
-            "last_stop_reason": "cohort_inconclusive",
+            "run_terminal": True,
+            "terminal_reason": report.get(
+                "terminal_reason",
+                "cohort_inconclusive",
+            ),
+            "latest_scientific_stop_reason": None,
         }
     if status == "provider_error":
         authentication = report.get("error_classification") == "authentication"
@@ -470,9 +510,9 @@ def _status_from_report(
             **common,
             "state": "blocked" if resumable else "failed",
             "resumable": resumable,
-            "terminal": not resumable,
+            "run_terminal": not resumable,
+            "terminal_reason": None if resumable else stop_reason,
             "latest_infrastructure_stop_reason": stop_reason,
-            "last_stop_reason": stop_reason,
             "last_error": report.get("error"),
         }
     if status in {"evaluation_error", "evaluation_failed"}:
@@ -480,16 +520,18 @@ def _status_from_report(
             **common,
             "state": "blocked",
             "resumable": False,
-            "latest_scientific_stop_reason": "program_failure",
-            "last_stop_reason": "program_failure",
+            "run_terminal": True,
+            "terminal_reason": report.get("terminal_reason", "evaluation_error"),
+            "latest_scientific_stop_reason": None,
             "last_error": report.get("error"),
         }
     return {
         **common,
         "state": "blocked",
         "resumable": False,
+        "run_terminal": True,
+        "terminal_reason": "evaluation_failed",
         "latest_infrastructure_stop_reason": "evaluation_failed",
-        "last_stop_reason": "evaluation_failed",
         "last_error": report.get("error"),
     }
 
@@ -534,7 +576,8 @@ def run_v3(
         **status,
         "state": "running",
         "resumable": True,
-        "last_stop_reason": None,
+        "run_terminal": False,
+        "terminal_reason": None,
         "last_error": None,
     }
     _persist_state(config, running)
@@ -565,7 +608,6 @@ def run_v3(
             "state": "blocked",
             "resumable": True,
             "latest_infrastructure_stop_reason": "provider_failed",
-            "last_stop_reason": "provider_failed",
             "last_error": f"{type(error).__name__}: {error}",
         }
     else:
@@ -579,9 +621,9 @@ def run_v3(
                     **_base_status(config),
                     "state": "failed",
                     "resumable": False,
-                    "terminal": True,
+                    "run_terminal": True,
+                    "terminal_reason": "provider_close_failed",
                     "latest_infrastructure_stop_reason": "provider_close_failed",
-                    "last_stop_reason": "provider_close_failed",
                     "last_error": f"{type(error).__name__}: {error}",
                 }
     _persist_state(config, status)

@@ -38,7 +38,7 @@ from .persistent_experiment import (
     protocol_hash,
 )
 from .search_memory import (
-    ActiveParentReference,
+    SEARCH_MEMORY_SCHEMA_VERSION,
     DuplicateCandidateError,
     LineageSummary,
     PatternSummary,
@@ -64,7 +64,7 @@ from .single_program_ir import (
 PERSISTENT_SINGLE_AST = "persistent_single_ast"
 FRESH_SINGLE_AST = "fresh_single_ast"
 ROLLBACK_MODE = "multi_program_batch"
-PREVIEW_STATE_SCHEMA_VERSION = "mforge.native-v3.preview-state.v1"
+PREVIEW_STATE_SCHEMA_VERSION = "mforge.native-v3.preview-state.v2"
 PREVIEW_PROGRAM_RECORD_SCHEMA_VERSION = "mforge.native-v3.program-record.v1"
 FORBIDDEN_LENGTHS = (4, 8, 16)
 PREVIEW_SLOT_IDS = SLOT_IDS[:4]
@@ -143,16 +143,29 @@ def _summary(value: str) -> str:
     return cleaned if cleaned.endswith((".", "!", "?")) else cleaned + "."
 
 
+def _observation_usage(observation: TurnObservation) -> dict[str, Any]:
+    return {
+        **observation.usage,
+        "final": observation.usage_final,
+        "partial": observation.terminal_status != "completed",
+    }
+
+
 def _empty_memory() -> SearchMemoryV1:
     return SearchMemoryV1(
         protocol_hash=protocol_hash(FORBIDDEN_LENGTHS),
         seen_program_hashes=(),
         seen_behavior_signatures=(),
         successful_patterns=(),
-        failed_patterns=(),
+        tested_patterns=(),
+        pending_patterns=(),
         active_lineages=(),
         validated_archive_ids=(),
     )
+
+
+def _candidate_id(slot_id: str) -> str:
+    return f"g0000-s{int(slot_id.removeprefix('slot-')):02d}"
 
 
 def _extend_memory(
@@ -164,20 +177,20 @@ def _extend_memory(
     program = response.program
     behavior_signature = _behavior_signature(program.ast)
     selectors, actions = program_families(program.ast)
-    candidate_id = f"g0000-s{slot_index:02d}"
-    patterns = memory.successful_patterns
+    candidate_id = _candidate_id(f"slot-{slot_index:02d}")
+    patterns = memory.pending_patterns
     if selectors or actions:
         patterns += (
             PatternSummary(
-                pattern_id=f"validated-{slot_index:02d}",
+                pattern_id=candidate_id,
                 selector_families=selectors,
                 action_families=actions,
                 control_flow=program_control_flow(program.ast),
-                description=_summary(response.design_summary),
-                description_source="model",
-                evaluation_outcome="VALIDATED",
-                evidence_kind="strength",
-                main_evidence=_summary(response.hypothesis),
+                summary=_summary(response.design_summary),
+                contract_status="VALID",
+                scientific_outcome="NOT_EVALUATED",
+                model_hypothesis=_summary(response.hypothesis),
+                observed_effect=None,
             ),
         )
     lineage = LineageSummary(
@@ -187,21 +200,70 @@ def _extend_memory(
         behavior_signature=behavior_signature,
         generation=0,
         slot=slot_index,
-        evaluation_outcome="VALIDATED",
+        contract_status="VALID",
+        scientific_outcome="NOT_EVALUATED",
         summary=_summary(response.design_summary),
     )
     return SearchMemoryV1(
         protocol_hash=memory.protocol_hash,
         seen_program_hashes=memory.seen_program_hashes + (program.program_hash,),
         seen_behavior_signatures=(memory.seen_behavior_signatures + (behavior_signature,)),
-        successful_patterns=patterns,
-        failed_patterns=memory.failed_patterns,
+        successful_patterns=memory.successful_patterns,
+        tested_patterns=memory.tested_patterns,
+        pending_patterns=patterns,
         active_lineages=memory.active_lineages + (lineage,),
         validated_archive_ids=memory.validated_archive_ids + (candidate_id,),
-        active_parent=ActiveParentReference(
-            candidate_id=candidate_id,
-            program_hash=program.program_hash,
-        ),
+        active_parent=None,
+    )
+
+
+def _memory_with_scientific_outcomes(
+    memory: SearchMemoryV1,
+    outcomes: Sequence[Mapping[str, Any]],
+) -> SearchMemoryV1:
+    by_candidate: dict[str, Mapping[str, Any]] = {}
+    for outcome in outcomes:
+        for slot_id in cast(Sequence[str], outcome["slot_aliases"]):
+            by_candidate[_candidate_id(slot_id)] = outcome
+
+    successful = list(memory.successful_patterns)
+    tested = list(memory.tested_patterns)
+    pending: list[PatternSummary] = []
+    for pattern in memory.pending_patterns:
+        result = by_candidate.get(pattern.pattern_id)
+        if result is None:
+            pending.append(pattern)
+            continue
+        updated = replace(
+            pattern,
+            scientific_outcome=str(result["scientific_outcome"]),
+            observed_effect=str(result["observed_effect"]),
+        )
+        (
+            successful
+            if updated.scientific_outcome in {"ACCEPTED_IMPROVEMENT", "VERIFIED_COUNTEREXAMPLE"}
+            else tested
+        ).append(updated)
+
+    lineages = tuple(
+        replace(
+            lineage,
+            scientific_outcome=str(by_candidate[lineage.candidate_id]["scientific_outcome"]),
+        )
+        if lineage.candidate_id in by_candidate
+        else lineage
+        for lineage in memory.active_lineages
+    )
+    return SearchMemoryV1(
+        protocol_hash=memory.protocol_hash,
+        seen_program_hashes=memory.seen_program_hashes,
+        seen_behavior_signatures=memory.seen_behavior_signatures,
+        successful_patterns=tuple(successful),
+        tested_patterns=tuple(tested),
+        pending_patterns=tuple(pending),
+        active_lineages=lineages,
+        validated_archive_ids=memory.validated_archive_ids,
+        active_parent=None,
     )
 
 
@@ -216,8 +278,10 @@ def _program_prompt(
         brief_id=brief_id,
         forbidden_lengths=FORBIDDEN_LENGTHS,
     )
-    return request.prompt + "\n\nSearch Memory:\n" + _compact_json(
-        {"search_memory": memory.model_facing_dict()}
+    return (
+        request.prompt
+        + "\n\nSearch Memory:\n"
+        + _compact_json({"search_memory": memory.model_facing_dict()})
     )
 
 
@@ -310,10 +374,7 @@ def _memory_from_reports(
                 )
             )
             continue
-        if (
-            _stored_output_schema_sha256(turns_dir, accepted_prefix)
-            != schema_hashes[brief_id]
-        ):
+        if _stored_output_schema_sha256(turns_dir, accepted_prefix) != schema_hashes[brief_id]:
             raise ValueError("stored provider output-schema identity mismatch")
         response = _response(
             turns_dir,
@@ -335,6 +396,7 @@ def _memory_from_reports(
 
 def _manifest(model: str, effort: str) -> dict[str, Any]:
     manifest = build_epoch_manifest(model=model, effort=effort)
+    manifest.pop("output_schema_sha256", None)
     system_prompt = build_candidate_request(
         candidate=SLOT_SPECIFIC_OUTPUT_CONTRACT,
         slot_id=PREVIEW_SLOT_IDS[0],
@@ -355,7 +417,7 @@ def _manifest(model: str, effort: str) -> dict[str, Any]:
             "communication_mode": PERSISTENT_SINGLE_AST,
             "provider_mode": PERSISTENT_SINGLE_AST,
             "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
-            "output_schema_sha256": contract_sha256,
+            "output_schema_contract_sha256": contract_sha256,
             "output_schema_sha256_by_brief": schema_hashes,
             "worker_count": WORKER_COUNT,
             "programs_per_turn": 1,
@@ -367,11 +429,9 @@ def _manifest(model: str, effort: str) -> dict[str, Any]:
             "single_program_system_prompt_sha256": hashlib.sha256(
                 system_prompt.encode("utf-8")
             ).hexdigest(),
-            "system_prompt_sha256": hashlib.sha256(
-                system_prompt.encode("utf-8")
-            ).hexdigest(),
+            "system_prompt_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
             "repair_prompt_sha256": None,
-            "search_memory_schema_version": "mforge.native.search_memory.v1",
+            "search_memory_schema_version": SEARCH_MEMORY_SCHEMA_VERSION,
             "protocols": protocols,
             "protocol_bundle_hash": protocol_bundle_hash,
         }
@@ -406,7 +466,7 @@ def _manifest(model: str, effort: str) -> dict[str, Any]:
             "protocol_bundle_hash": protocol_bundle_hash,
             "communication_mode": PERSISTENT_SINGLE_AST,
             "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
-            "output_schema_sha256": contract_sha256,
+            "output_schema_contract_sha256": contract_sha256,
             "model": model,
             "effort": effort,
         }
@@ -427,7 +487,7 @@ def _new_state(
         "communication_mode": PERSISTENT_SINGLE_AST,
         "provider_mode": PERSISTENT_SINGLE_AST,
         "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
-        "output_schema_sha256": slot_specific_contract_sha256(FORBIDDEN_LENGTHS),
+        "output_schema_contract_sha256": slot_specific_contract_sha256(FORBIDDEN_LENGTHS),
         "output_schema_sha256_by_brief": slot_specific_schema_hashes(FORBIDDEN_LENGTHS),
         "compaction_mode": "disabled",
         "rollback_mode": ROLLBACK_MODE,
@@ -471,7 +531,7 @@ def _new_state(
             "provider_warnings": bootstrap_warnings,
             "error": None,
         },
-        "usages": [anchor.usage],
+        "usages": [_observation_usage(anchor)],
     }
 
 
@@ -552,7 +612,7 @@ def run_persistent_single_ast_cohort(
             state.get("schema_version") != PREVIEW_STATE_SCHEMA_VERSION
             or state.get("communication_mode") != PERSISTENT_SINGLE_AST
             or state.get("output_contract") != SLOT_SPECIFIC_OUTPUT_CONTRACT
-            or state.get("output_schema_sha256") != contract_sha256
+            or state.get("output_schema_contract_sha256") != contract_sha256
             or state.get("output_schema_sha256_by_brief") != schema_hashes
         ):
             raise ValueError("preview communication state is incompatible")
@@ -819,9 +879,7 @@ def run_persistent_single_ast_cohort(
                 )
                 stored_schema_sha256 = _stored_output_schema_sha256(turns_dir, prefix)
                 if stored_schema_sha256 != expected_schema_sha256:
-                    raise ValueError(
-                        "provider output-schema artifact identity mismatch"
-                    )
+                    raise ValueError("provider output-schema artifact identity mismatch")
             except Exception as provider_error:
                 retries_after, warnings_after = _adapter_event_counts(adapter)
                 retry_count = retries_after - retries_before
@@ -875,7 +933,7 @@ def run_persistent_single_ast_cohort(
             write_json(state_path, state)
             model_turns += 1
             state["program_turns"] = int(state["program_turns"]) + 1
-            usages.append(observation.usage)
+            usages.append(_observation_usage(observation))
             worker["last_turn_id"] = observation.turn_id
             candidate: CompiledCandidateResponse | None = None
             duplicate_reason = None
@@ -934,9 +992,7 @@ def run_persistent_single_ast_cohort(
                     "attempt": attempt,
                     "valid_ast": candidate is not None,
                     "model_representation_sha256": (
-                        None
-                        if candidate is None
-                        else candidate.representation_sha256
+                        None if candidate is None else candidate.representation_sha256
                     ),
                     "program": (
                         None if candidate is None else validated_program_artifact(candidate.program)
@@ -1033,8 +1089,15 @@ def run_persistent_single_ast_cohort(
         backend_factory=backend_factory,
         episode_id=episode_id,
         communication_mode=PERSISTENT_SINGLE_AST,
+        planned_slot_ids=PREVIEW_SLOT_IDS,
         program_contract=build_single_program_contract(FORBIDDEN_LENGTHS),
     )
+    raw_outcomes = report.get("program_outcomes")
+    if isinstance(raw_outcomes, list):
+        memory = _memory_with_scientific_outcomes(
+            memory,
+            [cast(Mapping[str, Any], item) for item in raw_outcomes],
+        )
     completed_at_ms = time.time_ns() // 1_000_000
     first_valid_ast_at_ms = state.get("first_valid_ast_at_ms")
     time_to_first_valid_ast_ms = (
@@ -1046,26 +1109,29 @@ def run_persistent_single_ast_cohort(
         {
             "provider_mode": PERSISTENT_SINGLE_AST,
             "output_contract": SLOT_SPECIFIC_OUTPUT_CONTRACT,
-            "output_schema_sha256": contract_sha256,
+            "output_schema_contract_sha256": contract_sha256,
             "output_schema_sha256_by_brief": schema_hashes,
+            "search_memory_sha256": memory.sha256,
             "compaction_mode": "disabled",
             "rollback_mode": ROLLBACK_MODE,
             "diagnostic_mode": FRESH_SINGLE_AST,
             "program_turns": int(state["program_turns"]),
             "time_to_first_valid_ast_ms": time_to_first_valid_ast_ms,
             "first_valid_ast_published_before_cohort_complete": (
-                isinstance(first_valid_ast_at_ms, int)
-                and first_valid_ast_at_ms <= completed_at_ms
+                isinstance(first_valid_ast_at_ms, int) and first_valid_ast_at_ms <= completed_at_ms
             ),
         }
     )
     write_json(Path(str(report["cohort_report"])), report)
     state.update(
         {
-            "status": "completed",
+            "status": report["status"],
             "cohort_report": report["cohort_report"],
             "cohort_completed_at_ms": completed_at_ms,
             "time_to_first_valid_ast_ms": time_to_first_valid_ast_ms,
+            "search_memory": memory.as_dict(),
+            "model_search_memory": memory.model_facing_dict(),
+            "search_memory_sha256": memory.sha256,
         }
     )
     write_json(state_path, state)

@@ -7,6 +7,7 @@ import pytest
 from mutation_forge.native_v3.cohort import (
     PROVIDER_PARTITION,
     SLOT_IDS,
+    _usage_total,
     build_epoch_manifest,
     cohort_outcome,
     deduplicate_entries,
@@ -74,9 +75,7 @@ def test_response_order_does_not_change_programs_or_lineage() -> None:
     assert [entry.as_dict() for entry in reverse.entries] == [
         entry.as_dict() for entry in forward.entries
     ]
-    assert deduplicate_entries(reverse.entries) == deduplicate_entries(
-        forward.entries
-    )
+    assert deduplicate_entries(reverse.entries) == deduplicate_entries(forward.entries)
 
 
 def test_partial_invalidity_keeps_valid_siblings() -> None:
@@ -110,17 +109,43 @@ def test_duplicate_program_retains_aliases_and_counts_once() -> None:
 
 
 @pytest.mark.parametrize(
-    ("count", "expected"),
+    ("count", "planned", "expected"),
     [
-        (0, "INCONCLUSIVE"),
-        (3, "INCONCLUSIVE"),
-        (4, "DEGRADED"),
-        (7, "DEGRADED"),
-        (8, "COMPLETE"),
+        (0, 8, "INCONCLUSIVE"),
+        (3, 8, "INCONCLUSIVE"),
+        (4, 8, "DEGRADED"),
+        (7, 8, "DEGRADED"),
+        (8, 8, "COMPLETE"),
+        (4, 4, "COMPLETE"),
     ],
 )
-def test_exact_cohort_thresholds(count: int, expected: str) -> None:
-    assert cohort_outcome(count) == expected
+def test_exact_cohort_thresholds(
+    count: int,
+    planned: int,
+    expected: str,
+) -> None:
+    assert cohort_outcome(count, planned) == expected
+
+
+def test_usage_aggregate_is_final_only_when_every_turn_is_final() -> None:
+    complete = _usage_total(
+        [
+            {"totalTokens": 3, "final": True, "partial": False},
+            {"totalTokens": 5, "final": True, "partial": False},
+        ]
+    )
+    partial = _usage_total(
+        [
+            {"totalTokens": 3, "final": True, "partial": False},
+            {"totalTokens": 5, "final": False, "partial": True},
+        ]
+    )
+
+    assert complete["totalTokens"] == 8
+    assert complete["final"] is True
+    assert complete["partial"] is False
+    assert partial["final"] is False
+    assert partial["partial"] is True
 
 
 def test_manifest_freezes_eight_slots_two_calls_and_prompt_hashes() -> None:

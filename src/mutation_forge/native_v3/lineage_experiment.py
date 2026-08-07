@@ -83,28 +83,27 @@ def build_search_memory(
         forbidden_lengths=forbidden_lengths,
     )
     successful: list[PatternSummary] = []
-    failed: list[PatternSummary] = []
+    tested: list[PatternSummary] = []
     lineages: list[LineageSummary] = []
     for index, raw in enumerate(reference["candidates"]):
         candidate = dict(raw)
         selectors, actions = program_families(candidate["canonical_ast"])
         accepted = candidate["evaluation_outcome"] in {"ACCEPTED", "ACTIVE_PARENT"}
+        scientific_outcome = "ACCEPTED_IMPROVEMENT" if accepted else "REJECTED_NOT_PROVED"
         pattern = PatternSummary(
             pattern_id=f"pattern-{index:02d}",
             selector_families=selectors,
             action_families=actions,
             control_flow=program_control_flow(candidate["canonical_ast"]),
-            description=candidate["strategy_summary"],
-            description_source="host",
-            evaluation_outcome=candidate["evaluation_outcome"],
-            evidence_kind="strength" if accepted else "weakness",
-            main_evidence=(
-                candidate["main_strength"]
-                if accepted
-                else candidate["main_weakness"]
+            summary=candidate["strategy_summary"],
+            contract_status="VALID",
+            scientific_outcome=scientific_outcome,
+            model_hypothesis=candidate["strategy_summary"],
+            observed_effect=(
+                candidate["main_strength"] if accepted else candidate["main_weakness"]
             ),
         )
-        (successful if accepted else failed).append(pattern)
+        (successful if accepted else tested).append(pattern)
         lineages.append(
             LineageSummary(
                 candidate_id=candidate["candidate_id"],
@@ -113,7 +112,8 @@ def build_search_memory(
                 behavior_signature=candidate["behavior_signature"],
                 generation=index,
                 slot=index + 1,
-                evaluation_outcome=candidate["evaluation_outcome"],
+                contract_status="VALID",
+                scientific_outcome=scientific_outcome,
                 summary=candidate["strategy_summary"],
             )
         )
@@ -121,19 +121,17 @@ def build_search_memory(
     return SearchMemoryV1(
         protocol_hash=reference["protocol_hash"],
         seen_program_hashes=tuple(
-            str(candidate["canonical_hash"])
-            for candidate in reference["candidates"]
+            str(candidate["canonical_hash"]) for candidate in reference["candidates"]
         ),
         seen_behavior_signatures=tuple(
-            str(candidate["behavior_signature"])
-            for candidate in reference["candidates"]
+            str(candidate["behavior_signature"]) for candidate in reference["candidates"]
         ),
         successful_patterns=tuple(successful),
-        failed_patterns=tuple(failed),
+        tested_patterns=tuple(tested),
+        pending_patterns=(),
         active_lineages=tuple(lineages),
         validated_archive_ids=tuple(
-            str(candidate["candidate_id"])
-            for candidate in reference["candidates"]
+            str(candidate["candidate_id"]) for candidate in reference["candidates"]
         ),
         active_parent=ActiveParentReference(
             candidate_id=active["candidate_id"],
@@ -235,9 +233,7 @@ def _fresh_prompt() -> str:
 
 
 def _read_response(turns_dir: Path, prefix: str) -> object:
-    return json.loads(
-        (turns_dir / f"{prefix}.response.raw.txt").read_text(encoding="utf-8")
-    )
+    return json.loads((turns_dir / f"{prefix}.response.raw.txt").read_text(encoding="utf-8"))
 
 
 def _run_ack_turn(
@@ -402,10 +398,7 @@ def _fork_record(fork: ForkResult) -> dict[str, Any]:
 
 
 def _usage_total(observations: list[TurnObservation]) -> dict[str, int]:
-    return {
-        key: sum(item.usage[key] for item in observations)
-        for key in _usage_keys()
-    }
+    return {key: sum(item.usage[key] for item in observations) for key in _usage_keys()}
 
 
 def _markdown_report(report: Mapping[str, Any]) -> str:
@@ -654,12 +647,9 @@ def run_lineage_experiment(
     fresh_diverse = (
         fresh_record["valid_ast"]
         and not fresh_record["duplicate_rejected"]
-        and fresh_record["behavior_signature"]
-        not in memory.seen_behavior_signatures
+        and fresh_record["behavior_signature"] not in memory.seen_behavior_signatures
     )
-    duplicate_rejections = sum(
-        item["duplicate_rejected"] for item in (child_record, fresh_record)
-    )
+    duplicate_rejections = sum(item["duplicate_rejected"] for item in (child_record, fresh_record))
     status = (
         "completed"
         if (
@@ -702,7 +692,8 @@ def run_lineage_experiment(
             "sha256": memory.sha256,
             "canonical_bytes": len(memory.canonical_bytes()),
             "successful_pattern_count": len(memory.successful_patterns),
-            "failed_pattern_count": len(memory.failed_patterns),
+            "tested_pattern_count": len(memory.tested_patterns),
+            "pending_pattern_count": len(memory.pending_patterns),
             "full_ast_injected": False,
             "value": memory.as_dict(),
         },
@@ -714,9 +705,7 @@ def run_lineage_experiment(
         "prompt_bytes": {
             "child_mutation": len(child_prompt.encode("utf-8")),
             "child_repair": (
-                None
-                if child_repair_prompt is None
-                else len(child_repair_prompt.encode("utf-8"))
+                None if child_repair_prompt is None else len(child_repair_prompt.encode("utf-8"))
             ),
             "search_memory": len(memory_prompt.encode("utf-8")),
             "fresh_root": len(fresh_prompt.encode("utf-8")),
@@ -743,9 +732,7 @@ def run_lineage_experiment(
         write_json(root / "child-program.json.gz", child_validated.program.ast)
     if fresh_observation.program_hash is not None:
         fresh_validated = validate_single_program_response(
-            (turns_dir / "08-fresh-root.response.raw.txt").read_text(
-                encoding="utf-8"
-            ),
+            (turns_dir / "08-fresh-root.response.raw.txt").read_text(encoding="utf-8"),
             forbidden_lengths=forbidden_lengths,
         )
         write_json(root / "fresh-root-program.json.gz", fresh_validated.program.ast)

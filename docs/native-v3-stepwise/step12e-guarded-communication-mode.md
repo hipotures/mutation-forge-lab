@@ -67,6 +67,19 @@ turns. Every program turn:
 7. receives at most one repair turn on the same worker thread;
 8. publishes its semantic attempt and slot record before a later slot starts.
 
+Contract validation and scientific evaluation are separate states. A generated
+root enters Search Memory as `contract_status = VALID` with
+`scientific_outcome = NOT_EVALUATED`. After serial evaluation, the host moves
+it to `successful_patterns` only for `ACCEPTED_IMPROVEMENT` or
+`VERIFIED_COUNTEREXAMPLE`; every rejected, no-plan, illegal, failed, or
+inconclusive result moves to `tested_patterns`. The model's hypothesis remains
+labelled `model_hypothesis`, while measured evidence is recorded separately as
+`observed_effect`.
+
+All four preview slots are independent roots. Their model-facing
+`active_parent` is therefore null, and their host lineage has no parent program
+hash. An active parent is reserved for a real descendant fork.
+
 Large relocation and fanout relation sets are bounded with one seeded cyclic
 window before the ordinary seeded pick. This preserves a uniform marginal
 candidate probability without charging one interpreter random draw per
@@ -74,15 +87,17 @@ enumerated relation. The existing rollback selectors retain their original
 reservoir behavior.
 
 The status, epoch manifest, communication state, attempt records, and program
-records explicitly retain `provider_mode`, `output_contract`, the canonical
-contract hash, each brief-specific output-schema hash, `compaction_mode`,
+records explicitly retain `provider_mode`, `output_contract`,
+`output_schema_contract_sha256`, each brief-specific output-schema hash,
+`search_memory_sha256`, `compaction_mode`,
 rollback mode, specification and worker thread IDs, fork ancestry, turn IDs,
 prompt hashes, usage, validation, duplicates, and publication timing. These
 semantic projections remain outside transport artifacts. The same deterministic
-serial evaluator, interval fitness, cohort threshold, and program selection
-used by the rollback remain unchanged. The selected preview passes its explicit
-program contract into that evaluator; the rollback continues to use the default
-contract.
+serial evaluator, interval fitness, and program selection used by the rollback
+remain unchanged. Cohort completeness is evaluated against the immutable
+planned-slot manifest rather than a hard-coded production population size. The
+selected preview passes its explicit program contract into the evaluator; the
+rollback continues to use the default contract.
 
 The host/model boundary is strict. Protocol, program, behavior-signature, and
 schema hashes plus App Server request, thread, and turn IDs remain exclusively
@@ -128,8 +143,16 @@ rollback A/B turn retained exact provider artifact parity but omitted all four
 planned slots, so its valid-program rate was 0/4.
 
 This gate validates the communication and model-facing contract integration,
-not scientific quality: the bounded cohort outcome was `DEGRADED`. The
-integrated preview retains Step 12D's two-worker fork and Search Memory
+not scientific quality. Cohort completeness is measured against the explicit
+four-slot preview manifest, so four valid unique programs produce `COMPLETE`.
+That does not imply scientific success: status separately reports
+`scientific_result_kind`, `verified_counterexample`, selection tie metadata,
+`program_evaluations`, and `graph_score_attempts`. A terminal preview with no
+accepted scientific result reports `run_terminal = true`,
+`terminal_reason = preview_cohort_complete`, and
+`scientific_result_kind = NONE`.
+
+The integrated preview retains Step 12D's two-worker fork and Search Memory
 boundaries while using the unchanged production evaluator.
 
 ## Validation
@@ -146,9 +169,11 @@ make appserver-artifact-parity
 The focused tests cover explicit selected and rollback routing, rollback by
 default, authentication failure before provider construction, two exact
 specification forks, four separately published unique compiled AST turns,
-schema-identity fail-closed behavior, bounded Search Memory without ASTs,
-exact artifact parity, and durable process replacement through persisted
-thread identities.
+schema-identity fail-closed behavior, root-neutral parent context,
+post-evaluation Search Memory classification, planned-manifest completeness,
+usage finality, explicit score-attempt accounting, selection ties, bounded
+Search Memory without ASTs, exact artifact parity, and durable process
+replacement through persisted thread identities.
 
 The final full suite collected 820 tests: 793 passed, 25 failed, and two had
 setup errors. A targeted detached run at `c7dd740` reproduced the exact same

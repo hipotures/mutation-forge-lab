@@ -62,7 +62,7 @@ from .serial_evaluator import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 COHORT_PROTOCOL_ID = "native_v3_sequential_cohort_v1"
-COHORT_SCHEMA_VERSION = "mforge.native-v3.cohort.v1"
+COHORT_SCHEMA_VERSION = "mforge.native-v3.cohort.v2"
 EPOCH_MANIFEST_SCHEMA_VERSION = "mforge.native-v3.epoch-manifest.v1"
 PROGRAM_BATCH_SCHEMA_VERSION = "mforge.native.program_batch.v3"
 PROVIDER_INPUT_PROFILE_ID = "native_v3_input_4ast_v1"
@@ -97,9 +97,7 @@ class CohortEntry:
     def as_dict(self) -> dict[str, Any]:
         return {
             "slot_id": self.slot_id,
-            "program_hash": (
-                self.program.program_hash if self.program is not None else None
-            ),
+            "program_hash": (self.program.program_hash if self.program is not None else None),
             "design_summary": self.design_summary,
             "error": self.error,
         }
@@ -133,9 +131,7 @@ def _semantic_registry() -> dict[str, Any]:
                 "result": str(SELECTOR_TYPES[selector_id]),
                 "arguments": {
                     name: str(value_type)
-                    for name, value_type in SELECTOR_ARGUMENT_TYPES[
-                        selector_id
-                    ].items()
+                    for name, value_type in SELECTOR_ARGUMENT_TYPES[selector_id].items()
                 },
             }
             for selector_id in sorted(SELECTOR_TYPES)
@@ -147,12 +143,9 @@ def _semantic_registry() -> dict[str, Any]:
             }
             for action_id in sorted(ACTION_ARGUMENT_TYPES)
         },
-        "context_fields": {
-            name: str(value_type) for name, value_type in sorted(CTX_TYPES.items())
-        },
+        "context_fields": {name: str(value_type) for name, value_type in sorted(CTX_TYPES.items())},
         "graph_features": {
-            name: str(value_type)
-            for name, value_type in sorted(FEATURE_TYPES.items())
+            name: str(value_type) for name, value_type in sorted(FEATURE_TYPES.items())
         },
     }
 
@@ -170,9 +163,7 @@ def render_batch_prompt(slot_ids: Sequence[str]) -> str:
             }
             for slot_id in slot_ids
         ],
-        "program_schema": _load_json(
-            "configs/native/native-v3-program.schema.json"
-        ),
+        "program_schema": _load_json("configs/native/native-v3-program.schema.json"),
         "semantic_registry": _semantic_registry(),
     }
     return (
@@ -211,9 +202,7 @@ def build_epoch_manifest(*, model: str, effort: str) -> dict[str, Any]:
             }
         )
     protocols = _protocols()
-    protocol_bundle_hash = hashlib.sha256(
-        canonical_json_bytes(protocols)
-    ).hexdigest()
+    protocol_bundle_hash = hashlib.sha256(canonical_json_bytes(protocols)).hexdigest()
     slots = [
         {
             "slot_id": slot_id,
@@ -242,18 +231,10 @@ def build_epoch_manifest(*, model: str, effort: str) -> dict[str, Any]:
         "provider_calls": calls,
         "model": model,
         "effort": effort,
-        "system_prompt_sha256": _sha256_text(
-            _load_text("prompts/native-v3/cohort-system.md")
-        ),
-        "repair_prompt_sha256": _sha256_text(
-            _load_text("prompts/native-v3/cohort-repair.md")
-        ),
+        "system_prompt_sha256": _sha256_text(_load_text("prompts/native-v3/cohort-system.md")),
+        "repair_prompt_sha256": _sha256_text(_load_text("prompts/native-v3/cohort-repair.md")),
         "output_schema_sha256": hashlib.sha256(
-            canonical_json_bytes(
-                _load_json(
-                    "configs/native/native-v3-cohort-envelope.schema.json"
-                )
-            )
+            canonical_json_bytes(_load_json("configs/native/native-v3-cohort-envelope.schema.json"))
         ).hexdigest(),
         "protocols": protocols,
         "protocol_bundle_hash": protocol_bundle_hash,
@@ -298,9 +279,7 @@ def build_batch_request(
         model=model,
         effort=effort,
         system_prompt=_load_text("prompts/native-v3/cohort-system.md"),
-        output_schema=_load_json(
-            "configs/native/native-v3-cohort-envelope.schema.json"
-        ),
+        output_schema=_load_json("configs/native/native-v3-cohort-envelope.schema.json"),
         repair_prompt=_load_text("prompts/native-v3/cohort-repair.md"),
         max_repairs=1,
         remaining_repairs=1,
@@ -403,22 +382,14 @@ def parse_batch_response(
     entries: list[CohortEntry] = []
     for slot_id in slot_ids:
         if slot_id in duplicate_slots:
-            entries.append(
-                CohortEntry(slot_id, None, None, "duplicate slot in provider batch")
-            )
+            entries.append(CohortEntry(slot_id, None, None, "duplicate slot in provider batch"))
             continue
         item = raw_by_slot.get(slot_id)
         if item is None:
-            entries.append(
-                CohortEntry(slot_id, None, None, "provider omitted planned slot")
-            )
+            entries.append(CohortEntry(slot_id, None, None, "provider omitted planned slot"))
             continue
         design_summary = item.get("design_summary")
-        if (
-            not isinstance(design_summary, str)
-            or not design_summary
-            or len(design_summary) > 2048
-        ):
+        if not isinstance(design_summary, str) or not design_summary or len(design_summary) > 2048:
             entries.append(
                 CohortEntry(
                     slot_id,
@@ -442,27 +413,27 @@ def parse_batch_response(
         validation = validate_program(raw)
         if validation.program is None:
             summary = "; ".join(
-                f"{item.code}@{item.path}: {item.message}"
-                for item in validation.diagnostics
+                f"{item.code}@{item.path}: {item.message}" for item in validation.diagnostics
             )
-            entries.append(
-                CohortEntry(slot_id, None, design_summary, summary)
-            )
+            entries.append(CohortEntry(slot_id, None, design_summary, summary))
         else:
-            entries.append(
-                CohortEntry(slot_id, validation.program, design_summary, None)
-            )
+            entries.append(CohortEntry(slot_id, validation.program, design_summary, None))
     return ParsedBatch(envelope, tuple(entries))
 
 
-def cohort_outcome(unique_valid_programs: int) -> str:
-    if unique_valid_programs == 8:
+def cohort_outcome(
+    unique_valid_programs: int,
+    planned_programs: int,
+) -> str:
+    if planned_programs < 1:
+        raise ValueError("planned_programs must be positive")
+    if not 0 <= unique_valid_programs <= planned_programs:
+        raise ValueError("unique_valid_programs must be between zero and planned_programs")
+    if unique_valid_programs == planned_programs:
         return "COMPLETE"
-    if 4 <= unique_valid_programs <= 7:
+    if unique_valid_programs * 2 >= planned_programs:
         return "DEGRADED"
-    if 0 <= unique_valid_programs <= 3:
-        return "INCONCLUSIVE"
-    raise ValueError("unique_valid_programs must be between 0 and 8")
+    return "INCONCLUSIVE"
 
 
 def deduplicate_entries(
@@ -484,10 +455,7 @@ def deduplicate_entries(
     )
     return (
         tuple(by_hash[program_hash] for program_hash in ordered_hashes),
-        {
-            program_hash: tuple(sorted(aliases[program_hash]))
-            for program_hash in ordered_hashes
-        },
+        {program_hash: tuple(sorted(aliases[program_hash])) for program_hash in ordered_hashes},
     )
 
 
@@ -503,9 +471,7 @@ def _usage_total(usages: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         **{
             field: sum(
-                int(usage.get(field, 0))
-                for usage in usages
-                if isinstance(usage.get(field, 0), int)
+                int(usage.get(field, 0)) for usage in usages if isinstance(usage.get(field, 0), int)
             )
             for field in fields
         },
@@ -532,9 +498,7 @@ def _turn_result(
 ) -> dict[str, Any]:
     valid = [entry for entry in parsed.entries if entry.program is not None]
     errors = [
-        f"{entry.slot_id}: {entry.error}"
-        for entry in parsed.entries
-        if entry.error is not None
+        f"{entry.slot_id}: {entry.error}" for entry in parsed.entries if entry.error is not None
     ]
     result = {
         **dict(raw_result),
@@ -548,9 +512,7 @@ def _turn_result(
         "identity": {
             "valid_entry_count": len(valid),
             "program_hashes": sorted(
-                entry.program.program_hash
-                for entry in valid
-                if entry.program is not None
+                entry.program.program_hash for entry in valid if entry.program is not None
             ),
             "validator_version": VALIDATOR_PROTOCOL_ID,
         },
@@ -629,6 +591,80 @@ def _graph_evaluations(result: SerialEpisodeResult) -> int:
     return result.score_attempts
 
 
+def _interval_text(value: object) -> str:
+    lower = getattr(value, "lower", None)
+    upper = getattr(value, "upper", None)
+    return str(lower) if lower == upper else f"[{lower},{upper}]"
+
+
+def _scientific_outcome(
+    evaluation: SerialEpisodeResult,
+) -> tuple[str, str]:
+    if _verified_counterexample(evaluation):
+        return (
+            "VERIFIED_COUNTEREXAMPLE",
+            "Exact verification accepted a counterexample.",
+        )
+    if evaluation.status is SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT:
+        return (
+            "INCONCLUSIVE_SCORE",
+            "Scoring was inconclusive before a safe comparison was available.",
+        )
+    if evaluation.status is SerialEvaluationStatus.PROGRAM_FAILURE:
+        return (
+            "PROGRAM_FAILURE",
+            f"Program execution failed: {evaluation.scientific_error}.",
+        )
+    if evaluation.accepted_rewrites > 0:
+        return (
+            "ACCEPTED_IMPROVEMENT",
+            (f"Accepted {evaluation.accepted_rewrites} strictly improving rewrite(s)."),
+        )
+    if not evaluation.steps:
+        return ("NOT_EVALUATED", "No scientific step was evaluated.")
+    step = evaluation.steps[-1]
+    if step.outcome == "score_timeout_without_partial":
+        return (
+            "INCONCLUSIVE_SCORE",
+            "Candidate scoring timed out without safe partial evidence.",
+        )
+    if step.outcome == "no_plan":
+        if step.no_plan_reason == "ILLEGAL_FINAL_STATE":
+            return (
+                "ILLEGAL_FINAL_STATE",
+                "No rewrite was emitted because the final graph was illegal.",
+            )
+        return (
+            "NO_PLAN",
+            f"No rewrite was emitted ({step.no_plan_reason or 'unspecified'}).",
+        )
+    if step.outcome == "rewrite" and step.candidate_energy is not None:
+        candidate = step.candidate_energy
+        incumbent = step.energy_before
+        effect = (
+            f"Candidate energy {_interval_text(candidate)} versus incumbent "
+            f"{_interval_text(incumbent)}; rewrite was rejected."
+        )
+        if candidate.lower > incumbent.upper:
+            return ("REJECTED_WORSE", effect)
+        if (
+            candidate.lower == candidate.upper
+            and incumbent.lower == incumbent.upper
+            and candidate.lower == incumbent.lower
+        ):
+            return ("REJECTED_EQUAL", effect)
+        return ("REJECTED_NOT_PROVED", effect)
+    return ("NO_PLAN", "No accepted rewrite was produced.")
+
+
+def _verified_counterexample(evaluation: SerialEpisodeResult) -> bool:
+    traces = [
+        evaluation.initial_counterexample,
+        *[step.counterexample for step in evaluation.steps],
+    ]
+    return any(trace is not None and trace.decision == "stop_verified" for trace in traces)
+
+
 def _attempt_reference(
     raw_result: Mapping[str, Any],
     *,
@@ -658,6 +694,7 @@ def finalize_cohort(
     backend_factory: Callable[[], GraphBackend],
     episode_id: str,
     communication_mode: str,
+    planned_slot_ids: Sequence[str],
     program_contract: ProgramContract | None = None,
 ) -> dict[str, Any]:
     """Evaluate an already generated cohort without changing scientific semantics."""
@@ -665,8 +702,14 @@ def finalize_cohort(
     root = Path(experiment_root)
     output_root = root / "native-v3-output" / "epoch-0000"
     report_path = output_root / "cohort-report.json.gz"
+    planned = tuple(planned_slot_ids)
+    actual = tuple(entry.slot_id for entry in entries)
+    if len(set(planned)) != len(planned):
+        raise NativeV3CohortError("planned slot IDs contain duplicates")
+    if sorted(actual) != sorted(planned):
+        raise NativeV3CohortError("generated cohort does not cover the planned slot manifest")
     programs, aliases = deduplicate_entries(entries)
-    outcome = cohort_outcome(len(programs))
+    outcome = cohort_outcome(len(programs), len(planned))
     backend: GraphBackend | None = None
     evaluation_records: list[dict[str, Any]] = []
     graph_evaluations = 0
@@ -679,10 +722,7 @@ def finalize_cohort(
                 program_payload: dict[str, Any] = {
                     **validated_program_artifact(program),
                     "slot_aliases": list(aliases[program.program_hash]),
-                    "lineage": [
-                        slot_lineage[slot_id]
-                        for slot_id in aliases[program.program_hash]
-                    ],
+                    "lineage": [slot_lineage[slot_id] for slot_id in aliases[program.program_hash]],
                 }
                 write_json(
                     program_root / "program.json.gz",
@@ -699,9 +739,7 @@ def finalize_cohort(
                         policy_seed=17,
                         horizon=1,
                         witness_cap=64,
-                        episode_id=(
-                            f"{episode_id}/program-{evaluation_index:02d}"
-                        ),
+                        episode_id=(f"{episode_id}/program-{evaluation_index:02d}"),
                     ),
                     counterexample_pipeline=CounterexamplePipeline(
                         backend=backend,
@@ -711,10 +749,16 @@ def finalize_cohort(
                     program_contract=program_contract,
                 )
                 graph_evaluations += _graph_evaluations(evaluation)
+                scientific_outcome, observed_effect = _scientific_outcome(evaluation)
+                verified_counterexample = _verified_counterexample(evaluation)
                 record = {
                     "program_hash": program.program_hash,
                     "slot_aliases": list(aliases[program.program_hash]),
                     "evaluation_index": evaluation_index,
+                    "contract_status": "VALID",
+                    "scientific_outcome": scientific_outcome,
+                    "observed_effect": observed_effect,
+                    "verified_counterexample": verified_counterexample,
                     "evaluation": evaluation.as_dict(),
                 }
                 evaluation_records.append(record)
@@ -726,8 +770,7 @@ def finalize_cohort(
                         "program": validated_program_artifact(program),
                         "slot_aliases": list(aliases[program.program_hash]),
                         "lineage": [
-                            slot_lineage[slot_id]
-                            for slot_id in aliases[program.program_hash]
+                            slot_lineage[slot_id] for slot_id in aliases[program.program_hash]
                         ],
                         "backend": {
                             "graph_backend_id": backend.backend_id,
@@ -736,12 +779,15 @@ def finalize_cohort(
                                 "score_implementation",
                                 None,
                             ),
-                            "repo": str(getattr(backend, "repo", ""))
-                            or None,
+                            "repo": str(getattr(backend, "repo", "")) or None,
                             "commit": getattr(backend, "commit", None),
                             "dirty": getattr(backend, "dirty", None),
                         },
                         "mutation_forge": git_state(PROJECT_ROOT),
+                        "contract_status": "VALID",
+                        "scientific_outcome": scientific_outcome,
+                        "observed_effect": observed_effect,
+                        "verified_counterexample": verified_counterexample,
                         "evaluation": evaluation.as_dict(),
                     },
                     exclusive=True,
@@ -755,15 +801,19 @@ def finalize_cohort(
             "error_type": type(error).__name__,
             "error": str(error),
             "valid_ast": bool(programs),
+            "planned_slots": len(planned),
+            "manifest_complete": True,
             "valid_slots": sum(entry.program is not None for entry in entries),
             "unique_valid_programs": len(programs),
             "duplicate_aliases": sum(
-                max(0, len(slot_aliases) - 1)
-                for slot_aliases in aliases.values()
+                max(0, len(slot_aliases) - 1) for slot_aliases in aliases.values()
             ),
             "model_turns": model_turns,
-            "graph_evaluations": graph_evaluations,
-            "scientific_terminal_result": False,
+            "program_evaluations": len(evaluation_records),
+            "graph_score_attempts": graph_evaluations,
+            "scientific_result_kind": "INCONCLUSIVE",
+            "verified_counterexample": False,
+            "terminal_reason": "evaluation_error",
             "usage": _usage_total(usages),
             "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),
             "cohort_report": str(report_path),
@@ -788,10 +838,7 @@ def finalize_cohort(
                 Fraction(lower["numerator"], lower["denominator"]),
                 Fraction(upper["numerator"], upper["denominator"]),
             ),
-            program_hash=(
-                f"{int(record['evaluation_index']):08d}:"
-                f"{record['program_hash']}"
-            ),
+            program_hash=(f"{int(record['evaluation_index']):08d}:{record['program_hash']}"),
         )
 
     ranked = sorted(evaluation_records, key=selection_key)
@@ -805,56 +852,90 @@ def finalize_cohort(
     )
     selected_program_hash = (
         str(ranked[0]["program_hash"])
-        if (
-            ranked
-            and outcome != "INCONCLUSIVE"
-            and all_scientifically_comparable
-        )
+        if (ranked and outcome != "INCONCLUSIVE" and all_scientifically_comparable)
         else None
+    )
+    scientific_keys = [selection_key(record)[:-1] for record in ranked]
+    selection_tie_count = scientific_keys.count(scientific_keys[0]) if scientific_keys else 0
+    verified_counterexample = any(
+        record["verified_counterexample"] is True for record in evaluation_records
+    )
+    completed = outcome != "INCONCLUSIVE" and all_scientifically_comparable
+    scientific_result_kind = (
+        "VERIFIED_COUNTEREXAMPLE"
+        if verified_counterexample
+        else "NONE"
+        if completed
+        else "INCONCLUSIVE"
+    )
+    terminal_reason = (
+        "preview_cohort_complete"
+        if completed and communication_mode == "persistent_single_ast"
+        else "cohort_complete"
+        if completed
+        else "cohort_inconclusive"
     )
     report = {
         "schema_version": COHORT_SCHEMA_VERSION,
-        "status": (
-            "completed"
-            if outcome != "INCONCLUSIVE" and all_scientifically_comparable
-            else "inconclusive"
-        ),
+        "status": ("completed" if completed else "inconclusive"),
         "communication_mode": communication_mode,
         "cohort_outcome": outcome,
         "valid_ast": bool(programs),
+        "planned_slots": len(planned),
+        "manifest_complete": True,
         "valid_slots": sum(entry.program is not None for entry in entries),
         "unique_valid_programs": len(programs),
         "duplicate_aliases": sum(
-            max(0, len(slot_aliases) - 1)
-            for slot_aliases in aliases.values()
+            max(0, len(slot_aliases) - 1) for slot_aliases in aliases.values()
         ),
         "model_turns": model_turns,
-        "graph_evaluations": graph_evaluations,
-        "scientific_terminal_result": (
-            outcome != "INCONCLUSIVE" and all_scientifically_comparable
-        ),
+        "program_evaluations": len(evaluation_records),
+        "graph_score_attempts": graph_evaluations,
+        "scientific_result_kind": scientific_result_kind,
+        "verified_counterexample": verified_counterexample,
+        "terminal_reason": terminal_reason,
         "selected_program_hash": selected_program_hash,
-        "canonical_program_order": [
-            program.program_hash for program in programs
-        ],
+        "selection_reason": (
+            "DETERMINISTIC_TIEBREAK"
+            if selected_program_hash is not None and selection_tie_count > 1
+            else "BEST_CONSERVATIVE_FITNESS"
+            if selected_program_hash is not None
+            else None
+        ),
+        "selection_tie_count": selection_tie_count,
+        "scientifically_better_than_peers": (
+            selected_program_hash is not None and len(ranked) > 1 and selection_tie_count == 1
+        ),
+        "canonical_program_order": [program.program_hash for program in programs],
         "program_aliases": {
-            program_hash: list(slot_aliases)
-            for program_hash, slot_aliases in aliases.items()
+            program_hash: list(slot_aliases) for program_hash, slot_aliases in aliases.items()
         },
+        "program_outcomes": [
+            {
+                key: record[key]
+                for key in (
+                    "program_hash",
+                    "slot_aliases",
+                    "evaluation_index",
+                    "contract_status",
+                    "scientific_outcome",
+                    "observed_effect",
+                    "verified_counterexample",
+                )
+            }
+            for record in evaluation_records
+        ],
         "slot_lineage": [
-            slot_lineage[entry.slot_id]
-            for entry in sorted(entries, key=lambda item: item.slot_id)
+            slot_lineage[entry.slot_id] for entry in sorted(entries, key=lambda item: item.slot_id)
         ],
         "usage": _usage_total(usages),
         "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),
         "cohort_report": str(report_path),
         "resumable": False,
     }
-    report[
-        "batch_reports"
-        if communication_mode == "multi_program_batch"
-        else "turn_reports"
-    ] = [dict(item) for item in generation_reports]
+    report["batch_reports" if communication_mode == "multi_program_batch" else "turn_reports"] = [
+        dict(item) for item in generation_reports
+    ]
     write_json(report_path, report)
     return report
 
@@ -1004,15 +1085,11 @@ def run_sequential_cohort(
                 "entries": [entry.as_dict() for entry in parsed.entries],
                 "attempts": attempts,
                 "turn_directory": str(turn),
-                "turn_artifact_complete": (
-                    turn_manifest.get("artifact_complete") is True
-                ),
+                "turn_artifact_complete": (turn_manifest.get("artifact_complete") is True),
             }
             batch_reports.append(batch_report)
             write_json(
-                output_root
-                / "provider-batches"
-                / f"call-{call_index:02d}.json.gz",
+                output_root / "provider-batches" / f"call-{call_index:02d}.json.gz",
                 batch_report,
                 exclusive=True,
             )
@@ -1025,10 +1102,21 @@ def run_sequential_cohort(
             "error_type": type(error).__name__,
             "error": str(error),
             "valid_ast": False,
+            "planned_slots": len(SLOT_IDS),
+            "manifest_complete": False,
+            "valid_slots": 0,
             "unique_valid_programs": 0,
+            "duplicate_aliases": 0,
             "model_turns": model_turns,
-            "graph_evaluations": 0,
-            "scientific_terminal_result": False,
+            "program_evaluations": 0,
+            "graph_score_attempts": 0,
+            "scientific_result_kind": "NONE",
+            "verified_counterexample": False,
+            "terminal_reason": "provider_failed",
+            "selected_program_hash": None,
+            "selection_reason": None,
+            "selection_tie_count": 0,
+            "scientifically_better_than_peers": False,
             "usage": _usage_total(usages),
             "epoch_manifest": str(output_root / "epoch-manifest.json.gz"),
             "resumable": False,
@@ -1046,6 +1134,7 @@ def run_sequential_cohort(
         backend_factory=backend_factory,
         episode_id=episode_id,
         communication_mode="multi_program_batch",
+        planned_slot_ids=SLOT_IDS,
     )
 
 

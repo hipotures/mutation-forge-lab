@@ -62,9 +62,7 @@ PROFILE = ModelProfile("codex", "gpt-5.6-luna", "high")
 
 def _candidate_responses() -> dict[str, dict[str, Any]]:
     value = json.loads(
-        Path("tests/fixtures/native_v3_single_program_responses.json").read_text(
-            encoding="utf-8"
-        )
+        Path("tests/fixtures/native_v3_single_program_responses.json").read_text(encoding="utf-8")
     )
     assert isinstance(value, dict)
     return value
@@ -141,17 +139,14 @@ def test_thread_fork_is_inclusive_and_excludes_later_turns() -> None:
     assert fork.included_turn_ids == (first.turn_id,)
     assert second.turn_id not in fork.included_turn_ids
     request = next(
-        item
-        for item in processes[0].received_requests
-        if item.get("method") == "thread/fork"
+        item for item in processes[0].received_requests if item.get("method") == "thread/fork"
     )
     assert request["params"]["threadId"] == "thread-1"
     assert request["params"]["lastTurnId"] == first.turn_id
     assert request["params"]["excludeTurns"] is False
 
 
-def test_second_fork_accepts_strictly_correlated_late_first_fork_notifications(
-) -> None:
+def test_second_fork_accepts_strictly_correlated_late_first_fork_notifications() -> None:
     adapter = _adapter(FakeScenario(fork_late_notifications=True))
     try:
         anchor = adapter.generate_persistent("anchor", PROFILE)
@@ -188,9 +183,7 @@ def test_thread_fork_rejects_invalid_and_in_progress_boundaries() -> None:
     finally:
         invalid.close()
 
-    in_progress = _adapter(
-        FakeScenario(fork_in_progress_last_turn_ids=["turn-1"])
-    )
+    in_progress = _adapter(FakeScenario(fork_in_progress_last_turn_ids=["turn-1"]))
     try:
         turn = in_progress.generate_persistent("first", PROFILE)
         with pytest.raises(ProtocolError, match="request thread/fork failed"):
@@ -226,11 +219,10 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
     second = SearchMemoryV1(
         protocol_hash=first.protocol_hash,
         seen_program_hashes=tuple(reversed(first.seen_program_hashes)),
-        seen_behavior_signatures=tuple(
-            reversed(first.seen_behavior_signatures)
-        ),
+        seen_behavior_signatures=tuple(reversed(first.seen_behavior_signatures)),
         successful_patterns=tuple(reversed(first.successful_patterns)),
-        failed_patterns=tuple(reversed(first.failed_patterns)),
+        tested_patterns=tuple(reversed(first.tested_patterns)),
+        pending_patterns=tuple(reversed(first.pending_patterns)),
         active_lineages=tuple(reversed(first.active_lineages)),
         validated_archive_ids=tuple(reversed(first.validated_archive_ids)),
         active_parent=first.active_parent,
@@ -242,7 +234,8 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
     assert b"canonical_ast" not in encoded
     assert b'"entry"' not in encoded
     assert len(first.successful_patterns) <= MAX_PATTERNS_PER_OUTCOME
-    assert len(first.failed_patterns) <= MAX_PATTERNS_PER_OUTCOME
+    assert len(first.tested_patterns) <= MAX_PATTERNS_PER_OUTCOME
+    assert len(first.pending_patterns) <= MAX_PATTERNS_PER_OUTCOME
     host_memory = json.dumps(first.as_dict(), sort_keys=True)
     model_memory = json.dumps(first.model_facing_dict(), sort_keys=True)
     assert first.protocol_hash in host_memory
@@ -254,6 +247,8 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
     assert '"selectors":' in model_memory
     assert '"actions":' in model_memory
     assert '"control_flow":' in model_memory
+    assert '"contract_status": "VALID"' in model_memory
+    assert '"scientific_outcome":' in model_memory
 
     reference = build_reference_manifest(
         fixtures,
@@ -282,11 +277,11 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
             selector_families=sample.selector_families,
             action_families=sample.action_families,
             control_flow=sample.control_flow,
-            description=sample.description,
-            description_source=sample.description_source,
-            evaluation_outcome=sample.evaluation_outcome,
-            evidence_kind=sample.evidence_kind,
-            main_evidence=sample.main_evidence,
+            summary=sample.summary,
+            contract_status=sample.contract_status,
+            scientific_outcome=sample.scientific_outcome,
+            model_hypothesis=sample.model_hypothesis,
+            observed_effect=sample.observed_effect,
         )
         for index in range(MAX_PATTERNS_PER_OUTCOME + 1)
     )
@@ -296,7 +291,8 @@ def test_search_memory_is_canonical_bounded_and_contains_no_ast() -> None:
             seen_program_hashes=(),
             seen_behavior_signatures=(),
             successful_patterns=too_many,
-            failed_patterns=(),
+            tested_patterns=(),
+            pending_patterns=(),
             active_lineages=(),
             validated_archive_ids=(),
         )
@@ -397,17 +393,13 @@ def test_fake_lineage_experiment_proves_both_boundaries_and_artifacts(
     assert (workspace / "child-program.json.gz").is_file()
     assert (workspace / "fresh-root-program.json.gz").is_file()
 
-    memory_prompt = (
-        workspace / "provider-turns/07-search-memory.request.md"
-    ).read_text(encoding="utf-8")
+    memory_prompt = (workspace / "provider-turns/07-search-memory.request.md").read_text(
+        encoding="utf-8"
+    )
     json.loads(memory_prompt)
     assert "canonical_program" not in memory_prompt
     assert '"entry"' not in memory_prompt
-    json.loads(
-        (workspace / "provider-turns/00-spec-anchor.request.md").read_text(
-            encoding="utf-8"
-        )
-    )
+    json.loads((workspace / "provider-turns/00-spec-anchor.request.md").read_text(encoding="utf-8"))
 
     expected_suffixes = {
         "codex-profile.json.gz",

@@ -10,13 +10,27 @@ from typing import Any, Literal
 
 from .canonical import canonical_json_bytes
 
-SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.v1"
-MODEL_SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.model.v1"
+SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.v2"
+MODEL_SEARCH_MEMORY_SCHEMA_VERSION = "mforge.native.search_memory.model.v2"
 MAX_SEEN_IDENTITIES = 64
 MAX_PATTERNS_PER_OUTCOME = 8
 MAX_ACTIVE_LINEAGES = 16
 MAX_ARCHIVE_IDS = 16
 MAX_SEARCH_MEMORY_BYTES = 16 * 1024
+SCIENTIFIC_OUTCOMES = frozenset(
+    {
+        "NOT_EVALUATED",
+        "VERIFIED_COUNTEREXAMPLE",
+        "ACCEPTED_IMPROVEMENT",
+        "REJECTED_WORSE",
+        "REJECTED_EQUAL",
+        "REJECTED_NOT_PROVED",
+        "NO_PLAN",
+        "ILLEGAL_FINAL_STATE",
+        "INCONCLUSIVE_SCORE",
+        "PROGRAM_FAILURE",
+    }
+)
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _PRINTABLE = re.compile(r"^[\x20-\x7e]+$")
@@ -91,11 +105,7 @@ def _validated_identifier(value: str, field: str) -> str:
 
 
 def _validated_summary(value: str, field: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) > 600
-        or _PRINTABLE.fullmatch(value) is None
-    ):
+    if not isinstance(value, str) or len(value) > 600 or _PRINTABLE.fullmatch(value) is None:
         raise SearchMemoryError(f"{field} must be 1-600 printable ASCII characters")
     sentence_count = sum(value.count(mark) for mark in ".!?")
     if sentence_count < 1 or sentence_count > 3:
@@ -113,9 +123,7 @@ def _bounded_unique(
     if len(values) > maximum:
         raise SearchMemoryError(f"{field} exceeds {maximum} entries")
     checked = tuple(
-        _validated_hash(value, field)
-        if hash_values
-        else _validated_identifier(value, field)
+        _validated_hash(value, field) if hash_values else _validated_identifier(value, field)
         for value in values
     )
     if len(set(checked)) != len(checked):
@@ -129,11 +137,11 @@ class PatternSummary:
     selector_families: tuple[str, ...]
     action_families: tuple[str, ...]
     control_flow: tuple[str, ...]
-    description: str
-    description_source: Literal["host", "model"]
-    evaluation_outcome: str
-    evidence_kind: Literal["strength", "weakness"]
-    main_evidence: str
+    summary: str
+    contract_status: Literal["VALID"]
+    scientific_outcome: str
+    model_hypothesis: str
+    observed_effect: str | None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -153,18 +161,20 @@ class PatternSummary:
         object.__setattr__(
             self,
             "control_flow",
-            tuple(
-                _validated_identifier(value, "control_flow")
-                for value in self.control_flow
-            ),
+            tuple(_validated_identifier(value, "control_flow") for value in self.control_flow),
         )
         if not self.selector_families and not self.action_families:
             raise SearchMemoryError("pattern must name a selector or action family")
         if not self.control_flow:
             raise SearchMemoryError("pattern must summarize control flow")
-        _validated_summary(self.description, "description")
-        _validated_identifier(self.evaluation_outcome, "evaluation_outcome")
-        _validated_summary(self.main_evidence, "main_evidence")
+        _validated_summary(self.summary, "summary")
+        if self.contract_status != "VALID":
+            raise SearchMemoryError("contract_status must be VALID")
+        if self.scientific_outcome not in SCIENTIFIC_OUTCOMES:
+            raise SearchMemoryError("scientific_outcome is invalid")
+        _validated_summary(self.model_hypothesis, "model_hypothesis")
+        if self.observed_effect is not None:
+            _validated_summary(self.observed_effect, "observed_effect")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -172,11 +182,11 @@ class PatternSummary:
             "selector_families": list(self.selector_families),
             "action_families": list(self.action_families),
             "control_flow": list(self.control_flow),
-            "description": self.description,
-            "description_source": self.description_source,
-            "evaluation_outcome": self.evaluation_outcome,
-            "evidence_kind": self.evidence_kind,
-            "main_evidence": self.main_evidence,
+            "summary": self.summary,
+            "contract_status": self.contract_status,
+            "scientific_outcome": self.scientific_outcome,
+            "model_hypothesis": self.model_hypothesis,
+            "observed_effect": self.observed_effect,
         }
 
     def model_facing_dict(self) -> dict[str, Any]:
@@ -185,10 +195,11 @@ class PatternSummary:
             "selectors": list(self.selector_families),
             "actions": list(self.action_families),
             "control_flow": list(self.control_flow),
-            "summary": self.description,
-            "outcome": self.evaluation_outcome,
-            "evidence_kind": self.evidence_kind,
-            "evidence": self.main_evidence,
+            "summary": self.summary,
+            "contract_status": self.contract_status,
+            "scientific_outcome": self.scientific_outcome,
+            "model_hypothesis": self.model_hypothesis,
+            "observed_effect": self.observed_effect,
         }
 
 
@@ -200,7 +211,8 @@ class LineageSummary:
     behavior_signature: str
     generation: int
     slot: int
-    evaluation_outcome: str
+    contract_status: Literal["VALID"]
+    scientific_outcome: str
     summary: str
 
     def __post_init__(self) -> None:
@@ -218,7 +230,10 @@ class LineageSummary:
             or self.slot < 0
         ):
             raise SearchMemoryError("generation and slot must be non-negative integers")
-        _validated_identifier(self.evaluation_outcome, "evaluation_outcome")
+        if self.contract_status != "VALID":
+            raise SearchMemoryError("contract_status must be VALID")
+        if self.scientific_outcome not in SCIENTIFIC_OUTCOMES:
+            raise SearchMemoryError("scientific_outcome is invalid")
         _validated_summary(self.summary, "summary")
 
     def as_dict(self) -> dict[str, Any]:
@@ -229,7 +244,8 @@ class LineageSummary:
             "behavior_signature": self.behavior_signature,
             "generation": self.generation,
             "slot": self.slot,
-            "evaluation_outcome": self.evaluation_outcome,
+            "contract_status": self.contract_status,
+            "scientific_outcome": self.scientific_outcome,
             "summary": self.summary,
         }
 
@@ -239,7 +255,8 @@ class LineageSummary:
             "parent_id": self.parent_id,
             "generation": self.generation,
             "slot": self.slot,
-            "outcome": self.evaluation_outcome,
+            "contract_status": self.contract_status,
+            "scientific_outcome": self.scientific_outcome,
             "summary": self.summary,
         }
 
@@ -266,7 +283,8 @@ class SearchMemoryV1:
     seen_program_hashes: tuple[str, ...]
     seen_behavior_signatures: tuple[str, ...]
     successful_patterns: tuple[PatternSummary, ...]
-    failed_patterns: tuple[PatternSummary, ...]
+    tested_patterns: tuple[PatternSummary, ...]
+    pending_patterns: tuple[PatternSummary, ...]
     active_lineages: tuple[LineageSummary, ...]
     validated_archive_ids: tuple[str, ...]
     active_parent: ActiveParentReference | None = None
@@ -293,20 +311,31 @@ class SearchMemoryV1:
                 hash_values=True,
             ),
         )
-        for field in ("successful_patterns", "failed_patterns"):
+        for field in (
+            "successful_patterns",
+            "tested_patterns",
+            "pending_patterns",
+        ):
             patterns = getattr(self, field)
             if len(patterns) > MAX_PATTERNS_PER_OUTCOME:
-                raise SearchMemoryError(
-                    f"{field} exceeds {MAX_PATTERNS_PER_OUTCOME} entries"
-                )
+                raise SearchMemoryError(f"{field} exceeds {MAX_PATTERNS_PER_OUTCOME} entries")
             ordered = tuple(sorted(patterns, key=lambda item: item.pattern_id))
             if len({item.pattern_id for item in ordered}) != len(ordered):
                 raise SearchMemoryError(f"{field} contains duplicate pattern IDs")
             object.__setattr__(self, field, ordered)
-        if len(self.active_lineages) > MAX_ACTIVE_LINEAGES:
-            raise SearchMemoryError(
-                f"active_lineages exceeds {MAX_ACTIVE_LINEAGES} entries"
+        pattern_ids = [
+            item.pattern_id
+            for field in (
+                "successful_patterns",
+                "tested_patterns",
+                "pending_patterns",
             )
+            for item in getattr(self, field)
+        ]
+        if len(set(pattern_ids)) != len(pattern_ids):
+            raise SearchMemoryError("pattern IDs must be unique across outcome groups")
+        if len(self.active_lineages) > MAX_ACTIVE_LINEAGES:
+            raise SearchMemoryError(f"active_lineages exceeds {MAX_ACTIVE_LINEAGES} entries")
         lineages = tuple(
             sorted(
                 self.active_lineages,
@@ -336,15 +365,12 @@ class SearchMemoryV1:
             "protocol_hash": self.protocol_hash,
             "seen_program_hashes": list(self.seen_program_hashes),
             "seen_behavior_signatures": list(self.seen_behavior_signatures),
-            "successful_patterns": [
-                item.as_dict() for item in self.successful_patterns
-            ],
-            "failed_patterns": [item.as_dict() for item in self.failed_patterns],
+            "successful_patterns": [item.as_dict() for item in self.successful_patterns],
+            "tested_patterns": [item.as_dict() for item in self.tested_patterns],
+            "pending_patterns": [item.as_dict() for item in self.pending_patterns],
             "active_lineages": [item.as_dict() for item in self.active_lineages],
             "validated_archive_ids": list(self.validated_archive_ids),
-            "active_parent": (
-                None if self.active_parent is None else self.active_parent.as_dict()
-            ),
+            "active_parent": (None if self.active_parent is None else self.active_parent.as_dict()),
         }
 
     def model_facing_dict(self) -> dict[str, Any]:
@@ -367,21 +393,17 @@ class SearchMemoryV1:
                     if lineage is None
                     else {
                         "summary": lineage.summary,
-                        "outcome": lineage.evaluation_outcome,
+                        "contract_status": lineage.contract_status,
+                        "scientific_outcome": lineage.scientific_outcome,
                     }
                 ),
             }
         return {
             "schema_version": MODEL_SEARCH_MEMORY_SCHEMA_VERSION,
-            "successful_patterns": [
-                item.model_facing_dict() for item in self.successful_patterns
-            ],
-            "failed_patterns": [
-                item.model_facing_dict() for item in self.failed_patterns
-            ],
-            "active_lineages": [
-                item.model_facing_dict() for item in self.active_lineages
-            ],
+            "successful_patterns": [item.model_facing_dict() for item in self.successful_patterns],
+            "tested_patterns": [item.model_facing_dict() for item in self.tested_patterns],
+            "pending_patterns": [item.model_facing_dict() for item in self.pending_patterns],
+            "active_lineages": [item.model_facing_dict() for item in self.active_lineages],
             "validated_archive_aliases": list(self.validated_archive_ids),
             "active_parent": active_parent,
         }
