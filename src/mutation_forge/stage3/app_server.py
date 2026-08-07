@@ -1089,7 +1089,10 @@ class CodexAppServerAdapter:
                 raise ProtocolError("malformed notification")
             if self._consume_global_notification(method, ev):
                 continue
-            if method == "warning" and allow_server_retry:
+            # WarningNotification is a legal ServerNotification in the installed
+            # app-server protocol. Recording one does not relax any final response,
+            # usage, or terminal-status requirement below.
+            if method == "warning":
                 if (
                     not isinstance(ev.get("message"), str)
                     or not ev["message"]

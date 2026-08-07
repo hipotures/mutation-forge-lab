@@ -44,7 +44,7 @@ class _In:
 @dataclass
 class FakeScenario:
     enabled_skills: list[str] = field(default_factory=list)
-    final_text: str = "fixture answer"
+    final_text: str | None = "fixture answer"
     usage: dict[str, Any] | None = field(
         default_factory=lambda: {
             "inputTokens": 2,
@@ -84,6 +84,7 @@ class FakeScenario:
     final_texts: list[str] | None = None
     dangling_reasoning: bool = False
     warning_message: str | None = None
+    thread_status_after_warning: str | None = None
     thread_id: str = "thread-1"
     compaction_terminal_status: str = "completed"
     compaction_item_type: str = "contextCompaction"
@@ -578,6 +579,16 @@ class FakeProcess:
                         },
                     }
                 )
+                if s.thread_status_after_warning is not None:
+                    q.put(
+                        {
+                            "method": "thread/status/changed",
+                            "params": {
+                                "threadId": thread_id,
+                                "status": {"type": s.thread_status_after_warning},
+                            },
+                        }
+                    )
             if s.interleave:
                 q.put(
                     {

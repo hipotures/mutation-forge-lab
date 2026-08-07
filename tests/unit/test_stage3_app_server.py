@@ -334,6 +334,90 @@ def test_protocol_abuse_fails_only_the_adapter(
         adapter.start()
 
 
+def test_legal_warning_with_completed_turn_preserves_success_requirements(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(warning_message="fixture legal warning"),
+        artifacts=True,
+    )
+    with adapter:
+        result = adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert result.text == "fixture answer"
+    assert result.usage.final is True
+    assert metadata["status"] == "completed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is True
+    stdout = (tmp_path / "logs" / "slot-00.stdout.jsonl").read_text(encoding="utf-8")
+    assert '"method":"warning"' in stdout
+    assert "fixture legal warning" in stdout
+
+
+def test_legal_warning_with_interrupted_turn_fails_closed(tmp_path: Path) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(
+            warning_message="fixture legal warning",
+            terminal_status="interrupted",
+        ),
+    )
+    with adapter, pytest.raises(TurnError, match="interrupted"):
+        adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert metadata["status"] == "failed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is False
+
+
+def test_legal_warning_with_system_error_fails_closed(tmp_path: Path) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(
+            warning_message="fixture legal warning",
+            thread_status_after_warning="systemError",
+        ),
+    )
+    with adapter, pytest.raises(TurnError, match="systemError"):
+        adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert metadata["status"] == "failed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is False
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    [
+        (
+            FakeScenario(warning_message="fixture legal warning", final_text=None),
+            "no final_answer",
+        ),
+        (
+            FakeScenario(warning_message="fixture legal warning", usage=None),
+            "exact tokenUsage",
+        ),
+    ],
+)
+def test_legal_warning_does_not_relax_final_response_or_usage(
+    tmp_path: Path,
+    scenario: Any,
+    message: str,
+) -> None:
+    adapter, _ = _adapter(tmp_path, scenario)
+    with adapter, pytest.raises(TurnError, match=message):
+        adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert metadata["status"] == "failed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is False
+
+
 def test_system_error_and_oversized_message_are_rejected(tmp_path: Path) -> None:
     adapter, _ = _adapter(tmp_path)
     with adapter:
