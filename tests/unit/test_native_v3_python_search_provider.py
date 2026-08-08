@@ -63,7 +63,7 @@ class _Adapter:
         )
 
     def inspect_metadata(self) -> dict[str, int]:
-        return {"serverWarnings": 0}
+        return {"serverRetries": 0, "serverWarnings": 0}
 
     def generate_persistent(
         self,
@@ -243,6 +243,10 @@ def test_provider_forks_roots_at_anchor_and_child_at_exact_parent(
         anchor.turn_id,
         anchor.turn_id,
         root_zero.context.turn_id,
+    ]
+    assert [item[0] for item in adapter.forks[:2]] == [
+        anchor.thread_id,
+        anchor.thread_id,
     ]
     provider.close()
     assert adapter.closed is True

@@ -552,6 +552,10 @@ class CodexM5SearchProvider:
         idempotency_key: str,
         artifact_dir: Path,
     ) -> M5ProviderResultV1:
+        self.adapter.activate_forked_thread(
+            anchor.thread_id,
+            completed_turn_ids=anchor.included_turn_ids,
+        )
         fork = self._fork(
             last_turn_id=anchor.turn_id,
             expected_history=anchor.included_turn_ids,
