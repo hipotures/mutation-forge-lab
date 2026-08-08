@@ -247,13 +247,26 @@ class IsolatedPolicyWorkerV1:
         self._closed = False
         self._calls = 0
         self._failures = 0
-        self._started_at = time.monotonic()
+        self._rotations = 0
+        self._started_at = 0.0
         self._startup_seconds = 0.0
         self._controls: dict[str, JsonValue] = {}
         self._last_rss_kib = 0
-        self._stderr = tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115
-        bwrap, runtime_root, python = _require_linux_sandbox()
         try:
+            self._spawn_process()
+        except BaseException:
+            self._failed = True
+            self._closed = True
+            raise
+
+    def _spawn_process(self) -> None:
+        self._started_at = time.monotonic()
+        self._startup_seconds = 0.0
+        self._controls = {}
+        self._last_rss_kib = 0
+        self._stderr = tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115
+        try:
+            bwrap, runtime_root, python = _require_linux_sandbox()
             self._process = subprocess.Popen(
                 _worker_command(bwrap, runtime_root, python),
                 stdin=subprocess.PIPE,
@@ -287,16 +300,74 @@ class IsolatedPolicyWorkerV1:
             ready = self._receive(time.monotonic() + min(10.0, self.limits.worker_lifetime_seconds))
             self._accept_ready(ready)
             self._startup_seconds = time.monotonic() - self._started_at
-        except BaseException:
-            self._failed = True
+        except (_WorkerTimeout, _WorkerCrash) as error:
             self._terminate()
-            self._closed = True
+            self._stderr.close()
+            raise PolicyInfrastructureError(
+                f"worker initialization failed: {error}"
+            ) from error
+        except BaseException:
+            self._terminate()
             self._stderr.close()
             raise
 
     @property
     def usable(self) -> bool:
         return not self._failed and not self._closed and self._process.poll() is None
+
+    def _shutdown_process(self, *, strict: bool) -> None:
+        failure: BaseException | None = None
+        exit_code = self._process.poll()
+        if strict and exit_code is not None:
+            failure = PolicyInfrastructureError(
+                f"worker exited before rotation shutdown (code={exit_code})"
+            )
+        elif exit_code is None:
+            try:
+                self._send({"type": "shutdown"}, self.limits.request_bytes)
+                response = self._receive(time.monotonic() + 0.2)
+                if response != {"status": "ok", "type": "shutdown"}:
+                    raise PolicyProtocolError("worker returned invalid shutdown response")
+                self._process.wait(timeout=0.2)
+            except BaseException as error:
+                failure = error
+        self._terminate()
+        self._stderr.close()
+        if strict and failure is not None:
+            raise PolicyInfrastructureError(
+                "worker process could not be cleanly rotated"
+            ) from failure
+
+    def _rotate_process(self) -> None:
+        try:
+            self._shutdown_process(strict=True)
+            self._spawn_process()
+        except BaseException:
+            self._failed = True
+            raise
+        self._rotations += 1
+
+    def _prepare_full_propose_window(self) -> float:
+        exit_code = self._process.poll()
+        if exit_code is not None:
+            self._failed = True
+            self._shutdown_process(strict=False)
+            raise PolicyInfrastructureError(
+                f"worker exited while idle before invocation (code={exit_code})"
+            )
+        process_deadline = self._started_at + self.limits.worker_lifetime_seconds
+        now = time.monotonic()
+        if process_deadline - now < self.limits.propose_wall_seconds:
+            self._rotate_process()
+            process_deadline = self._started_at + self.limits.worker_lifetime_seconds
+            now = time.monotonic()
+        if process_deadline - now < self.limits.propose_wall_seconds:
+            self._failed = True
+            self._shutdown_process(strict=False)
+            raise PolicyInfrastructureError(
+                "worker lifetime cannot guarantee a full propose wall-time window"
+            )
+        return now
 
     def _accept_ready(self, ready: dict[str, object]) -> None:
         if (
@@ -437,9 +508,6 @@ class IsolatedPolicyWorkerV1:
 
         if not self.usable:
             raise PolicyInfrastructureError("failed or closed workers cannot be reused")
-        lifetime_remaining = self.limits.worker_lifetime_seconds - (
-            time.monotonic() - self._started_at
-        )
         try:
             session = SafeGraphSessionV1(
                 graph=graph,
@@ -452,22 +520,10 @@ class IsolatedPolicyWorkerV1:
             )
         except (SafeAPIInfrastructureError, ValueError) as error:
             raise PolicyInfrastructureError(f"invalid host runtime input: {error}") from error
-        if lifetime_remaining <= 0:
-            self._failed = True
-            self._terminate()
-            self._failures += 1
-            return self._failure_result(
-                session,
-                self._program_failure(
-                    "WORKER_LIFETIME_EXCEEDED",
-                    "candidate worker lifetime was exhausted",
-                ),
-                0.0,
-            )
         graph_view: GraphViewV1 = graph_view_v1(graph)
         invocation = os.urandom(16).hex()
-        started = time.monotonic()
-        deadline = started + min(self.limits.propose_wall_seconds, lifetime_remaining)
+        started = self._prepare_full_propose_window()
+        deadline = started + self.limits.propose_wall_seconds
         program_error_sent = False
         try:
             self._send(
@@ -664,6 +720,7 @@ class IsolatedPolicyWorkerV1:
             "pid": self._process.pid,
             "calls": self._calls,
             "failures": self._failures,
+            "rotations": self._rotations,
             "usable": self.usable,
             "startup_seconds": self._startup_seconds,
             "worker_age_seconds": max(0.0, time.monotonic() - self._started_at),
@@ -678,10 +735,12 @@ class IsolatedPolicyWorkerV1:
     def _stderr_size(self) -> int:
         try:
             return os.fstat(self._stderr.fileno()).st_size
-        except OSError:
+        except (OSError, ValueError):
             return 0
 
     def captured_stderr(self) -> str:
+        if self._stderr.closed:
+            return ""
         self._stderr.seek(0)
         data = self._stderr.read(self.limits.diagnostics_bytes)
         return data.decode("utf-8", errors="replace")
@@ -690,26 +749,25 @@ class IsolatedPolicyWorkerV1:
         process = getattr(self, "_process", None)
         if process is None:
             return
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        if process.poll() is None:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
         try:
             process.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=1.0)
+        for stream_name in ("_stdin", "_stdout"):
+            stream = getattr(self, stream_name, None)
+            if stream is not None and not stream.closed:
+                with suppress(OSError):
+                    stream.close()
 
     def close(self) -> None:
         if self._closed:
             return
-        if self.usable:
-            try:
-                self._send({"type": "shutdown"}, self.limits.request_bytes)
-                self._receive(time.monotonic() + 0.2)
-            except BaseException:
-                self._failed = True
-        self._terminate()
+        self._shutdown_process(strict=False)
         self._closed = True
-        self._stderr.close()
 
     def __enter__(self) -> IsolatedPolicyWorkerV1:
         return self

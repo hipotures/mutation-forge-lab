@@ -85,8 +85,13 @@ The 1-second wall limit has more than 85 times the observed maximum-call
 headroom while remaining a strict per-call boundary. The 256 MiB address-space
 limit leaves room for CPython virtual-memory behavior that RSS alone does not
 measure. The 60-second lifetime permits worker reuse while bounding accumulated
-state and process lifetime. Reducing either memory or lifetime should require a
-separate cross-platform benchmark rather than inference from this Linux run.
+state and process lifetime. Before an invocation that cannot receive the full
+1-second wall window, the host cleanly reaps the idle process, starts the same
+validated source in a fresh sandbox, and repeats every sandbox attestation.
+Host idle or scoring time therefore causes transparent rotation rather than a
+program failure or a shortened `propose` deadline. Reducing either memory or
+lifetime should require a separate cross-platform benchmark rather than
+inference from this Linux run.
 
 M2 also recommends freezing the following capability budgets:
 
@@ -136,6 +141,8 @@ exhaustion, and candidate-process crash are classified as
 `INFRASTRUCTURE_FAILURE` exceptions and must not become scientific fitness.
 Only the explicit host `IllegalRewriteError` contract converts a
 candidate-invalid final graph to `NoPlan("ILLEGAL_FINAL_STATE")`.
+The 60-second process-lifetime boundary is enforced between invocations by
+transparent rotation and is never reported as candidate fitness.
 
 ## Residual Limitations
 

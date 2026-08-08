@@ -20,8 +20,13 @@ from mutation_forge.native_v3_python import (
     PolicyRuntimeLimitsV1,
     UnsupportedPolicySandboxError,
 )
-from mutation_forge.native_v3_python.runner import _canonical_frame, _strict_json_object
-from mutation_forge.native_v3_python.safe_api import SafeGraphSessionV1
+from mutation_forge.native_v3_python.runner import (
+    _canonical_frame,
+    _strict_json_object,
+    _WorkerCrash,
+    _WorkerTimeout,
+)
+from mutation_forge.native_v3_python.safe_api import SafeGraphSessionV1, graph_view_v1
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "mutation_forge" / "native_v3_python"
@@ -344,21 +349,242 @@ def test_host_api_time_is_included_in_propose_wall_limit(
     worker.close()
 
 
-def test_worker_lifetime_exhaustion_is_program_failure() -> None:
+def test_worker_lifetime_rotates_between_calls_without_program_failure() -> None:
     worker = IsolatedPolicyWorkerV1(
-        NO_PLAN_SOURCE,
-        PolicyRuntimeLimitsV1(worker_lifetime_seconds=0.25),
+        ADD_EDGE_SOURCE,
+        PolicyRuntimeLimitsV1(
+            propose_wall_seconds=0.05,
+            worker_lifetime_seconds=0.25,
+        ),
     )
-    time.sleep(0.3)
+    first = worker.invoke(
+        context=_context(),
+        graph=_cubic_graph(),
+        rewrite_host=HOST,
+        seed=11,
+    )
+    first_pid = worker.telemetry()["pid"]
+    first_controls = worker.telemetry()["controls"]
+    first_process = worker._process  # noqa: SLF001 - process-rotation evidence
+    worker._started_at -= 0.24  # noqa: SLF001 - deterministic host-idle simulation
+    second = worker.invoke(
+        context=_context(),
+        graph=_cubic_graph(),
+        rewrite_host=HOST,
+        seed=11,
+    )
+    second_process = worker._process  # noqa: SLF001 - process-rotation evidence
+    worker._started_at -= 0.24  # noqa: SLF001 - deterministic host-idle simulation
     result = worker.invoke(
         context=_context(),
         graph=_cubic_graph(),
         rewrite_host=HOST,
         seed=11,
     )
-    assert result.outcome == "PROGRAM_FAILURE"
-    assert result.failure is not None
-    assert result.failure.code == "WORKER_LIFETIME_EXCEEDED"
+    telemetry = worker.telemetry()
+    assert first.outcome == second.outcome == result.outcome == "REWRITE_PLAN"
+    assert first.failure is second.failure is result.failure is None
+    assert first.rewrite_plan == second.rewrite_plan == result.rewrite_plan
+    assert first.semantic_trace == second.semantic_trace == result.semantic_trace
+    assert telemetry["pid"] != first_pid
+    assert telemetry["rotations"] == 2
+    assert telemetry["calls"] == 3
+    assert telemetry["failures"] == 0
+    assert telemetry["controls"] == first_controls
+    assert first_process.poll() is not None
+    assert first_process.stdin is not None and first_process.stdin.closed
+    assert first_process.stdout is not None and first_process.stdout.closed
+    assert second_process.poll() is not None
+    assert second_process.stdin is not None and second_process.stdin.closed
+    assert second_process.stdout is not None and second_process.stdout.closed
+    assert worker.usable
+    final_process = worker._process  # noqa: SLF001 - cleanup evidence
+    worker.close()
+    assert final_process.stdin is not None and final_process.stdin.closed
+    assert final_process.stdout is not None and final_process.stdout.closed
+    worker.close()
+    assert worker.telemetry()["usable"] is False
+    assert worker.captured_stderr() == ""
+
+
+def test_rotated_worker_receives_the_full_propose_wall_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = SafeGraphSessionV1.handle_call
+
+    def slow_call(
+        session: SafeGraphSessionV1,
+        method: str,
+        arguments: dict[str, object],
+    ) -> object:
+        time.sleep(0.05)
+        return original(session, method, arguments)
+
+    monkeypatch.setattr(SafeGraphSessionV1, "handle_call", slow_call)
+    worker = IsolatedPolicyWorkerV1(
+        NO_PLAN_SOURCE,
+        PolicyRuntimeLimitsV1(
+            propose_wall_seconds=0.15,
+            worker_lifetime_seconds=0.5,
+        ),
+    )
+    worker._started_at = time.monotonic() - 0.49  # noqa: SLF001
+    result = worker.invoke(
+        context=_context(),
+        graph=_cubic_graph(),
+        rewrite_host=HOST,
+        seed=11,
+    )
+    assert result.outcome == "NO_PLAN"
+    assert result.failure is None
+    assert 0.05 <= result.wall_seconds < 0.15
+    assert worker.telemetry()["rotations"] == 1
+    worker.close()
+
+
+def test_rotation_startup_failure_is_infrastructure_not_program_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = IsolatedPolicyWorkerV1(
+        NO_PLAN_SOURCE,
+        PolicyRuntimeLimitsV1(
+            propose_wall_seconds=0.05,
+            worker_lifetime_seconds=0.25,
+        ),
+    )
+    process = worker._process  # noqa: SLF001 - process-rotation evidence
+    worker._started_at -= 0.24  # noqa: SLF001 - deterministic host-idle simulation
+
+    def fail_spawn() -> None:
+        raise UnsupportedPolicySandboxError("fixture re-attestation failure")
+
+    monkeypatch.setattr(worker, "_spawn_process", fail_spawn)
+    with pytest.raises(
+        UnsupportedPolicySandboxError,
+        match="fixture re-attestation failure",
+    ):
+        worker.invoke(
+            context=_context(),
+            graph=_cubic_graph(),
+            rewrite_host=HOST,
+            seed=11,
+        )
+    assert process.poll() is not None
+    assert worker.telemetry()["failures"] == 0
+    assert not worker.usable
+    assert worker.captured_stderr() == ""
+    worker.close()
+
+
+@pytest.mark.parametrize(
+    "startup_error",
+    (
+        _WorkerTimeout("fixture startup timeout"),
+        _WorkerCrash("fixture startup crash"),
+    ),
+)
+def test_initial_worker_startup_failures_are_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+    startup_error: Exception,
+) -> None:
+    def fail_receive(
+        _worker: IsolatedPolicyWorkerV1,
+        _deadline: float,
+    ) -> dict[str, object]:
+        raise startup_error
+
+    monkeypatch.setattr(IsolatedPolicyWorkerV1, "_receive", fail_receive)
+    with pytest.raises(PolicyInfrastructureError, match="worker initialization failed"):
+        IsolatedPolicyWorkerV1(NO_PLAN_SOURCE)
+
+
+def test_failed_rotation_shutdown_is_infrastructure_and_reaps_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = IsolatedPolicyWorkerV1(
+        NO_PLAN_SOURCE,
+        PolicyRuntimeLimitsV1(
+            propose_wall_seconds=0.05,
+            worker_lifetime_seconds=0.25,
+        ),
+    )
+    process = worker._process  # noqa: SLF001 - rotation failure evidence
+    worker._started_at -= 0.24  # noqa: SLF001 - deterministic host-idle simulation
+    monkeypatch.setattr(
+        worker,
+        "_receive",
+        lambda _deadline: {"status": "invalid", "type": "shutdown"},
+    )
+    with pytest.raises(PolicyInfrastructureError, match="cleanly rotated"):
+        worker.invoke(
+            context=_context(),
+            graph=_cubic_graph(),
+            rewrite_host=HOST,
+            seed=11,
+        )
+    assert process.poll() is not None
+    assert worker.telemetry()["rotations"] == 0
+    assert worker.telemetry()["failures"] == 0
+    assert not worker.usable
+    worker.close()
+
+
+def test_worker_crash_while_host_is_idle_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = IsolatedPolicyWorkerV1(NO_PLAN_SOURCE)
+
+    def crash_during_host_setup(graph: GraphState) -> object:
+        os.killpg(worker._process.pid, signal.SIGKILL)  # noqa: SLF001
+        worker._process.wait(timeout=1.0)  # noqa: SLF001
+        return graph_view_v1(graph)
+
+    monkeypatch.setattr(
+        "mutation_forge.native_v3_python.runner.graph_view_v1",
+        crash_during_host_setup,
+    )
+    with pytest.raises(PolicyInfrastructureError, match="exited while idle"):
+        worker.invoke(
+            context=_context(),
+            graph=_cubic_graph(),
+            rewrite_host=HOST,
+            seed=11,
+        )
+    assert worker.telemetry()["failures"] == 0
+    assert not worker.usable
+    worker.close()
+
+
+def test_worker_crash_at_rotation_boundary_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = IsolatedPolicyWorkerV1(
+        NO_PLAN_SOURCE,
+        PolicyRuntimeLimitsV1(
+            propose_wall_seconds=0.05,
+            worker_lifetime_seconds=0.25,
+        ),
+    )
+    process = worker._process  # noqa: SLF001 - rotation race evidence
+    worker._started_at -= 0.24  # noqa: SLF001 - deterministic host-idle simulation
+    rotate = worker._rotate_process  # noqa: SLF001 - deterministic race injection
+
+    def crash_at_rotation_boundary() -> None:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=1.0)
+        rotate()
+
+    monkeypatch.setattr(worker, "_rotate_process", crash_at_rotation_boundary)
+    with pytest.raises(PolicyInfrastructureError, match="cleanly rotated"):
+        worker.invoke(
+            context=_context(),
+            graph=_cubic_graph(),
+            rewrite_host=HOST,
+            seed=11,
+        )
+    assert process.poll() is not None
+    assert worker.telemetry()["rotations"] == 0
+    assert worker.telemetry()["failures"] == 0
     assert not worker.usable
     worker.close()
 
