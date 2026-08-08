@@ -29,6 +29,7 @@ from mutation_forge.native_v3_python.search import (
     M5ProviderContextV1,
     M5ProviderResultV1,
 )
+from mutation_forge.native_v3_python.search_provider import CodexM5SearchProvider
 
 
 def _config(tmp_path: Path, *, exp_id: str = "python-preview") -> Path:
@@ -634,6 +635,82 @@ def test_cleanup_runs_once_and_does_not_mask_primary_failure(
     assert "secret" not in json.dumps(result)
     assert provider.close_calls == 1
     assert backend.close_calls == 1
+
+
+def test_owned_provider_can_preserve_durable_capsule_for_resume() -> None:
+    class Adapter:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class Capsule:
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        def cleanup(self) -> None:
+            self.cleanup_calls += 1
+
+    provider = object.__new__(CodexM5SearchProvider)
+    adapter = Adapter()
+    capsule = Capsule()
+    provider.adapter = adapter  # type: ignore[assignment]
+    provider._owns_adapter = True
+    provider._cleanup_capsule = True
+    provider._capsule = capsule  # type: ignore[assignment]
+
+    provider.close(cleanup_capsule=False)
+
+    assert adapter.close_calls == 1
+    assert capsule.cleanup_calls == 0
+
+
+def test_blocked_preview_preserves_owned_capsule_for_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Adapter:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class Capsule:
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        def cleanup(self) -> None:
+            self.cleanup_calls += 1
+
+    provider = object.__new__(CodexM5SearchProvider)
+    adapter = Adapter()
+    capsule = Capsule()
+    provider.adapter = adapter  # type: ignore[assignment]
+    provider._owns_adapter = True
+    provider._cleanup_capsule = True
+    provider._capsule = capsule  # type: ignore[assignment]
+    provider.model = "fixture-model"
+    provider.effort = "high"
+    monkeypatch.setattr(
+        preview_module,
+        "run_m5_search",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("resumable failure")),
+    )
+
+    result = run_python_preview(
+        _config(tmp_path),
+        provider_factory=lambda *_: provider,
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+
+    assert result["state"] == "blocked"
+    assert adapter.close_calls == 1
+    assert capsule.cleanup_calls == 0
 
 
 def test_public_cli_routes_python_preview_without_dsl_runner(

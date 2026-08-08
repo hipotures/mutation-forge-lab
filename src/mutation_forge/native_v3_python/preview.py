@@ -974,7 +974,15 @@ def run_python_preview(
     cleanup_errors: list[Exception] = []
     if provider is not None:
         try:
-            provider.close()
+            if isinstance(provider, CodexM5SearchProvider):
+                provider.close(
+                    cleanup_capsule=(
+                        primary_error is None
+                        and final_state.get("state") == "completed"
+                    )
+                )
+            else:
+                provider.close()
         except Exception as error:
             cleanup_errors.append(error)
     if backend is not None:

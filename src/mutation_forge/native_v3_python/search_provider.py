@@ -628,9 +628,14 @@ class CodexM5SearchProvider:
             history=previous.context.included_turn_ids,
         )
 
-    def close(self) -> None:
+    def close(self, *, cleanup_capsule: bool | None = None) -> None:
         self.adapter.close()
-        if self._owns_adapter and self._cleanup_capsule and self._capsule is not None:
+        cleanup = (
+            self._cleanup_capsule
+            if cleanup_capsule is None
+            else cleanup_capsule
+        )
+        if self._owns_adapter and cleanup and self._capsule is not None:
             self._capsule.cleanup()
 
 
