@@ -9,7 +9,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
@@ -935,19 +935,37 @@ class CodexAppServerAdapter:
             self.activate_forked_thread(child_thread_id)
         return fork
 
-    def activate_forked_thread(self, child_thread_id: str) -> None:
-        """Select one child previously returned by thread/fork."""
+    def activate_forked_thread(
+        self,
+        child_thread_id: str,
+        *,
+        completed_turn_ids: Sequence[str] | None = None,
+    ) -> None:
+        """Select one idle child and restore its exact completed history."""
 
         thread = self._forked_threads.get(child_thread_id)
         if thread is None:
             raise ValueError("unknown forked thread")
+        known_turns = self._completed_turn_ids.get(child_thread_id, [])
+        if completed_turn_ids is not None:
+            restored_turns = list(completed_turn_ids)
+            if (
+                not restored_turns
+                or any(not isinstance(turn_id, str) or not turn_id for turn_id in restored_turns)
+                or len(set(restored_turns)) != len(restored_turns)
+            ):
+                raise ValueError("completed turn history must be non-empty and unique")
+            if known_turns and known_turns != restored_turns:
+                raise ProtocolError("completed turn history changed during activation")
+            self._completed_turn_ids[child_thread_id] = restored_turns
+            known_turns = restored_turns
         self._thread = dict(thread)
         self._current_thread_id = child_thread_id
         self._current_turn_id = None
         self._last_usage_raw = None
         self._active.clear()
         self._completed.clear()
-        self._last_status = "initialized"
+        self._last_status = "completed" if known_turns else "initialized"
 
     def _generate_on_thread(
         self,

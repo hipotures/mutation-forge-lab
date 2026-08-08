@@ -171,6 +171,59 @@ def test_second_fork_accepts_strictly_correlated_late_first_fork_notifications()
     assert child_followup.thread_id == child.child_thread_id
 
 
+def test_switching_back_to_completed_parent_allows_exact_child_fork() -> None:
+    adapter = _adapter(FakeScenario(), max_campaigns=4)
+    try:
+        anchor = adapter.generate_persistent("anchor", PROFILE)
+        parent_branch = adapter.fork_persistent_thread(
+            PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        parent = adapter.generate_persistent("parent", PROFILE)
+        sibling_branch = adapter.fork_persistent_thread(
+            PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        adapter.generate_persistent("sibling", PROFILE)
+        adapter.activate_forked_thread(
+            parent_branch.child_thread_id,
+            completed_turn_ids=(anchor.turn_id, parent.turn_id),
+        )
+        child = adapter.fork_persistent_thread(
+            PROFILE,
+            last_turn_id=parent.turn_id,
+        )
+    finally:
+        adapter.close()
+
+    assert child.source_thread_id == parent_branch.child_thread_id
+    assert child.included_turn_ids == (anchor.turn_id, parent.turn_id)
+    assert sibling_branch.child_thread_id != child.source_thread_id
+
+
+def test_switching_parent_rejects_changed_completed_history() -> None:
+    adapter = _adapter(FakeScenario())
+    try:
+        anchor = adapter.generate_persistent("anchor", PROFILE)
+        branch = adapter.fork_persistent_thread(
+            PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        parent = adapter.generate_persistent("parent", PROFILE)
+        with pytest.raises(ProtocolError, match="history changed"):
+            adapter.activate_forked_thread(
+                branch.child_thread_id,
+                completed_turn_ids=(anchor.turn_id, "different-turn"),
+            )
+    finally:
+        adapter.close()
+
+    assert parent.turn_id != "different-turn"
+
+
 def test_thread_fork_rejects_invalid_and_in_progress_boundaries() -> None:
     invalid = _adapter(FakeScenario())
     try:
