@@ -46,6 +46,8 @@ class _Adapter:
         self.current_thread = "anchor-thread"
         self.histories: dict[str, tuple[str, ...]] = {"anchor-thread": ()}
         self.forks: list[tuple[str, str, tuple[str, ...]]] = []
+        self.activations: list[tuple[str, tuple[str, ...] | None]] = []
+        self.resumed: list[str] = []
         self.turn_count = 0
         self.closed = False
 
@@ -142,8 +144,32 @@ class _Adapter:
     ) -> None:
         assert thread_id in self.histories
         if completed_turn_ids is not None:
-            assert self.histories[thread_id] == completed_turn_ids
+            self.histories[thread_id] = completed_turn_ids
+        self.activations.append((thread_id, completed_turn_ids))
         self.current_thread = thread_id
+
+    def resume_thread(
+        self,
+        profile: ModelProfile,
+        *,
+        thread_id: str,
+        thread_path: str,
+    ) -> None:
+        del profile, thread_path
+        self.histories.setdefault(thread_id, ())
+        self.current_thread = thread_id
+        self.resumed.append(thread_id)
+
+    def resume_forked_thread(
+        self,
+        profile: ModelProfile,
+        *,
+        thread_id: str,
+        thread_path: str,
+    ) -> None:
+        del profile, thread_path
+        self.histories.setdefault(thread_id, ())
+        self.resumed.append(thread_id)
 
     def close(self) -> None:
         self.closed = True
@@ -177,6 +203,7 @@ def test_provider_forks_roots_at_anchor_and_child_at_exact_parent(
         idempotency_key="root-zero",
         artifact_dir=tmp_path / "root-zero",
     )
+    assert adapter.activations == [(root_zero.context.thread_id, None)]
     fork_count = len(adapter.forks)
     turn_count = adapter.turn_count
     assert (
@@ -215,6 +242,10 @@ def test_provider_forks_roots_at_anchor_and_child_at_exact_parent(
         idempotency_key="root-one",
         artifact_dir=tmp_path / "root-one",
     )
+    assert adapter.activations[-2:] == [
+        (anchor.thread_id, anchor.included_turn_ids),
+        (root_one.context.thread_id, None),
+    ]
     child = provider.generate_child(
         parent=root_zero.context,
         generation=1,
@@ -250,6 +281,67 @@ def test_provider_forks_roots_at_anchor_and_child_at_exact_parent(
     ]
     provider.close()
     assert adapter.closed is True
+
+
+def test_first_root_after_resume_reactivates_exact_anchor(tmp_path: Path) -> None:
+    initial_adapter = _Adapter()
+    initial_provider = CodexM5SearchProvider(
+        workspace=tmp_path / "runtime",
+        model="fixture-model",
+        effort="high",
+        base_instructions="Return only the structured response.",
+        adapter=cast(Any, initial_adapter),
+    )
+    anchor = initial_provider.ensure_specification_anchor(
+        prompt="retain specification",
+        system_prompt="system",
+        output_schema=specification_ack_schema(),
+        artifact_dir=tmp_path / "anchor",
+    ).context
+    prior_root = initial_provider.generate_root(
+        anchor=anchor,
+        generation=0,
+        slot="slot-00",
+        prompt="initial root",
+        system_prompt="system",
+        output_schema={"type": "object"},
+        idempotency_key="initial-root",
+        artifact_dir=tmp_path / "initial-root",
+    )
+    initial_provider.close()
+
+    resumed_adapter = _Adapter()
+    resumed_adapter.turn_count = initial_adapter.turn_count
+    provider = CodexM5SearchProvider(
+        workspace=tmp_path / "runtime",
+        model="fixture-model",
+        effort="high",
+        base_instructions="Return only the structured response.",
+        adapter=cast(Any, resumed_adapter),
+    )
+
+    root = provider.generate_root(
+        anchor=anchor,
+        generation=1,
+        slot="slot-07",
+        prompt="pending root after resume",
+        system_prompt="system",
+        output_schema={"type": "object"},
+        idempotency_key="resumed-root",
+        artifact_dir=tmp_path / "resumed-root",
+    )
+
+    assert resumed_adapter.resumed == [
+        anchor.thread_id,
+        prior_root.context.thread_id,
+    ]
+    assert resumed_adapter.activations == [
+        (anchor.thread_id, anchor.included_turn_ids),
+        (root.context.thread_id, None),
+    ]
+    assert resumed_adapter.forks == [
+        (anchor.thread_id, anchor.turn_id, anchor.included_turn_ids)
+    ]
 
 
 def test_retained_fork_mismatch_fails_closed(tmp_path: Path) -> None:

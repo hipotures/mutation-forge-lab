@@ -147,8 +147,12 @@ class CodexM5SearchProvider:
         self._cleanup_capsule = cleanup_capsule
         self._capsule: IsolatedCapsule | None = None
         self._owns_adapter = adapter is None
+        self._anchor_can_activate = False
         if adapter is not None:
             self.adapter = adapter
+            if self._state_path.exists():
+                self._resume_state()
+                self._anchor_can_activate = True
             return
         if self._state_path.exists():
             raw = read_json(self._state_path)
@@ -183,6 +187,7 @@ class CodexM5SearchProvider:
         )
         if self._state_path.exists():
             self._resume_state()
+            self._anchor_can_activate = True
 
     def _state(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -552,16 +557,18 @@ class CodexM5SearchProvider:
         idempotency_key: str,
         artifact_dir: Path,
     ) -> M5ProviderResultV1:
-        self.adapter.activate_forked_thread(
-            anchor.thread_id,
-            completed_turn_ids=anchor.included_turn_ids,
-        )
+        if self._anchor_can_activate:
+            self.adapter.activate_forked_thread(
+                anchor.thread_id,
+                completed_turn_ids=anchor.included_turn_ids,
+            )
         fork = self._fork(
             last_turn_id=anchor.turn_id,
             expected_history=anchor.included_turn_ids,
             artifact_dir=artifact_dir / "fork",
             prefix=f"g{generation:04d}-{slot}-root-fork",
         )
+        self._anchor_can_activate = True
         self.adapter.activate_forked_thread(fork.child_thread_id)
         return self._turn(
             artifact_dir=artifact_dir,
