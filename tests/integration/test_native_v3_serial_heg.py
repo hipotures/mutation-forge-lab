@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from mutation_forge.backends.heg import HegBackend
+from mutation_forge.experiment.provider import LocalCodexAppServerProvider
 from mutation_forge.native_v3.contracts import (
     PROGRAM_SCHEMA_VERSION,
     ValidatedProgram,
@@ -19,6 +22,7 @@ from mutation_forge.native_v3_python import (
     PythonSerialEpisodeConfigV1,
     evaluate_serial_python_policy,
 )
+from mutation_forge.native_v3_python.provider_evaluation import run_m4_single_root
 
 PYTHON_FIXTURE = (
     Path(__file__).resolve().parents[1]
@@ -26,6 +30,50 @@ PYTHON_FIXTURE = (
     / "native_v3_python_m3"
     / "add_edge.py"
 )
+
+
+class _RecordedM4Transport:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls = 0
+
+    def generate(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        del request
+        self.calls += 1
+        return {
+            "status": "completed",
+            "accepted": True,
+            "charged": True,
+            "content": True,
+            "response": json.loads(self.response),
+            "response_text": self.response,
+            "provider_request_id": 1,
+            "provider_thread_id": "recorded-thread",
+            "provider_turn_id": "recorded-turn",
+            "provider_duration_ms": 1,
+            "model": "gpt-5.6-luna",
+            "effort": "high",
+            "usage": {
+                "inputTokens": 1,
+                "cachedInputTokens": 0,
+                "cacheWriteInputTokens": 0,
+                "outputTokens": 1,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 2,
+                "final": True,
+                "partial": False,
+            },
+        }
+
+    def repair(
+        self,
+        request: Mapping[str, Any],
+        diagnostics: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        raise AssertionError((request, diagnostics, "recorded M4 response is valid"))
+
+    def close(self) -> None:
+        return None
 
 
 def _known_valid_program() -> ValidatedProgram:
@@ -142,3 +190,54 @@ def test_fixture_python_runs_through_sandbox_and_current_heg_scoring(
         "model_turns": 0,
         "app_server_calls": 0,
     }
+
+
+def test_recorded_m4_provider_python_runs_through_current_heg(
+    heg_repo: Path,
+    tmp_path: Path,
+) -> None:
+    source = PYTHON_FIXTURE.read_text(encoding="utf-8")
+    response = json.dumps(
+        {
+            "schema_version": "mforge.native.python_policy_response.v1",
+            "source": source,
+        },
+        separators=(",", ":"),
+    )
+    transport = _RecordedM4Transport(response)
+    provider = LocalCodexAppServerProvider(
+        model="gpt-5.6-luna",
+        effort="high",
+        concurrency=1,
+        max_repairs=1,
+        transport=transport,
+        persist_artifacts=False,
+    )
+    backend = HegBackend(heg_repo)
+    try:
+        report = run_m4_single_root(
+            provider,
+            tmp_path,
+            backend_factory=lambda: backend,
+            config=PythonSerialEpisodeConfigV1(
+                order=30,
+                graph_seed=101,
+                policy_seed=17,
+                horizon=1,
+                witness_cap=64,
+                episode_id="native-v3-python-m4-recorded-heg",
+                forbidden_lengths=backend.target_forbidden_lengths(30),
+            ),
+        )
+    finally:
+        provider.close()
+
+    assert report["status"] == "completed"
+    assert report["model_turns"] == 1
+    assert report["provider_attempts"] == 1
+    assert report["outcome"]["kind"] == "REWRITE_PLAN"
+    assert report["graph_score_attempts"] >= 2
+    assert report["scientific_result"] is True
+    assert report["verification"]["authority"] == "exact_verifier_only"
+    assert report["dsl_runtime_used"] is False
+    assert transport.calls == 1

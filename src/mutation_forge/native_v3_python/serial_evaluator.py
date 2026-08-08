@@ -120,7 +120,12 @@ class PythonSerialEpisodeResultV1:
     worker_telemetry: dict[str, JsonValue]
     protocol_id: str = PYTHON_SERIAL_RESULT_PROTOCOL_ID
 
-    def as_dict(self, *, include_telemetry: bool = True) -> dict[str, JsonValue]:
+    def as_dict(
+        self,
+        *,
+        include_telemetry: bool = True,
+        include_external_activity: bool = True,
+    ) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
             "protocol_id": self.protocol_id,
             "program_identity": self.program_identity.as_dict(),
@@ -135,12 +140,13 @@ class PythonSerialEpisodeResultV1:
             "scientific_result": self.scientific_result.as_dict(
                 include_telemetry=include_telemetry
             ),
-            "external_activity": {
+        }
+        if include_external_activity:
+            result["external_activity"] = {
                 "provider_turns": 0,
                 "model_turns": 0,
                 "app_server_calls": 0,
-            },
-        }
+            }
         if include_telemetry:
             result["worker_telemetry"] = self.worker_telemetry
         return result

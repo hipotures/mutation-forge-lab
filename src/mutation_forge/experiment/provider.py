@@ -22,12 +22,14 @@ from typing import Any, Protocol, cast
 
 from .artifacts import (
     NATIVE_V3_PROGRAM_BATCH_PROJECTION,
+    NATIVE_V3_PYTHON_POLICY_PROJECTION,
     TurnArtifactStore,
     generated_policy_diagnostics,
     is_generated_policy,
     redact,
     render_generated_policy_markdown,
     render_native_v3_program_batch_markdown,
+    render_native_v3_python_policy_markdown,
 )
 from .json_io import write_json
 
@@ -197,6 +199,7 @@ class _CodexTransport:
         if response_projection not in {
             None,
             NATIVE_V3_PROGRAM_BATCH_PROJECTION,
+            NATIVE_V3_PYTHON_POLICY_PROJECTION,
         }:
             raise NativeProviderError(
                 f"unsupported response projection: {response_projection!r}"
@@ -268,10 +271,24 @@ class _CodexTransport:
         else:
             if isinstance(decoded, Mapping):
                 response = dict(decoded)
-        response_diagnostics = generated_policy_diagnostics(response)
-        response_projection_valid = is_generated_policy(response)
-        if response_projection_valid:
-            response_diagnostics = ()
+        response_diagnostics: tuple[Mapping[str, Any], ...]
+        if response_projection == NATIVE_V3_PYTHON_POLICY_PROJECTION:
+            from mutation_forge.native_v3_python.validation import (
+                validate_python_policy_response,
+            )
+
+            python_validation = validate_python_policy_response(response_text)
+            response_projection_valid = python_validation.valid
+            response_diagnostics = tuple(
+                item.as_dict() for item in python_validation.diagnostics
+            )
+            if python_validation.response is not None:
+                response = python_validation.response.as_dict()
+        else:
+            response_diagnostics = generated_policy_diagnostics(response)
+            response_projection_valid = is_generated_policy(response)
+            if response_projection_valid:
+                response_diagnostics = ()
         usage = self._usage({"usage": self._usage_from_result(result)})
         value = {
             "status": "completed",
@@ -300,12 +317,16 @@ class _CodexTransport:
             adapter.logger.raw_text("request.md", prompt)
             adapter.logger.raw_text("response.raw.txt", response_text)
             if response_projection_valid and isinstance(response, Mapping):
-                response_markdown = (
-                    render_native_v3_program_batch_markdown(response)
-                    if response_projection
-                    == NATIVE_V3_PROGRAM_BATCH_PROJECTION
-                    else render_generated_policy_markdown(response)
-                )
+                if response_projection == NATIVE_V3_PROGRAM_BATCH_PROJECTION:
+                    response_markdown = render_native_v3_program_batch_markdown(
+                        response
+                    )
+                elif response_projection == NATIVE_V3_PYTHON_POLICY_PROJECTION:
+                    response_markdown = render_native_v3_python_policy_markdown(
+                        response
+                    )
+                else:
+                    response_markdown = render_generated_policy_markdown(response)
                 adapter.logger.raw_text("response.md", response_markdown)
             else:
                 adapter.logger.remove("response.md")

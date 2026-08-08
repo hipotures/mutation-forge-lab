@@ -10,6 +10,7 @@
   ],
   "properties": {
     "schema_version": {
+      "type": "string",
       "const": "mforge.native.python_policy_response.v1"
     },
     "source": {

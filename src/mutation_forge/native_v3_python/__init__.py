@@ -25,6 +25,15 @@ from .contracts import (
     VertexRef,
     require_python_workspace_schema_version,
 )
+from .provider_evaluation import (
+    M4_EVALUATION_SCHEMA_VERSION,
+    M4_REPORT_SCHEMA_VERSION,
+    M4RootEvaluationError,
+    M4ScoringError,
+    M4VerificationError,
+    build_m4_request,
+    run_m4_single_root,
+)
 from .runner import IsolatedPolicyWorkerV1
 from .runtime_contracts import (
     RANDOM_PROTOCOL_ID,
@@ -94,6 +103,11 @@ __all__ = [
     "MAX_HELPER_FUNCTIONS",
     "MAX_SELECTOR_RESULTS",
     "MAX_SOURCE_BYTES",
+    "M4_EVALUATION_SCHEMA_VERSION",
+    "M4_REPORT_SCHEMA_VERSION",
+    "M4RootEvaluationError",
+    "M4ScoringError",
+    "M4VerificationError",
     "MatchingRef",
     "NO_PLAN_REASONS",
     "NoPlan",
@@ -136,10 +150,12 @@ __all__ = [
     "VALIDATOR_VERSION",
     "VertexRef",
     "accepted_ast_node_names",
+    "build_m4_request",
     "graph_view_v1",
     "evaluate_serial_python_policy",
     "normalize_source_newlines",
     "require_python_workspace_schema_version",
+    "run_m4_single_root",
     "validate_python_policy_response",
     "validate_python_policy_source",
 ]
