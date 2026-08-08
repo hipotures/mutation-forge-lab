@@ -467,7 +467,7 @@ def test_recorded_model_python_runs_one_root_and_replays_offline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "mutation_forge.native_v3.serial_evaluator.invoke_program",
+        "mutation_forge.native_v3.interpreter.invoke_program",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError((args, kwargs, "DSL runtime used"))
         ),
