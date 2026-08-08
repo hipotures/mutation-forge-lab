@@ -927,6 +927,9 @@ class CodexAppServerAdapter:
             last_turn_id=last_turn_id,
             included_turn_ids=tuple(included_turn_ids),
         )
+        # Keep the source selectable after activating its child. Fresh-root
+        # campaigns repeatedly fork the same completed specification anchor.
+        self._forked_threads[source_thread_id] = dict(source)
         self._forked_threads[child_thread_id] = dict(thread)
         self._completed_turn_ids[child_thread_id] = list(included_turn_ids)
         self._drain_fork_notifications(source_thread_id)

@@ -203,6 +203,31 @@ def test_switching_back_to_completed_parent_allows_exact_child_fork() -> None:
     assert sibling_branch.child_thread_id != child.source_thread_id
 
 
+def test_switching_back_to_original_anchor_allows_another_root_fork() -> None:
+    adapter = _adapter(FakeScenario(), max_campaigns=3)
+    try:
+        anchor = adapter.generate_persistent("anchor", PROFILE)
+        first_root = adapter.fork_persistent_thread(
+            PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        adapter.activate_forked_thread(
+            anchor.thread_id,
+            completed_turn_ids=(anchor.turn_id,),
+        )
+        second_root = adapter.fork_persistent_thread(
+            PROFILE,
+            last_turn_id=anchor.turn_id,
+        )
+    finally:
+        adapter.close()
+
+    assert first_root.source_thread_id == anchor.thread_id
+    assert second_root.source_thread_id == anchor.thread_id
+    assert second_root.included_turn_ids == (anchor.turn_id,)
+
+
 def test_switching_parent_rejects_changed_completed_history() -> None:
     adapter = _adapter(FakeScenario())
     try:
