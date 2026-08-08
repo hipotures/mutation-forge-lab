@@ -32,6 +32,7 @@ from .single_program_ir import (
 
 V2_PROTOCOL = "native-v2"
 V3_SELECTOR = "v3"
+PYTHON_PREVIEW_SELECTOR = "native-v3-python-v1"
 V3_CONFIG_SCHEMA_VERSION = "mforge.experiment.v3"
 V3_PROTOCOL_VERSION = "v3"
 V3_STATUS_SCHEMA_VERSION = "mforge.experiment.status.v3"
@@ -86,18 +87,19 @@ def _raw_config(path: str | Path) -> tuple[Path, bytes, dict[str, Any]]:
 
 
 def experiment_protocol(path: str | Path = "experiment.toml") -> str:
-    """Return the explicit v3 selector or the unchanged Native v2 default."""
+    """Return an explicit preview selector or the unchanged Native v2 default."""
 
     _, _, raw = _raw_config(path)
     protocol = raw.get("protocol")
     if protocol is None:
         return V2_PROTOCOL
-    if protocol != V3_SELECTOR:
+    if protocol not in {V3_SELECTOR, PYTHON_PREVIEW_SELECTOR}:
         raise ValueError(
             f"unsupported experiment protocol selector: {protocol!r}; "
-            f"expected {V3_SELECTOR!r} or omit it for Native v2"
+            f"expected {V3_SELECTOR!r}, {PYTHON_PREVIEW_SELECTOR!r}, "
+            "or omit it for Native v2"
         )
-    return V3_SELECTOR
+    return cast(str, protocol)
 
 
 def _string(value: object, name: str) -> str:
@@ -642,6 +644,7 @@ __all__ = [
     "V3WorkspaceError",
     "MULTI_PROGRAM_BATCH",
     "PERSISTENT_SINGLE_AST",
+    "PYTHON_PREVIEW_SELECTOR",
     "SLOT_SPECIFIC_OUTPUT_CONTRACT",
     "experiment_protocol",
     "load_v3_config",

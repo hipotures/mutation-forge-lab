@@ -39,6 +39,7 @@ M5_TERMINAL_CANDIDATE_STATUSES = frozenset(
         "duplicate",
         "provider_failed",
         "missing",
+        "evaluation_infrastructure_failure",
     }
 )
 
@@ -1135,7 +1136,11 @@ def _verify_retained_candidate(
         if replayed_validation.valid or candidate.get("evaluation_case_count") != 0:
             raise M5InfrastructureError("invalid candidate gained scientific evidence")
         return candidate
-    if status not in {"evaluated", "duplicate"}:
+    if status not in {
+        "evaluated",
+        "duplicate",
+        "evaluation_infrastructure_failure",
+    }:
         raise M5InfrastructureError(f"unknown retained candidate status: {status}")
     if (
         not replayed_validation.valid
@@ -1143,11 +1148,11 @@ def _verify_retained_candidate(
         or replayed_validation.identity is None
         or replayed_validation.identity.program_hash is None
     ):
-        raise M5InfrastructureError("evaluated candidate no longer validates")
+        raise M5InfrastructureError("retained valid candidate no longer validates")
     source = normalize_source_newlines(replayed_validation.response.source)
     source_path_value = candidate.get("source_path")
     if not isinstance(source_path_value, str):
-        raise M5InfrastructureError("evaluated candidate omitted its source path")
+        raise M5InfrastructureError("retained valid candidate omitted its source path")
     source_path = (root / source_path_value).resolve()
     if (
         not source_path.is_relative_to(root.resolve())
@@ -1162,6 +1167,31 @@ def _verify_retained_candidate(
         != replayed_validation.identity.canonical_ast_sha256
     ):
         raise M5InfrastructureError(f"retained source identity changed: {path}")
+    if status == "evaluation_infrastructure_failure":
+        evaluation_count = candidate.get("evaluation_case_count")
+        if (
+            isinstance(evaluation_count, bool)
+            or not isinstance(evaluation_count, int)
+            or not 0 <= evaluation_count < len(panel)
+            or not isinstance(candidate.get("failure"), Mapping)
+            or candidate.get("behavior_profile") is not None
+            or candidate.get("behavior_signature") is not None
+            or candidate.get("duplicate_of") is not None
+        ):
+            raise M5InfrastructureError(
+                "retained evaluation infrastructure failure changed"
+            )
+        for index, case in enumerate(panel):
+            evaluation_path = (
+                path.parent / "evaluations" / f"{case.case_id}.json.gz"
+            )
+            if evaluation_path.is_file() != (index < evaluation_count):
+                raise M5InfrastructureError(
+                    "retained partial evaluation boundary changed"
+                )
+            if index < evaluation_count:
+                _load_mapping(evaluation_path)
+        return candidate
     evaluations = [
         _load_mapping(path.parent / "evaluations" / f"{case.case_id}.json.gz")
         for case in panel
@@ -1352,6 +1382,8 @@ def run_m5_search(
     specification_prompt: str,
     specification_ack_schema: Mapping[str, Any],
     policy_schema: Mapping[str, Any],
+    preview_active: bool = False,
+    close_provider: bool = True,
     operator_stop: Callable[[], bool] | None = None,
     boundary_hook: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -1377,7 +1409,7 @@ def run_m5_search(
         "effort": provider.effort,
         "sequential": True,
         "safe_api_expanded": False,
-        "preview_active": False,
+        "preview_active": preview_active,
         "dsl_runtime_used": False,
     }
     _write_exclusive_or_verify(protocol_path, protocol)
@@ -2039,7 +2071,7 @@ def run_m5_search(
                 "held_out_evidence_used": False,
             },
             "sequential": True,
-            "preview_active": False,
+            "preview_active": preview_active,
             "dsl_runtime_used": False,
             "safe_api_expanded": False,
             "api_expressiveness": {
@@ -2091,7 +2123,8 @@ def run_m5_search(
         write_json(root / "m5-report.json.gz", report)
         if boundary_hook is not None:
             boundary_hook("report_persisted")
-        provider.close()
+        if close_provider:
+            provider.close()
         return report
     except (M5InfrastructureError, M5OperatorStop) as error:
         write_json(

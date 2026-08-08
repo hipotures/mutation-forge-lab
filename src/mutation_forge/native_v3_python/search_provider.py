@@ -193,11 +193,27 @@ class CodexM5SearchProvider:
                 ),
                 "anchor": None,
                 "threads": {},
+                "telemetry": {
+                    "transport_retries": 0,
+                    "process_restarts": 0,
+                    "thread_resume_attempts": 0,
+                },
             }
         raw = read_json(self._state_path)
         if not isinstance(raw, Mapping):
             raise M5InfrastructureError("provider state is not an object")
         return dict(raw)
+
+    def _increment_telemetry(self, field: str, amount: int = 1) -> None:
+        state = self._state()
+        telemetry = state.setdefault("telemetry", {})
+        if not isinstance(telemetry, dict):
+            raise M5InfrastructureError("provider telemetry state is malformed")
+        current = telemetry.get(field, 0)
+        if isinstance(current, bool) or not isinstance(current, int) or current < 0:
+            raise M5InfrastructureError("provider telemetry counter is malformed")
+        telemetry[field] = current + amount
+        write_json(self._state_path, state)
 
     def _save_context(
         self,
@@ -221,6 +237,7 @@ class CodexM5SearchProvider:
         if not isinstance(anchor_raw, Mapping):
             return
         anchor = M5ProviderContextV1.from_dict(anchor_raw)
+        self._increment_telemetry("thread_resume_attempts")
         self.adapter.resume_thread(
             self.profile,
             thread_id=anchor.thread_id,
@@ -235,6 +252,7 @@ class CodexM5SearchProvider:
             if not isinstance(raw, Mapping):
                 raise M5InfrastructureError("provider thread context is malformed")
             context = M5ProviderContextV1.from_dict(raw)
+            self._increment_telemetry("thread_resume_attempts")
             self.adapter.resume_forked_thread(
                 self.profile,
                 thread_id=context.thread_id,
@@ -328,7 +346,9 @@ class CodexM5SearchProvider:
             output_schema=output_schema,
             idempotency_key=idempotency_key,
         )
-        warnings_before = int(self.adapter.inspect_metadata()["serverWarnings"])
+        metadata_before = self.adapter.inspect_metadata()
+        warnings_before = int(metadata_before["serverWarnings"])
+        retries_before = int(metadata_before["serverRetries"])
         result = self.adapter.generate_persistent(
             prompt,
             self.profile,
@@ -366,13 +386,17 @@ class CodexM5SearchProvider:
             thread_path=result.thread_path,
             included_turn_ids=history + (result.turn_id,),
         )
+        metadata_after = self.adapter.inspect_metadata()
+        retries = int(metadata_after["serverRetries"]) - retries_before
+        if retries:
+            self._increment_telemetry("transport_retries", retries)
         value = M5ProviderResultV1(
             response_text=result.text,
             context=context,
             usage=self._usage(result),
             duration_ms=result.duration_ms or 0,
             warnings=(
-                int(self.adapter.inspect_metadata()["serverWarnings"])
+                int(metadata_after["serverWarnings"])
                 - warnings_before
             ),
         )

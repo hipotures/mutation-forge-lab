@@ -32,10 +32,15 @@ from mutation_forge.experiment.service import final_stop_experiment, run_experim
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
 from mutation_forge.native_v3.experiment import (
+    PYTHON_PREVIEW_SELECTOR,
     V3_SELECTOR,
     experiment_protocol,
     run_v3,
     v3_status,
+)
+from mutation_forge.native_v3_python.preview import (
+    python_preview_status,
+    run_python_preview,
 )
 from mutation_forge.output.interactive_dashboard import (
     DashboardCapabilities,
@@ -288,7 +293,26 @@ def _experiment_run(
     dashboard: bool = False,
     until_complete: bool = False,
 ) -> int:
-    if experiment_protocol(config_path) == V3_SELECTOR:
+    protocol = experiment_protocol(config_path)
+    if protocol == PYTHON_PREVIEW_SELECTOR:
+        if dashboard or until_complete or profiling is not None:
+            raise ValueError(
+                "ordinary-Python preview does not accept Native v2 dashboard, "
+                "until-complete, or profiling options"
+            )
+        result = run_python_preview(config_path)
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if json_output:
+            print(encoded)
+        else:
+            Console().print_json(encoded)
+        return 0 if result.get("state") == "completed" else 1
+    if protocol == V3_SELECTOR:
         if dashboard or until_complete or profiling is not None:
             raise ValueError(
                 "v3 does not accept Native v2 dashboard, "
@@ -416,7 +440,21 @@ def _experiment_run(
 
 
 def _experiment_status(config_path: Path, *, json_output: bool) -> int:
-    if experiment_protocol(config_path) == V3_SELECTOR:
+    protocol = experiment_protocol(config_path)
+    if protocol == PYTHON_PREVIEW_SELECTOR:
+        result = python_preview_status(config_path)
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if json_output:
+            print(encoded)
+        else:
+            Console().print_json(encoded)
+        return 0 if result.get("state") != "failed" else 1
+    if protocol == V3_SELECTOR:
         result = v3_status(config_path)
         encoded = json.dumps(
             result,

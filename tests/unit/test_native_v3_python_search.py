@@ -899,6 +899,7 @@ def test_terminal_missing_slot_is_consumed_and_not_submitted(
         "duplicate",
         "provider_failed",
         "missing",
+        "evaluation_infrastructure_failure",
     } == M5_TERMINAL_CANDIDATE_STATUSES
 
 
