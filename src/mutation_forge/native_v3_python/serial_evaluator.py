@@ -8,8 +8,8 @@ from typing import cast
 from mutation_forge.backends.base import GraphBackend, InvalidRewriteError
 from mutation_forge.models import GraphState, JsonValue, RewritePlan
 from mutation_forge.native_v3.canonical import canonical_json_bytes, domain_hash
+from mutation_forge.native_v3.execution import ProgramFailure, SemanticEvent
 from mutation_forge.native_v3.heg_scoring import ScoreEvidenceScorer
-from mutation_forge.native_v3.interpreter import ProgramFailure, SemanticEvent
 from mutation_forge.native_v3.serial_evaluator import (
     CounterexampleInspector,
     SerialEpisodeConfig,

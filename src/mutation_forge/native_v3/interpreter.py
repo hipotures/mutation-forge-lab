@@ -19,6 +19,7 @@ from .contracts import (
     ValidatedProgram,
     ValueType,
 )
+from .execution import ProgramFailure, SemanticEvent
 from .graph_runtime import (
     EdgeRef,
     EdgeSetRef,
@@ -133,23 +134,6 @@ class InterpreterLimits:
 @dataclass(frozen=True, slots=True)
 class NoPlan:
     reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class ProgramFailure:
-    code: str
-    path: str
-    message: str
-
-
-@dataclass(frozen=True, slots=True)
-class SemanticEvent:
-    kind: str
-    path: str
-    payload: Mapping[str, JsonValue]
-
-    def as_dict(self) -> dict[str, JsonValue]:
-        return {"kind": self.kind, "path": self.path, "payload": dict(self.payload)}
 
 
 @dataclass(frozen=True, slots=True)

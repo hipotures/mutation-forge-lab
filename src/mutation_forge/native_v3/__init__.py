@@ -1,5 +1,8 @@
 """Isolated contracts for Native v3 declarative mutation programs."""
 
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
 from .canonical import (
     CANONICAL_PROTOCOL_ID,
     CanonicalJsonError,
@@ -18,6 +21,7 @@ from .contracts import (
     validate_program,
     validated_program_artifact,
 )
+from .execution import ProgramFailure, SemanticEvent
 from .graph_runtime import (
     GRAPH_RUNTIME_PROTOCOL_ID,
     EdgeRef,
@@ -30,19 +34,6 @@ from .graph_runtime import (
     SelectionPopulation,
     VertexRef,
     VertexSetRef,
-)
-from .interpreter import (
-    INTERPRETER_PROTOCOL_ID,
-    BranchFailureCode,
-    CatchableBranchFailure,
-    InterpreterLimits,
-    InvocationCounters,
-    InvocationResult,
-    NoPlan,
-    ProgramContext,
-    ProgramFailure,
-    SemanticEvent,
-    invoke_program,
 )
 from .randomness import (
     RANDOM_PROTOCOL_ID,
@@ -94,6 +85,41 @@ from .single_program_contract import (
     single_program_request_size_bytes,
     validate_single_program_response,
 )
+
+if TYPE_CHECKING:
+    from .interpreter import (
+        INTERPRETER_PROTOCOL_ID,
+        BranchFailureCode,
+        CatchableBranchFailure,
+        InterpreterLimits,
+        InvocationCounters,
+        InvocationResult,
+        NoPlan,
+        ProgramContext,
+        invoke_program,
+    )
+
+_INTERPRETER_EXPORTS = frozenset(
+    {
+        "INTERPRETER_PROTOCOL_ID",
+        "BranchFailureCode",
+        "CatchableBranchFailure",
+        "InterpreterLimits",
+        "InvocationCounters",
+        "InvocationResult",
+        "NoPlan",
+        "ProgramContext",
+        "invoke_program",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _INTERPRETER_EXPORTS:
+        raise AttributeError(name)
+    value = getattr(import_module(f"{__name__}.interpreter"), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "CANONICAL_PROTOCOL_ID",

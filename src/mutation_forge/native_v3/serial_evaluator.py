@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from fractions import Fraction
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mutation_forge.backends.base import GraphBackend, ScoreProfileRecorder
 from mutation_forge.counterexamples import (
@@ -17,16 +17,10 @@ from mutation_forge.models import GraphScore, GraphState, JsonValue, RewritePlan
 
 from .canonical import canonical_json_bytes, domain_hash
 from .contracts import ProgramContract, ValidatedProgram
+from .execution import ProgramFailure, SemanticEvent
 from .heg_scoring import (
     ScoreEvidenceScorer,
     merge_score_evidence,
-)
-from .interpreter import (
-    InterpreterLimits,
-    ProgramContext,
-    ProgramFailure,
-    SemanticEvent,
-    invoke_program,
 )
 from .scoring import (
     AttemptKind,
@@ -40,6 +34,9 @@ from .scoring import (
     episode_auc,
     proved_strict_energy_improvement,
 )
+
+if TYPE_CHECKING:
+    from .interpreter import InterpreterLimits
 
 SERIAL_EVALUATOR_PROTOCOL_ID = "native_v3_serial_interval_evaluator_v2"
 _TRACE_HASH_DOMAIN = b"mforge-native-v3-serial-trace\0"
@@ -745,6 +742,8 @@ def evaluate_serial_program(
     provenance_source_kind: str = "native_v3_fixture",
 ) -> SerialEpisodeResult:
     """Run the existing JSON-DSL trajectory without changing its artifact shape."""
+
+    from .interpreter import ProgramContext, invoke_program
 
     invocation_episode_id = f"{config.episode_id}/policy-{config.policy_seed}"
 

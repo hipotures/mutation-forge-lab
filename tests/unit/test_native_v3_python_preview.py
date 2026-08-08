@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -759,3 +761,23 @@ def test_python_preview_call_path_has_no_json_dsl_runtime_or_ir_compiler() -> No
         Path(preview_module.__file__).parent / "contracts.py"
     ).read_text(encoding="utf-8")
     assert "mforge.experiment.v3" in protocol_source
+    python_serial_source = (
+        Path(preview_module.__file__).parent / "serial_evaluator.py"
+    ).read_text(encoding="utf-8")
+    assert "native_v3.interpreter" not in python_serial_source
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys;"
+                "import mutation_forge.native_v3_python.preview;"
+                "assert 'mutation_forge.native_v3.interpreter' not in sys.modules;"
+                "assert not any('single_program_ir' in name for name in sys.modules)"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
