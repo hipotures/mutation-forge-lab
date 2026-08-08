@@ -14,6 +14,7 @@ from mutation_forge.models import JsonValue
 from mutation_forge.native_v3_python import search as search_module
 from mutation_forge.native_v3_python import search_provider as search_provider_module
 from mutation_forge.native_v3_python.search import (
+    M5_TERMINAL_CANDIDATE_STATUSES,
     DevelopmentCaseV1,
     M5InfrastructureError,
     M5OperatorStop,
@@ -776,6 +777,13 @@ class _FailProvider(_Provider):
         raise RuntimeError("fixture provider failed")
 
 
+class _FailFirstGenerationOneProvider(_Provider):
+    def generate_child(self, **kwargs: Any) -> M5ProviderResultV1:
+        if kwargs["generation"] == 1 and kwargs["slot"] == "slot-00":
+            raise RuntimeError("fixture generation-one provider failed")
+        return super().generate_child(**kwargs)
+
+
 def test_provider_failure_consumes_slot_and_stops_as_infrastructure(
     tmp_path: Path,
 ) -> None:
@@ -793,6 +801,105 @@ def test_provider_failure_consumes_slot_and_stops_as_infrastructure(
     assert candidate["status"] == "provider_failed"
     assert read_json(root / "m5-stop.json.gz")["status"] == "infrastructure_failure"
     assert provider.closed is False
+
+
+def test_resume_skips_one_terminal_provider_failure_and_runs_seven_pending(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "provider-failure-resume"
+    initial_provider = _FailFirstGenerationOneProvider()
+    initial_evaluator = _Evaluator()
+    with pytest.raises(M5InfrastructureError, match="provider failed"):
+        _run(root, initial_provider, initial_evaluator)
+    generation_zero_paths = sorted(
+        (root / "generations" / "generation-0000").glob(
+            "slot-*/candidate.json.gz"
+        )
+    )
+    generation_zero_bytes = {
+        path.relative_to(root): path.read_bytes() for path in generation_zero_paths
+    }
+    manifest_path = (
+        root / "generations" / "generation-0001" / "manifest.json.gz"
+    )
+    memory_path = (
+        root / "generations" / "generation-0001" / "search-memory.json.gz"
+    )
+    manifest_before = manifest_path.read_bytes()
+    memory_before = memory_path.read_bytes()
+    failed_path = (
+        root
+        / "generations"
+        / "generation-0001"
+        / "slot-00"
+        / "candidate.json.gz"
+    )
+    assert read_json(failed_path)["status"] == "provider_failed"
+
+    resumed_provider = _Provider()
+    resumed_evaluator = _Evaluator()
+    report = _run(root, resumed_provider, resumed_evaluator)
+
+    assert len(resumed_provider.calls) == 7
+    assert [(kind, slot) for kind, _, slot, _ in resumed_provider.calls] == [
+        ("child", "slot-01"),
+        ("child", "slot-02"),
+        ("child", "slot-03"),
+        ("root", "slot-04"),
+        ("root", "slot-05"),
+        ("root", "slot-06"),
+        ("root", "slot-07"),
+    ]
+    assert len(resumed_evaluator.calls) == 7 * len(_PANEL)
+    assert read_json(failed_path)["status"] == "provider_failed"
+    assert manifest_path.read_bytes() == manifest_before
+    assert memory_path.read_bytes() == memory_before
+    assert {
+        path.relative_to(root): path.read_bytes() for path in generation_zero_paths
+    } == generation_zero_bytes
+    assert report["candidate_status_counts"]["provider_failed"] == 1
+    assert report["generation_status_counts"]["1"] == {
+        "evaluated": 7,
+        "provider_failed": 1,
+    }
+    assert report["generation_allocations"]["1"] == {
+        "children": 4,
+        "roots": 4,
+    }
+
+
+def test_terminal_missing_slot_is_consumed_and_not_submitted(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "missing-resume"
+    with pytest.raises(M5InfrastructureError, match="provider failed"):
+        _run(root, _FailFirstGenerationOneProvider(), _Evaluator())
+    missing_path = (
+        root
+        / "generations"
+        / "generation-0001"
+        / "slot-00"
+        / "candidate.json.gz"
+    )
+    missing = read_json(missing_path)
+    assert isinstance(missing, dict)
+    missing["status"] = "missing"
+    write_json(missing_path, missing)
+
+    provider = _Provider()
+    report = _run(root, provider, _Evaluator())
+    assert len(provider.calls) == 7
+    assert report["generation_status_counts"]["1"] == {
+        "evaluated": 7,
+        "missing": 1,
+    }
+    assert {
+        "evaluated",
+        "contract_invalid",
+        "duplicate",
+        "provider_failed",
+        "missing",
+    } == M5_TERMINAL_CANDIDATE_STATUSES
 
 
 def test_operator_stop_is_distinct_and_resumable(tmp_path: Path) -> None:

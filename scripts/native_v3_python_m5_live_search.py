@@ -13,6 +13,7 @@ from mutation_forge.native_v3_python import (
     CodexM5SearchProvider,
     DevelopmentCaseV1,
     PythonPanelScientificEvaluator,
+    ensure_m5_acceptance_provenance,
     run_m5_search,
     specification_ack_schema,
 )
@@ -56,14 +57,30 @@ def main() -> int:
         if root.exists():
             raise RuntimeError(f"refusing to reuse M5 search root: {root}")
     system_prompt = _text("prompts/native-v3-python/m5-system.md").strip()
+    request_template = _text("prompts/native-v3-python/m4-request.md")
     specification_prompt = (
         "Retain the complete policy specification below for later root and "
         "mutation turns. Do not generate a policy on this turn. Return only "
         "the required specification acknowledgement.\n\n"
-        + _text("prompts/native-v3-python/m4-request.md")
+        + request_template
     )
     policy_schema = json.loads(
         _text("configs/native/native-v3-python-policy-response.schema.json")
+    )
+    ack_schema = specification_ack_schema()
+    ensure_m5_acceptance_provenance(
+        workspace=root,
+        resume=args.resume_workspace is not None,
+        repository_root=PROJECT_ROOT,
+        heg_root=args.heg_repo,
+        experiment_config=PROJECT_ROOT / "experiment.toml",
+        model=args.model,
+        effort=args.effort,
+        system_prompt=system_prompt,
+        request_template=request_template,
+        specification_prompt=specification_prompt,
+        output_schema=policy_schema,
+        specification_ack_schema=ack_schema,
     )
     backend = HegBackend(args.heg_repo)
     forbidden_lengths = backend.target_forbidden_lengths(30)
@@ -107,7 +124,7 @@ def main() -> int:
             panel=panel,
             system_prompt=system_prompt,
             specification_prompt=specification_prompt,
-            specification_ack_schema=specification_ack_schema(),
+            specification_ack_schema=ack_schema,
             policy_schema=policy_schema,
         )
     finally:

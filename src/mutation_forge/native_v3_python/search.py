@@ -32,6 +32,15 @@ M5_CANDIDATE_PROTOCOL_ID = "mforge.native.python_search_candidate.v1"
 M5_SEARCH_MEMORY_PROTOCOL_ID = "mforge.native.python_search_memory.v1"
 M5_MODEL_MEMORY_PROTOCOL_ID = "mforge.native.python_search_memory.model.v1"
 M5_REPORT_PROTOCOL_ID = "mforge.native.python_m5_search_report.v1"
+M5_TERMINAL_CANDIDATE_STATUSES = frozenset(
+    {
+        "evaluated",
+        "contract_invalid",
+        "duplicate",
+        "provider_failed",
+        "missing",
+    }
+)
 
 POPULATION_SIZE = 8
 CHILD_SLOTS = 4
@@ -1091,6 +1100,16 @@ def _verify_retained_candidate(
     if len(attempts) != len(raw_attempts):
         raise M5InfrastructureError(f"retained provider attempt changed: {path}")
     status = candidate.get("status")
+    if status == "missing":
+        if (
+            attempts
+            or candidate.get("evaluation_case_count") != 0
+            or candidate.get("provider_context") is not None
+        ):
+            raise M5InfrastructureError(
+                "terminal missing slot gained provider or scientific evidence"
+            )
+        return candidate
     if status == "provider_failed":
         if candidate.get("evaluation_case_count") != 0:
             raise M5InfrastructureError("provider failure gained scientific evidence")
@@ -1832,6 +1851,21 @@ def run_m5_search(
             "generation_count": len(generations),
             "population_size": POPULATION_SIZE,
             "candidate_count": len(candidates),
+            "candidate_status_counts": dict(
+                sorted(Counter(str(item.get("status")) for item in candidates).items())
+            ),
+            "generation_status_counts": {
+                str(generation): dict(
+                    sorted(
+                        Counter(
+                            str(item.get("status"))
+                            for item in candidates
+                            if int(item["generation"]) == generation
+                        ).items()
+                    )
+                )
+                for generation in generations
+            },
             "generation_allocations": {
                 str(generation): {
                     "children": sum(
@@ -1942,7 +1976,7 @@ def run_m5_search(
                     anchor_result.usage.get("final") is True
                     and anchor_result.usage.get("partial") is False
                     and all(
-                        item.get("status") != "provider_failed"
+                        item.get("status") not in {"provider_failed", "missing"}
                         for item in candidates
                     )
                     and all(
@@ -2089,6 +2123,7 @@ __all__ = [
     "M5ProviderResultV1",
     "M5ScientificEvaluator",
     "M5SearchError",
+    "M5_TERMINAL_CANDIDATE_STATUSES",
     "M5SearchProvider",
     "M5_REPORT_PROTOCOL_ID",
     "M5_SEARCH_PROTOCOL_ID",
