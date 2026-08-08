@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from fractions import Fraction
@@ -215,6 +216,7 @@ class SerialEpisodeResult:
     failure: ProgramFailure | None
     scientific_error: str | None
     semantic_trace_hash: str
+    execution_trace_protocol_id: str | None = None
 
     def as_dict(
         self,
@@ -281,6 +283,8 @@ class SerialEpisodeResult:
             ),
             "scientific_error": self.scientific_error,
         }
+        if self.execution_trace_protocol_id is not None:
+            result["execution_trace_protocol_id"] = self.execution_trace_protocol_id
         if include_hash:
             result["semantic_trace_hash"] = self.semantic_trace_hash
         return result
@@ -305,6 +309,30 @@ class _CapturingRewriteHost:
         )
         self.candidate = candidate
         return candidate
+
+
+@dataclass(frozen=True, slots=True)
+class _SerialInvocation:
+    semantic_trace: tuple[SemanticEvent, ...]
+    no_plan_reason: str | None = None
+    failure: ProgramFailure | None = None
+    rewrite: RewritePlan | None = None
+    candidate: GraphState | None = None
+
+    def __post_init__(self) -> None:
+        outcomes = (
+            self.no_plan_reason is not None,
+            self.failure is not None,
+            self.rewrite is not None or self.candidate is not None,
+        )
+        if sum(outcomes) != 1:
+            raise ValueError("serial invocation must contain exactly one outcome")
+
+
+type _StepInvoker = Callable[
+    [GraphState, int, int],
+    _SerialInvocation,
+]
 
 
 def _identity(backend: GraphBackend, graph: GraphState) -> GraphIdentity:
@@ -332,7 +360,7 @@ def _inspect_apparent_zero(
     graph: GraphState,
     evidence: ScoreEvidence,
     config: SerialEpisodeConfig,
-    program: ValidatedProgram,
+    program_hash: str,
     step_index: int,
     provenance_source_kind: str,
 ) -> CounterexampleTrace | None:
@@ -356,7 +384,7 @@ def _inspect_apparent_zero(
         witness_cap=config.witness_cap,
         provenance=CandidateProvenance(
             source_kind=provenance_source_kind,
-            source_id=program.program_hash,
+            source_id=program_hash,
             episode_id=config.episode_id,
             graph_seed=config.graph_seed,
             policy_seed=config.policy_seed,
@@ -419,18 +447,36 @@ def _program_failure_fitness() -> RationalInterval:
     return RationalInterval(Fraction(), Fraction())
 
 
-def evaluate_serial_program(
+def _score_initial_evidence(
+    *,
+    scorer: ScoreEvidenceScorer,
+    graph: GraphState,
+    witness_cap: int,
+    forbidden_lengths: tuple[int, ...] | None,
+) -> ScoreEvidence:
+    if forbidden_lengths is None:
+        return scorer.score_evidence(graph, witness_cap=witness_cap)
+    return scorer.score_evidence(
+        graph,
+        witness_cap=witness_cap,
+        forbidden_lengths=forbidden_lengths,
+    )
+
+
+def _evaluate_serial(
     *,
     backend: GraphBackend,
     scorer: ScoreEvidenceScorer,
-    program: ValidatedProgram,
+    program_hash: str,
     config: SerialEpisodeConfig,
-    interpreter_limits: InterpreterLimits | None = None,
-    program_contract: ProgramContract | None = None,
+    invoke_step: _StepInvoker,
     counterexample_pipeline: CounterexampleInspector | None = None,
-    provenance_source_kind: str = "native_v3_fixture",
+    provenance_source_kind: str,
+    protocol_id: str,
+    execution_trace_protocol_id: str | None = None,
+    forbidden_lengths: tuple[int, ...] | None = None,
 ) -> SerialEpisodeResult:
-    """Run one serial trajectory using only proved interval improvements."""
+    """Run one representation-independent trajectory with proved improvements."""
 
     attempts_before = scorer.raw_graph_score_calls
     unique_before = scorer.unique_graph_scores
@@ -440,9 +486,11 @@ def evaluate_serial_program(
         raise ValueError(f"backend generated an invalid seed: {validation.errors}")
     initial_identity = _identity(backend, initial)
     try:
-        initial_evidence = scorer.score_evidence(
-            initial,
+        initial_evidence = _score_initial_evidence(
+            scorer=scorer,
+            graph=initial,
             witness_cap=config.witness_cap,
+            forbidden_lengths=forbidden_lengths,
         )
     except ScoreTimeoutWithoutPartial:
         uncertainty = _full_uncertainty()
@@ -450,8 +498,8 @@ def evaluate_serial_program(
             uncertainty for _ in range(config.horizon + 1)
         )
         provisional = SerialEpisodeResult(
-            protocol_id=SERIAL_EVALUATOR_PROTOCOL_ID,
-            program_hash=program.program_hash,
+            protocol_id=protocol_id,
+            program_hash=program_hash,
             status=SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT,
             config=config,
             initial_identity=initial_identity,
@@ -475,6 +523,7 @@ def evaluate_serial_program(
                 "initial scoring timed out without safe partial evidence"
             ),
             semantic_trace_hash="",
+            execution_trace_protocol_id=execution_trace_protocol_id,
         )
         payload = provisional.as_dict(
             include_hash=False,
@@ -499,7 +548,7 @@ def evaluate_serial_program(
         graph=initial,
         evidence=initial_evidence,
         config=config,
-        program=program,
+        program_hash=program_hash,
         step_index=0,
         provenance_source_kind=provenance_source_kind,
     )
@@ -510,29 +559,10 @@ def evaluate_serial_program(
     failure: ProgramFailure | None = None
     steps: list[SerialStepTrace] = []
     trajectory = [initial_utility]
-    invocation_episode_id = f"{config.episode_id}/policy-{config.policy_seed}"
-
     for step_index in range(config.horizon):
         before_identity = _identity(backend, current)
         evidence_before = current_evidence
-        host = _CapturingRewriteHost(backend)
-        invocation = invoke_program(
-            program,
-            current,
-            rewrite_host=host,
-            context=ProgramContext(
-                step_index=step_index,
-                horizon=config.horizon,
-                acceptance_profile_id="strict_improvement",
-                stagnation_steps=step_index - accepted_rewrites,
-                accepted_rewrites=accepted_rewrites,
-                witness_cap=config.witness_cap,
-                invocation_ordinal=step_index,
-            ),
-            episode_id=invocation_episode_id,
-            limits=interpreter_limits,
-            contract=program_contract,
-        )
+        invocation = invoke_step(current, step_index, accepted_rewrites)
         outcome = "failure"
         no_plan_reason: str | None = None
         rewrite: RewritePlan | None = None
@@ -546,12 +576,12 @@ def evaluate_serial_program(
 
         if invocation.failure is not None:
             failure = invocation.failure
-        elif invocation.no_plan is not None:
+        elif invocation.no_plan_reason is not None:
             outcome = "no_plan"
-            no_plan_reason = invocation.no_plan.reason
+            no_plan_reason = invocation.no_plan_reason
         else:
             rewrite = invocation.rewrite
-            candidate = host.candidate
+            candidate = invocation.candidate
             if rewrite is None or candidate is None:
                 failure = ProgramFailure(
                     "INTERPRETER_FAULT",
@@ -565,6 +595,7 @@ def evaluate_serial_program(
                     candidate_evidence = scorer.score_evidence(
                         candidate,
                         witness_cap=config.witness_cap,
+                        forbidden_lengths=forbidden_lengths,
                     )
                 except ScoreTimeoutWithoutPartial:
                     outcome = "score_timeout_without_partial"
@@ -606,7 +637,7 @@ def evaluate_serial_program(
                         graph=candidate,
                         evidence=candidate_evidence,
                         config=config,
-                        program=program,
+                        program_hash=program_hash,
                         step_index=step_index + 1,
                         provenance_source_kind=provenance_source_kind,
                     )
@@ -666,8 +697,8 @@ def evaluate_serial_program(
         else candidate_fitness({config.order: (auc,)})
     )
     provisional = SerialEpisodeResult(
-        protocol_id=SERIAL_EVALUATOR_PROTOCOL_ID,
-        program_hash=program.program_hash,
+        protocol_id=protocol_id,
+        program_hash=program_hash,
         status=status,
         config=config,
         initial_identity=initial_identity,
@@ -690,6 +721,7 @@ def evaluate_serial_program(
             else None
         ),
         semantic_trace_hash="",
+        execution_trace_protocol_id=execution_trace_protocol_id,
     )
     payload = provisional.as_dict(
         include_hash=False,
@@ -698,4 +730,64 @@ def evaluate_serial_program(
     return replace(
         provisional,
         semantic_trace_hash=_trace_hash(payload),
+    )
+
+
+def evaluate_serial_program(
+    *,
+    backend: GraphBackend,
+    scorer: ScoreEvidenceScorer,
+    program: ValidatedProgram,
+    config: SerialEpisodeConfig,
+    interpreter_limits: InterpreterLimits | None = None,
+    program_contract: ProgramContract | None = None,
+    counterexample_pipeline: CounterexampleInspector | None = None,
+    provenance_source_kind: str = "native_v3_fixture",
+) -> SerialEpisodeResult:
+    """Run the existing JSON-DSL trajectory without changing its artifact shape."""
+
+    invocation_episode_id = f"{config.episode_id}/policy-{config.policy_seed}"
+
+    def invoke_step(
+        graph: GraphState,
+        step_index: int,
+        accepted_rewrites: int,
+    ) -> _SerialInvocation:
+        host = _CapturingRewriteHost(backend)
+        invocation = invoke_program(
+            program,
+            graph,
+            rewrite_host=host,
+            context=ProgramContext(
+                step_index=step_index,
+                horizon=config.horizon,
+                acceptance_profile_id="strict_improvement",
+                stagnation_steps=step_index - accepted_rewrites,
+                accepted_rewrites=accepted_rewrites,
+                witness_cap=config.witness_cap,
+                invocation_ordinal=step_index,
+            ),
+            episode_id=invocation_episode_id,
+            limits=interpreter_limits,
+            contract=program_contract,
+        )
+        return _SerialInvocation(
+            semantic_trace=invocation.semantic_trace,
+            no_plan_reason=(
+                invocation.no_plan.reason if invocation.no_plan is not None else None
+            ),
+            failure=invocation.failure,
+            rewrite=invocation.rewrite,
+            candidate=host.candidate if invocation.rewrite is not None else None,
+        )
+
+    return _evaluate_serial(
+        backend=backend,
+        scorer=scorer,
+        program_hash=program.program_hash,
+        config=config,
+        invoke_step=invoke_step,
+        counterexample_pipeline=counterexample_pipeline,
+        provenance_source_kind=provenance_source_kind,
+        protocol_id=SERIAL_EVALUATOR_PROTOCOL_ID,
     )

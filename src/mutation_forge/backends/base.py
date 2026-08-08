@@ -20,6 +20,10 @@ class ScoringBackendError(RuntimeError):
     """The mandatory scoring backend is unavailable or failed."""
 
 
+class InvalidRewriteError(ValueError):
+    """A proposed rewrite is invalid for the current graph."""
+
+
 class GraphBackend(Protocol):
     backend_id: str
 
@@ -54,7 +58,9 @@ class GraphBackend(Protocol):
         rewrite: RewritePlan,
         *,
         record_score_profile: ScoreProfileRecorder | None = None,
-    ) -> GraphState: ...
+    ) -> GraphState:
+        """Apply a candidate rewrite or raise InvalidRewriteError."""
+        ...
 
     def propose_rewrite(
         self,

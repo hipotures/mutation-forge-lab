@@ -43,6 +43,14 @@ from .runtime_contracts import (
     UnsupportedPolicySandboxError,
 )
 from .safe_api import SafeAPIProgramError, SafeGraphSessionV1, graph_view_v1
+from .serial_evaluator import (
+    PYTHON_FIXTURE_PROVENANCE_SOURCE_KIND,
+    PYTHON_SERIAL_EVALUATOR_PROTOCOL_ID,
+    PYTHON_SERIAL_RESULT_PROTOCOL_ID,
+    PythonSerialEpisodeConfigV1,
+    PythonSerialEpisodeResultV1,
+    evaluate_serial_python_policy,
+)
 from .validation import (
     ACTION_METHODS,
     API_METHODS,
@@ -92,8 +100,11 @@ __all__ = [
     "NonEdgeRef",
     "IsolatedPolicyWorkerV1",
     "PYTHON_EXPERIMENT_PROTOCOL_ID",
+    "PYTHON_FIXTURE_PROVENANCE_SOURCE_KIND",
     "PYTHON_POLICY_PROTOCOL_ID",
     "PYTHON_RESPONSE_SCHEMA_VERSION",
+    "PYTHON_SERIAL_EVALUATOR_PROTOCOL_ID",
+    "PYTHON_SERIAL_RESULT_PROTOCOL_ID",
     "PYTHON_SYNTAX_VERSION",
     "PYTHON_WORKSPACE_SCHEMA_VERSION",
     "PathRef",
@@ -107,6 +118,8 @@ __all__ = [
     "PythonPolicyResponse",
     "PythonPolicyValidation",
     "PythonProgramIdentityV1",
+    "PythonSerialEpisodeConfigV1",
+    "PythonSerialEpisodeResultV1",
     "PythonWorkspaceProtocolError",
     "RelocationRef",
     "RANDOM_PROTOCOL_ID",
@@ -124,6 +137,7 @@ __all__ = [
     "VertexRef",
     "accepted_ast_node_names",
     "graph_view_v1",
+    "evaluate_serial_python_policy",
     "normalize_source_newlines",
     "require_python_workspace_schema_version",
     "validate_python_policy_response",

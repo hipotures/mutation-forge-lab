@@ -1,0 +1,47 @@
+{
+  "schema_version": "mforge.native.python_m3_fixture_manifest.v1",
+  "cases": [
+    {
+      "id": "no-plan",
+      "path": "no_plan.py",
+      "validation": "VALID",
+      "expected_outcome": "no_plan"
+    },
+    {
+      "id": "add-edge",
+      "path": "add_edge.py",
+      "validation": "VALID",
+      "expected_outcome": "rewrite"
+    },
+    {
+      "id": "no-effect",
+      "path": "no_effect.py",
+      "validation": "VALID",
+      "expected_outcome": "no_plan"
+    },
+    {
+      "id": "remove-edge",
+      "path": "remove_edge.py",
+      "validation": "VALID",
+      "expected_outcome": "rewrite_or_illegal_final_state"
+    },
+    {
+      "id": "invalid-return",
+      "path": "invalid_return.py",
+      "validation": "VALID",
+      "expected_outcome": "failure"
+    },
+    {
+      "id": "timeout",
+      "path": "timeout.py",
+      "validation": "VALID",
+      "expected_outcome": "failure"
+    },
+    {
+      "id": "invalid-import",
+      "path": "invalid_import.py",
+      "validation": "INVALID",
+      "expected_outcome": "contract_invalid"
+    }
+  ]
+}
