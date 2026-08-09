@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1228,3 +1228,63 @@ def test_m10_provider_retries_only_transient_worker_resume_setup_once(
     )
     assert attempts["worker-00"] == 2
     assert restarts == ["process_restarts"]
+
+
+def test_m10_root_repair_advances_the_persistent_lane_context(
+    tmp_path: Path,
+) -> None:
+    previous_context = M5ProviderContextV1(
+        "root-thread",
+        "primary-turn",
+        None,
+        ("anchor-turn", "primary-turn"),
+    )
+    repaired_context = M5ProviderContextV1(
+        "root-thread",
+        "repair-turn",
+        None,
+        ("anchor-turn", "primary-turn", "repair-turn"),
+    )
+    previous = M5ProviderResultV1(
+        response_text="{}",
+        context=previous_context,
+        usage=_usage(),
+        duration_ms=1,
+        warnings=0,
+    )
+    repaired = M5ProviderResultV1(
+        response_text="{}",
+        context=repaired_context,
+        usage=_usage(),
+        duration_ms=1,
+        warnings=0,
+    )
+
+    class Worker:
+        def repair(self, **_: Any) -> M5ProviderResultV1:
+            return repaired
+
+    provider = object.__new__(CodexM10SearchProvider)
+    provider.workspace = tmp_path
+    provider.model = "fixture"
+    provider.effort = "medium"
+    provider.provider_concurrency = 1
+    provider._state_path = tmp_path / "provider-pool-state.json.gz"
+    provider._state_lock = threading.RLock()
+    provider._root_workers = {0: previous_context}
+    provider._thread_owners = {"root-thread": 0}
+    provider._primary_slot_owners = {}
+    provider._completed_primary_slots = set()
+    provider._released_primary_slots = set()
+    provider._anchor = None
+    provider._worker_locks = [threading.Lock()]
+    provider._workers = [cast(Any, Worker())]
+
+    result = provider.repair(
+        previous=previous,
+        generation=0,
+        slot="slot-00",
+    )
+
+    assert result == repaired
+    assert provider._root_workers[0] == repaired_context

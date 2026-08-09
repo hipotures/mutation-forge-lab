@@ -1276,7 +1276,15 @@ class CodexM10SearchProvider:
                 slot=slot,
                 **kwargs,
             )
-            self._record_owner(worker=worker, context=result.context)
+            root_context = self._root_workers.get(worker)
+            self._record_owner(
+                worker=worker,
+                context=result.context,
+                root_worker=(
+                    root_context is not None
+                    and root_context.thread_id == previous.context.thread_id
+                ),
+            )
             return result
 
     def close(self, *, cleanup_capsule: bool = True) -> None:
