@@ -134,6 +134,15 @@ The experiment root contains:
 Large runtime trees remain outside Git. Human-readable reports and small
 canonical manifests may be committed after the campaign.
 
+The completed campaign is summarized in
+[`native-v3-python-m9-scientific-search-report.md`](native-v3-python-m9-scientific-search-report.md)
+and
+[`native-v3-python-m9-result-manifest.json`](native-v3-python-m9-result-manifest.json).
+The final implementation can also terminalize a retained, fully consumed
+provider-turn budget offline. That path validates all retained evidence before
+writing status and report artifacts and never starts a provider, backend, or
+policy worker.
+
 ## Baseline profile
 
 The pre-M9 10.68-minute profile spent approximately 61% of wall time inside
