@@ -6,6 +6,7 @@ import pty
 import re
 import termios
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -2419,6 +2420,71 @@ def test_python_dashboard_retries_first_q_after_workspace_startup_race(
         == 0
     )
     assert request_stop.call_count == 2
+    sink.close.assert_called_once()
+
+
+def test_python_dashboard_second_q_does_not_wait_for_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scientific = SimpleNamespace(
+        generation_limit=1,
+        wall_seconds=60.0,
+        as_dict=lambda: {"provider_concurrency": 2},
+    )
+    config = SimpleNamespace(
+        protocol="native-v3-python-v1",
+        source_path=Path("m10.toml"),
+        experiment_root=Path("/durable/m10"),
+        exp_id="m10-dashboard",
+        model="gpt-fixture",
+        effort="medium",
+        scientific_search=scientific,
+    )
+    status = {
+        "state": "running",
+        "counts": {},
+        "provider": {},
+        "evaluators": {},
+        "throughput": {},
+        "scientific_activity": {},
+        "phase_timings": {},
+        "best": {},
+        "exact_verification": {},
+        "slots": [],
+        "recovery": {},
+    }
+    sink = Mock()
+    release = threading.Event()
+
+    def dashboard_factory(**kwargs: Any) -> Mock:
+        kwargs["capabilities"].quit()
+        kwargs["capabilities"].interrupt()
+        return sink
+
+    def fake_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        release.wait(timeout=5.0)
+        return status
+
+    monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "native-v3-python-v1")
+    monkeypatch.setattr(cli, "load_python_preview_config", lambda _path: config)
+    monkeypatch.setattr(cli, "python_preview_status", lambda _path: status)
+    monkeypatch.setattr(cli, "request_python_preview_stop", Mock())
+    monkeypatch.setattr(cli, "run_python_preview", fake_run)
+    monkeypatch.setattr(cli, "InteractiveDashboardSink", dashboard_factory)
+
+    started = time.monotonic()
+    try:
+        assert (
+            cli._experiment_run(
+                Path("m10.toml"),
+                json_output=False,
+                dashboard=True,
+            )
+            == 1
+        )
+        assert time.monotonic() - started < 2.0
+    finally:
+        release.set()
     sink.close.assert_called_once()
 
 

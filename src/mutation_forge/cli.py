@@ -398,10 +398,11 @@ def _experiment_run(
                     interrupt=interrupt_stop,
                 ),
             )
-            with ThreadPoolExecutor(
+            executor = ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix="mforge-python-preview",
-            ) as executor:
+            )
+            try:
                 if resume_budget is None:
                     future = executor.submit(
                         run_python_preview,
@@ -421,6 +422,13 @@ def _experiment_run(
                             result = future.result(timeout=0.5)
                             break
                         except FutureTimeoutError:
+                            if immediate_stop.is_set():
+                                # The worker normally observes force_stop and
+                                # returns a durable blocked result.  Do not
+                                # make the dashboard wait forever if a provider
+                                # implementation ignores cancellation.
+                                result = python_preview_status(config_path)
+                                break
                             if pending_stop.is_set() and not immediate_stop.is_set():
                                 persist_stop_request()
                             preview_sink.update_canonical_state(
@@ -429,6 +437,11 @@ def _experiment_run(
                     preview_sink.update_canonical_state(project(result))
                 finally:
                     preview_sink.close()
+            finally:
+                executor.shutdown(
+                    wait=not immediate_stop.is_set(),
+                    cancel_futures=immediate_stop.is_set(),
+                )
         else:
             if resume_budget is None:
                 result = run_python_preview(config_path)
