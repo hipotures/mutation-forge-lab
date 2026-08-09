@@ -11,6 +11,7 @@ import pytest
 
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
+from mutation_forge.native_v3_python import scientific_search as scientific_module
 from mutation_forge.native_v3_python import search_provider as provider_module
 from mutation_forge.native_v3_python.contracts import (
     PYTHON_EXPERIMENT_PROTOCOL_ID,
@@ -359,7 +360,13 @@ def _run(
     )
 
 
-def _scientific_config(tmp_path: Path, *, exp_id: str) -> Path:
+def _scientific_config(
+    tmp_path: Path,
+    *,
+    exp_id: str,
+    generations: int = 1,
+    turns: int = 8,
+) -> Path:
     heg = tmp_path / "heg"
     (heg / "src" / "sglab").mkdir(parents=True, exist_ok=True)
     config_path = tmp_path / f"{exp_id}.toml"
@@ -376,11 +383,11 @@ timeout_seconds = 30
 heg_repo = "{heg.as_posix()}"
 
 [python_preview.scientific_search]
-generation_limit = 1
+generation_limit = {generations}
 evaluator_workers = 2
 provider_concurrency = 1
 wall_seconds = 60
-provider_program_turn_limit = 8
+provider_program_turn_limit = {turns}
 stop_on_verified = true
 resume_enabled = true
 replace_terminal_slots = false
@@ -434,6 +441,47 @@ def test_program_turn_budget_stops_without_replacement(
         tmp_path
         / "generations/generation-0000/slot-02/candidate.json.gz"
     ).exists()
+
+
+def test_atomic_provider_budget_exhaustion_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = scientific_module._RuntimeTelemetry.provider_turn_available
+
+    def stale_available(
+        telemetry: Any,
+        limit: int,
+        *,
+        key: str | None = None,
+    ) -> bool:
+        if len(telemetry.snapshot()["provider_turn_keys"]) >= limit:
+            return True
+        return original(
+            telemetry,
+            limit,
+            key=key,
+        )
+
+    monkeypatch.setattr(
+        scientific_module._RuntimeTelemetry,
+        "provider_turn_available",
+        stale_available,
+    )
+    provider = _Provider()
+
+    report = _run(
+        tmp_path,
+        provider=provider,
+        concurrency=_Concurrency(parties=1),
+        options=_options(turns=2, workers=1),
+    )
+
+    assert report["stop_reason"] == "provider_turn_budget"
+    assert report["candidate_program_turns"] == 2
+    assert report["candidate_count"] == 2
+    assert report["pending_candidate_count"] == 6
+    assert provider.calls == [(0, "slot-00"), (0, "slot-01")]
 
 
 def test_all_later_generations_keep_four_children_and_four_roots(
@@ -744,6 +792,97 @@ def test_terminal_m9_report_wins_after_state_write_interruption(
     assert status["state"] == "completed"
     assert status["run_terminal"] is True
     assert status["resumable"] is False
+
+
+def test_budget_workspace_finalizes_offline_without_provider_or_backend(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="offline-budget-finalization",
+        generations=2,
+        turns=8,
+    )
+    first = run_python_preview(
+        config_path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    assert first["terminal_reason"] == "provider_turn_budget"
+    root = load_python_preview_config(config_path).experiment_root
+    write_json(
+        root / "acceptance-provenance.json.gz",
+        {"status": "accepted"},
+    )
+    for candidate_path in sorted(
+        root.glob(
+            "generations/generation-*/slot-*/candidate.json.gz"
+        )
+    ):
+        candidate = read_json(candidate_path)
+        attempts = candidate["provider_attempts"]
+        assert len(attempts) == 1
+        write_json(
+            candidate_path.parent
+            / "provider-initial"
+            / "m5-provider-result.json.gz",
+            attempts[0],
+        )
+    (root / "m9-report.json.gz").unlink()
+    (
+        root
+        / "generations"
+        / "generation-0001"
+        / "search-memory.json.gz"
+    ).unlink()
+    runtime_path = root / "m9-runtime.json.gz"
+    runtime = read_json(runtime_path)
+    runtime["terminal_reason"] = None
+    write_json(runtime_path, runtime)
+    state_path = root / "python-preview-state.json.gz"
+    state = read_json(state_path)
+    state.update(
+        {
+            "state": "blocked",
+            "resumable": True,
+            "run_terminal": False,
+            "terminal_reason": None,
+        }
+    )
+    write_json(state_path, state)
+    unexpected = 0
+
+    def fail(*_: object, **__: object) -> Any:
+        nonlocal unexpected
+        unexpected += 1
+        raise AssertionError("offline finalization constructed a live service")
+
+    finalized = run_python_preview(
+        config_path,
+        provider_factory=fail,
+        backend_factory=fail,
+        evaluator_factory=fail,
+        provenance_guard=fail,
+        auth_available=lambda _: False,
+    )
+
+    assert unexpected == 0
+    assert finalized["state"] == "completed"
+    assert finalized["terminal_reason"] == "provider_turn_budget"
+    assert finalized["counts"]["terminal"] == 8
+    assert finalized["counts"]["pending"] == 8
+    report = read_json(root / "m9-report.json.gz")
+    assert report["planned_candidate_count"] == 16
+    assert report["candidate_count"] == 8
+    assert report["pending_candidate_count"] == 8
+    assert report["recovery"] == {
+        "offline_finalized": True,
+        "provider_or_backend_started": False,
+        "missing_search_memory_generations": [1],
+    }
 
 
 def test_sustained_provider_transport_is_bounded_for_sixty_four_turns(

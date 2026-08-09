@@ -37,6 +37,7 @@ from .scientific_search import (
     M9_SEARCH_PROTOCOL_ID,
     M9_STOP_FILENAME,
     ScientificSearchOptionsV1,
+    finalize_budget_limited_search,
     run_sustained_search,
 )
 from .search import (
@@ -1366,6 +1367,35 @@ def run_python_preview(
     state = _load_state(config) if existed else _initialize_workspace(config)
     if state.get("state") == "completed":
         return _progress(config, state)
+    if config.scientific_search is not None:
+        finalized = finalize_budget_limited_search(
+            workspace=config.experiment_root,
+            options=config.scientific_search,
+        )
+        if finalized is not None:
+            completed = {
+                **state,
+                "state": "completed",
+                "resumable": False,
+                "run_terminal": True,
+                "terminal_reason": str(
+                    finalized.get(
+                        "stop_reason", "provider_turn_budget"
+                    )
+                ),
+                "scientific_result_kind": (
+                    "VERIFIED_COUNTEREXAMPLE"
+                    if finalized.get("exact_verified") is True
+                    else "DEVELOPMENT_SEARCH_EVIDENCE"
+                ),
+                "scientific_success": (
+                    finalized.get("exact_verified") is True
+                ),
+                "last_boundary": "report_persisted",
+                "last_error": None,
+            }
+            _write_state(config, completed)
+            return _progress(config, completed)
     if state.get("state") == "failed" and state.get("resumable") is not True:
         raise PythonPreviewWorkspaceError(
             "Python preview workspace is terminal and cannot be resumed"

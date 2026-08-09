@@ -32,6 +32,10 @@ M9_PREPARED_FILENAME = "prepared-candidate.json.gz"
 M9_MAX_CONSECUTIVE_PROVIDER_FAILURES = 3
 
 
+class _ProviderTurnBudgetExhausted(core.M5SearchError):
+    """The durable M9 provider reservation budget is terminally exhausted."""
+
+
 @dataclass(frozen=True, slots=True)
 class ScientificSearchOptionsV1:
     """Immutable host-owned controls for one sustained campaign."""
@@ -186,7 +190,9 @@ class _RuntimeTelemetry:
             if key in keys:
                 return False
             if len(keys) >= limit:
-                raise core.M5SearchError("provider program-turn budget exhausted")
+                raise _ProviderTurnBudgetExhausted(
+                    "provider program-turn budget exhausted"
+                )
             keys.append(key)
             self._state["provider_turn_keys"] = keys
             self._state["provider_turns_submitted"] = len(keys)
@@ -883,22 +889,30 @@ def _report(
     *,
     root: Path,
     panel: tuple[core.DevelopmentCaseV1, ...],
-    provider: core.M5SearchProvider,
+    provider_model: str,
+    provider_effort: str,
     anchor_result: core.M5ProviderResultV1,
     options: ScientificSearchOptionsV1,
-    telemetry: _RuntimeTelemetry,
+    runtime: Mapping[str, Any],
     stop_reason: str,
 ) -> dict[str, Any]:
     candidates = core._all_candidates(root)
-    generations = [
-        int(path.parent.name.removeprefix("generation-"))
+    manifests = {
+        int(path.parent.name.removeprefix("generation-")): core._load_mapping(
+            path
+        )
         for path in sorted(
             root.glob("generations/generation-*/manifest.json.gz")
         )
-    ]
+    }
+    generations = sorted(manifests)
+    planned_candidate_count = sum(
+        len(cast(Sequence[object], manifest.get("slots", ())))
+        for manifest in manifests.values()
+    )
     statuses = Counter(str(item.get("status")) for item in candidates)
     proofs = _child_mutation_proofs(candidates)
-    runtime = telemetry.snapshot()
+    runtime_payload = dict(runtime)
     profiles = [
         cast(Mapping[str, Any], item["behavior_profile"])
         for item in candidates
@@ -915,7 +929,11 @@ def _report(
         "generation_count": len(generations),
         "generation_limit": options.generation_limit,
         "population_size": core.POPULATION_SIZE,
+        "planned_candidate_count": planned_candidate_count,
         "candidate_count": len(candidates),
+        "pending_candidate_count": max(
+            0, planned_candidate_count - len(candidates)
+        ),
         "candidate_status_counts": dict(sorted(statuses.items())),
         "generation_status_counts": {
             str(generation): dict(
@@ -932,14 +950,18 @@ def _report(
         "generation_allocations": {
             str(generation): {
                 "children": sum(
-                    item.get("kind") == "child"
-                    for item in candidates
-                    if int(item["generation"]) == generation
+                    slot.get("kind") == "child"
+                    for slot in cast(
+                        Sequence[Mapping[str, Any]],
+                        manifests[generation].get("slots", ()),
+                    )
                 ),
                 "roots": sum(
-                    item.get("kind") == "root"
-                    for item in candidates
-                    if int(item["generation"]) == generation
+                    slot.get("kind") == "root"
+                    for slot in cast(
+                        Sequence[Mapping[str, Any]],
+                        manifests[generation].get("slots", ()),
+                    )
                 ),
             }
             for generation in generations
@@ -961,6 +983,12 @@ def _report(
                 / "search-memory.json.gz"
             )["sha256"]
             for generation in generations
+            if (
+                root
+                / "generations"
+                / f"generation-{generation:04d}"
+                / "search-memory.json.gz"
+            ).is_file()
         },
         "lineage": [
             {
@@ -1011,15 +1039,15 @@ def _report(
         ],
         "usage": core._usage_with_anchor(candidates, anchor_result.usage),
         "provider_turns": 1
-        + int(runtime.get("provider_turns_submitted", 0)),
+        + int(runtime_payload.get("provider_turns_submitted", 0)),
         "specification_anchor_turns": 1,
         "candidate_program_turns": int(
-            runtime.get("provider_turns_submitted", 0)
+            runtime_payload.get("provider_turns_submitted", 0)
         ),
         "repair_turns": sum(int(item.get("repairs", 0)) for item in candidates),
         "provider_accounting": {
-            "model": provider.model,
-            "effort": provider.effort,
+            "model": provider_model,
+            "effort": provider_effort,
             "warnings": anchor_result.warnings
             + sum(int(item.get("warnings", 0)) for item in candidates),
             "duration_ms": anchor_result.duration_ms
@@ -1063,25 +1091,32 @@ def _report(
             "edge_scoped_fanout_selector": True,
             "edge_scoped_relocation_selector": True,
         },
-        "runtime": runtime,
+        "runtime": runtime_payload,
         "acceptance_checks": {
             "generation_zero_eight_roots": sum(
-                int(item["generation"]) == 0 and item["kind"] == "root"
-                for item in candidates
+                slot.get("kind") == "root"
+                for slot in cast(
+                    Sequence[Mapping[str, Any]],
+                    manifests.get(0, {}).get("slots", ()),
+                )
             )
             == core.POPULATION_SIZE,
             "later_generations_four_children_four_roots": all(
                 (
                     sum(
-                        int(item["generation"]) == generation
-                        and item["kind"] == "child"
-                        for item in candidates
+                        slot.get("kind") == "child"
+                        for slot in cast(
+                            Sequence[Mapping[str, Any]],
+                            manifests[generation].get("slots", ()),
+                        )
                     )
                     == core.CHILD_SLOTS
                     and sum(
-                        int(item["generation"]) == generation
-                        and item["kind"] == "root"
-                        for item in candidates
+                        slot.get("kind") == "root"
+                        for slot in cast(
+                            Sequence[Mapping[str, Any]],
+                            manifests[generation].get("slots", ()),
+                        )
                     )
                     == core.ROOT_SLOTS
                 )
@@ -1097,11 +1132,267 @@ def _report(
             ),
             "exact_verifier_only_authority": True,
             "provider_program_turn_budget_respected": int(
-                runtime.get("provider_turns_submitted", 0)
+                runtime_payload.get("provider_turns_submitted", 0)
             )
             <= options.provider_program_turn_limit,
         },
     }
+    return report
+
+
+def _panel_from_protocol(
+    protocol: Mapping[str, Any],
+) -> tuple[core.DevelopmentCaseV1, ...]:
+    raw_panel = protocol.get("panel")
+    if not isinstance(raw_panel, Sequence) or isinstance(
+        raw_panel, str | bytes
+    ):
+        raise core.M5InfrastructureError("M9 protocol panel is malformed")
+    panel: list[core.DevelopmentCaseV1] = []
+    for raw_case in raw_panel:
+        if not isinstance(raw_case, Mapping):
+            raise core.M5InfrastructureError(
+                "M9 protocol panel case is malformed"
+            )
+        required_ints = (
+            "order",
+            "graph_seed",
+            "policy_seed",
+            "horizon",
+            "witness_cap",
+        )
+        if (
+            not isinstance(raw_case.get("case_id"), str)
+            or any(
+                not isinstance(raw_case.get(key), int)
+                or isinstance(raw_case.get(key), bool)
+                for key in required_ints
+            )
+        ):
+            raise core.M5InfrastructureError(
+                "M9 protocol panel case fields changed"
+            )
+        raw_lengths = raw_case.get("forbidden_lengths")
+        if (
+            not isinstance(raw_lengths, Sequence)
+            or isinstance(raw_lengths, str | bytes)
+            or not all(
+                isinstance(item, int) and not isinstance(item, bool)
+                for item in raw_lengths
+            )
+        ):
+            raise core.M5InfrastructureError(
+                "M9 protocol forbidden lengths changed"
+            )
+        panel.append(
+            core.DevelopmentCaseV1(
+                case_id=str(raw_case["case_id"]),
+                order=int(raw_case["order"]),
+                graph_seed=int(raw_case["graph_seed"]),
+                policy_seed=int(raw_case["policy_seed"]),
+                horizon=int(raw_case["horizon"]),
+                witness_cap=int(raw_case["witness_cap"]),
+                forbidden_lengths=tuple(cast(Sequence[int], raw_lengths)),
+            )
+        )
+    result = tuple(panel)
+    if (
+        not result
+        or protocol.get("panel_hash") != core.panel_hash(result)
+    ):
+        raise core.M5InfrastructureError("M9 protocol panel identity changed")
+    return result
+
+
+def finalize_budget_limited_search(
+    *,
+    workspace: str | Path,
+    options: ScientificSearchOptionsV1,
+) -> dict[str, Any] | None:
+    """Finalize retained M9 evidence after the provider budget is exhausted."""
+
+    root = Path(workspace)
+    report_path = root / M9_REPORT_FILENAME
+    if report_path.is_file():
+        report = core._load_mapping(report_path)
+        if report.get("protocol_id") != M9_REPORT_PROTOCOL_ID:
+            raise core.M5InfrastructureError("M9 report identity changed")
+        return report
+    runtime_path = root / M9_RUNTIME_FILENAME
+    if not runtime_path.is_file():
+        return None
+    runtime = core._load_mapping(runtime_path)
+    submitted = runtime.get("provider_turns_submitted")
+    if (
+        not isinstance(submitted, int)
+        or isinstance(submitted, bool)
+        or submitted < options.provider_program_turn_limit
+    ):
+        return None
+    if submitted != options.provider_program_turn_limit:
+        raise core.M5InfrastructureError(
+            "M9 provider turn accounting exceeded its budget"
+        )
+    keys = runtime.get("provider_turn_keys")
+    if (
+        not isinstance(keys, Sequence)
+        or isinstance(keys, str | bytes)
+        or len(keys) != submitted
+        or not all(isinstance(item, str) and item for item in keys)
+        or len(set(cast(Sequence[str], keys))) != submitted
+    ):
+        raise core.M5InfrastructureError(
+            "M9 provider reservation evidence changed"
+        )
+    protocol = core._load_mapping(root / "protocol.json.gz")
+    expected_protocol = {
+        "protocol_id": M9_SEARCH_PROTOCOL_ID,
+        "generation_limit": options.generation_limit,
+        "provider_concurrency": options.provider_concurrency,
+        "evaluator_workers": options.evaluator_workers,
+        "wall_seconds": options.wall_seconds,
+        "provider_program_turn_limit": options.provider_program_turn_limit,
+        "replace_terminal_slots": options.replace_terminal_slots,
+        "resume_enabled": options.resume_enabled,
+        "stop_on_verified": options.stop_on_verified,
+        "native_v2_default": True,
+        "dsl_runtime_used": False,
+    }
+    if any(
+        protocol.get(key) != value
+        for key, value in expected_protocol.items()
+    ):
+        raise core.M5InfrastructureError("M9 protocol options changed")
+    provider_model = protocol.get("model")
+    provider_effort = protocol.get("effort")
+    if not isinstance(provider_model, str) or not isinstance(
+        provider_effort, str
+    ):
+        raise core.M5InfrastructureError(
+            "M9 provider accounting identity changed"
+        )
+    provenance = core._load_mapping(
+        root / "acceptance-provenance.json.gz"
+    )
+    if not provenance:
+        raise core.M5InfrastructureError(
+            "M9 acceptance provenance is unavailable"
+        )
+    anchor = core.M5ProviderResultV1.from_dict(
+        core._load_mapping(root / "anchor.json.gz")
+    )
+    panel = _panel_from_protocol(protocol)
+    manifest_paths = sorted(
+        root.glob("generations/generation-*/manifest.json.gz")
+    )
+    generations = [
+        int(path.parent.name.removeprefix("generation-"))
+        for path in manifest_paths
+    ]
+    if not generations or generations != list(range(len(generations))):
+        raise core.M5InfrastructureError(
+            "M9 retained generations are not contiguous"
+        )
+    missing_memory_generations: list[int] = []
+    for generation, manifest_path in zip(
+        generations, manifest_paths, strict=True
+    ):
+        previous = (
+            core._generation_candidates(root, generation - 1)
+            if generation > 0
+            else []
+        )
+        manifest = core.build_generation_manifest(
+            generation=generation,
+            panel=panel,
+            previous_candidates=previous,
+        )
+        if core._load_mapping(manifest_path) != manifest.as_dict():
+            raise core.M5InfrastructureError(
+                "M9 retained generation manifest changed"
+            )
+        generation_dir = manifest_path.parent
+        memory_path = generation_dir / "search-memory.json.gz"
+        if memory_path.is_file():
+            memory_candidates = [
+                item
+                for item in core._all_candidates(root)
+                if int(item.get("generation", -1)) < generation
+            ]
+            memory = core.build_search_memory(memory_candidates)
+            if core._load_mapping(memory_path) != memory:
+                raise core.M5InfrastructureError(
+                    "M9 retained Search Memory changed"
+                )
+            memory_sha256 = str(memory["sha256"])
+        else:
+            missing_memory_generations.append(generation)
+            if generation != generations[-1]:
+                raise core.M5InfrastructureError(
+                    "M9 retained Search Memory is missing"
+                )
+            memory_sha256 = ""
+        for slot_plan in manifest.slots:
+            slot_dir = generation_dir / slot_plan.slot
+            candidate_path = slot_dir / "candidate.json.gz"
+            prepared_path = slot_dir / M9_PREPARED_FILENAME
+            if candidate_path.is_file():
+                if not memory_sha256:
+                    raise core.M5InfrastructureError(
+                        "M9 candidate has no retained Search Memory"
+                    )
+                core._verify_retained_candidate(
+                    root=root,
+                    path=candidate_path,
+                    panel=panel,
+                    slot_plan=slot_plan,
+                    search_memory_sha256=memory_sha256,
+                )
+            elif prepared_path.is_file():
+                raise core.M5InfrastructureError(
+                    "M9 budget finalization found a prepared candidate"
+                )
+    candidates = core._all_candidates(root)
+    attempts = sum(
+        len(cast(Sequence[object], item.get("provider_attempts", ())))
+        for item in candidates
+    )
+    provider_results = list(
+        root.glob(
+            "generations/generation-*/slot-*/provider-*/"
+            "m5-provider-result.json.gz"
+        )
+    )
+    if attempts != submitted or len(provider_results) != submitted:
+        raise core.M5InfrastructureError(
+            "M9 retained provider evidence is incomplete"
+        )
+    runtime_payload = {
+        **runtime,
+        "active_evaluators": 0,
+        "queued_evaluations": 0,
+        "terminal_reason": "provider_turn_budget",
+        "updated_epoch_seconds": time.time(),
+    }
+    write_json(runtime_path, runtime_payload)
+    report = _report(
+        root=root,
+        panel=panel,
+        provider_model=provider_model,
+        provider_effort=provider_effort,
+        anchor_result=anchor,
+        options=options,
+        runtime=runtime_payload,
+        stop_reason="provider_turn_budget",
+    )
+    report["recovery"] = {
+        "offline_finalized": True,
+        "provider_or_backend_started": False,
+        "missing_search_memory_generations": (
+            missing_memory_generations
+        ),
+    }
+    _write_or_verify(report_path, report)
     return report
 
 
@@ -1415,6 +1706,9 @@ def run_sustained_search(
                             expected_history=parent_context.included_turn_ids,
                         )
                 except Exception as error:
+                    if isinstance(error, _ProviderTurnBudgetExhausted):
+                        commit_ready(block=True)
+                        raise
                     if isinstance(error, core.M5InfrastructureError):
                         raise
                     base = _candidate_base(
@@ -1506,6 +1800,11 @@ def run_sustained_search(
                                 ),
                             )
                         except Exception as error:
+                            if isinstance(
+                                error, _ProviderTurnBudgetExhausted
+                            ):
+                                commit_ready(block=True)
+                                raise
                             if isinstance(error, core.M5InfrastructureError):
                                 raise
                             base = _candidate_base(
@@ -1632,6 +1931,9 @@ def run_sustained_search(
             if halt:
                 break
         telemetry.boundary("report_pending")
+    except _ProviderTurnBudgetExhausted:
+        stop_reason = "provider_turn_budget"
+        telemetry.boundary("provider_turn_budget_exhausted")
     except (core.M5InfrastructureError, core.M5OperatorStop) as error:
         reason = (
             "operator_stop"
@@ -1678,10 +1980,11 @@ def run_sustained_search(
     report = _report(
         root=root,
         panel=panel,
-        provider=provider,
+        provider_model=provider.model,
+        provider_effort=provider.effort,
         anchor_result=anchor_result,
         options=options,
-        telemetry=telemetry,
+        runtime=telemetry.snapshot(),
         stop_reason=stop_reason,
     )
     write_json(root / M9_REPORT_FILENAME, report)
@@ -1697,5 +2000,6 @@ __all__ = [
     "M9_SEARCH_PROTOCOL_ID",
     "M9_STOP_FILENAME",
     "ScientificSearchOptionsV1",
+    "finalize_budget_limited_search",
     "run_sustained_search",
 ]
