@@ -3838,7 +3838,7 @@ class InteractiveDashboardSink:
 
 
 def _responsive_mode(width: int, height: int) -> Literal["full", "compact", "minimal"]:
-    if width >= 140 and height >= 46:
+    if width >= 140 and height >= 48:
         return "full"
     if width >= 110 and height >= 32:
         return "compact"

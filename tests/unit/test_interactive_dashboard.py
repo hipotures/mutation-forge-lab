@@ -221,8 +221,7 @@ def test_compact_display_ids(raw: str, displayed: str) -> None:
     (
         (150, 55, "full"),
         (140, 48, "full"),
-        (150, 46, "full"),
-        (150, 45, "compact"),
+        (150, 47, "compact"),
         (120, 35, "compact"),
         (109, 55, "minimal"),
         (150, 31, "minimal"),
@@ -1506,13 +1505,13 @@ def test_profiling_panel_is_numbered_and_copyable() -> None:
         },
     )
     sink = InteractiveDashboardSink(
-        console=Console(file=io.StringIO(), width=150, height=46, force_terminal=False),
+        console=Console(file=io.StringIO(), width=150, height=55, force_terminal=False),
         start_live=False,
     )
     sink.state = state
 
     output = io.StringIO()
-    Console(file=output, width=150, height=46, force_terminal=False).print(sink.render())
+    Console(file=output, width=150, height=55, force_terminal=False).print(sink.render())
     profile_title = next(
         line for line in output.getvalue().splitlines() if "Profiling · top-N" in line
     )
