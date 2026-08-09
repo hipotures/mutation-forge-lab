@@ -111,6 +111,22 @@ class ScientificSearchOptionsV2:
 
 
 @dataclass(frozen=True, slots=True)
+class ScientificResumeBudgetV1:
+    """Transient provider budget for one incomplete generation resume."""
+
+    expected_pending_primary_slots: int
+    max_new_repair_turns: int
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.expected_pending_primary_slots <= core.POPULATION_SIZE:
+            raise ValueError(
+                "expected_pending_primary_slots must be between 1 and 8"
+            )
+        if not 0 <= self.max_new_repair_turns <= core.POPULATION_SIZE:
+            raise ValueError("max_new_repair_turns must be between 0 and 8")
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationSnapshotV1:
     """Immutable model-facing and host scheduling identity for one generation."""
 
@@ -338,6 +354,7 @@ class _RuntimeTelemetry:
         self,
         root: Path,
         options: ScientificSearchOptionsV2,
+        resume_budget: ScientificResumeBudgetV1 | None = None,
     ) -> None:
         self._path = root / M10_RUNTIME_FILENAME
         self._lock = threading.Lock()
@@ -394,6 +411,62 @@ class _RuntimeTelemetry:
                 "terminal_reason": None,
             }
         self._state = state
+        self._resume_budget = resume_budget
+        current_started = self._string_keys_locked("provider_started_keys")
+        current_repairs = self._string_keys_locked("repair_turn_keys")
+        if resume_budget is None:
+            baseline_started = current_started
+            baseline_repairs = current_repairs
+        else:
+            expected_guard = {
+                "protocol_id": "mforge.native.python.resume_budget.v1",
+                "expected_pending_primary_slots": (
+                    resume_budget.expected_pending_primary_slots
+                ),
+                "max_new_repair_turns": resume_budget.max_new_repair_turns,
+            }
+            raw_guard = state.get("resume_budget_guard")
+            if raw_guard is None:
+                guard: dict[str, Any] = {
+                    **expected_guard,
+                    "provider_started_baseline": list(current_started),
+                    "repair_turn_baseline": list(current_repairs),
+                }
+                state["resume_budget_guard"] = guard
+            elif not isinstance(raw_guard, Mapping):
+                raise core.M5InfrastructureError(
+                    "M10 resume budget guard is malformed"
+                )
+            else:
+                guard = dict(raw_guard)
+                if any(
+                    guard.get(key) != value
+                    for key, value in expected_guard.items()
+                ):
+                    raise core.M5InfrastructureError(
+                        "M10 resume budget guard changed across attempts"
+                    )
+            guard_started = guard.get("provider_started_baseline")
+            guard_repairs = guard.get("repair_turn_baseline")
+            if (
+                not isinstance(guard_started, list)
+                or not all(
+                    isinstance(item, str) and item
+                    for item in guard_started
+                )
+                or not isinstance(guard_repairs, list)
+                or not all(
+                    isinstance(item, str) and item
+                    for item in guard_repairs
+                )
+            ):
+                raise core.M5InfrastructureError(
+                    "M10 resume budget baseline is malformed"
+                )
+            baseline_started = cast(list[str], guard_started)
+            baseline_repairs = cast(list[str], guard_repairs)
+        self._started_at_resume = frozenset(baseline_started)
+        self._repairs_at_resume = frozenset(baseline_repairs)
         self._provider_active_started: float | None = None
         self._persist_locked()
 
@@ -465,12 +538,67 @@ class _RuntimeTelemetry:
             repairs = self._string_keys_locked("repair_turn_keys")
             if key in repairs:
                 return True
+            if (
+                self._resume_budget is not None
+                and len(set(repairs).difference(self._repairs_at_resume))
+                >= self._resume_budget.max_new_repair_turns
+            ):
+                return False
             if len(repairs) >= limit:
                 return False
             repairs.append(key)
             self._state["repair_turn_keys"] = repairs
             self._persist_locked()
             return True
+
+    def primary_was_started(self, key: str) -> bool:
+        with self._lock:
+            return key in self._string_keys_locked("provider_started_keys")
+
+    def admit_primary_retry(
+        self,
+        key: str,
+        *,
+        limit: int,
+        durable_result_exists: Callable[[int], bool],
+    ) -> tuple[str, int]:
+        with self._lock:
+            primary = self._string_keys_locked("primary_slot_keys")
+            started = self._string_keys_locked("provider_started_keys")
+            if key not in primary or key not in started:
+                raise core.M5InfrastructureError(
+                    "only an interrupted admitted primary turn can be retried"
+                )
+            for attempt in range(1, core.POPULATION_SIZE + 1):
+                retry_key = f"{key}-resume-{attempt:02d}"
+                if retry_key in primary:
+                    if (
+                        retry_key not in started
+                        or durable_result_exists(attempt)
+                    ):
+                        return retry_key, attempt
+                    continue
+                if retry_key not in primary:
+                    if len(primary) >= limit:
+                        raise _ProviderTurnBudgetExhausted(
+                            "primary retry exceeds the frozen provider budget"
+                        )
+                    primary.append(retry_key)
+                    self._state["primary_slot_keys"] = primary
+                    retries = self._state.setdefault(
+                        "interrupted_primary_retries",
+                        {},
+                    )
+                    if not isinstance(retries, dict):
+                        raise core.M5InfrastructureError(
+                            "M10 interrupted primary retry evidence is malformed"
+                        )
+                    retries[retry_key] = key
+                    self._persist_locked()
+                    return retry_key, attempt
+            raise core.M5InfrastructureError(
+                "interrupted primary retry attempts are exhausted"
+            )
 
     def provider_started(self, key: str, *, kind: str) -> bool:
         with self._lock:
@@ -488,6 +616,19 @@ class _RuntimeTelemetry:
             started = self._string_keys_locked("provider_started_keys")
             if key in started:
                 return False
+            if (
+                self._resume_budget is not None
+                and kind == "primary"
+                and len(
+                    set(started)
+                    .difference(self._started_at_resume)
+                    .intersection(admitted)
+                )
+                >= self._resume_budget.expected_pending_primary_slots
+            ):
+                raise _ProviderTurnBudgetExhausted(
+                    "resume primary turn budget is exhausted"
+                )
             started.append(key)
             self._state["provider_started_keys"] = started
             self._state["provider_turns_submitted"] = len(started)
@@ -927,6 +1068,7 @@ class _ProviderTask:
     prompt: str
     expected_history: tuple[str, ...]
     key: str
+    durable_result_path: Path
     operation: Callable[[], core.M5ProviderResultV1]
 
 
@@ -1616,6 +1758,59 @@ def _report(
     return report
 
 
+def resolve_resume_generation(
+    *,
+    root: Path,
+    options: ScientificSearchOptionsV2,
+    budget: ScientificResumeBudgetV1,
+) -> tuple[int, tuple[str, ...]]:
+    manifests: list[int] = []
+    incomplete: list[int] = []
+    pending_primary: dict[int, tuple[str, ...]] = {}
+    for generation in range(options.generation_limit):
+        generation_dir = (
+            root / "generations" / f"generation-{generation:04d}"
+        )
+        if not (generation_dir / "manifest.json.gz").is_file():
+            continue
+        manifests.append(generation)
+        terminal = 0
+        pending: list[str] = []
+        for slot_index in range(core.POPULATION_SIZE):
+            slot = f"slot-{slot_index:02d}"
+            slot_dir = core._candidate_path(root, generation, slot)
+            if (slot_dir / "candidate.json.gz").is_file():
+                terminal += 1
+            elif not _prepared_path(slot_dir).is_file():
+                pending.append(core._candidate_id(generation, slot))
+        if terminal < core.POPULATION_SIZE:
+            incomplete.append(generation)
+            pending_primary[generation] = tuple(pending)
+    if not manifests or len(incomplete) != 1:
+        raise core.M5InfrastructureError(
+            "current-generation resume requires exactly one incomplete "
+            "existing generation"
+        )
+    generation = incomplete[0]
+    if generation != max(manifests):
+        raise core.M5InfrastructureError(
+            "a later generation already exists after the incomplete generation"
+        )
+    for previous in range(generation):
+        if previous not in manifests:
+            raise core.M5InfrastructureError(
+                "generation history is incomplete before the resume boundary"
+            )
+    pending_ids = pending_primary[generation]
+    if len(pending_ids) != budget.expected_pending_primary_slots:
+        raise core.M5InfrastructureError(
+            "pending primary slot count changed: "
+            f"expected {budget.expected_pending_primary_slots}, "
+            f"found {len(pending_ids)}"
+        )
+    return generation, pending_ids
+
+
 def run_sustained_search(
     *,
     provider: core.M10SearchProvider,
@@ -1628,6 +1823,7 @@ def run_sustained_search(
     policy_schema: Mapping[str, Any],
     options: ScientificSearchOptionsV2,
     provider_turn_timeout_seconds: float,
+    resume_budget: ScientificResumeBudgetV1 | None = None,
     operator_stop: Callable[[], bool] | None = None,
     boundary_hook: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -1644,6 +1840,13 @@ def run_sustained_search(
     core._assert_model_prompt_hygiene(system_prompt)
     core._assert_model_prompt_hygiene(specification_prompt)
     root = Path(workspace)
+    resume_generation: int | None = None
+    if resume_budget is not None:
+        resume_generation, _ = resolve_resume_generation(
+            root=root,
+            options=options,
+            budget=resume_budget,
+        )
     root.mkdir(parents=True, exist_ok=True)
     protocol = {
         "protocol_id": M10_SEARCH_PROTOCOL_ID,
@@ -1667,7 +1870,7 @@ def run_sustained_search(
     _write_or_verify(root / "protocol.json.gz", protocol)
     if boundary_hook is not None:
         boundary_hook("protocol_persisted")
-    telemetry = _RuntimeTelemetry(root, options)
+    telemetry = _RuntimeTelemetry(root, options, resume_budget)
     telemetry.clear_terminal_reason()
     pool = _ConcurrentEvaluatorPool(
         workers=options.evaluator_workers,
@@ -1710,7 +1913,12 @@ def run_sustained_search(
         if boundary_hook is not None:
             boundary_hook("anchor_persisted")
 
-        for generation in range(options.generation_limit):
+        generations = (
+            range(resume_generation, resume_generation + 1)
+            if resume_generation is not None
+            else range(options.generation_limit)
+        )
+        for generation in generations:
             if operator_stop is not None and operator_stop():
                 raise core.M5OperatorStop("operator stop requested")
             if (
@@ -1875,6 +2083,45 @@ def run_sustained_search(
                     continue
 
                 parent: Mapping[str, Any] | None = None
+                provider_key = initial_key
+                idempotency_key = slot_plan.request_key
+                artifact_dir = pending.slot_dir / "provider-initial"
+                durable_result_path = (
+                    artifact_dir / "m5-provider-result.json.gz"
+                )
+                if (
+                    resume_budget is not None
+                    and telemetry.primary_was_started(initial_key)
+                    and not durable_result_path.is_file()
+                ):
+                    slot_dir = pending.slot_dir
+
+                    def retry_result_exists(
+                        attempt: int,
+                        *,
+                        retry_slot_dir: Path = slot_dir,
+                    ) -> bool:
+                        return (
+                            retry_slot_dir
+                            / f"provider-resume-{attempt:02d}"
+                            / "m5-provider-result.json.gz"
+                        ).is_file()
+
+                    provider_key, retry_attempt = (
+                        telemetry.admit_primary_retry(
+                            initial_key,
+                            limit=options.primary_program_slots,
+                            durable_result_exists=retry_result_exists,
+                        )
+                    )
+                    idempotency_key = provider_key
+                    artifact_dir = (
+                        pending.slot_dir
+                        / f"provider-resume-{retry_attempt:02d}"
+                    )
+                    durable_result_path = (
+                        artifact_dir / "m5-provider-result.json.gz"
+                    )
                 if slot_plan.kind == "root":
                     prompt = _root_prompt(snapshot)
                     operation = partial(
@@ -1885,8 +2132,8 @@ def run_sustained_search(
                         prompt=prompt,
                         system_prompt=system_prompt,
                         output_schema=policy_schema,
-                        idempotency_key=slot_plan.request_key,
-                        artifact_dir=pending.slot_dir / "provider-initial",
+                        idempotency_key=idempotency_key,
+                        artifact_dir=artifact_dir,
                     )
                     expected_history: tuple[str, ...] = ()
                 else:
@@ -1919,8 +2166,8 @@ def run_sustained_search(
                         prompt=prompt,
                         system_prompt=system_prompt,
                         output_schema=policy_schema,
-                        idempotency_key=slot_plan.request_key,
-                        artifact_dir=pending.slot_dir / "provider-initial",
+                        idempotency_key=idempotency_key,
+                        artifact_dir=artifact_dir,
                     )
                 core._assert_model_prompt_hygiene(prompt)
                 task = _ProviderTask(
@@ -1929,10 +2176,21 @@ def run_sustained_search(
                     parent=parent,
                     prompt=prompt,
                     expected_history=expected_history,
-                    key=initial_key,
+                    key=provider_key,
+                    durable_result_path=durable_result_path,
                     operation=operation,
                 )
                 provider_task_list.append(task)
+
+            if (
+                resume_budget is not None
+                and len(provider_task_list)
+                != resume_budget.expected_pending_primary_slots
+            ):
+                raise core.M5InfrastructureError(
+                    "pending primary task identities changed after resume "
+                    "validation"
+                )
 
             lane_tasks: dict[int, list[_ProviderTask]] = {
                 lane: [] for lane in range(options.provider_concurrency)
@@ -1960,11 +2218,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                         telemetry=telemetry,
                         key=task.key,
-                        durable_result_path=(
-                            task.pending.slot_dir
-                            / "provider-initial"
-                            / "m5-provider-result.json.gz"
-                        ),
+                        durable_result_path=task.durable_result_path,
                         operation=task.operation,
                     )
                     provider_futures[task.pending.candidate_id] = future
@@ -2188,6 +2442,9 @@ def run_sustained_search(
             if exact_verified:
                 stop_reason = "exact_verified_counterexample"
                 break
+            if resume_generation is not None:
+                stop_reason = "resume_generation_complete"
+                break
         telemetry.boundary("report_pending")
     except _ProviderTurnBudgetExhausted:
         stop_reason = "provider_turn_budget"
@@ -2239,6 +2496,8 @@ __all__ = [
     "M10_RUNTIME_FILENAME",
     "M10_SEARCH_PROTOCOL_ID",
     "M10_STOP_FILENAME",
+    "ScientificResumeBudgetV1",
     "ScientificSearchOptionsV2",
+    "resolve_resume_generation",
     "run_sustained_search",
 ]

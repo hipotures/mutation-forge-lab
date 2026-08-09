@@ -36,7 +36,9 @@ from .scientific_search import (
     M10_RUNTIME_FILENAME,
     M10_SEARCH_PROTOCOL_ID,
     M10_STOP_FILENAME,
+    ScientificResumeBudgetV1,
     ScientificSearchOptionsV2,
+    resolve_resume_generation,
     run_sustained_search,
 )
 from .search import (
@@ -1728,12 +1730,29 @@ def run_python_preview(
     evaluator_factory: EvaluatorFactory = _default_evaluator,
     provenance_guard: ProvenanceGuard = ensure_m5_acceptance_provenance,
     auth_available: Callable[[Path], bool] = Path.is_file,
+    resume_budget: ScientificResumeBudgetV1 | None = None,
 ) -> dict[str, Any]:
-    """Run or resume the explicit two-generation ordinary-Python preview."""
+    """Run or resume the explicit ordinary-Python preview."""
 
     config = load_python_preview_config(config_path)
     existed = config.experiment_root.exists()
     state = _load_state(config) if existed else _initialize_workspace(config)
+    if resume_budget is not None and (
+        not existed
+        or config.scientific_search is None
+        or state.get("resumable") is not True
+    ):
+        raise PythonPreviewWorkspaceError(
+            "current-generation budget requires a resumable scientific "
+            "workspace"
+        )
+    if resume_budget is not None:
+        assert config.scientific_search is not None
+        resolve_resume_generation(
+            root=config.experiment_root,
+            options=config.scientific_search,
+            budget=resume_budget,
+        )
     if state.get("state") == "completed":
         return _progress(config, state)
     if state.get("state") == "failed" and state.get("resumable") is not True:
@@ -1862,14 +1881,20 @@ def run_python_preview(
                 policy_schema=policy_schema,
                 options=config.scientific_search,
                 provider_turn_timeout_seconds=config.timeout_seconds,
+                resume_budget=resume_budget,
                 boundary_hook=boundary_hook,
                 operator_stop=lambda: _stop_requested(config),
             )
+        resume_generation_complete = (
+            report.get("stop_reason") == "resume_generation_complete"
+        )
         final_state = {
             **running,
-            "state": "completed",
-            "resumable": False,
-            "run_terminal": True,
+            "state": (
+                "blocked" if resume_generation_complete else "completed"
+            ),
+            "resumable": resume_generation_complete,
+            "run_terminal": not resume_generation_complete,
             "terminal_reason": report.get("stop_reason"),
             "scientific_result_kind": (
                 "VERIFIED_COUNTEREXAMPLE"
@@ -1877,6 +1902,7 @@ def run_python_preview(
                 else "DEVELOPMENT_SEARCH_EVIDENCE"
             ),
             "scientific_success": report.get("exact_verified") is True,
+            "last_error": None,
         }
     except M5OperatorStop as error:
         primary_error = error

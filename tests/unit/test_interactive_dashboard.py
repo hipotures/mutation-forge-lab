@@ -2055,10 +2055,22 @@ def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
             "paused-for-budget.json",
         ]
     )
+    parsed_resume = cli.build_parser().parse_args(
+        [
+            "experiment",
+            "run",
+            "--resume-current-generation",
+            "7",
+            "--max-new-repair-turns",
+            "2",
+        ]
+    )
     assert parsed_default.dashboard is False
     assert parsed_dashboard.dashboard is True
     assert parsed_status.dashboard is True
     assert parsed_status.pause_record == Path("paused-for-budget.json")
+    assert parsed_resume.resume_current_generation == 7
+    assert parsed_resume.max_new_repair_turns == 2
 
     class _TTY(io.StringIO):
         def isatty(self) -> bool:
@@ -2097,6 +2109,51 @@ def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
     cli.RichLiveSink.assert_not_called()
     cli.InteractiveDashboardSink.assert_called_once()
     new_sink.close.assert_called_once()
+
+
+def test_current_generation_resume_flags_route_transient_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[object] = []
+
+    def fake_run(
+        _path: Path,
+        *,
+        resume_budget: object,
+    ) -> dict[str, object]:
+        captured.append(resume_budget)
+        return {
+            "state": "blocked",
+            "terminal_reason": "resume_generation_complete",
+        }
+
+    monkeypatch.setattr(
+        cli,
+        "experiment_protocol",
+        lambda _path: "native-v3-python-v1",
+    )
+    monkeypatch.setattr(cli, "run_python_preview", fake_run)
+
+    assert (
+        cli._experiment_run(
+            Path("m10.toml"),
+            json_output=True,
+            resume_current_generation=7,
+            max_new_repair_turns=2,
+        )
+        == 0
+    )
+    budget = captured[0]
+    assert isinstance(budget, cli.ScientificResumeBudgetV1)
+    assert budget.expected_pending_primary_slots == 7
+    assert budget.max_new_repair_turns == 2
+
+    with pytest.raises(ValueError, match="must be supplied together"):
+        cli._experiment_run(
+            Path("m10.toml"),
+            json_output=True,
+            resume_current_generation=7,
+        )
 
 
 def test_standard_dashboard_routes_explicit_python_through_existing_sink(
