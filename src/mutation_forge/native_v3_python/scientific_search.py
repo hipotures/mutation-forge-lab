@@ -2060,12 +2060,15 @@ def run_sustained_search(
 
     try:
         check_force_stop()
-        anchor_result = provider.ensure_specification_anchor(
+        anchor_future = provider_executor.submit(
+            provider.ensure_specification_anchor,
             prompt=specification_prompt,
             system_prompt=system_prompt,
             output_schema=specification_ack_schema,
             artifact_dir=root / "provider" / "specification-anchor",
         )
+        anchor_result = wait_for_provider_result(anchor_future)
+        check_force_stop()
         core._assert_provider_turn_boundary(anchor_result, expected_history=())
         anchor = anchor_result.context
         core._write_exclusive_or_verify(root / "anchor.json.gz", anchor_result.as_dict())
