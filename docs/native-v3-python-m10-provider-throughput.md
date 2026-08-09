@@ -101,7 +101,7 @@ bottleneck.
 
 Two smaller versioned profiles support the required live acceptance:
 
-- `native-v3-python-m10-dashboard-acceptance-v2.toml` exercises Rich,
+- `native-v3-python-m10-dashboard-acceptance-v3.toml` exercises Rich,
   durable stop/resume, no-repeat, and JSON parity;
 - `native-v3-python-m10-benchmark-v1.toml` runs one eight-slot generation for
   the quick throughput benchmark.
