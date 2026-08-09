@@ -73,6 +73,10 @@ _STATE_NAME = "python-preview-state.json.gz"
 _CONFIG_NAME = "python-preview.toml"
 _STOP_REQUEST_NAME = "python-preview-stop-request.json.gz"
 _STOP_REQUEST_PROTOCOL_ID = "mforge.native.python_preview.stop_request.v1"
+_M10_PAUSE_RECORD_SCHEMA_VERSION = (
+    "mforge.native.python_m10_emergency_stop_evidence.v1"
+)
+_PAUSED_FOR_BUDGET = "PAUSED_FOR_BUDGET"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _TERMINAL_CANDIDATE_STATUSES = frozenset(
     {
@@ -1313,6 +1317,8 @@ def _progress(
 
 def python_preview_status(
     config_path: str | Path,
+    *,
+    pause_record_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return a bounded read-only status projection without provider contact."""
 
@@ -1330,7 +1336,204 @@ def python_preview_status(
             "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
             "last_error": _safe_error(error, config),
         }
-    return _progress(config, state)
+    status = _progress(config, state)
+    if pause_record_path is None:
+        return status
+    return _apply_pause_record(config, status, Path(pause_record_path))
+
+
+def _apply_pause_record(
+    config: PythonPreviewConfig,
+    status: Mapping[str, Any],
+    pause_record_path: Path,
+) -> dict[str, Any]:
+    resolved_pause_record = pause_record_path.resolve()
+    try:
+        raw_record = json.loads(resolved_pause_record.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        raw_record = None
+    record = dict(raw_record) if isinstance(raw_record, Mapping) else None
+    if (
+        record is None
+        or record.get("schema_version") != _M10_PAUSE_RECORD_SCHEMA_VERSION
+        or record.get("state") != _PAUSED_FOR_BUDGET
+        or record.get("experiment") != config.exp_id
+    ):
+        raise PythonPreviewWorkspaceError(
+            "Budget pause record does not match this ordinary-Python workspace"
+        )
+
+    slots_record = record.get("slots")
+    counts = status.get("counts")
+    if not isinstance(slots_record, Mapping) or not isinstance(counts, Mapping):
+        raise PythonPreviewWorkspaceError("Budget pause slot accounting is malformed")
+    terminal = _nonnegative_int(slots_record.get("terminal_total"))
+    pending = _nonnegative_int(slots_record.get("pending_total"))
+    if (
+        terminal != _nonnegative_int(counts.get("terminal"))
+        or pending != _nonnegative_int(counts.get("pending"))
+    ):
+        raise PythonPreviewWorkspaceError(
+            "Budget pause slot accounting does not match durable workspace artifacts"
+        )
+
+    interrupted = _string_sequence(
+        slots_record.get("in_flight_slots"),
+        "slots.in_flight_slots",
+    )
+    unstarted = _string_sequence(
+        slots_record.get("pending_unstarted_slots"),
+        "slots.pending_unstarted_slots",
+    )
+    if (
+        len(interrupted) != _nonnegative_int(
+            slots_record.get("in_flight_cancelled_at_stop")
+        )
+        or len(interrupted) + len(unstarted) != pending
+        or set(interrupted).intersection(unstarted)
+    ):
+        raise PythonPreviewWorkspaceError("Budget pause pending identities are malformed")
+
+    provider_record = record.get("provider_turns")
+    best_record = record.get("best")
+    exact_record = record.get("exact_verifier")
+    if (
+        not isinstance(provider_record, Mapping)
+        or not isinstance(best_record, Mapping)
+        or not isinstance(exact_record, Mapping)
+    ):
+        raise PythonPreviewWorkspaceError("Budget pause scientific accounting is malformed")
+    raw_usage = provider_record.get("persisted_usage_including_specification_anchor")
+    fitness = best_record.get("fitness_interval")
+    if not isinstance(raw_usage, Mapping) or not isinstance(fitness, Mapping):
+        raise PythonPreviewWorkspaceError("Budget pause scientific accounting is malformed")
+
+    usage_fields = {
+        "inputTokens": "input_tokens",
+        "cachedInputTokens": "cached_input_tokens",
+        "outputTokens": "output_tokens",
+        "reasoningOutputTokens": "reasoning_output_tokens",
+        "totalTokens": "total_tokens",
+    }
+    usage = {
+        target: _nonnegative_int(raw_usage.get(source))
+        for target, source in usage_fields.items()
+    }
+    usage["cacheWriteInputTokens"] = 0
+
+    provider = status.get("provider")
+    evaluators = status.get("evaluators")
+    best = status.get("best")
+    exact = status.get("exact_verification")
+    recovery = status.get("recovery")
+    provider_projection = dict(provider) if isinstance(provider, Mapping) else {}
+    evaluator_projection = dict(evaluators) if isinstance(evaluators, Mapping) else {}
+    best_projection = dict(best) if isinstance(best, Mapping) else {}
+    exact_projection = dict(exact) if isinstance(exact, Mapping) else {}
+    recovery_projection = dict(recovery) if isinstance(recovery, Mapping) else {}
+    provider_projection.update(
+        {
+            "program_turns_reserved": _nonnegative_int(
+                provider_record.get("started_reservations")
+            ),
+            "primary_turns": _nonnegative_int(
+                provider_record.get("primary_turns_submitted")
+            ),
+            "repair_turns": _nonnegative_int(
+                provider_record.get("repair_turns_submitted")
+            ),
+            "completed_turns": _nonnegative_int(
+                provider_record.get("completed_turns")
+            ),
+            "interrupted_turns": _nonnegative_int(
+                provider_record.get("in_flight_started_without_finished")
+            ),
+            "active": 0,
+            "usage": usage,
+        }
+    )
+    evaluator_projection["active"] = 0
+    best_projection.update(
+        {
+            "candidate_id": best_record.get("candidate_id"),
+            "program_hash": best_record.get("program_hash"),
+            "fitness_interval": dict(fitness),
+        }
+    )
+    exact_projection.update(
+        {
+            "submissions": _nonnegative_int(
+                exact_record.get("candidate_submissions")
+            ),
+            "records": _nonnegative_int(exact_record.get("candidate_results")),
+            "verified": exact_record.get("all_candidate_exact_verified") is True,
+        }
+    )
+    recovery_projection.update(
+        {
+            "state": "resumable",
+            "completed_slots_will_not_repeat": True,
+        }
+    )
+
+    paused_slot_states = {
+        **{candidate_id: "interrupted" for candidate_id in interrupted},
+        **{candidate_id: "queued" for candidate_id in unstarted},
+    }
+    slot_projection: list[dict[str, Any]] = []
+    raw_slots = status.get("slots")
+    if isinstance(raw_slots, Sequence) and not isinstance(raw_slots, str | bytes):
+        for raw_slot in raw_slots:
+            if not isinstance(raw_slot, Mapping):
+                continue
+            candidate_id = raw_slot.get("candidate_id")
+            projected = dict(raw_slot)
+            if isinstance(candidate_id, str) and candidate_id in paused_slot_states:
+                projected["state"] = paused_slot_states[candidate_id]
+                projected["phase"] = "paused"
+            slot_projection.append(projected)
+    missing_pending = set(paused_slot_states).difference(
+        str(item.get("candidate_id")) for item in slot_projection
+    )
+    if missing_pending:
+        raise PythonPreviewWorkspaceError(
+            "Budget pause identities do not match durable generation manifests"
+        )
+
+    return {
+        **status,
+        "state": _PAUSED_FOR_BUDGET,
+        "resumable": True,
+        "run_terminal": False,
+        "terminal_reason": "provider_budget",
+        "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
+        "scientific_success": False,
+        "counts": {**counts, "terminal": terminal, "pending": pending},
+        "provider": provider_projection,
+        "evaluators": evaluator_projection,
+        "best": best_projection,
+        "slots": slot_projection,
+        "recovery": recovery_projection,
+        "exact_verification": exact_projection,
+        "pause": {
+            "state": _PAUSED_FOR_BUDGET,
+            "record_path": str(resolved_pause_record),
+            "interrupted_slots": list(interrupted),
+            "unstarted_slots": list(unstarted),
+            "resumable_pending": pending,
+        },
+    }
+
+
+def _string_sequence(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise PythonPreviewWorkspaceError(f"Budget pause {name} must be a list")
+    items = tuple(value)
+    if any(not isinstance(item, str) or not item for item in items):
+        raise PythonPreviewWorkspaceError(
+            f"Budget pause {name} must contain non-empty strings"
+        )
+    return cast(tuple[str, ...], items)
 
 
 def _stop_request_path(config: PythonPreviewConfig) -> Path:

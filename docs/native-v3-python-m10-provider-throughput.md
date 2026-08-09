@@ -77,6 +77,12 @@ uv run mforge experiment status \
   --json
 ```
 
+Use `experiment status --dashboard` for a single read-only Rich snapshot. A
+matching offline budget-pause record can be supplied with `--pause-record`;
+both Rich and JSON then report `PAUSED_FOR_BUDGET` from the same canonical
+projection. Neither status mode starts the App Server, provider, evaluator, or
+experiment coordinator.
+
 Request a durable stop:
 
 ```bash

@@ -905,6 +905,121 @@ def test_rich_projection_uses_the_same_canonical_status_counters(
     ]["planned"]
 
 
+def test_budget_pause_record_projects_read_only_rich_and_json_status(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="paused-budget-status",
+    )
+    status = run_python_preview(
+        config_path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(
+            _Concurrency(parties=1)
+        ),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    config = load_python_preview_config(config_path)
+    workspace = config.experiment_root
+    before = {
+        path.relative_to(workspace): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+    pause_record = tmp_path / "paused-for-budget.json"
+    pause_record.write_text(
+        json.dumps(
+            {
+                "schema_version": (
+                    "mforge.native.python_m10_emergency_stop_evidence.v1"
+                ),
+                "state": "PAUSED_FOR_BUDGET",
+                "experiment": config.exp_id,
+                "slots": {
+                    "terminal_total": 8,
+                    "in_flight_cancelled_at_stop": 0,
+                    "pending_total": 0,
+                    "in_flight_slots": [],
+                    "pending_unstarted_slots": [],
+                },
+                "provider_turns": {
+                    "started_reservations": 8,
+                    "completed_turns": 8,
+                    "in_flight_started_without_finished": 0,
+                    "primary_turns_submitted": 8,
+                    "repair_turns_submitted": 0,
+                    "persisted_usage_including_specification_anchor": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 10,
+                        "output_tokens": 20,
+                        "reasoning_output_tokens": 3,
+                        "total_tokens": 120,
+                    },
+                },
+                "best": {
+                    "candidate_id": "g0000-slot-00",
+                    "program_hash": "b" * 64,
+                    "fitness_interval": {
+                        "lower": {"numerator": 2, "denominator": 3},
+                        "upper": {"numerator": 2, "denominator": 3},
+                    },
+                },
+                "exact_verifier": {
+                    "candidate_submissions": 0,
+                    "candidate_results": 0,
+                    "all_candidate_exact_verified": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paused = python_preview_status(
+        config_path,
+        pause_record_path=pause_record,
+    )
+    after = {
+        path.relative_to(workspace): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+
+    assert status["counts"]["terminal"] == 8
+    assert paused["state"] == "PAUSED_FOR_BUDGET"
+    assert paused["resumable"] is True
+    assert paused["run_terminal"] is False
+    assert paused["counts"]["terminal"] == 8
+    assert paused["counts"]["pending"] == 0
+    assert paused["provider"]["active"] == 0
+    assert paused["provider"]["completed_turns"] == 8
+    assert paused["provider"]["usage"]["totalTokens"] == 120
+    assert paused["exact_verification"]["verified"] is False
+    assert before == after
+
+    assert config.scientific_search is not None
+    rich = dashboard_state_from_python_status(
+        paused,
+        run_id=config.exp_id,
+        model=config.model,
+        effort=config.effort,
+        generation_limit=config.scientific_search.generation_limit,
+        wall_seconds=config.scientific_search.wall_seconds,
+    )
+    assert rich.experiment_state == "PAUSED_FOR_BUDGET"
+    assert rich.paused is False
+    assert rich.completed_slots == paused["counts"]["terminal"]
+    assert rich.provider_turns_attempted == 8
+    assert rich.provider_turns_completed == 8
+    assert rich.cumulative_usage.total == 120
+    assert rich.best_candidate == "g0000-slot-00"
+    assert rich.best_program_hash == "b" * 64
+    assert rich.best_fitness == "2/3"
+    assert rich.best_objective == 2 / 3
+
+
 def test_status_counts_failed_provider_reservations(
     tmp_path: Path,
 ) -> None:

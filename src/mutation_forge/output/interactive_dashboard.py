@@ -260,6 +260,8 @@ class DashboardState:
     current_objective: float | None = None
     best_objective: float | None = None
     best_candidate: str = "—"
+    best_program_hash: str = "—"
+    best_fitness: str = "—"
     objective_direction: str = "maximize"
     baseline_random: float | None = None
     baseline_structural: float | None = None
@@ -436,11 +438,15 @@ def dashboard_state_from_python_status(
     generation = integer(status.get("generation_index"))
     best_interval = best.get("fitness_interval")
     best_value: float | None = None
+    best_fitness = "—"
     if isinstance(best_interval, Mapping):
         lower = best_interval.get("lower")
-        if isinstance(lower, Mapping):
+        upper = best_interval.get("upper")
+        if isinstance(lower, Mapping) and isinstance(upper, Mapping):
             numerator = lower.get("numerator")
             denominator = lower.get("denominator")
+            upper_numerator = upper.get("numerator")
+            upper_denominator = upper.get("denominator")
             if (
                 isinstance(numerator, int)
                 and not isinstance(numerator, bool)
@@ -449,6 +455,21 @@ def dashboard_state_from_python_status(
                 and denominator
             ):
                 best_value = numerator / denominator
+                lower_text = f"{numerator}/{denominator}"
+                upper_text = (
+                    f"{upper_numerator}/{upper_denominator}"
+                    if isinstance(upper_numerator, int)
+                    and not isinstance(upper_numerator, bool)
+                    and isinstance(upper_denominator, int)
+                    and not isinstance(upper_denominator, bool)
+                    and upper_denominator
+                    else "unknown"
+                )
+                best_fitness = (
+                    lower_text
+                    if lower_text == upper_text
+                    else f"[{lower_text}, {upper_text}]"
+                )
     scientific_activity = (
         f"NoPlan={integer(activity.get('no_plan_count'))} · "
         f"illegal-final={integer(activity.get('illegal_final_state_count'))} · "
@@ -480,15 +501,20 @@ def dashboard_state_from_python_status(
         generation=generation,
         generation_limit=generation_limit,
         displayed_generation=generation,
-        population_size=8,
+        population_size=max(8, integer(counts.get("planned"))),
         completed_slots=integer(counts.get("terminal")),
         provider_turns_attempted=integer(
             provider.get("program_turns_reserved")
         ),
         provider_turns_completed=max(
             0,
-            integer(provider.get("program_turns_reserved"))
-            - integer(provider.get("active")),
+            integer(
+                provider.get(
+                    "completed_turns",
+                    integer(provider.get("program_turns_reserved"))
+                    - integer(provider.get("active")),
+                )
+            ),
         ),
         max_model_turns=None,
         active_provider_turns=integer(provider.get("active")),
@@ -509,13 +535,15 @@ def dashboard_state_from_python_status(
         current_objective=best_value,
         best_objective=best_value,
         best_candidate=str(best.get("candidate_id") or "—"),
+        best_program_hash=str(best.get("program_hash") or "—"),
+        best_fitness=best_fitness,
         improvement_rate=number(
             throughput.get("accepted_rewrites_per_second")
         ),
         evaluation_rate=number(
             throughput.get("policy_invocations_per_second")
         ),
-        profiling_enabled=True,
+        profiling_enabled=status.get("state") != "PAUSED_FOR_BUDGET",
         timing_profile={
             "phase_seconds": {
                 "provider": number(phase.get("provider_wait_seconds")),
@@ -550,6 +578,21 @@ def dashboard_state_from_python_status(
                 severity="info",
                 message=exact_activity,
             ),
+            ActivityEntry(
+                timestamp="status",
+                component="best",
+                severity="info",
+                message=(
+                    f"candidate {best.get('candidate_id') or '—'} · "
+                    f"fitness {best_fitness}"
+                ),
+            ),
+            ActivityEntry(
+                timestamp="status",
+                component="program",
+                severity="info",
+                message=f"program {best.get('program_hash') or '—'}",
+            ),
         ),
         counterexample_state=(
             "verified" if exact.get("verified") is True else "none"
@@ -558,6 +601,11 @@ def dashboard_state_from_python_status(
             str(best.get("candidate_id"))
             if exact.get("verified") is True
             else "—"
+        ),
+        status_message=(
+            "Read-only status · provider work is not scheduled"
+            if status.get("state") == "PAUSED_FOR_BUDGET"
+            else ""
         ),
     )
 
@@ -1033,6 +1081,14 @@ def _merge_persisted_dashboard_state(
         objective_history=history,
         best_objective=persisted_best if use_persisted_best else live_best,
         best_candidate=persisted.best_candidate if use_persisted_best else live.best_candidate,
+        best_program_hash=(
+            persisted.best_program_hash
+            if use_persisted_best
+            else live.best_program_hash
+        ),
+        best_fitness=(
+            persisted.best_fitness if use_persisted_best else live.best_fitness
+        ),
         archive_size=max(live.archive_size, persisted.archive_size),
         accepted_candidates=max(live.accepted_candidates, persisted.accepted_candidates),
         evaluations_completed=max(
@@ -2723,6 +2779,7 @@ class InteractiveDashboardSink:
     ) -> Panel:
         state_style = {
             "running": "bold cyan",
+            "PAUSED_FOR_BUDGET": "bold yellow",
             "paused": "bold yellow",
             "idle": "bold yellow",
             "exhausted": "bold blue",
@@ -3178,6 +3235,19 @@ class InteractiveDashboardSink:
                     self.state.configured_provider_concurrency,
                 ),
             ),
+            (
+                "provider turns",
+                f"{self.state.provider_turns_completed}/"
+                f"{self.state.provider_turns_attempted}",
+            ),
+            ("evaluations", self.state.evaluations_completed),
+            (
+                "pending slots",
+                max(
+                    0,
+                    self.state.population_size - self.state.completed_slots,
+                ),
+            ),
         ]
         if compact:
             rows = rows[: row_limit or 1]
@@ -3257,7 +3327,9 @@ class InteractiveDashboardSink:
             ("direction", f"{self.state.objective_direction} ↑"),
             ("current", _objective(self.state.current_objective)),
             ("best", _objective(self.state.best_objective)),
-            ("best candidate", compact_display_ids(self.state.best_candidate)),
+            ("best candidate", Text(self.state.best_candidate)),
+            ("best program", Text(self.state.best_program_hash)),
+            ("exact fitness", Text(self.state.best_fitness)),
             ("random baseline", _objective(self.state.baseline_random)),
             ("structural baseline", _objective(self.state.baseline_structural)),
             ("accepted", self.state.accepted_candidates),
@@ -3494,6 +3566,12 @@ class InteractiveDashboardSink:
         return Panel(content, title=title, border_style="cyan", padding=(0, 1))
 
     def _footer(self, width: int) -> Text:
+        if self.locked_config.get("read_only") is True:
+            message = (
+                self.state.status_message
+                or "Read-only status · provider work is not scheduled"
+            )
+            return Text(_compact(message, width).ljust(width), style="reverse")
         if self.state.search_editing:
             return Text(
                 _compact(
@@ -3562,6 +3640,7 @@ class InteractiveDashboardSink:
 
     def _elapsed(self) -> float:
         if self.state.started_monotonic is not None and self.state.experiment_state not in {
+            "PAUSED_FOR_BUDGET",
             "completed",
             "interrupted",
             "failed",

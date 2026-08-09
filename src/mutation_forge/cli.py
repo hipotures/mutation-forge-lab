@@ -484,10 +484,54 @@ def _experiment_run(
     return 0 if result.get("status") != "failed" else 1
 
 
-def _experiment_status(config_path: Path, *, json_output: bool) -> int:
+def _experiment_status(
+    config_path: Path,
+    *,
+    json_output: bool,
+    dashboard: bool = False,
+    pause_record_path: Path | None = None,
+) -> int:
+    if dashboard and json_output:
+        raise ValueError("experiment status dashboard cannot be combined with JSON")
     protocol = experiment_protocol(config_path)
     if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
-        result = python_preview_status(config_path)
+        result = python_preview_status(
+            config_path,
+            pause_record_path=pause_record_path,
+        )
+        if dashboard:
+            config = load_python_preview_config(config_path)
+            scientific = config.scientific_search
+            generation_limit = (
+                scientific.generation_limit if scientific is not None else 2
+            )
+            wall_seconds = (
+                scientific.wall_seconds if scientific is not None else 0.0
+            )
+            console = Console(file=sys.stdout, width=160, height=50)
+            sink = InteractiveDashboardSink(
+                console=console,
+                locked_config={
+                    "protocol": config.protocol,
+                    "config_path": str(config.source_path),
+                    "workspace": str(config.experiment_root),
+                    "read_only": True,
+                },
+                initial_state=dashboard_state_from_python_status(
+                    result,
+                    run_id=config.exp_id,
+                    model=config.model,
+                    effort=config.effort,
+                    generation_limit=generation_limit,
+                    wall_seconds=wall_seconds,
+                ),
+                start_live=False,
+            )
+            try:
+                console.print(sink.render())
+            finally:
+                sink.close()
+            return 0 if result.get("state") != "failed" else 1
         encoded = json.dumps(
             result,
             ensure_ascii=False,
@@ -499,6 +543,10 @@ def _experiment_status(config_path: Path, *, json_output: bool) -> int:
         else:
             Console().print_json(encoded)
         return 0 if result.get("state") != "failed" else 1
+    if dashboard or pause_record_path is not None:
+        raise ValueError(
+            "read-only dashboard and pause records require ordinary-Python mode"
+        )
     result = experiment_status(config_path)
     print(render_status(result, json_output=json_output))
     return 0 if result.get("state") != "failed" else 1
@@ -975,6 +1023,16 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     )
     experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_status.add_argument("--json", action="store_true")
+    experiment_status.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="render one read-only Rich dashboard snapshot without scheduling work",
+    )
+    experiment_status.add_argument(
+        "--pause-record",
+        type=Path,
+        help="apply a matching offline budget-pause evidence record",
+    )
     experiment_stop = experiment_commands.add_parser(
         "stop",
         help="persist an explicit terminal operator decision",
@@ -1412,6 +1470,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_status.add_argument("--json", action="store_true")
+    experiment_status.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="render one read-only Rich dashboard snapshot without scheduling work",
+    )
+    experiment_status.add_argument(
+        "--pause-record",
+        type=Path,
+        help="apply a matching offline budget-pause evidence record",
+    )
     experiment_stop = experiment_commands.add_parser(
         "stop",
         help="persist an explicit terminal operator decision",
@@ -1444,7 +1512,12 @@ def legacy_main(argv: list[str] | None = None) -> int:
                 until_complete=getattr(args, "until_complete", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
-            return _experiment_status(args.config, json_output=args.json)
+            return _experiment_status(
+                args.config,
+                json_output=args.json,
+                dashboard=getattr(args, "dashboard", False),
+                pause_record_path=getattr(args, "pause_record", None),
+            )
         if args.command == "experiment" and args.experiment_command == "stop":
             return _experiment_stop(
                 args.config,
@@ -1544,7 +1617,12 @@ def main(argv: list[str] | None = None) -> int:
                 until_complete=getattr(args, "until_complete", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
-            return _experiment_status(args.config, json_output=args.json)
+            return _experiment_status(
+                args.config,
+                json_output=args.json,
+                dashboard=getattr(args, "dashboard", False),
+                pause_record_path=getattr(args, "pause_record", None),
+            )
         if args.command == "experiment" and args.experiment_command == "stop":
             return _experiment_stop(
                 args.config,

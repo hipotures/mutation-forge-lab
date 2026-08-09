@@ -117,6 +117,20 @@ valid programs per provider minute, provider-wait share, repaired-valid
 programs, policy and scoring rates, time since improvement, and the dominant
 bottleneck. The Rich dashboard renders these same counters.
 
+Render one static Rich snapshot without running or resuming the experiment:
+
+```bash
+uv run mforge experiment status \
+  --config /home/user/DEV/mutation-forge-lab-evidence/my-preview.toml \
+  --dashboard
+```
+
+An externally recorded budget pause can be applied to either read-only
+projection with `--pause-record <path>`. The record must match the experiment
+and its terminal/pending slot accounting or status fails closed. This option
+does not rewrite the workspace checkpoint; it only normalizes the displayed
+host state to `PAUSED_FOR_BUDGET`.
+
 ## Stop at a durable boundary and resume
 
 While the foreground route is running, request a resumable stop from another
