@@ -268,6 +268,9 @@ class DashboardState:
     objective_direction: str = "maximize"
     baseline_random: float | None = None
     baseline_structural: float | None = None
+    evaluation_orders: tuple[int, ...] = ()
+    evaluation_case_count: int | None = None
+    evaluation_horizon: int | None = None
     improvement_rate: float | None = None
     evaluation_rate: float | None = None
     profiling_enabled: bool = False
@@ -337,20 +340,16 @@ def dashboard_state_from_python_status(
         return value if isinstance(value, Mapping) else {}
 
     def integer(value: object) -> int:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    def optional_integer(value: object) -> int | None:
         return (
-            value
-            if isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 0
-            else 0
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
         )
 
     def number(value: object) -> float:
         return (
-            float(value)
-            if isinstance(value, int | float)
-            and not isinstance(value, bool)
-            else 0.0
+            float(value) if isinstance(value, int | float) and not isinstance(value, bool) else 0.0
         )
 
     def fitness_objective(value: object) -> float | None:
@@ -379,16 +378,21 @@ def dashboard_state_from_python_status(
     phase = mapping("phase_timings")
     best = mapping("best")
     exact = mapping("exact_verification")
+    workload = mapping("evaluation_workload")
+    baselines = mapping("baselines")
     usage = provider.get("usage")
     usage = usage if isinstance(usage, Mapping) else {}
+    usage_known = (
+        integer(provider.get("turns")) > 0 or integer(provider.get("program_turns_reserved")) > 0
+    )
     token_usage = TokenUsage(
-        input=integer(usage.get("inputTokens")),
-        cached=integer(usage.get("cachedInputTokens")),
-        cache_write=integer(usage.get("cacheWriteInputTokens")),
-        output=integer(usage.get("outputTokens")),
-        reasoning=integer(usage.get("reasoningOutputTokens")),
-        total=integer(usage.get("totalTokens")),
-        quality="exact",
+        input=optional_integer(usage.get("inputTokens")) if usage_known else None,
+        cached=(optional_integer(usage.get("cachedInputTokens")) if usage_known else None),
+        cache_write=(optional_integer(usage.get("cacheWriteInputTokens")) if usage_known else None),
+        output=optional_integer(usage.get("outputTokens")) if usage_known else None,
+        reasoning=(optional_integer(usage.get("reasoningOutputTokens")) if usage_known else None),
+        total=optional_integer(usage.get("totalTokens")) if usage_known else None,
+        quality="exact" if usage_known else "unknown",
     )
     raw_hourly_limit = status.get("hourly_token_limit")
     hourly_token_limit = (
@@ -401,9 +405,7 @@ def dashboard_state_from_python_status(
     groups: dict[int, list[DashboardSlot]] = {}
     programs_by_candidate: dict[str, Mapping[str, Any]] = {}
     raw_programs = status.get("programs")
-    if isinstance(raw_programs, Sequence) and not isinstance(
-        raw_programs, str | bytes
-    ):
+    if isinstance(raw_programs, Sequence) and not isinstance(raw_programs, str | bytes):
         for raw_program in raw_programs:
             if not isinstance(raw_program, Mapping):
                 continue
@@ -411,9 +413,7 @@ def dashboard_state_from_python_status(
             if isinstance(candidate_id, str):
                 programs_by_candidate[candidate_id] = raw_program
     raw_slots = status.get("slots")
-    if isinstance(raw_slots, Sequence) and not isinstance(
-        raw_slots, str | bytes
-    ):
+    if isinstance(raw_slots, Sequence) and not isinstance(raw_slots, str | bytes):
         for raw in raw_slots:
             if not isinstance(raw, Mapping):
                 continue
@@ -443,26 +443,19 @@ def dashboard_state_from_python_status(
                     phase=str(raw.get("phase", "queued")),
                     state=state,
                     started_monotonic=(
-                        time.monotonic()
-                        - max(0.0, time.time() - started_epoch)
+                        time.monotonic() - max(0.0, time.time() - started_epoch)
                         if started_epoch > 0
                         else None
                     ),
-                    elapsed_seconds=(
-                        slot_elapsed if slot_elapsed > 0 else None
-                    ),
+                    elapsed_seconds=(slot_elapsed if slot_elapsed > 0 else None),
                     repairs=integer(raw.get("repairs")),
                     usage=TokenUsage(
-                        input=integer(raw_usage.get("inputTokens")),
-                        cached=integer(raw_usage.get("cachedInputTokens")),
-                        cache_write=integer(
-                            raw_usage.get("cacheWriteInputTokens")
-                        ),
-                        output=integer(raw_usage.get("outputTokens")),
-                        reasoning=integer(
-                            raw_usage.get("reasoningOutputTokens")
-                        ),
-                        total=integer(raw_usage.get("totalTokens")),
+                        input=optional_integer(raw_usage.get("inputTokens")),
+                        cached=optional_integer(raw_usage.get("cachedInputTokens")),
+                        cache_write=optional_integer(raw_usage.get("cacheWriteInputTokens")),
+                        output=optional_integer(raw_usage.get("outputTokens")),
+                        reasoning=optional_integer(raw_usage.get("reasoningOutputTokens")),
+                        total=optional_integer(raw_usage.get("totalTokens")),
                         quality="exact",
                     ),
                     validation=(
@@ -475,18 +468,14 @@ def dashboard_state_from_python_status(
                     candidate=candidate_id,
                     error=raw_state if state == "failed" else "",
                     objective=fitness_objective(
-                        programs_by_candidate.get(candidate_id, {}).get(
-                            "fitness_interval"
-                        )
+                        programs_by_candidate.get(candidate_id, {}).get("fitness_interval")
                     ),
                 )
             )
     generation_groups = tuple(
         GenerationSlots(
             generation=generation,
-            slots=tuple(
-                sorted(slots, key=lambda item: item.slot)
-            ),
+            slots=tuple(sorted(slots, key=lambda item: item.slot)),
         )
         for generation, slots in sorted(groups.items())
     )
@@ -522,9 +511,7 @@ def dashboard_state_from_python_status(
                     else "unknown"
                 )
                 best_fitness = (
-                    lower_text
-                    if lower_text == upper_text
-                    else f"[{lower_text}, {upper_text}]"
+                    lower_text if lower_text == upper_text else f"[{lower_text}, {upper_text}]"
                 )
     scientific_activity = (
         f"NoPlan={integer(activity.get('no_plan_count'))} · "
@@ -539,26 +526,18 @@ def dashboard_state_from_python_status(
     )
     current_slots = groups.get(generation, ())
     live_slots = sorted(
-        (
-            slot
-            for slot in current_slots
-            if slot.state in ACTIVE_STATES or slot.state == "queued"
-        ),
+        (slot for slot in current_slots if slot.state in ACTIVE_STATES or slot.state == "queued"),
         key=lambda slot: (slot.state == "queued", slot.slot),
     )
     live_activity = tuple(
         ActivityEntry(
             timestamp=(
-                _duration(slot.elapsed_seconds)
-                if slot.elapsed_seconds is not None
-                else "live"
+                _duration(slot.elapsed_seconds) if slot.elapsed_seconds is not None else "live"
             ),
             component=slot.phase,
             severity="info",
             message=(
-                f"{slot.state} · {slot.usage.total} tokens"
-                if slot.usage.total
-                else slot.state
+                f"{slot.state} · {slot.usage.total} tokens" if slot.usage.total else slot.state
             ),
             slot=slot.slot,
         )
@@ -567,6 +546,22 @@ def dashboard_state_from_python_status(
     best_program = best.get("program")
     best_program = best_program if isinstance(best_program, Mapping) else {}
     best_program_hash = str(best_program.get("program_hash") or "—")
+    random_baseline = baselines.get("random")
+    structural_baseline = baselines.get("structural")
+    baseline_random = fitness_objective(
+        random_baseline.get("fitness_interval") if isinstance(random_baseline, Mapping) else None
+    )
+    baseline_structural = fitness_objective(
+        structural_baseline.get("fitness_interval")
+        if isinstance(structural_baseline, Mapping)
+        else None
+    )
+    raw_orders = workload.get("orders")
+    evaluation_orders = (
+        tuple(item for item in raw_orders if isinstance(item, int) and not isinstance(item, bool))
+        if isinstance(raw_orders, Sequence) and not isinstance(raw_orders, str | bytes)
+        else ()
+    )
     return DashboardState(
         run_id=run_id,
         session_id="ordinary-python",
@@ -579,7 +574,7 @@ def dashboard_state_from_python_status(
             or phase.get("dominant_bottleneck")
             or "provider"
         ),
-        graph_mode="minimum-degree-3",
+        graph_mode=str(workload.get("graph_mode") or "—"),
         started_at="durable workspace",
         started_monotonic=time.monotonic() - elapsed,
         elapsed_seconds=elapsed,
@@ -589,9 +584,7 @@ def dashboard_state_from_python_status(
         displayed_generation=generation,
         population_size=max(8, integer(counts.get("planned"))),
         completed_slots=integer(counts.get("terminal")),
-        provider_turns_attempted=integer(
-            provider.get("program_turns_reserved")
-        ),
+        provider_turns_attempted=integer(provider.get("program_turns_reserved")),
         provider_turns_completed=max(
             0,
             integer(
@@ -612,14 +605,10 @@ def dashboard_state_from_python_status(
             else None
         ),
         active_provider_turns=integer(provider.get("active")),
-        configured_provider_concurrency=integer(
-            provider.get("configured_concurrency")
-        ),
+        configured_provider_concurrency=integer(provider.get("configured_concurrency")),
         evaluations_completed=integer(evaluators.get("completed")),
         evaluation_workers_active=integer(evaluators.get("active")),
-        evaluation_workers_configured=integer(
-            evaluators.get("configured")
-        ),
+        evaluation_workers_configured=integer(evaluators.get("configured")),
         archive_size=integer(counts.get("valid")),
         accepted_candidates=integer(counts.get("evaluated")),
         invalid_candidates=integer(counts.get("contract_invalid")),
@@ -631,27 +620,24 @@ def dashboard_state_from_python_status(
         best_candidate=str(best.get("candidate_id") or "—"),
         best_program_hash=best_program_hash,
         best_fitness=best_fitness,
-        improvement_rate=number(
-            throughput.get("accepted_rewrites_per_second")
-        ),
-        evaluation_rate=number(
-            throughput.get("policy_invocations_per_second")
-        ),
+        baseline_random=baseline_random,
+        baseline_structural=baseline_structural,
+        evaluation_orders=evaluation_orders,
+        evaluation_case_count=optional_integer(workload.get("case_count")),
+        evaluation_horizon=optional_integer(workload.get("horizon")),
+        improvement_rate=number(throughput.get("accepted_rewrites_per_second")),
+        evaluation_rate=number(throughput.get("policy_invocations_per_second")),
         profiling_enabled=status.get("state") != "PAUSED_FOR_BUDGET",
         timing_profile={
             "phase_seconds": {
                 "provider": number(phase.get("provider_wait_seconds")),
-                "evaluator/scorer": number(
-                    phase.get("evaluator_busy_seconds")
-                ),
+                "evaluator/scorer": number(phase.get("evaluator_busy_seconds")),
                 "sandbox": number(phase.get("sandbox_seconds")),
                 "HEG scoring": number(phase.get("heg_scoring_seconds")),
                 "persistence": number(phase.get("persistence_seconds")),
             },
             "phase_calls": {
-                "provider": integer(
-                    provider.get("program_turns_reserved")
-                ),
+                "provider": integer(provider.get("program_turns_reserved")),
                 "evaluator/scorer": integer(evaluators.get("completed")),
             },
             "unattributed_fraction": 0.0,
@@ -677,10 +663,7 @@ def dashboard_state_from_python_status(
                 timestamp="status",
                 component="best",
                 severity="info",
-                message=(
-                    f"candidate {best.get('candidate_id') or '—'} · "
-                    f"fitness {best_fitness}"
-                ),
+                message=(f"candidate {best.get('candidate_id') or '—'} · fitness {best_fitness}"),
             ),
             ActivityEntry(
                 timestamp="status",
@@ -689,13 +672,9 @@ def dashboard_state_from_python_status(
                 message=f"program {best_program_hash}",
             ),
         ),
-        counterexample_state=(
-            "verified" if exact.get("verified") is True else "none"
-        ),
+        counterexample_state=("verified" if exact.get("verified") is True else "none"),
         counterexample_candidate=(
-            str(best.get("candidate_id"))
-            if exact.get("verified") is True
-            else "—"
+            str(best.get("candidate_id")) if exact.get("verified") is True else "—"
         ),
         status_message=(
             "Read-only status · provider work is not scheduled"
@@ -836,10 +815,13 @@ def load_persisted_dashboard_state(
 
     evaluations: dict[str, tuple[float, Mapping[str, Any], float | None]] = {}
     evaluation_history: list[tuple[str, float]] = []
-    best_candidate: tuple[
-        str,
-        tuple[float, Mapping[str, Any], float | None],
-    ] | None = None
+    best_candidate: (
+        tuple[
+            str,
+            tuple[float, Mapping[str, Any], float | None],
+        ]
+        | None
+    ) = None
     slot_runtime_seconds: dict[tuple[int, str], float] = {}
     store: Any | None = None
     try:
@@ -1177,13 +1159,9 @@ def _merge_persisted_dashboard_state(
         best_objective=persisted_best if use_persisted_best else live_best,
         best_candidate=persisted.best_candidate if use_persisted_best else live.best_candidate,
         best_program_hash=(
-            persisted.best_program_hash
-            if use_persisted_best
-            else live.best_program_hash
+            persisted.best_program_hash if use_persisted_best else live.best_program_hash
         ),
-        best_fitness=(
-            persisted.best_fitness if use_persisted_best else live.best_fitness
-        ),
+        best_fitness=(persisted.best_fitness if use_persisted_best else live.best_fitness),
         archive_size=max(live.archive_size, persisted.archive_size),
         accepted_candidates=max(live.accepted_candidates, persisted.accepted_candidates),
         evaluations_completed=max(
@@ -1786,7 +1764,10 @@ def reduce_dashboard_event(
     elif event_type == "counterexample_independent_verification_started":
         if state.counterexample_state in {"verified", "conflict"}:
             return state
-        if state.counterexample_state not in {"primary_verified", "independent_verifying"}:
+        if state.counterexample_state not in {
+            "primary_verified",
+            "independent_verifying",
+        }:
             return state
         state = replace(
             state,
@@ -1797,7 +1778,10 @@ def reduce_dashboard_event(
     elif event_type == "counterexample_independent_verification_completed":
         if state.counterexample_state in {"verified", "conflict"}:
             return state
-        if state.counterexample_state not in {"primary_verified", "independent_verifying"}:
+        if state.counterexample_state not in {
+            "primary_verified",
+            "independent_verifying",
+        }:
             return state
         state = replace(
             state,
@@ -1814,7 +1798,10 @@ def reduce_dashboard_event(
     elif event_type == "counterexample_verification_conflict":
         if state.counterexample_state == "verified":
             return state
-        if state.counterexample_state not in {"primary_verified", "independent_verifying"}:
+        if state.counterexample_state not in {
+            "primary_verified",
+            "independent_verifying",
+        }:
             return state
         state = replace(
             state,
@@ -2313,8 +2300,7 @@ def reduce_dashboard_key(
                         group,
                         slots=tuple(
                             replace(slot, state="stopping")
-                            if group.generation == state.generation
-                            and slot.state == "queued"
+                            if group.generation == state.generation and slot.state == "queued"
                             else slot
                             for slot in group.slots
                         ),
@@ -2513,9 +2499,8 @@ class InteractiveDashboardSink:
         self.capabilities = capabilities or DashboardCapabilities()
         self.state = initial_state or DashboardState()
         self._persisted_loader = persisted_loader
-        self._history_exhausted = (
-            persisted_loader is None
-            or any(group.generation == 0 for group in self.state.generations)
+        self._history_exhausted = persisted_loader is None or any(
+            group.generation == 0 for group in self.state.generations
         )
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -2562,9 +2547,7 @@ class InteractiveDashboardSink:
 
         with self._lock:
             previous = self.state
-            generations = {
-                group.generation for group in state.generations
-            }
+            generations = {group.generation for group in state.generations}
             self.state = replace(
                 state,
                 experiment_state=(
@@ -2585,9 +2568,7 @@ class InteractiveDashboardSink:
                 search_editing=previous.search_editing,
                 slot_icon_mode=previous.slot_icon_mode,
                 retry_confirmation=previous.retry_confirmation,
-                status_message=(
-                    previous.status_message or state.status_message
-                ),
+                status_message=(previous.status_message or state.status_message),
             )
             self._rendered.clear()
             self._dirty.set()
@@ -2609,9 +2590,7 @@ class InteractiveDashboardSink:
                     self.state,
                     self._persisted_loader(previous_oldest),
                 )
-                loaded_generations = [
-                    group.generation for group in self.state.generations
-                ]
+                loaded_generations = [group.generation for group in self.state.generations]
                 loaded_oldest = min(loaded_generations, default=previous_oldest)
                 if loaded_oldest == 0 or loaded_oldest >= previous_oldest:
                     self._history_exhausted = True
@@ -2934,7 +2913,11 @@ class InteractiveDashboardSink:
             )
         )
         if minimal:
-            return Panel(first, title="Mutation Forge Lab · Native experiment", border_style="cyan")
+            return Panel(
+                first,
+                title="Mutation Forge Lab · Native experiment",
+                border_style="cyan",
+            )
         evaluation_workers = _ratio(
             self.state.evaluation_workers_active,
             self.state.evaluation_workers_configured,
@@ -3112,8 +3095,7 @@ class InteractiveDashboardSink:
             columns = [item for item in columns if item[0] in visible]
         icon_state_width = (
             4
-            if icon_mode
-            and any(_slot_evaluation_percent(slot) is not None for slot in group.slots)
+            if icon_mode and any(_slot_evaluation_percent(slot) is not None for slot in group.slots)
             else 1
         )
         for name, justify, max_width in columns:
@@ -3299,7 +3281,10 @@ class InteractiveDashboardSink:
             body = table
         elif tab == "Validation":
             body = _key_value_grid(
-                (("outcome/code", slot.validation), ("message", slot.validation_message or "—"))
+                (
+                    ("outcome/code", slot.validation),
+                    ("message", slot.validation_message or "—"),
+                )
             )
         elif tab == "Probe":
             body = _key_value_grid(
@@ -3372,8 +3357,7 @@ class InteractiveDashboardSink:
             ),
             (
                 "provider turns",
-                f"{self.state.provider_turns_completed}/"
-                f"{self.state.provider_turns_attempted}",
+                f"{self.state.provider_turns_completed}/{self.state.provider_turns_attempted}",
             ),
             ("evaluations", self.state.evaluations_completed),
             (
@@ -3615,6 +3599,8 @@ class InteractiveDashboardSink:
                 evaluation_config,
                 self.state.displayed_generation,
             )
+        if self.state.evaluation_orders:
+            effective_orders = self.state.evaluation_orders
         orders = ", ".join(map(str, effective_orders)) or "—"
         rows = (
             (
@@ -3623,6 +3609,13 @@ class InteractiveDashboardSink:
                 f"{self.state.provider_turns_attempted} / {len(group.slots)}",
             ),
             ("Orders", orders),
+            (
+                "Cases / Horizon",
+                (
+                    f"{_show(self.state.evaluation_case_count)} / "
+                    f"{_show(self.state.evaluation_horizon)}"
+                ),
+            ),
             ("Best objective", _objective(self.state.best_objective)),
             ("Active / Queued", f"{active} / {queued}"),
             ("Failed / Invalid", f"{failed} / {invalid}"),
@@ -3703,8 +3696,7 @@ class InteractiveDashboardSink:
     def _footer(self, width: int) -> Text:
         if self.locked_config.get("read_only") is True:
             message = (
-                self.state.status_message
-                or "Read-only status · provider work is not scheduled"
+                self.state.status_message or "Read-only status · provider work is not scheduled"
             )
             return Text(_compact(message, width).ljust(width), style="reverse")
         if self.state.search_editing:
@@ -4005,7 +3997,10 @@ def _token_grid(usage: TokenUsage, *, charged: bool | None) -> Table:
             ("reasoning (in output)", usage.reasoning),
             ("authoritative total", usage.total),
             ("usage quality", usage.quality),
-            ("charged", "yes" if charged is True else "no" if charged is False else "—"),
+            (
+                "charged",
+                "yes" if charged is True else "no" if charged is False else "—",
+            ),
         )
     )
 
@@ -4054,11 +4049,7 @@ def _slot_state_label(slot: DashboardSlot) -> str:
 
 
 def _slot_evaluation_percent(slot: DashboardSlot) -> int | None:
-    if (
-        slot.state != "evaluating"
-        or slot.evaluation_total is None
-        or slot.evaluation_total <= 0
-    ):
+    if slot.state != "evaluating" or slot.evaluation_total is None or slot.evaluation_total <= 0:
         return None
     return round(
         100 * min(slot.evaluation_completed, slot.evaluation_total) / slot.evaluation_total

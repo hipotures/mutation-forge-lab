@@ -119,9 +119,7 @@ class _Evaluator:
         candidate_id: str,
     ) -> Mapping[str, JsonValue]:
         self.calls.append((candidate_id, case.case_id))
-        digest = hashlib.sha256(
-            f"{source}:{case.case_id}".encode()
-        ).hexdigest()
+        digest = hashlib.sha256(f"{source}:{case.case_id}".encode()).hexdigest()
         return {
             "behavior_identity": {
                 "protocol_id": "fixture",
@@ -234,9 +232,7 @@ class _Provider:
         return M5ProviderResultV1(
             response_text=json.dumps(
                 {
-                    "schema_version": (
-                        "mforge.native.python_m5_specification_ack.v1"
-                    ),
+                    "schema_version": ("mforge.native.python_m5_specification_ack.v1"),
                     "ack": "specification-retained",
                 }
             ),
@@ -436,9 +432,7 @@ def test_json_dsl_workspace_is_rejected_before_provider_or_backend(
         },
     )
     before = {
-        item.relative_to(root): item.read_bytes()
-        for item in root.rglob("*")
-        if item.is_file()
+        item.relative_to(root): item.read_bytes() for item in root.rglob("*") if item.is_file()
     }
     calls = {"provider": 0, "backend": 0}
 
@@ -448,23 +442,58 @@ def test_json_dsl_workspace_is_rejected_before_provider_or_backend(
     ):
         run_python_preview(
             path,
-            provider_factory=lambda *_: calls.__setitem__(
-                "provider", calls["provider"] + 1
-            ),
-            backend_factory=lambda _: calls.__setitem__(
-                "backend", calls["backend"] + 1
-            ),
+            provider_factory=lambda *_: calls.__setitem__("provider", calls["provider"] + 1),
+            backend_factory=lambda _: calls.__setitem__("backend", calls["backend"] + 1),
             provenance_guard=_no_provenance,
             auth_available=lambda _: True,
         )
 
     after = {
-        item.relative_to(root): item.read_bytes()
-        for item in root.rglob("*")
-        if item.is_file()
+        item.relative_to(root): item.read_bytes() for item in root.rglob("*") if item.is_file()
     }
     assert calls == {"provider": 0, "backend": 0}
     assert before == after
+
+
+def test_legacy_ranker_prompt_is_rejected_before_provider_or_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _config(tmp_path)
+    (
+        system_prompt,
+        _request_template,
+        _specification_prompt,
+        policy_schema,
+        ack_schema,
+    ) = preview_module._prompt_inputs()
+    legacy_request = "Generate a ranker defining priority(ctx, proposal)."
+    monkeypatch.setattr(
+        preview_module,
+        "_prompt_inputs",
+        lambda: (
+            system_prompt,
+            legacy_request,
+            legacy_request,
+            policy_schema,
+            ack_schema,
+        ),
+    )
+    calls = {"provider": 0, "backend": 0}
+
+    with pytest.raises(
+        ValueError,
+        match="does not use the canonical propose contract",
+    ):
+        run_python_preview(
+            path,
+            provider_factory=lambda *_: calls.__setitem__("provider", calls["provider"] + 1),
+            backend_factory=lambda _: calls.__setitem__("backend", calls["backend"] + 1),
+            provenance_guard=_no_provenance,
+            auth_available=lambda _: True,
+        )
+
+    assert calls == {"provider": 0, "backend": 0}
 
 
 def test_provider_failure_is_not_scientific_success_and_resume_skips_it(
@@ -556,12 +585,8 @@ def test_provenance_failure_stops_before_provider_and_is_terminal(
 
     result = run_python_preview(
         path,
-        provider_factory=lambda *_: calls.__setitem__(
-            "provider", calls["provider"] + 1
-        ),
-        backend_factory=lambda _: calls.__setitem__(
-            "backend", calls["backend"] + 1
-        ),
+        provider_factory=lambda *_: calls.__setitem__("provider", calls["provider"] + 1),
+        backend_factory=lambda _: calls.__setitem__("backend", calls["backend"] + 1),
         provenance_guard=reject_provenance,
         auth_available=lambda _: True,
     )
@@ -780,10 +805,7 @@ def test_public_cli_routes_python_preview_without_dsl_runner(
     assert not hasattr(cli, "run_v3")
 
     assert cli.main(["experiment", "run", "--config", str(path), "--json"]) == 0
-    assert (
-        cli.main(["experiment", "status", "--config", str(path), "--json"])
-        == 0
-    )
+    assert cli.main(["experiment", "status", "--config", str(path), "--json"]) == 0
     assert calls == ["run", "status"]
     assert capsys.readouterr().out.count('"state":"completed"') == 2
 
@@ -798,13 +820,13 @@ def test_python_preview_call_path_has_no_json_dsl_runtime_or_ir_compiler() -> No
         "compile_program(",
     )
     assert all(token not in source for token in forbidden)
-    protocol_source = (
-        Path(preview_module.__file__).parent / "contracts.py"
-    ).read_text(encoding="utf-8")
+    protocol_source = (Path(preview_module.__file__).parent / "contracts.py").read_text(
+        encoding="utf-8"
+    )
     assert "mforge.experiment.v3" in protocol_source
-    python_serial_source = (
-        Path(preview_module.__file__).parent / "serial_evaluator.py"
-    ).read_text(encoding="utf-8")
+    python_serial_source = (Path(preview_module.__file__).parent / "serial_evaluator.py").read_text(
+        encoding="utf-8"
+    )
     assert "native_v3.interpreter" not in python_serial_source
     probe = subprocess.run(
         [

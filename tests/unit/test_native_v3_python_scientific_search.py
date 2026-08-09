@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 
+from mutation_forge.experiment.config import orders_for_generation
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
 from mutation_forge.native_v3_python import scientific_search as search_module
@@ -23,6 +24,9 @@ from mutation_forge.native_v3_python.preview import (
     load_python_preview_config,
     python_preview_status,
     run_python_preview,
+)
+from mutation_forge.native_v3_python.scientific_evaluation import (
+    ScientificEvaluationOptionsV1,
 )
 from mutation_forge.native_v3_python.scientific_search import (
     M10_REPORT_PROTOCOL_ID,
@@ -40,8 +44,6 @@ from mutation_forge.native_v3_python.search import (
     M5ProviderResultV1,
 )
 from mutation_forge.native_v3_python.search_provider import (
-    M5_PROVIDER_MAX_CAMPAIGNS,
-    M5_PROVIDER_MAX_TURNS,
     M10_PROVIDER_MAX_EVENTS,
     M10_PROVIDER_STDOUT_BYTES,
     M10_PROVIDER_TRANSCRIPT_BYTES,
@@ -62,9 +64,7 @@ _POLICY_SCHEMA: dict[str, Any] = {
     "required": ["schema_version", "source"],
     "additionalProperties": False,
     "properties": {
-        "schema_version": {
-            "const": "mforge.native.python_policy_response.v1"
-        },
+        "schema_version": {"const": "mforge.native.python_policy_response.v1"},
         "source": {"type": "string"},
     },
 }
@@ -87,9 +87,7 @@ def _result(
     source: str,
     case: DevelopmentCaseV1,
 ) -> dict[str, JsonValue]:
-    digest = hashlib.sha256(
-        f"{source}:{case.case_id}".encode()
-    ).hexdigest()
+    digest = hashlib.sha256(f"{source}:{case.case_id}".encode()).hexdigest()
     return {
         "behavior_identity": {
             "behavior_signature": digest,
@@ -197,9 +195,7 @@ class _Provider:
         del generation
         return int(slot.removeprefix("slot-")) % self.provider_concurrency
 
-    def await_primary_slot(
-        self, *, generation: int, slot: str
-    ) -> None:
+    def await_primary_slot(self, *, generation: int, slot: str) -> None:
         slot_index = int(slot.removeprefix("slot-"))
         predecessor = (
             generation,
@@ -213,9 +209,7 @@ class _Provider:
                 timeout=1,
             )
 
-    def release_primary_slot(
-        self, *, generation: int, slot: str
-    ) -> None:
+    def release_primary_slot(self, *, generation: int, slot: str) -> None:
         with self.release_condition:
             self.released.append((generation, slot))
             self.release_condition.notify_all()
@@ -227,9 +221,7 @@ class _Provider:
         return M5ProviderResultV1(
             response_text=json.dumps(
                 {
-                    "schema_version": (
-                        "mforge.native.python_m5_specification_ack.v1"
-                    ),
+                    "schema_version": ("mforge.native.python_m5_specification_ack.v1"),
                     "ack": "specification-retained",
                 }
             ),
@@ -260,9 +252,7 @@ class _Provider:
         result = M5ProviderResultV1(
             response_text=json.dumps(
                 {
-                    "schema_version": (
-                        "mforge.native.python_policy_response.v1"
-                    ),
+                    "schema_version": ("mforge.native.python_policy_response.v1"),
                     "source": _source(f"{generation}-{slot}"),
                 },
                 separators=(",", ":"),
@@ -335,7 +325,7 @@ class _Provider:
 
 class _Backend:
     def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
-        assert order == 30
+        assert order >= 4
         return (4, 8)
 
     def close(self) -> None:
@@ -384,6 +374,18 @@ class _Evaluator:
             with self.concurrency.lock:
                 self.concurrency.active -= 1
 
+    def evaluate_baseline(
+        self,
+        *,
+        baseline: str,
+        case: DevelopmentCaseV1,
+        generation: int,
+    ) -> Mapping[str, JsonValue]:
+        return _result(
+            source=f"{baseline}:{generation}",
+            case=case,
+        )
+
 
 def _options(
     *,
@@ -405,6 +407,19 @@ def _options(
         stop_on_verified=True,
         resume_enabled=True,
         replace_terminal_slots=False,
+        evaluation=ScientificEvaluationOptionsV1(
+            graph_mode="unrestricted_min_degree_3",
+            order_schedule="adaptive",
+            min_order=8,
+            max_order=8,
+            orders_per_generation=1,
+            graph_seeds=(101, 103),
+            policy_seeds=(17, 19),
+            horizon=1,
+            witness_cap=64,
+            baselines=("random", "structural"),
+            replay=False,
+        ),
     )
 
 
@@ -422,7 +437,7 @@ def _run(
         provider=provider,
         evaluator_factory=lambda: _Evaluator(concurrency),
         workspace=root,
-        panel=_PANEL,
+        panel_factory=lambda _generation: _PANEL,
         system_prompt="system",
         specification_prompt="specification",
         specification_ack_schema=specification_ack_schema(),
@@ -470,10 +485,79 @@ validated_queue_capacity = 8
 stop_on_verified = true
 resume_enabled = true
 replace_terminal_slots = false
+
+[python_preview.scientific_search.evaluation]
+graph_mode = "unrestricted_min_degree_3"
+order_schedule = "adaptive"
+min_order = 8
+max_order = 8
+orders_per_generation = 1
+graph_seeds = [101, 103]
+policy_seeds = [17, 19]
+horizon = 1
+witness_cap = 64
+baselines = ["random", "structural"]
+replay = false
 ''',
         encoding="utf-8",
     )
     return config_path
+
+
+def test_native_v2_reference_profile_derives_the_same_adaptive_orders() -> None:
+    evaluation = ScientificEvaluationOptionsV1(
+        graph_mode="unrestricted_min_degree_3",
+        order_schedule="adaptive",
+        min_order=22,
+        max_order=128,
+        orders_per_generation=5,
+        graph_seeds=(401, 402, 403, 404),
+        policy_seeds=tuple(range(4001, 4017)),
+        horizon=32,
+        witness_cap=64,
+        baselines=("random", "structural"),
+        replay=False,
+    )
+    native_v2 = evaluation.as_dict()
+
+    for generation in range(4):
+        assert evaluation.orders_for_generation(generation) == orders_for_generation(
+            native_v2, generation
+        )
+    panel = evaluation.panel_for_generation(
+        generation=0,
+        backend=_Backend(),
+    )
+    assert len(panel) == 5 * 4 * 16
+    assert {case.horizon for case in panel} == {32}
+    assert {case.graph_mode for case in panel} == {"unrestricted_min_degree_3"}
+
+
+def test_evaluation_graph_modes_keep_native_v2_order_domains() -> None:
+    common = {
+        "order_schedule": "adaptive",
+        "orders_per_generation": 1,
+        "graph_seeds": (401,),
+        "policy_seeds": (4001,),
+        "horizon": 32,
+        "witness_cap": 64,
+        "baselines": ("random", "structural"),
+        "replay": False,
+    }
+    with pytest.raises(ValueError, match="even min_order and max_order"):
+        ScientificEvaluationOptionsV1(
+            graph_mode="cubic_first",
+            min_order=21,
+            max_order=128,
+            **common,
+        )
+    with pytest.raises(ValueError, match="min_order >= 5"):
+        ScientificEvaluationOptionsV1(
+            graph_mode="minimal_structure_mixed_degree",
+            min_order=4,
+            max_order=8,
+            **common,
+        )
 
 
 def test_sustained_search_overlaps_evaluations_and_commits_canonically(
@@ -491,14 +575,18 @@ def test_sustained_search_overlaps_evaluations_and_commits_canonically(
     assert report["protocol_id"] == M10_REPORT_PROTOCOL_ID
     assert report["candidate_count"] == 8
     assert report["candidate_program_turns"] == 8
-    assert report["provider_order"] == [
-        f"g0000-slot-{index:02d}" for index in range(8)
-    ]
+    assert report["provider_order"] == [f"g0000-slot-{index:02d}" for index in range(8)]
     assert concurrency.peak == 2
     assert report["runtime"]["peak_active_evaluators"] == 2
-    assert report["acceptance_checks"][
-        "provider_program_turn_budget_respected"
-    ] is True
+    assert report["acceptance_checks"]["provider_program_turn_budget_respected"] is True
+    assert report["acceptance_checks"]["generation_baselines_complete"] is True
+    baselines = read_json(
+        tmp_path / "generations" / "generation-0000" / search_module.M10_BASELINE_FILENAME
+    )
+    assert set(cast(Mapping[str, Any], baselines["baselines"])) == {
+        "random",
+        "structural",
+    }
 
 
 def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
@@ -535,9 +623,7 @@ def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
 
     assert provider.peak == 4
     assert report["runtime"]["peak_active_provider_turns"] == 4
-    assert report["provider_order"] == [
-        f"g0000-slot-{index:02d}" for index in range(8)
-    ]
+    assert report["provider_order"] == [f"g0000-slot-{index:02d}" for index in range(8)]
     assert len(provider.snapshots) == 1
     snapshot = provider.snapshots[0]
     assert snapshot["generation"] == 0
@@ -545,10 +631,7 @@ def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
     assert len(set(provider.prompts.values())) == 1
     assert "active_parent=null" in next(iter(provider.prompts.values()))
     retained = read_json(
-        tmp_path
-        / "generations"
-        / "generation-0000"
-        / "generation-snapshot.json.gz"
+        tmp_path / "generations" / "generation-0000" / "generation-snapshot.json.gz"
     )
     assert retained == snapshot
 
@@ -574,9 +657,7 @@ def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
             invalid = M5ProviderResultV1(
                 response_text=json.dumps(
                     {
-                        "schema_version": (
-                            "mforge.native.python_policy_response.v1"
-                        ),
+                        "schema_version": ("mforge.native.python_policy_response.v1"),
                         "source": "import os\n",
                     },
                     separators=(",", ":"),
@@ -589,8 +670,7 @@ def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
             key = str(kwargs["idempotency_key"])
             self.durable[key] = invalid
             write_json(
-                Path(kwargs["artifact_dir"])
-                / "m5-provider-result.json.gz",
+                Path(kwargs["artifact_dir"]) / "m5-provider-result.json.gz",
                 invalid.as_dict(),
             )
             return invalid
@@ -613,9 +693,7 @@ def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
             result = M5ProviderResultV1(
                 response_text=json.dumps(
                     {
-                        "schema_version": (
-                            "mforge.native.python_policy_response.v1"
-                        ),
+                        "schema_version": ("mforge.native.python_policy_response.v1"),
                         "source": _source(f"repair-{slot}"),
                     },
                     separators=(",", ":"),
@@ -675,9 +753,7 @@ def test_all_later_generations_keep_four_children_and_four_roots(
         "1": {"children": 4, "roots": 4},
         "2": {"children": 4, "roots": 4},
     }
-    assert report["acceptance_checks"][
-        "later_generations_four_children_four_roots"
-    ] is True
+    assert report["acceptance_checks"]["later_generations_four_children_four_roots"] is True
 
 
 def test_operator_stop_resume_repeats_no_terminal_work(
@@ -698,11 +774,7 @@ def test_operator_stop_resume_repeats_no_terminal_work(
 
     retained = {
         path: path.read_bytes()
-        for path in sorted(
-            tmp_path.glob(
-                "generations/generation-*/slot-*/candidate.json.gz"
-            )
-        )
+        for path in sorted(tmp_path.glob("generations/generation-*/slot-*/candidate.json.gz"))
     }
     assert len(retained) == 8
     resumed_provider = _Provider(durable)
@@ -715,9 +787,7 @@ def test_operator_stop_resume_repeats_no_terminal_work(
     )
 
     assert report["candidate_count"] == 16
-    assert sorted(resumed_provider.calls) == [
-        (1, f"slot-{index:02d}") for index in range(8)
-    ]
+    assert sorted(resumed_provider.calls) == [(1, f"slot-{index:02d}") for index in range(8)]
     assert all(path.read_bytes() == content for path, content in retained.items())
     assert len(first_concurrency.calls) + len(resumed_concurrency.calls) == 32
 
@@ -744,9 +814,7 @@ def test_crash_after_prepared_boundary_repeats_no_provider_turn(
             boundary_hook=crash,
         )
 
-    assert first_provider.calls == [
-        (0, f"slot-{index:02d}") for index in range(4)
-    ]
+    assert first_provider.calls == [(0, f"slot-{index:02d}") for index in range(4)]
     resumed = _Provider(durable)
     report = _run(
         tmp_path,
@@ -755,9 +823,7 @@ def test_crash_after_prepared_boundary_repeats_no_provider_turn(
         options=_options(),
     )
     assert report["candidate_count"] == 8
-    assert resumed.calls == [
-        (0, f"slot-{index:02d}") for index in range(4, 8)
-    ]
+    assert resumed.calls == [(0, f"slot-{index:02d}") for index in range(4, 8)]
     assert len(durable) == 8
 
 
@@ -811,12 +877,7 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
 
     manifest = cast(
         Mapping[str, Any],
-        read_json(
-            tmp_path
-            / "generations"
-            / "generation-0002"
-            / "manifest.json.gz"
-        ),
+        read_json(tmp_path / "generations" / "generation-0002" / "manifest.json.gz"),
     )
     slots = cast(list[Mapping[str, Any]], manifest["slots"])
     pending_slots = {f"slot-{index:02d}" for index in range(1, 8)}
@@ -827,12 +888,7 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
             continue
         request_key = str(slot["request_key"])
         request_keys[slot_name] = request_key
-        slot_dir = (
-            tmp_path
-            / "generations"
-            / "generation-0002"
-            / slot_name
-        )
+        slot_dir = tmp_path / "generations" / "generation-0002" / slot_name
         (slot_dir / "candidate.json.gz").unlink()
         (slot_dir / "prepared-candidate.json.gz").unlink()
         shutil.rmtree(slot_dir / "provider-initial")
@@ -840,10 +896,7 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
 
     runtime_path = tmp_path / "m10-runtime.json.gz"
     runtime = cast(dict[str, Any], read_json(runtime_path))
-    unstarted = {
-        f"{request_keys[slot]}-initial"
-        for slot in ("slot-03", "slot-04", "slot-05")
-    }
+    unstarted = {f"{request_keys[slot]}-initial" for slot in ("slot-03", "slot-04", "slot-05")}
     started = [
         str(key)
         for key in cast(list[object], runtime["provider_started_keys"])
@@ -878,9 +931,7 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
             invalid = M5ProviderResultV1(
                 response_text=json.dumps(
                     {
-                        "schema_version": (
-                            "mforge.native.python_policy_response.v1"
-                        ),
+                        "schema_version": ("mforge.native.python_policy_response.v1"),
                         "source": "import os\n",
                     },
                     separators=(",", ":"),
@@ -893,8 +944,7 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
             key = str(kwargs["idempotency_key"])
             self.durable[key] = invalid
             write_json(
-                Path(kwargs["artifact_dir"])
-                / "m5-provider-result.json.gz",
+                Path(kwargs["artifact_dir"]) / "m5-provider-result.json.gz",
                 invalid.as_dict(),
             )
             return invalid
@@ -914,9 +964,7 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
             result = M5ProviderResultV1(
                 response_text=json.dumps(
                     {
-                        "schema_version": (
-                            "mforge.native.python_policy_response.v1"
-                        ),
+                        "schema_version": ("mforge.native.python_policy_response.v1"),
                         "source": _source(f"repair-{slot}"),
                     },
                     separators=(",", ":"),
@@ -950,29 +998,25 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
         ),
     )
 
-    assert sorted(resumed.calls) == [
-        (2, f"slot-{index:02d}") for index in range(1, 8)
-    ]
+    assert sorted(resumed.calls) == [(2, f"slot-{index:02d}") for index in range(1, 8)]
     assert resumed.repair_slots == ["slot-01", "slot-02"]
     assert report["stop_reason"] == "resume_generation_complete"
     assert report["candidate_count"] == 24
     assert report["pending_candidate_count"] == 0
-    assert not (
-        tmp_path
-        / "generations"
-        / "generation-0003"
-        / "manifest.json.gz"
-    ).exists()
+    assert not (tmp_path / "generations" / "generation-0003" / "manifest.json.gz").exists()
     final_runtime = cast(dict[str, Any], read_json(runtime_path))
     assert final_runtime["primary_turns_submitted"] == 28
     assert final_runtime["repair_turns_submitted"] == 3
     assert final_runtime["provider_turns_submitted"] == 31
-    assert len(
-        cast(
-            Mapping[str, object],
-            final_runtime["interrupted_primary_retries"],
+    assert (
+        len(
+            cast(
+                Mapping[str, object],
+                final_runtime["interrupted_primary_retries"],
+            )
         )
-    ) == 4
+        == 4
+    )
 
 
 def test_resume_budget_remains_cumulative_across_process_restarts(
@@ -1115,6 +1159,55 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
         "balanced",
     }
     assert status["exact_verification"]["authority"] == "exact_verifier_only"
+    assert status["evaluation_workload"] == {
+        "generation": 0,
+        "panel_hash": status["equal_development_panel"],
+        "case_count": 4,
+        "orders": [8],
+        "graph_mode": "unrestricted_min_degree_3",
+        "order_schedule": "adaptive",
+        "graph_seed_count": 2,
+        "policy_seed_count": 2,
+        "horizon": 1,
+        "witness_cap": 64,
+        "baselines": ["random", "structural"],
+        "replay": False,
+    }
+    for baseline in ("random", "structural"):
+        assert status["baselines"][baseline]["status"] == "complete"
+        assert status["baselines"][baseline]["fitness_interval"] == {
+            "lower": {"numerator": 1, "denominator": 2},
+            "upper": {"numerator": 1, "denominator": 2},
+        }
+
+
+def test_fresh_dashboard_keeps_unknown_baselines_and_tokens_unknown(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="fresh-unknown-values",
+    )
+    status = python_preview_status(config_path)
+    config = load_python_preview_config(config_path)
+    assert config.scientific_search is not None
+    rich = dashboard_state_from_python_status(
+        status,
+        run_id=config.exp_id,
+        model=config.model,
+        effort=config.effort,
+        generation_limit=config.scientific_search.generation_limit,
+        wall_seconds=config.scientific_search.wall_seconds,
+    )
+
+    assert status["baselines"] == {
+        "random": None,
+        "structural": None,
+    }
+    assert rich.baseline_random is None
+    assert rich.baseline_structural is None
+    assert rich.cumulative_usage.total is None
+    assert rich.cumulative_usage.quality == "unknown"
 
 
 def test_rich_projection_uses_the_same_canonical_status_counters(
@@ -1128,9 +1221,7 @@ def test_rich_projection_uses_the_same_canonical_status_counters(
         config_path,
         provider_factory=lambda *_: _Provider(),
         backend_factory=lambda _: _Backend(),
-        evaluator_factory=lambda *_: _Evaluator(
-            _Concurrency(parties=1)
-        ),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
         provenance_guard=lambda **_: {},
         auth_available=lambda _: True,
     )
@@ -1146,18 +1237,17 @@ def test_rich_projection_uses_the_same_canonical_status_counters(
     )
 
     assert rich.completed_slots == status["counts"]["terminal"]
-    assert rich.provider_turns_attempted == status["provider"][
-        "program_turns_reserved"
-    ]
+    assert rich.provider_turns_attempted == status["provider"]["program_turns_reserved"]
     assert rich.active_provider_turns == status["provider"]["active"]
-    assert rich.configured_provider_concurrency == status["provider"][
-        "configured_concurrency"
-    ]
+    assert rich.configured_provider_concurrency == status["provider"]["configured_concurrency"]
     assert rich.evaluations_completed == status["evaluators"]["completed"]
     assert rich.evaluation_workers_active == status["evaluators"]["active"]
-    assert sum(len(group.slots) for group in rich.generations) == status[
-        "counts"
-    ]["planned"]
+    assert sum(len(group.slots) for group in rich.generations) == status["counts"]["planned"]
+    assert rich.baseline_random == 0.5
+    assert rich.baseline_structural == 0.5
+    assert rich.evaluation_orders == (8,)
+    assert rich.evaluation_case_count == 4
+    assert rich.evaluation_horizon == 1
 
 
 def test_budget_pause_record_projects_read_only_rich_and_json_status(
@@ -1171,9 +1261,7 @@ def test_budget_pause_record_projects_read_only_rich_and_json_status(
         config_path,
         provider_factory=lambda *_: _Provider(),
         backend_factory=lambda _: _Backend(),
-        evaluator_factory=lambda *_: _Evaluator(
-            _Concurrency(parties=1)
-        ),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
         provenance_guard=lambda **_: {},
         auth_available=lambda _: True,
     )
@@ -1188,9 +1276,7 @@ def test_budget_pause_record_projects_read_only_rich_and_json_status(
     pause_record.write_text(
         json.dumps(
             {
-                "schema_version": (
-                    "mforge.native.python_m10_emergency_stop_evidence.v1"
-                ),
+                "schema_version": ("mforge.native.python_m10_emergency_stop_evidence.v1"),
                 "state": "PAUSED_FOR_BUDGET",
                 "experiment": config.exp_id,
                 "slots": {
@@ -1428,8 +1514,8 @@ def test_sustained_provider_transport_is_bounded_for_one_hundred_twenty_turns(
         base_instructions="system",
     )
     m5_limits = captured["limits"]
-    assert m5_limits.max_turns == M5_PROVIDER_MAX_TURNS
-    assert m5_limits.max_campaigns == M5_PROVIDER_MAX_CAMPAIGNS
+    assert m5_limits.max_turns is None
+    assert m5_limits.max_campaigns is None
     assert m5_limits.max_events == 10_000
 
 
@@ -1462,18 +1548,12 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
                 anchor.included_turn_ids,
             )
 
-        def ensure_anchor_context(
-            self, context: M5ProviderContextV1
-        ) -> None:
+        def ensure_anchor_context(self, context: M5ProviderContextV1) -> None:
             assert not self.coordinator
             assert "coordinator-close-False" in events
-            events.append(
-                f"worker-{context.thread_id.removeprefix('worker-')}-resume"
-            )
+            events.append(f"worker-{context.thread_id.removeprefix('worker-')}-resume")
 
-        def _increment_telemetry(
-            self, _: str, amount: int = 1
-        ) -> None:
+        def _increment_telemetry(self, _: str, amount: int = 1) -> None:
             assert amount == 1
 
         def close(self, *, cleanup_capsule: bool = True) -> None:
@@ -1485,12 +1565,8 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
         providers.append(provider)
         return provider
 
-    monkeypatch.setattr(
-        provider_module, "CodexM5SearchProvider", provider_factory
-    )
-    monkeypatch.setattr(
-        provider_module, "CodexAppServerAdapter", lambda **_: object()
-    )
+    monkeypatch.setattr(provider_module, "CodexM5SearchProvider", provider_factory)
+    monkeypatch.setattr(provider_module, "CodexAppServerAdapter", lambda **_: object())
     provider = CodexM10SearchProvider(
         workspace=tmp_path / "provider",
         model="fixture",
@@ -1501,17 +1577,12 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
         provider_concurrency=4,
         provider_total_turn_limit=16,
     )
-    anchor = M5ProviderContextV1(
-        "anchor-thread", "anchor-turn", None, ("anchor-turn",)
-    )
+    anchor = M5ProviderContextV1("anchor-thread", "anchor-turn", None, ("anchor-turn",))
     provider._anchor = anchor
     provider.prepare_generation(
         snapshot={
             "generation": 0,
-            "slots": [
-                {"slot": f"slot-{slot:02d}", "kind": "root"}
-                for slot in range(8)
-            ],
+            "slots": [{"slot": f"slot-{slot:02d}", "kind": "root"} for slot in range(8)],
         },
         anchor=anchor,
         artifact_dir=tmp_path / "generation-provider",
@@ -1561,20 +1632,14 @@ def test_m10_provider_retries_only_transient_worker_resume_setup_once(
                 anchor.included_turn_ids,
             )
 
-        def ensure_anchor_context(
-            self, context: M5ProviderContextV1
-        ) -> None:
+        def ensure_anchor_context(self, context: M5ProviderContextV1) -> None:
             assert not self.coordinator
             key = self.workspace.name
             attempts[key] = attempts.get(key, 0) + 1
             if key == "worker-00" and attempts[key] == 1:
-                raise provider_module.ProtocolError(
-                    "request thread/resume failed"
-                )
+                raise provider_module.ProtocolError("request thread/resume failed")
 
-        def _increment_telemetry(
-            self, field: str, amount: int = 1
-        ) -> None:
+        def _increment_telemetry(self, field: str, amount: int = 1) -> None:
             assert amount == 1
             restarts.append(field)
 
@@ -1589,12 +1654,8 @@ def test_m10_provider_retries_only_transient_worker_resume_setup_once(
         providers.append(provider)
         return provider
 
-    monkeypatch.setattr(
-        provider_module, "CodexM5SearchProvider", provider_factory
-    )
-    monkeypatch.setattr(
-        provider_module, "CodexAppServerAdapter", lambda **_: object()
-    )
+    monkeypatch.setattr(provider_module, "CodexM5SearchProvider", provider_factory)
+    monkeypatch.setattr(provider_module, "CodexAppServerAdapter", lambda **_: object())
     provider = CodexM10SearchProvider(
         workspace=tmp_path / "provider",
         model="fixture",
@@ -1605,17 +1666,12 @@ def test_m10_provider_retries_only_transient_worker_resume_setup_once(
         provider_concurrency=4,
         provider_total_turn_limit=16,
     )
-    anchor = M5ProviderContextV1(
-        "anchor-thread", "anchor-turn", None, ("anchor-turn",)
-    )
+    anchor = M5ProviderContextV1("anchor-thread", "anchor-turn", None, ("anchor-turn",))
     provider._anchor = anchor
     provider.prepare_generation(
         snapshot={
             "generation": 0,
-            "slots": [
-                {"slot": f"slot-{slot:02d}", "kind": "root"}
-                for slot in range(8)
-            ],
+            "slots": [{"slot": f"slot-{slot:02d}", "kind": "root"} for slot in range(8)],
         },
         anchor=anchor,
         artifact_dir=tmp_path / "generation-provider",

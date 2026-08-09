@@ -1036,7 +1036,9 @@ def test_q_arms_graceful_stop_then_requests_immediate_interrupt() -> None:
     assert state.status_message == "Immediate interrupt requested"
 
 
-def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_path: Path) -> None:
+def test_persisted_dashboard_hydrates_previous_generations_and_objectives(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "experiment"
     state_path = root / "state.sqlite3"
     ExperimentStateStore.initialize(
@@ -1120,7 +1122,9 @@ def test_persisted_dashboard_hydrates_previous_generations_and_objectives(tmp_pa
     sink.close()
 
 
-def test_persisted_dashboard_uses_newest_retained_slot_generation(tmp_path: Path) -> None:
+def test_persisted_dashboard_uses_newest_retained_slot_generation(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "experiment"
     checkpoint = root / "artifacts" / "native-generation-checkpoint.json.gz"
     checkpoint.parent.mkdir(parents=True)
@@ -2044,6 +2048,7 @@ def test_terminal_input_restores_terminal_mode() -> None:
 def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "mforge.experiment.v2")
     parsed_default = cli.build_parser().parse_args(["experiment", "run"])
     parsed_dashboard = cli.build_parser().parse_args(["experiment", "run", "--dashboard"])
     parsed_status = cli.build_parser().parse_args(
@@ -2315,6 +2320,8 @@ def test_read_only_python_status_dashboard_does_not_run_experiment(
 def test_dashboard_q_stops_gracefully_then_interrupts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "mforge.experiment.v2")
+
     class _TTY(io.StringIO):
         def isatty(self) -> bool:
             return True
@@ -2356,7 +2363,10 @@ def test_dashboard_q_stops_gracefully_then_interrupts(
     sink.close.assert_called_once()
 
 
-def test_until_complete_continues_after_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_until_complete_continues_after_wall_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "mforge.experiment.v2")
     config = SimpleNamespace(
         run=SimpleNamespace(output="json"),
         config_path=Path("experiment.toml"),
@@ -2398,6 +2408,7 @@ def test_until_complete_continues_after_wall_budget(monkeypatch: pytest.MonkeyPa
 def test_until_complete_stops_at_hourly_token_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "mforge.experiment.v2")
     config = SimpleNamespace(
         run=SimpleNamespace(output="json"),
         config_path=Path("experiment.toml"),

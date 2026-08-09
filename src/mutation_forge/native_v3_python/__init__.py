@@ -75,6 +75,7 @@ from .runtime_contracts import (
     UnsupportedPolicySandboxError,
 )
 from .safe_api import SafeAPIProgramError, SafeGraphSessionV1, graph_view_v1
+from .scientific_evaluation import ScientificEvaluationOptionsV1
 from .search import (
     CHILD_SLOTS,
     M5_REPORT_PROTOCOL_ID,
@@ -106,11 +107,13 @@ from .search_provider import (
     specification_ack_schema,
 )
 from .serial_evaluator import (
+    PYTHON_BASELINE_EVALUATOR_PROTOCOL_ID,
     PYTHON_FIXTURE_PROVENANCE_SOURCE_KIND,
     PYTHON_SERIAL_EVALUATOR_PROTOCOL_ID,
     PYTHON_SERIAL_RESULT_PROTOCOL_ID,
     PythonSerialEpisodeConfigV1,
     PythonSerialEpisodeResultV1,
+    evaluate_serial_builtin_baseline,
     evaluate_serial_python_policy,
 )
 from .validation import (
@@ -185,6 +188,7 @@ __all__ = [
     "NonEdgeRef",
     "IsolatedPolicyWorkerV1",
     "PYTHON_EXPERIMENT_PROTOCOL_ID",
+    "PYTHON_BASELINE_EVALUATOR_PROTOCOL_ID",
     "PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION",
     "PYTHON_PREVIEW_MODE",
     "PYTHON_PREVIEW_PROTOCOL_VERSION",
@@ -213,6 +217,7 @@ __all__ = [
     "PythonPreviewWorkspaceError",
     "PythonSerialEpisodeConfigV1",
     "PythonSerialEpisodeResultV1",
+    "ScientificEvaluationOptionsV1",
     "PythonWorkspaceProtocolError",
     "RelocationRef",
     "RANDOM_PROTOCOL_ID",
@@ -243,6 +248,7 @@ __all__ = [
     "load_python_preview_config",
     "evaluate_serial_python_policy",
     "ensure_m5_acceptance_provenance",
+    "evaluate_serial_builtin_baseline",
     "normalize_source_newlines",
     "python_control_flow_summary",
     "python_preview_status",

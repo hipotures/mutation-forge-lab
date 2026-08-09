@@ -26,14 +26,17 @@ from .runtime_contracts import (
     IllegalRewriteError,
     PolicyRuntimeLimitsV1,
 )
+from .scientific_evaluation import BASELINE_OPERATOR_FAMILIES
 from .validation import PythonProgramIdentityV1, validate_python_policy_source
 
 PYTHON_SERIAL_EVALUATOR_PROTOCOL_ID = "native_v3_python_serial_interval_evaluator_v1"
 PYTHON_SERIAL_RESULT_PROTOCOL_ID = "mforge.native.python_serial_evaluation.v1"
 PYTHON_FIXTURE_PROVENANCE_SOURCE_KIND = "native_v3_python_fixture"
+PYTHON_BASELINE_EVALUATOR_PROTOCOL_ID = "mforge.native.python_builtin_baseline_evaluation.v1"
 
 _BEHAVIOR_MANIFEST_DOMAIN = b"mforge-native-v3-python-behavior-manifest-v1\0"
 _BEHAVIOR_SIGNATURE_DOMAIN = b"mforge-native-v3-python-behavior-signature-v1\0"
+_BASELINE_IDENTITY_DOMAIN = b"mforge-native-v3-python-baseline-v1\0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +50,7 @@ class PythonSerialEpisodeConfigV1:
     witness_cap: int
     episode_id: str
     forbidden_lengths: tuple[int, ...]
+    graph_mode: str = "unrestricted_min_degree_3"
 
     def __post_init__(self) -> None:
         SerialEpisodeConfig(
@@ -70,6 +74,8 @@ class PythonSerialEpisodeConfigV1:
             invocation_ordinal=0,
             forbidden_lengths=self.forbidden_lengths,
         )
+        if not self.graph_mode:
+            raise ValueError("graph_mode must be nonempty")
 
     def serial_config(self) -> SerialEpisodeConfig:
         return SerialEpisodeConfig(
@@ -90,6 +96,7 @@ class PythonSerialEpisodeConfigV1:
             "witness_cap": self.witness_cap,
             "episode_id": self.episode_id,
             "forbidden_lengths": list(self.forbidden_lengths),
+            "graph_mode": self.graph_mode,
         }
 
 
@@ -132,9 +139,7 @@ class PythonSerialEpisodeResultV1:
             "program_identity": self.program_identity.as_dict(),
             "behavior_identity": {
                 "protocol_id": self.behavior_identity.protocol_id,
-                "probe_manifest_sha256": (
-                    self.behavior_identity.probe_manifest_sha256
-                ),
+                "probe_manifest_sha256": (self.behavior_identity.probe_manifest_sha256),
                 "behavior_signature": self.behavior_identity.behavior_signature,
             },
             "config": self.config.as_dict(),
@@ -164,9 +169,7 @@ def _behavior_rewrite_payload(
         "added_edges": [list(edge) for edge in rewrite.added_edges],
         "operator_family": rewrite.operator_family,
         "metadata": {
-            key: value
-            for key, value in rewrite.metadata.items()
-            if key != "program_hash"
+            key: value for key, value in rewrite.metadata.items() if key != "program_hash"
         },
     }
 
@@ -251,9 +254,10 @@ def evaluate_serial_python_policy(
         raise ValueError("valid ordinary-Python policy identity is missing program_hash")
     backend_lengths = backend.target_forbidden_lengths(config.order)
     if backend_lengths != config.forbidden_lengths:
-        raise ValueError(
-            "episode forbidden_lengths do not match the authoritative backend target"
-        )
+        raise ValueError("episode forbidden_lengths do not match the authoritative backend target")
+    backend_mode = getattr(backend, "graph_mode", config.graph_mode)
+    if backend_mode != config.graph_mode:
+        raise ValueError("episode graph_mode differs from the authoritative backend")
 
     worker = IsolatedPolicyWorkerV1(source, limits=runtime_limits)
     invocation_wall_seconds = 0.0
@@ -307,15 +311,11 @@ def evaluate_serial_python_policy(
                     invocation.semantic_trace,
                 ),
                 no_plan_reason=(
-                    invocation.no_plan.reason
-                    if invocation.no_plan is not None
-                    else None
+                    invocation.no_plan.reason if invocation.no_plan is not None else None
                 ),
                 failure=failure,
                 rewrite=invocation.rewrite_plan,
-                candidate=(
-                    host.candidate if invocation.rewrite_plan is not None else None
-                ),
+                candidate=(host.candidate if invocation.rewrite_plan is not None else None),
             )
 
         result = _evaluate_serial(
@@ -349,3 +349,90 @@ def evaluate_serial_python_policy(
             "action_wall_seconds": action_wall_seconds,
         },
     )
+
+
+def evaluate_serial_builtin_baseline(
+    *,
+    backend: GraphBackend,
+    scorer: ScoreEvidenceScorer,
+    baseline: str,
+    config: PythonSerialEpisodeConfigV1,
+    counterexample_pipeline: CounterexampleInspector | None = None,
+) -> dict[str, JsonValue]:
+    """Evaluate one host-owned Native-v2-equivalent baseline trajectory."""
+
+    operator_family = BASELINE_OPERATOR_FAMILIES.get(baseline)
+    if operator_family is None:
+        raise ValueError(f"unsupported ordinary-Python baseline: {baseline}")
+    backend_lengths = backend.target_forbidden_lengths(config.order)
+    if backend_lengths != config.forbidden_lengths:
+        raise ValueError("baseline forbidden_lengths do not match the authoritative backend")
+    backend_mode = getattr(backend, "graph_mode", config.graph_mode)
+    if backend_mode != config.graph_mode:
+        raise ValueError("baseline graph_mode differs from the frozen workload")
+    baseline_hash = domain_hash(
+        _BASELINE_IDENTITY_DOMAIN,
+        canonical_json_bytes(
+            {
+                "baseline": baseline,
+                "operator_family": operator_family,
+                "config": config.as_dict(),
+            }
+        ),
+    )
+
+    def invoke_step(
+        graph: GraphState,
+        step_index: int,
+        _accepted_rewrites: int,
+    ) -> _SerialInvocation:
+        try:
+            rewrite = backend.propose_rewrite(
+                graph,
+                operator_family=operator_family,
+                policy_seed=config.policy_seed,
+                evaluation=step_index,
+            )
+            candidate = backend.apply_rewrite(graph, rewrite)
+        except Exception:
+            return _SerialInvocation(
+                semantic_trace=(),
+                no_plan_reason="BASELINE_REWRITE_UNAVAILABLE",
+                failure=None,
+                rewrite=None,
+                candidate=None,
+            )
+        return _SerialInvocation(
+            semantic_trace=(),
+            no_plan_reason=None,
+            failure=None,
+            rewrite=rewrite,
+            candidate=candidate,
+        )
+
+    result = _evaluate_serial(
+        backend=backend,
+        scorer=scorer,
+        program_hash=baseline_hash,
+        config=config.serial_config(),
+        invoke_step=invoke_step,
+        counterexample_pipeline=counterexample_pipeline,
+        provenance_source_kind="native_v3_python_builtin_baseline",
+        protocol_id=PYTHON_BASELINE_EVALUATOR_PROTOCOL_ID,
+        forbidden_lengths=config.forbidden_lengths,
+    )
+    return {
+        "protocol_id": PYTHON_BASELINE_EVALUATOR_PROTOCOL_ID,
+        "baseline": baseline,
+        "operator_family": operator_family,
+        "config": config.as_dict(),
+        "scientific_result": result.as_dict(
+            include_hash=True,
+            include_telemetry=True,
+        ),
+        "external_activity": {
+            "provider_turns": 0,
+            "model_turns": 0,
+            "app_server_calls": 0,
+        },
+    }

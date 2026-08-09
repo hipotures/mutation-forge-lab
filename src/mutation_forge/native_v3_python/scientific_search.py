@@ -15,29 +15,43 @@ from fractions import Fraction
 from functools import partial
 from itertools import count
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
 from mutation_forge.native_v3.canonical import canonical_json_bytes
 
 from . import search as core
+from .scientific_evaluation import (
+    ScientificEvaluationOptionsV1,
+    workload_projection,
+)
 from .validation import normalize_source_newlines, validate_python_policy_response
 
 M10_SEARCH_PROTOCOL_ID = "mforge.native.python_scientific_search.v2"
-M10_PREPARED_CANDIDATE_PROTOCOL_ID = (
-    "mforge.native.python_scientific_search_prepared_candidate.v2"
-)
+M10_PREPARED_CANDIDATE_PROTOCOL_ID = "mforge.native.python_scientific_search_prepared_candidate.v2"
 M10_RUNTIME_PROTOCOL_ID = "mforge.native.python_scientific_search_runtime.v2"
 M10_REPORT_PROTOCOL_ID = "mforge.native.python_scientific_search_report.v2"
 M10_RUNTIME_FILENAME = "m10-runtime.json.gz"
 M10_REPORT_FILENAME = "m10-report.json.gz"
 M10_STOP_FILENAME = "m10-stop.json.gz"
 M10_PREPARED_FILENAME = "prepared-candidate.json.gz"
+M10_BASELINE_FILENAME = "generation-baselines.json.gz"
+M10_BASELINE_PROTOCOL_ID = "mforge.native.python_generation_baselines.v1"
 
 
 class _ProviderTurnBudgetExhausted(core.M5SearchError):
     """The durable M10 provider reservation budget is terminally exhausted."""
+
+
+class M10ScientificEvaluator(core.M5ScientificEvaluator, Protocol):
+    def evaluate_baseline(
+        self,
+        *,
+        baseline: str,
+        case: core.DevelopmentCaseV1,
+        generation: int,
+    ) -> Mapping[str, JsonValue]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +70,7 @@ class ScientificSearchOptionsV2:
     stop_on_verified: bool
     resume_enabled: bool
     replace_terminal_slots: bool
+    evaluation: ScientificEvaluationOptionsV1
     max_total_tokens_per_hour: int | None = None
 
     def __post_init__(self) -> None:
@@ -67,29 +82,17 @@ class ScientificSearchOptionsV2:
             raise ValueError("provider_concurrency must be between 1 and 4")
         if self.wall_seconds is not None and self.wall_seconds <= 0:
             raise ValueError("wall_seconds must be positive when configured")
-        if (
-            self.max_total_tokens_per_hour is not None
-            and self.max_total_tokens_per_hour < 1
-        ):
-            raise ValueError(
-                "max_total_tokens_per_hour must be positive when configured"
-            )
+        if self.max_total_tokens_per_hour is not None and self.max_total_tokens_per_hour < 1:
+            raise ValueError("max_total_tokens_per_hour must be positive when configured")
         if (
             self.generation_limit is not None
-            and self.primary_program_slots
-            != self.generation_limit * core.POPULATION_SIZE
+            and self.primary_program_slots != self.generation_limit * core.POPULATION_SIZE
         ):
             raise ValueError(
-                "primary_program_slots must provide exactly eight slots per "
-                "generation"
+                "primary_program_slots must provide exactly eight slots per generation"
             )
-        if (
-            self.generation_limit is None
-            and self.primary_program_slots is not None
-        ):
-            raise ValueError(
-                "primary_program_slots must be omitted for unlimited generations"
-            )
+        if self.generation_limit is None and self.primary_program_slots is not None:
+            raise ValueError("primary_program_slots must be omitted for unlimited generations")
         if self.repair_turn_limit is not None and self.repair_turn_limit < 0:
             raise ValueError("repair_turn_limit cannot be negative")
         if (
@@ -98,25 +101,17 @@ class ScientificSearchOptionsV2:
             and self.provider_total_turn_limit
             != self.primary_program_slots + self.repair_turn_limit
         ):
-            raise ValueError(
-                "provider_total_turn_limit must equal primary slots plus repairs"
-            )
+            raise ValueError("provider_total_turn_limit must equal primary slots plus repairs")
         if (
-            self.primary_program_slots is None
-            or self.repair_turn_limit is None
+            self.primary_program_slots is None or self.repair_turn_limit is None
         ) and self.provider_total_turn_limit is not None:
             raise ValueError(
-                "provider_total_turn_limit must be omitted when either provider "
-                "budget is unlimited"
+                "provider_total_turn_limit must be omitted when either provider budget is unlimited"
             )
         if self.validated_queue_target != 2 * self.evaluator_workers:
-            raise ValueError(
-                "validated_queue_target must equal twice evaluator_workers"
-            )
+            raise ValueError("validated_queue_target must equal twice evaluator_workers")
         if self.validated_queue_capacity != 4 * self.evaluator_workers:
-            raise ValueError(
-                "validated_queue_capacity must equal four times evaluator_workers"
-            )
+            raise ValueError("validated_queue_capacity must equal four times evaluator_workers")
         if not self.stop_on_verified:
             raise ValueError("stop_on_verified must remain enabled")
         if not self.resume_enabled:
@@ -139,6 +134,7 @@ class ScientificSearchOptionsV2:
             "stop_on_verified": self.stop_on_verified,
             "resume_enabled": self.resume_enabled,
             "replace_terminal_slots": self.replace_terminal_slots,
+            "evaluation": self.evaluation.as_dict(),
         }
 
 
@@ -151,9 +147,7 @@ class ScientificResumeBudgetV1:
 
     def __post_init__(self) -> None:
         if not 1 <= self.expected_pending_primary_slots <= core.POPULATION_SIZE:
-            raise ValueError(
-                "expected_pending_primary_slots must be between 1 and 8"
-            )
+            raise ValueError("expected_pending_primary_slots must be between 1 and 8")
         if not 0 <= self.max_new_repair_turns <= core.POPULATION_SIZE:
             raise ValueError("max_new_repair_turns must be between 0 and 8")
 
@@ -167,19 +161,13 @@ def hourly_token_usage(
     """Return rolling one-hour usage from durable provider results."""
 
     current = now or datetime.now(UTC)
-    current = (
-        current.replace(tzinfo=UTC)
-        if current.tzinfo is None
-        else current.astimezone(UTC)
-    )
+    current = current.replace(tzinfo=UTC) if current.tzinfo is None else current.astimezone(UTC)
     cutoff = current - timedelta(hours=1)
     runtime_path = root / M10_RUNTIME_FILENAME
     if runtime_path.is_file():
         runtime = read_json(runtime_path)
         started = (
-            runtime.get("campaign_started_epoch_seconds")
-            if isinstance(runtime, Mapping)
-            else None
+            runtime.get("campaign_started_epoch_seconds") if isinstance(runtime, Mapping) else None
         )
         if isinstance(started, int | float) and not isinstance(started, bool):
             cutoff = max(
@@ -210,9 +198,7 @@ def hourly_token_usage(
     return {
         "hourly_token_limit": limit,
         "hourly_tokens_used": used,
-        "hourly_tokens_remaining": (
-            None if limit is None else max(0, limit - used)
-        ),
+        "hourly_tokens_remaining": (None if limit is None else max(0, limit - used)),
         "hourly_window_seconds": 3600,
         "hourly_limit_reached": reached,
         "hourly_retry_after": retry_after,
@@ -238,9 +224,7 @@ class GenerationSnapshotV1:
             "schema_version": "mforge.native.python_generation_snapshot.v1",
             "generation": self.generation,
             "slots": cast(JsonValue, [dict(slot) for slot in self.slots]),
-            "search_memory_projection": cast(
-                JsonValue, dict(self.search_memory_projection)
-            ),
+            "search_memory_projection": cast(JsonValue, dict(self.search_memory_projection)),
             "model": self.model,
             "effort": self.effort,
             "prompt_versions": cast(JsonValue, dict(self.prompt_versions)),
@@ -248,9 +232,7 @@ class GenerationSnapshotV1:
             "panel": cast(JsonValue, [dict(case) for case in self.panel]),
             "budgets": cast(JsonValue, dict(self.budgets)),
         }
-        payload["sha256"] = hashlib.sha256(
-            canonical_json_bytes(payload)
-        ).hexdigest()
+        payload["sha256"] = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
         return payload
 
 
@@ -271,9 +253,7 @@ def _generation_snapshot(
 ) -> dict[str, JsonValue]:
     model_projection = memory.get("model_projection")
     if not isinstance(model_projection, Mapping):
-        raise core.M5InfrastructureError(
-            "generation Search Memory has no model projection"
-        )
+        raise core.M5InfrastructureError("generation Search Memory has no model projection")
     slots: list[Mapping[str, JsonValue]] = []
     for slot_plan in manifest.slots:
         parent_turn_id: str | None = anchor.turn_id
@@ -282,41 +262,31 @@ def _generation_snapshot(
         if slot_plan.parent_candidate_id is not None:
             parent = candidates_by_id.get(slot_plan.parent_candidate_id)
             if parent is None:
-                raise core.M5InfrastructureError(
-                    "generation snapshot parent is unavailable"
-                )
+                raise core.M5InfrastructureError("generation snapshot parent is unavailable")
             context = core._provider_context(parent)
             parent_turn_id = context.turn_id
             parent_thread_id = context.thread_id
             parent_turn_ids = list(context.included_turn_ids)
         slots.append(
             {
-                "candidate_id": core._candidate_id(
-                    generation, slot_plan.slot
-                ),
+                "candidate_id": core._candidate_id(generation, slot_plan.slot),
                 "slot": slot_plan.slot,
                 "kind": slot_plan.kind,
                 "parent_candidate_id": slot_plan.parent_candidate_id,
                 "parent_thread_id": parent_thread_id,
                 "parent_turn_id": parent_turn_id,
-                "parent_included_turn_ids": cast(
-                    JsonValue, parent_turn_ids
-                ),
+                "parent_included_turn_ids": cast(JsonValue, parent_turn_ids),
                 "request_key": slot_plan.request_key,
             }
         )
     snapshot = GenerationSnapshotV1(
         generation=generation,
         slots=tuple(slots),
-        search_memory_projection=cast(
-            Mapping[str, JsonValue], model_projection
-        ),
+        search_memory_projection=cast(Mapping[str, JsonValue], model_projection),
         model=model,
         effort=effort,
         prompt_versions={
-            "system_prompt_sha256": hashlib.sha256(
-                system_prompt.encode("utf-8")
-            ).hexdigest(),
+            "system_prompt_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
             "root": "mforge.native.python_root_prompt.v2",
             "child": "mforge.native.python_child_prompt.v2",
             "repair": "mforge.native.python_repair_prompt.v2",
@@ -328,13 +298,9 @@ def _generation_snapshot(
             "evaluator_workers": options.evaluator_workers,
             "provider_concurrency": options.provider_concurrency,
             "wall_seconds_milliseconds": (
-                round(options.wall_seconds * 1000)
-                if options.wall_seconds is not None
-                else None
+                round(options.wall_seconds * 1000) if options.wall_seconds is not None else None
             ),
-            "max_total_tokens_per_hour": (
-                options.max_total_tokens_per_hour
-            ),
+            "max_total_tokens_per_hour": (options.max_total_tokens_per_hour),
             "primary_program_slots": options.primary_program_slots,
             "repair_turn_limit": options.repair_turn_limit,
             "provider_total_turn_limit": options.provider_total_turn_limit,
@@ -343,9 +309,7 @@ def _generation_snapshot(
             "stop_on_verified": options.stop_on_verified,
             "resume_enabled": options.resume_enabled,
             "replace_terminal_slots": options.replace_terminal_slots,
-            "provider_turn_timeout_milliseconds": round(
-                provider_turn_timeout_seconds * 1000
-            ),
+            "provider_turn_timeout_milliseconds": round(provider_turn_timeout_seconds * 1000),
         },
     ).as_dict()
     core._assert_model_prompt_hygiene(
@@ -424,11 +388,7 @@ def _repair_prompt(
             "path": str(item.get("path", "/"))[:512],
             "message": str(item.get("message", "invalid response"))[:512],
             "line": item.get("line") if isinstance(item.get("line"), int) else None,
-            "column": (
-                item.get("column")
-                if isinstance(item.get("column"), int)
-                else None
-            ),
+            "column": (item.get("column") if isinstance(item.get("column"), int) else None),
         }
         for item in diagnostics[:16]
     ]
@@ -466,9 +426,7 @@ class _RuntimeTelemetry:
                 state.get("protocol_id") != M10_RUNTIME_PROTOCOL_ID
                 or state.get("options") != options.as_dict()
             ):
-                raise core.M5InfrastructureError(
-                    "M10 runtime telemetry options changed on resume"
-                )
+                raise core.M5InfrastructureError("M10 runtime telemetry options changed on resume")
             state["resume_attempts"] = int(state.get("resume_attempts", 0)) + 1
             state["active_evaluators"] = 0
             state["queued_evaluations"] = 0
@@ -518,9 +476,7 @@ class _RuntimeTelemetry:
         else:
             expected_guard = {
                 "protocol_id": "mforge.native.python.resume_budget.v1",
-                "expected_pending_primary_slots": (
-                    resume_budget.expected_pending_primary_slots
-                ),
+                "expected_pending_primary_slots": (resume_budget.expected_pending_primary_slots),
                 "max_new_repair_turns": resume_budget.max_new_repair_turns,
             }
             raw_guard = state.get("resume_budget_guard")
@@ -532,15 +488,10 @@ class _RuntimeTelemetry:
                 }
                 state["resume_budget_guard"] = guard
             elif not isinstance(raw_guard, Mapping):
-                raise core.M5InfrastructureError(
-                    "M10 resume budget guard is malformed"
-                )
+                raise core.M5InfrastructureError("M10 resume budget guard is malformed")
             else:
                 guard = dict(raw_guard)
-                if any(
-                    guard.get(key) != value
-                    for key, value in expected_guard.items()
-                ):
+                if any(guard.get(key) != value for key, value in expected_guard.items()):
                     raise core.M5InfrastructureError(
                         "M10 resume budget guard changed across attempts"
                     )
@@ -548,19 +499,11 @@ class _RuntimeTelemetry:
             guard_repairs = guard.get("repair_turn_baseline")
             if (
                 not isinstance(guard_started, list)
-                or not all(
-                    isinstance(item, str) and item
-                    for item in guard_started
-                )
+                or not all(isinstance(item, str) and item for item in guard_started)
                 or not isinstance(guard_repairs, list)
-                or not all(
-                    isinstance(item, str) and item
-                    for item in guard_repairs
-                )
+                or not all(isinstance(item, str) and item for item in guard_repairs)
             ):
-                raise core.M5InfrastructureError(
-                    "M10 resume budget baseline is malformed"
-                )
+                raise core.M5InfrastructureError("M10 resume budget baseline is malformed")
             baseline_started = cast(list[str], guard_started)
             baseline_repairs = cast(list[str], guard_repairs)
         self._started_at_resume = frozenset(baseline_started)
@@ -602,12 +545,8 @@ class _RuntimeTelemetry:
 
     def _string_keys_locked(self, field: str) -> list[str]:
         value = self._state.get(field, [])
-        if not isinstance(value, list) or not all(
-            isinstance(item, str) and item for item in value
-        ):
-            raise core.M5InfrastructureError(
-                f"M10 {field} reservations are malformed"
-            )
+        if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+            raise core.M5InfrastructureError(f"M10 {field} reservations are malformed")
         return cast(list[str], value)
 
     def reserve_primary_generation(
@@ -617,16 +556,12 @@ class _RuntimeTelemetry:
         limit: int | None,
     ) -> None:
         if len(keys) != core.POPULATION_SIZE or len(set(keys)) != len(keys):
-            raise core.M5InfrastructureError(
-                "a generation must reserve eight unique primary slots"
-            )
+            raise core.M5InfrastructureError("a generation must reserve eight unique primary slots")
         with self._lock:
             retained = self._string_keys_locked("primary_slot_keys")
             new = [key for key in keys if key not in retained]
             if limit is not None and len(retained) + len(new) > limit:
-                raise _ProviderTurnBudgetExhausted(
-                    "fewer than eight primary program slots remain"
-                )
+                raise _ProviderTurnBudgetExhausted("fewer than eight primary program slots remain")
             retained.extend(new)
             self._state["primary_slot_keys"] = retained
             self._persist_locked()
@@ -670,10 +605,7 @@ class _RuntimeTelemetry:
             for attempt in range(1, core.POPULATION_SIZE + 1):
                 retry_key = f"{key}-resume-{attempt:02d}"
                 if retry_key in primary:
-                    if (
-                        retry_key not in started
-                        or durable_result_exists(attempt)
-                    ):
+                    if retry_key not in started or durable_result_exists(attempt):
                         return retry_key, attempt
                     continue
                 if retry_key not in primary:
@@ -694,18 +626,14 @@ class _RuntimeTelemetry:
                     retries[retry_key] = key
                     self._persist_locked()
                     return retry_key, attempt
-            raise core.M5InfrastructureError(
-                "interrupted primary retry attempts are exhausted"
-            )
+            raise core.M5InfrastructureError("interrupted primary retry attempts are exhausted")
 
     def provider_started(self, key: str, *, kind: str) -> bool:
         with self._lock:
             if kind not in {"primary", "repair"}:
                 raise ValueError("provider turn kind is invalid")
             admitted = self._string_keys_locked(
-                "primary_slot_keys"
-                if kind == "primary"
-                else "repair_turn_keys"
+                "primary_slot_keys" if kind == "primary" else "repair_turn_keys"
             )
             if key not in admitted:
                 raise core.M5InfrastructureError(
@@ -717,23 +645,15 @@ class _RuntimeTelemetry:
             if (
                 self._resume_budget is not None
                 and kind == "primary"
-                and len(
-                    set(started)
-                    .difference(self._started_at_resume)
-                    .intersection(admitted)
-                )
+                and len(set(started).difference(self._started_at_resume).intersection(admitted))
                 >= self._resume_budget.expected_pending_primary_slots
             ):
-                raise _ProviderTurnBudgetExhausted(
-                    "resume primary turn budget is exhausted"
-                )
+                raise _ProviderTurnBudgetExhausted("resume primary turn budget is exhausted")
             started.append(key)
             self._state["provider_started_keys"] = started
             self._state["provider_turns_submitted"] = len(started)
             count_field = (
-                "primary_turns_submitted"
-                if kind == "primary"
-                else "repair_turns_submitted"
+                "primary_turns_submitted" if kind == "primary" else "repair_turns_submitted"
             )
             self._state[count_field] = int(self._state[count_field]) + 1
             active = int(self._state["active_provider_turns"]) + 1
@@ -802,9 +722,7 @@ class _RuntimeTelemetry:
         operation()
         elapsed = time.monotonic() - started
         with self._lock:
-            self._state["persistence_seconds"] = (
-                float(self._state["persistence_seconds"]) + elapsed
-            )
+            self._state["persistence_seconds"] = float(self._state["persistence_seconds"]) + elapsed
             self._persist_locked()
 
     def first_valid_program(self) -> None:
@@ -815,9 +733,7 @@ class _RuntimeTelemetry:
 
     def evaluator_created(self) -> None:
         with self._lock:
-            self._state["evaluator_instances"] = (
-                int(self._state["evaluator_instances"]) + 1
-            )
+            self._state["evaluator_instances"] = int(self._state["evaluator_instances"]) + 1
             self._persist_locked()
 
     def evaluator_queued(self) -> None:
@@ -839,8 +755,7 @@ class _RuntimeTelemetry:
             active = int(self._state["active_evaluators"]) + 1
             self._state["active_evaluators"] = active
             self._state["evaluator_queue_wait_seconds"] = (
-                float(self._state["evaluator_queue_wait_seconds"])
-                + queue_wait_seconds
+                float(self._state["evaluator_queue_wait_seconds"]) + queue_wait_seconds
             )
             self._state["peak_active_evaluators"] = max(
                 active,
@@ -905,13 +820,13 @@ class _ConcurrentEvaluatorPool:
         *,
         workers: int,
         queue_capacity: int,
-        evaluator_factory: Callable[[], core.M5ScientificEvaluator],
+        evaluator_factory: Callable[[], M10ScientificEvaluator],
         telemetry: _RuntimeTelemetry,
     ) -> None:
         self._factory = evaluator_factory
         self._telemetry = telemetry
         self._local = threading.local()
-        self._owned: list[core.M5ScientificEvaluator] = []
+        self._owned: list[M10ScientificEvaluator] = []
         self._owned_lock = threading.Lock()
         self._capacity = threading.BoundedSemaphore(queue_capacity)
         self._executor = ThreadPoolExecutor(
@@ -919,7 +834,7 @@ class _ConcurrentEvaluatorPool:
             thread_name_prefix="mforge-m10-evaluator",
         )
 
-    def _evaluator(self) -> core.M5ScientificEvaluator:
+    def _evaluator(self) -> M10ScientificEvaluator:
         evaluator = getattr(self._local, "evaluator", None)
         if evaluator is None:
             evaluator = self._factory()
@@ -927,7 +842,7 @@ class _ConcurrentEvaluatorPool:
             with self._owned_lock:
                 self._owned.append(evaluator)
             self._telemetry.evaluator_created()
-        return cast(core.M5ScientificEvaluator, evaluator)
+        return cast(M10ScientificEvaluator, evaluator)
 
     def submit(
         self,
@@ -958,9 +873,7 @@ class _ConcurrentEvaluatorPool:
                         panel[0].case_id,
                     )
                 for case in panel:
-                    evaluation_path = (
-                        slot_dir / "evaluations" / f"{case.case_id}.json.gz"
-                    )
+                    evaluation_path = slot_dir / "evaluations" / f"{case.case_id}.json.gz"
                     if evaluation_path.is_file():
                         payloads.append(core._load_mapping(evaluation_path))
                         continue
@@ -971,6 +884,78 @@ class _ConcurrentEvaluatorPool:
                                     source=source,
                                     case=case,
                                     candidate_id=candidate_id,
+                                )
+                            )
+                        )
+                    except Exception as error:
+                        failed = True
+                        return _EvaluationOutcome(
+                            tuple(payloads),
+                            type(error).__name__,
+                            str(error)[:1024],
+                            case.case_id,
+                        )
+                return _EvaluationOutcome(tuple(payloads))
+            finally:
+                self._telemetry.evaluator_finished(
+                    time.monotonic() - started,
+                    failed=failed,
+                )
+
+        try:
+            future = self._executor.submit(evaluate)
+        except BaseException:
+            self._capacity.release()
+            raise
+        future.add_done_callback(lambda _: self._capacity.release())
+        return future
+
+    def submit_baseline(
+        self,
+        *,
+        baseline: str,
+        panel: tuple[core.DevelopmentCaseV1, ...],
+        generation: int,
+        generation_dir: Path,
+    ) -> Future[_EvaluationOutcome]:
+        self._capacity.acquire()
+        self._telemetry.evaluator_queued()
+        queued_at = time.monotonic()
+
+        def evaluate() -> _EvaluationOutcome:
+            started = time.monotonic()
+            self._telemetry.evaluator_started(started - queued_at)
+            payloads: list[dict[str, Any]] = []
+            failed = False
+            try:
+                try:
+                    evaluator = self._evaluator()
+                except Exception as error:
+                    failed = True
+                    return _EvaluationOutcome(
+                        (),
+                        type(error).__name__,
+                        str(error)[:1024],
+                        panel[0].case_id,
+                    )
+                for case in panel:
+                    evaluation_path = (
+                        generation_dir
+                        / "baselines"
+                        / baseline
+                        / "evaluations"
+                        / f"{case.case_id}.json.gz"
+                    )
+                    if evaluation_path.is_file():
+                        payloads.append(core._load_mapping(evaluation_path))
+                        continue
+                    try:
+                        payloads.append(
+                            dict(
+                                evaluator.evaluate_baseline(
+                                    baseline=baseline,
+                                    case=case,
+                                    generation=generation,
                                 )
                             )
                         )
@@ -1017,9 +1002,7 @@ def _write_or_verify(path: Path, value: Mapping[str, Any]) -> None:
     if path.exists():
         retained = read_json(path)
         if retained != dict(value):
-            raise core.M5InfrastructureError(
-                f"immutable M10 metadata changed: {path}"
-            )
+            raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
         return
     write_json(path, value, exclusive=True)
 
@@ -1051,35 +1034,22 @@ def _verify_prepared(
         or value.get("panel_case_ids") != [item.case_id for item in panel]
         or value.get("search_memory_sha256") != search_memory_sha256
     ):
-        raise core.M5InfrastructureError(
-            f"retained prepared candidate identity changed: {path}"
-        )
+        raise core.M5InfrastructureError(f"retained prepared candidate identity changed: {path}")
     candidates = core._all_candidates(root)
     parent = next(
-        (
-            item
-            for item in candidates
-            if item.get("candidate_id") == slot_plan.parent_candidate_id
-        ),
+        (item for item in candidates if item.get("candidate_id") == slot_plan.parent_candidate_id),
         None,
     )
     if slot_plan.kind == "child" and parent is None:
         raise core.M5InfrastructureError("prepared child parent is unavailable")
-    if (
-        value.get("parent_program_hash")
-        != (parent.get("program_hash") if parent is not None else None)
-        or value.get("parent_behavior_signature")
-        != (
-            parent.get("behavior_signature")
-            if parent is not None
-            else None
-        )
+    if value.get("parent_program_hash") != (
+        parent.get("program_hash") if parent is not None else None
+    ) or value.get("parent_behavior_signature") != (
+        parent.get("behavior_signature") if parent is not None else None
     ):
         raise core.M5InfrastructureError("prepared parent identity changed")
     attempts_raw = value.get("provider_attempts")
-    if not isinstance(attempts_raw, Sequence) or isinstance(
-        attempts_raw, str | bytes
-    ):
+    if not isinstance(attempts_raw, Sequence) or isinstance(attempts_raw, str | bytes):
         raise core.M5InfrastructureError("prepared provider attempts are malformed")
     attempts = [
         core.M5ProviderResultV1.from_dict(item)
@@ -1091,21 +1061,15 @@ def _verify_prepared(
     for previous, current in zip(attempts, attempts[1:], strict=False):
         if (
             current.context.thread_id != previous.context.thread_id
-            or current.context.included_turn_ids[:-1]
-            != previous.context.included_turn_ids
+            or current.context.included_turn_ids[:-1] != previous.context.included_turn_ids
         ):
-            raise core.M5InfrastructureError(
-                "prepared provider attempt lineage changed"
-            )
+            raise core.M5InfrastructureError("prepared provider attempt lineage changed")
     provider_context = value.get("provider_context")
     if (
         not isinstance(provider_context, Mapping)
-        or core.M5ProviderContextV1.from_dict(provider_context)
-        != attempts[-1].context
+        or core.M5ProviderContextV1.from_dict(provider_context) != attempts[-1].context
     ):
-        raise core.M5InfrastructureError(
-            "prepared provider context changed"
-        )
+        raise core.M5InfrastructureError("prepared provider context changed")
     validation = validate_python_policy_response(attempts[-1].response_text)
     if (
         not validation.valid
@@ -1127,8 +1091,7 @@ def _verify_prepared(
         or value.get("source") != source
         or value.get("program_hash") != validation.identity.program_hash
         or value.get("source_sha256") != validation.identity.source_sha256
-        or value.get("canonical_ast_sha256")
-        != validation.identity.canonical_ast_sha256
+        or value.get("canonical_ast_sha256") != validation.identity.canonical_ast_sha256
     ):
         raise core.M5InfrastructureError("prepared source identity changed")
     return value
@@ -1201,6 +1164,7 @@ def _provider_call(
             failed=failed,
         )
 
+
 def _primary_provider_call(
     *,
     provider: core.M10SearchProvider,
@@ -1244,16 +1208,12 @@ def _queue_valid_candidate(
     source = normalize_source_newlines(validation.response.source)
     program_hash = validation.identity.program_hash
     source_path = root / "sources" / f"{program_hash}.py"
-    telemetry.timed_persist(
-        partial(core._write_source_exclusive_or_verify, source_path, source)
-    )
+    telemetry.timed_persist(partial(core._write_source_exclusive_or_verify, source_path, source))
     if boundary_hook is not None:
         boundary_hook(f"{pending.candidate_id}_source_persisted")
     canonical_ast_sha256 = validation.identity.canonical_ast_sha256
     if not isinstance(canonical_ast_sha256, str):
-        raise core.M5InfrastructureError(
-            "validated program omitted canonical AST identity"
-        )
+        raise core.M5InfrastructureError("validated program omitted canonical AST identity")
     prepared = _prepared_candidate(
         base=base,
         validation=validation.as_dict(),
@@ -1264,9 +1224,7 @@ def _queue_valid_candidate(
         source_sha256=validation.identity.source_sha256,
         canonical_ast_sha256=canonical_ast_sha256,
     )
-    telemetry.timed_persist(
-        partial(_write_or_verify, _prepared_path(pending.slot_dir), prepared)
-    )
+    telemetry.timed_persist(partial(_write_or_verify, _prepared_path(pending.slot_dir), prepared))
     telemetry.first_valid_program()
     pending.prepared = prepared
     pending.future = pool.submit(
@@ -1300,9 +1258,7 @@ def _candidate_base(
         "slot": slot_plan.slot,
         "kind": slot_plan.kind,
         "parent_candidate_id": slot_plan.parent_candidate_id,
-        "parent_program_hash": (
-            parent.get("program_hash") if parent is not None else None
-        ),
+        "parent_program_hash": (parent.get("program_hash") if parent is not None else None),
         "parent_behavior_signature": (
             parent.get("behavior_signature") if parent is not None else None
         ),
@@ -1310,9 +1266,7 @@ def _candidate_base(
         "panel_case_ids": [item.case_id for item in panel],
         "search_memory_sha256": memory["sha256"],
         "provider_context": (
-            provider_result.context.as_dict()
-            if provider_result is not None
-            else None
+            provider_result.context.as_dict() if provider_result is not None else None
         ),
         "provider_attempts": list(attempts),
         "repairs": repairs,
@@ -1448,9 +1402,7 @@ def _commit_pending(
     candidate_path = pending.slot_dir / "candidate.json.gz"
     if pending.terminal_payload is not None:
         terminal_payload = pending.terminal_payload
-        telemetry.timed_persist(
-            partial(_write_or_verify, candidate_path, terminal_payload)
-        )
+        telemetry.timed_persist(partial(_write_or_verify, candidate_path, terminal_payload))
         if boundary_hook is not None:
             boundary_hook(f"{pending.candidate_id}_committed")
         pending.terminal_payload = None
@@ -1461,16 +1413,10 @@ def _commit_pending(
         return None
     outcome = pending.future.result()
     for case, evaluation in zip(panel, outcome.payloads, strict=False):
-        evaluation_path = (
-            pending.slot_dir / "evaluations" / f"{case.case_id}.json.gz"
-        )
-        telemetry.timed_persist(
-            partial(_write_or_verify, evaluation_path, evaluation)
-        )
+        evaluation_path = pending.slot_dir / "evaluations" / f"{case.case_id}.json.gz"
+        telemetry.timed_persist(partial(_write_or_verify, evaluation_path, evaluation))
         if boundary_hook is not None:
-            boundary_hook(
-                f"{pending.candidate_id}_evaluation_{case.case_id}"
-            )
+            boundary_hook(f"{pending.candidate_id}_evaluation_{case.case_id}")
     base = {
         key: value
         for key, value in pending.prepared.items()
@@ -1495,9 +1441,7 @@ def _commit_pending(
                 "case_id": outcome.failure_case_id,
             },
         }
-        telemetry.timed_persist(
-            partial(_write_or_verify, candidate_path, candidate)
-        )
+        telemetry.timed_persist(partial(_write_or_verify, candidate_path, candidate))
         if boundary_hook is not None:
             boundary_hook(f"{pending.candidate_id}_committed")
         pending.prepared = None
@@ -1511,9 +1455,7 @@ def _commit_pending(
             ),
         )
     if len(outcome.payloads) != len(panel):
-        raise core.M5InfrastructureError(
-            "M10 evaluator returned an incomplete development panel"
-        )
+        raise core.M5InfrastructureError("M10 evaluator returned an incomplete development panel")
     behavior_profile = core.aggregate_behavior(outcome.payloads)
     behavior_signature = str(behavior_profile["behavior_signature"])
     duplicate_of = core._seen_duplicates(
@@ -1531,9 +1473,7 @@ def _commit_pending(
         "evaluation_case_count": len(outcome.payloads),
         "exact_verified": behavior_profile["exact_verified"],
     }
-    telemetry.timed_persist(
-        partial(_write_or_verify, candidate_path, candidate)
-    )
+    telemetry.timed_persist(partial(_write_or_verify, candidate_path, candidate))
     runtime = telemetry.snapshot()
     if _is_improvement(candidate, runtime.get("best_fitness_interval")):
         interval = behavior_profile.get("fitness_interval")
@@ -1547,6 +1487,59 @@ def _commit_pending(
     pending.prepared = None
     pending.future = None
     return behavior_profile["exact_verified"] is True, None
+
+
+def _commit_generation_baselines(
+    *,
+    generation: int,
+    generation_dir: Path,
+    panel: tuple[core.DevelopmentCaseV1, ...],
+    options: ScientificEvaluationOptionsV1,
+    futures: Mapping[str, Future[_EvaluationOutcome]],
+    telemetry: _RuntimeTelemetry,
+    boundary_hook: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    profiles: dict[str, JsonValue] = {}
+    for baseline in options.baselines:
+        outcome = futures[baseline].result()
+        for case, evaluation in zip(panel, outcome.payloads, strict=False):
+            evaluation_path = (
+                generation_dir / "baselines" / baseline / "evaluations" / f"{case.case_id}.json.gz"
+            )
+            telemetry.timed_persist(partial(_write_or_verify, evaluation_path, evaluation))
+        if outcome.failure_type is not None:
+            raise core.M5InfrastructureError(
+                "baseline evaluation failed for "
+                f"generation {generation}/{baseline}/"
+                f"{outcome.failure_case_id}: {outcome.failure_type}"
+            )
+        if len(outcome.payloads) != len(panel):
+            raise core.M5InfrastructureError(f"baseline {baseline} returned an incomplete panel")
+        profile = core.aggregate_behavior(outcome.payloads)
+        profiles[baseline] = cast(JsonValue, profile)
+        if boundary_hook is not None:
+            boundary_hook(f"generation_{generation}_baseline_{baseline}_evaluated")
+    summary = {
+        "protocol_id": M10_BASELINE_PROTOCOL_ID,
+        "generation": generation,
+        "panel_hash": core.panel_hash(panel),
+        "workload": workload_projection(
+            generation=generation,
+            panel=panel,
+            options=options,
+        ),
+        "baselines": profiles,
+    }
+    telemetry.timed_persist(
+        partial(
+            _write_or_verify,
+            generation_dir / M10_BASELINE_FILENAME,
+            summary,
+        )
+    )
+    if boundary_hook is not None:
+        boundary_hook(f"generation_{generation}_baselines_committed")
+    return summary
 
 
 def _child_mutation_proofs(
@@ -1574,24 +1567,37 @@ def _child_mutation_proofs(
                 "program_changed": (
                     isinstance(candidate.get("program_hash"), str)
                     and isinstance(parent.get("program_hash"), str)
-                    and candidate.get("program_hash")
-                    != parent.get("program_hash")
+                    and candidate.get("program_hash") != parent.get("program_hash")
                 ),
                 "semantic_behavior_changed": (
                     isinstance(candidate.get("behavior_signature"), str)
                     and isinstance(parent.get("behavior_signature"), str)
-                    and candidate.get("behavior_signature")
-                    != parent.get("behavior_signature")
+                    and candidate.get("behavior_signature") != parent.get("behavior_signature")
                 ),
             }
         )
     return result
 
 
+def _panel_from_manifest(
+    manifest: Mapping[str, Any],
+) -> tuple[core.DevelopmentCaseV1, ...]:
+    raw_panel = manifest.get("panel")
+    if not isinstance(raw_panel, Sequence) or isinstance(raw_panel, str | bytes):
+        raise core.M5InfrastructureError("generation manifest panel is malformed")
+    try:
+        return tuple(
+            core.DevelopmentCaseV1.from_dict(item)
+            for item in raw_panel
+            if isinstance(item, Mapping)
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise core.M5InfrastructureError("generation manifest panel is invalid") from error
+
+
 def _report(
     *,
     root: Path,
-    panel: tuple[core.DevelopmentCaseV1, ...],
     provider_model: str,
     provider_effort: str,
     anchor_result: core.M5ProviderResultV1,
@@ -1601,17 +1607,22 @@ def _report(
 ) -> dict[str, Any]:
     candidates = core._all_candidates(root)
     manifests = {
-        int(path.parent.name.removeprefix("generation-")): core._load_mapping(
-            path
-        )
-        for path in sorted(
-            root.glob("generations/generation-*/manifest.json.gz")
-        )
+        int(path.parent.name.removeprefix("generation-")): core._load_mapping(path)
+        for path in sorted(root.glob("generations/generation-*/manifest.json.gz"))
     }
     generations = sorted(manifests)
+    panels = {
+        generation: _panel_from_manifest(manifest) for generation, manifest in manifests.items()
+    }
+    baseline_summaries = {
+        generation: core._load_mapping(
+            root / "generations" / f"generation-{generation:04d}" / M10_BASELINE_FILENAME
+        )
+        for generation in generations
+        if (root / "generations" / f"generation-{generation:04d}" / M10_BASELINE_FILENAME).is_file()
+    }
     planned_candidate_count = sum(
-        len(cast(Sequence[object], manifest.get("slots", ())))
-        for manifest in manifests.values()
+        len(cast(Sequence[object], manifest.get("slots", ()))) for manifest in manifests.values()
     )
     statuses = Counter(str(item.get("status")) for item in candidates)
     proofs = _child_mutation_proofs(candidates)
@@ -1621,9 +1632,18 @@ def _report(
         for item in candidates
         if isinstance(item.get("behavior_profile"), Mapping)
     ]
-    exact_verified = any(
-        profile.get("exact_verified") is True for profile in profiles
-    )
+    exact_verified = any(profile.get("exact_verified") is True for profile in profiles)
+    baseline_profiles = [
+        profile
+        for summary in baseline_summaries.values()
+        for profile in (
+            cast(Mapping[str, Any], summary.get("baselines", {})).values()
+            if isinstance(summary.get("baselines"), Mapping)
+            else ()
+        )
+        if isinstance(profile, Mapping)
+    ]
+    exact_verified |= any(profile.get("exact_verified") is True for profile in baseline_profiles)
     report: dict[str, Any] = {
         "protocol_id": M10_REPORT_PROTOCOL_ID,
         "search_protocol_id": M10_SEARCH_PROTOCOL_ID,
@@ -1634,13 +1654,10 @@ def _report(
         "population_size": core.POPULATION_SIZE,
         "planned_candidate_count": planned_candidate_count,
         "candidate_count": len(candidates),
-        "pending_candidate_count": max(
-            0, planned_candidate_count - len(candidates)
-        ),
+        "pending_candidate_count": max(0, planned_candidate_count - len(candidates)),
         "candidate_status_counts": dict(sorted(statuses.items())),
         "repaired_valid_count": sum(
-            int(item.get("repairs", 0)) > 0
-            and item.get("status") in {"evaluated", "duplicate"}
+            int(item.get("repairs", 0)) > 0 and item.get("status") in {"evaluated", "duplicate"}
             for item in candidates
         ),
         "generation_status_counts": {
@@ -1676,26 +1693,17 @@ def _report(
         },
         "generation_manifest_hashes": {
             str(generation): core._load_mapping(
-                root
-                / "generations"
-                / f"generation-{generation:04d}"
-                / "manifest.json.gz"
+                root / "generations" / f"generation-{generation:04d}" / "manifest.json.gz"
             )["sha256"]
             for generation in generations
         },
         "search_memory_hashes": {
             str(generation): core._load_mapping(
-                root
-                / "generations"
-                / f"generation-{generation:04d}"
-                / "search-memory.json.gz"
+                root / "generations" / f"generation-{generation:04d}" / "search-memory.json.gz"
             )["sha256"]
             for generation in generations
             if (
-                root
-                / "generations"
-                / f"generation-{generation:04d}"
-                / "search-memory.json.gz"
+                root / "generations" / f"generation-{generation:04d}" / "search-memory.json.gz"
             ).is_file()
         },
         "lineage": [
@@ -1703,9 +1711,7 @@ def _report(
                 "candidate_id": item["candidate_id"],
                 "parent_candidate_id": item.get("parent_candidate_id"),
                 "parent_program_hash": item.get("parent_program_hash"),
-                "parent_behavior_signature": item.get(
-                    "parent_behavior_signature"
-                ),
+                "parent_behavior_signature": item.get("parent_behavior_signature"),
                 "generation": item["generation"],
                 "slot": item["slot"],
                 "kind": item["kind"],
@@ -1722,7 +1728,7 @@ def _report(
                 "case_id": case.case_id,
             }
             for item in candidates
-            for case in panel
+            for case in panels[int(item["generation"])]
             if (
                 root
                 / "generations"
@@ -1734,8 +1740,7 @@ def _report(
         ],
         "child_mutation_proofs": proofs,
         "behavior_profiles": {
-            str(item["candidate_id"]): item.get("behavior_profile")
-            for item in candidates
+            str(item["candidate_id"]): item.get("behavior_profile") for item in candidates
         },
         "duplicates": [
             {
@@ -1746,12 +1751,9 @@ def _report(
             if item.get("duplicate_of") is not None
         ],
         "usage": core._usage_with_anchor(candidates, anchor_result.usage),
-        "provider_turns": 1
-        + int(runtime_payload.get("provider_turns_submitted", 0)),
+        "provider_turns": 1 + int(runtime_payload.get("provider_turns_submitted", 0)),
         "specification_anchor_turns": 1,
-        "candidate_program_turns": int(
-            runtime_payload.get("provider_turns_submitted", 0)
-        ),
+        "candidate_program_turns": int(runtime_payload.get("provider_turns_submitted", 0)),
         "repair_turns": sum(int(item.get("repairs", 0)) for item in candidates),
         "provider_accounting": {
             "model": provider_model,
@@ -1763,33 +1765,40 @@ def _report(
             "primary_program_slots": options.primary_program_slots,
             "repair_turn_limit": options.repair_turn_limit,
             "total_turn_limit": options.provider_total_turn_limit,
-            "primary_turns_submitted": int(
-                runtime_payload.get("primary_turns_submitted", 0)
-            ),
-            "repair_turns_submitted": int(
-                runtime_payload.get("repair_turns_submitted", 0)
-            ),
+            "primary_turns_submitted": int(runtime_payload.get("primary_turns_submitted", 0)),
+            "repair_turns_submitted": int(runtime_payload.get("repair_turns_submitted", 0)),
         },
         "exact_verified": exact_verified,
         "exact_verification": {
             "authority": "exact_verifier_only",
             "submissions": sum(
                 int(profile.get("exact_verifier_submissions", 0))
-                for profile in profiles
+                for profile in [*profiles, *baseline_profiles]
             ),
             "records": sum(
                 int(profile.get("exact_verifier_records", 0))
-                for profile in profiles
+                for profile in [*profiles, *baseline_profiles]
             ),
             "verified": exact_verified,
             "queue": 0,
         },
-        "equal_panel_hash": core.panel_hash(panel),
+        "generation_workloads": {
+            str(generation): workload_projection(
+                generation=generation,
+                panel=panels[generation],
+                options=options.evaluation,
+            )
+            for generation in generations
+        },
+        "generation_baselines": {
+            str(generation): summary for generation, summary in baseline_summaries.items()
+        },
         "equal_development_budget": {
-            "case_count": len(panel),
-            "case_ids": [item.case_id for item in panel],
+            "case_count_per_generation": {
+                str(generation): len(panels[generation]) for generation in generations
+            },
             "all_evaluated_candidates_complete": all(
-                int(item.get("evaluation_case_count", 0)) == len(panel)
+                int(item.get("evaluation_case_count", 0)) == len(panels[int(item["generation"])])
                 for item in candidates
                 if item.get("status") in {"evaluated", "duplicate"}
             ),
@@ -1839,12 +1848,25 @@ def _report(
                 for generation in generations
                 if generation > 0
             ),
-            "terminal_slots_not_replaced": options.replace_terminal_slots
-            is False,
+            "terminal_slots_not_replaced": options.replace_terminal_slots is False,
             "equal_development_panel_and_budget": all(
-                int(item.get("evaluation_case_count", 0)) == len(panel)
+                int(item.get("evaluation_case_count", 0)) == len(panels[int(item["generation"])])
                 for item in candidates
                 if item.get("status") in {"evaluated", "duplicate"}
+            ),
+            "generation_baselines_complete": (
+                len(baseline_summaries) == len(generations)
+                and all(
+                    set(
+                        cast(
+                            Mapping[str, Any],
+                            summary.get("baselines", {}),
+                        )
+                    )
+                    == set(options.evaluation.baselines)
+                    for summary in baseline_summaries.values()
+                    if isinstance(summary.get("baselines"), Mapping)
+                )
             ),
             "exact_verifier_only_authority": True,
             "provider_program_turn_budget_respected": (
@@ -1872,9 +1894,7 @@ def resolve_resume_generation(
         for path in root.glob("generations/generation-*/manifest.json.gz")
     )
     for generation in generations:
-        generation_dir = (
-            root / "generations" / f"generation-{generation:04d}"
-        )
+        generation_dir = root / "generations" / f"generation-{generation:04d}"
         if not (generation_dir / "manifest.json.gz").is_file():
             continue
         manifests.append(generation)
@@ -1892,8 +1912,7 @@ def resolve_resume_generation(
             pending_primary[generation] = tuple(pending)
     if not manifests or len(incomplete) != 1:
         raise core.M5InfrastructureError(
-            "current-generation resume requires exactly one incomplete "
-            "existing generation"
+            "current-generation resume requires exactly one incomplete existing generation"
         )
     generation = incomplete[0]
     if generation != max(manifests):
@@ -1915,12 +1934,34 @@ def resolve_resume_generation(
     return generation, pending_ids
 
 
+def _next_generation_to_run(root: Path) -> int:
+    generations = sorted(
+        int(path.parent.name.removeprefix("generation-"))
+        for path in root.glob("generations/generation-*/manifest.json.gz")
+    )
+    if not generations:
+        return 0
+    if generations != list(range(generations[-1] + 1)):
+        raise core.M5InfrastructureError("generation manifest history is incomplete")
+    for generation in generations:
+        generation_dir = root / "generations" / f"generation-{generation:04d}"
+        terminal = len(core._generation_candidates(root, generation))
+        baselines_complete = (generation_dir / M10_BASELINE_FILENAME).is_file()
+        if terminal < core.POPULATION_SIZE or not baselines_complete:
+            if generation != generations[-1]:
+                raise core.M5InfrastructureError(
+                    "a later generation exists after an incomplete generation"
+                )
+            return generation
+    return generations[-1] + 1
+
+
 def run_sustained_search(
     *,
     provider: core.M10SearchProvider,
-    evaluator_factory: Callable[[], core.M5ScientificEvaluator],
+    evaluator_factory: Callable[[], M10ScientificEvaluator],
     workspace: str | Path,
-    panel: tuple[core.DevelopmentCaseV1, ...],
+    panel_factory: Callable[[int], tuple[core.DevelopmentCaseV1, ...]],
     system_prompt: str,
     specification_prompt: str,
     specification_ack_schema: Mapping[str, Any],
@@ -1933,15 +1974,10 @@ def run_sustained_search(
 ) -> dict[str, Any]:
     """Run or resume one bounded, completion-order-independent campaign."""
 
-    if not panel:
-        raise ValueError("development panel must not be empty")
     if provider_turn_timeout_seconds <= 0 or (
-        options.wall_seconds is not None
-        and provider_turn_timeout_seconds >= options.wall_seconds
+        options.wall_seconds is not None and provider_turn_timeout_seconds >= options.wall_seconds
     ):
-        raise ValueError(
-            "provider turn timeout must be positive and below the wall budget"
-        )
+        raise ValueError("provider turn timeout must be positive and below the wall budget")
     if provider.provider_concurrency != options.provider_concurrency:
         raise ValueError("provider concurrency differs from the frozen options")
     core._assert_model_prompt_hygiene(system_prompt)
@@ -1962,8 +1998,6 @@ def run_sustained_search(
         "generation_zero_roots": core.POPULATION_SIZE,
         "later_child_slots": core.CHILD_SLOTS,
         "later_root_slots": core.ROOT_SLOTS,
-        "panel_hash": core.panel_hash(panel),
-        "panel": [item.as_dict() for item in panel],
         "model": provider.model,
         "effort": provider.effort,
         **options.as_dict(),
@@ -2001,7 +2035,7 @@ def run_sustained_search(
             "error_type": type(error).__name__,
             "error": str(error)[:2048],
             "candidate_count": len(core._all_candidates(root)),
-            "panel_hash": core.panel_hash(panel),
+            "evaluation": options.evaluation.as_dict(),
             "resumable": True,
         }
 
@@ -2014,19 +2048,11 @@ def run_sustained_search(
         )
         core._assert_provider_turn_boundary(anchor_result, expected_history=())
         anchor = anchor_result.context
-        core._write_exclusive_or_verify(
-            root / "anchor.json.gz", anchor_result.as_dict()
-        )
+        core._write_exclusive_or_verify(root / "anchor.json.gz", anchor_result.as_dict())
         if boundary_hook is not None:
             boundary_hook("anchor_persisted")
 
-        retained_generations = sorted(
-            int(path.parent.name.removeprefix("generation-"))
-            for path in root.glob("generations/generation-*/manifest.json.gz")
-        )
-        next_generation = (
-            max(retained_generations) + 1 if retained_generations else 0
-        )
+        next_generation = _next_generation_to_run(root)
         generations = (
             range(resume_generation, resume_generation + 1)
             if resume_generation is not None
@@ -2035,27 +2061,30 @@ def run_sustained_search(
             else range(next_generation, options.generation_limit)
         )
         for generation in generations:
+            panel = panel_factory(generation)
+            if not panel:
+                raise core.M5InfrastructureError(
+                    f"generation {generation} development panel is empty"
+                )
             if operator_stop is not None and operator_stop():
                 raise core.M5OperatorStop("operator stop requested")
-            if hourly_token_usage(
-                root,
-                options.max_total_tokens_per_hour,
-            )["hourly_limit_reached"] is True:
+            if (
+                hourly_token_usage(
+                    root,
+                    options.max_total_tokens_per_hour,
+                )["hourly_limit_reached"]
+                is True
+            ):
                 stop_reason = "hourly_token_limit"
                 break
             if options.wall_seconds is not None and (
                 telemetry.wall_expired(options.wall_seconds)
-                or telemetry.wall_remaining(options.wall_seconds)
-                < provider_turn_timeout_seconds
+                or telemetry.wall_remaining(options.wall_seconds) < provider_turn_timeout_seconds
             ):
                 stop_reason = "wall_clock_budget"
                 break
 
-            previous = (
-                core._generation_candidates(root, generation - 1)
-                if generation > 0
-                else []
-            )
+            previous = core._generation_candidates(root, generation - 1) if generation > 0 else []
             manifest = core.build_generation_manifest(
                 generation=generation,
                 panel=panel,
@@ -2064,19 +2093,32 @@ def run_sustained_search(
             if generation > 0 and manifest.all_root_fallback:
                 stop_reason = "insufficient_valid_parents"
                 break
-            primary_keys = [
-                f"{slot.request_key}-initial" for slot in manifest.slots
-            ]
+            primary_keys = [f"{slot.request_key}-initial" for slot in manifest.slots]
             telemetry.reserve_primary_generation(
                 primary_keys,
                 limit=options.primary_program_slots,
             )
 
-            generation_dir = (
-                root / "generations" / f"generation-{generation:04d}"
+            generation_dir = root / "generations" / f"generation-{generation:04d}"
+            core._write_exclusive_or_verify(generation_dir / "manifest.json.gz", manifest.as_dict())
+            baseline_summary_path = generation_dir / M10_BASELINE_FILENAME
+            retained_baselines = (
+                core._load_mapping(baseline_summary_path)
+                if baseline_summary_path.is_file()
+                else None
             )
-            core._write_exclusive_or_verify(
-                generation_dir / "manifest.json.gz", manifest.as_dict()
+            baseline_futures = (
+                {}
+                if retained_baselines is not None
+                else {
+                    baseline: pool.submit_baseline(
+                        baseline=baseline,
+                        panel=panel,
+                        generation=generation,
+                        generation_dir=generation_dir,
+                    )
+                    for baseline in options.evaluation.baselines
+                }
             )
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_manifest")
@@ -2086,15 +2128,11 @@ def run_sustained_search(
                 if int(item.get("generation", -1)) < generation
             ]
             memory = core.build_search_memory(memory_candidates)
-            core._write_exclusive_or_verify(
-                generation_dir / "search-memory.json.gz", memory
-            )
+            core._write_exclusive_or_verify(generation_dir / "search-memory.json.gz", memory)
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_search_memory")
             prior_candidates = core._all_candidates(root)
-            by_id = {
-                str(item["candidate_id"]): item for item in prior_candidates
-            }
+            by_id = {str(item["candidate_id"]): item for item in prior_candidates}
             snapshot = _generation_snapshot(
                 generation=generation,
                 manifest=manifest,
@@ -2109,9 +2147,7 @@ def run_sustained_search(
                 options=options,
                 provider_turn_timeout_seconds=provider_turn_timeout_seconds,
             )
-            _write_or_verify(
-                generation_dir / "generation-snapshot.json.gz", snapshot
-            )
+            _write_or_verify(generation_dir / "generation-snapshot.json.gz", snapshot)
             provider.prepare_generation(
                 snapshot=snapshot,
                 anchor=anchor,
@@ -2123,12 +2159,8 @@ def run_sustained_search(
             entries = [
                 _PendingCommit(
                     slot_plan=slot_plan,
-                    candidate_id=core._candidate_id(
-                        generation, slot_plan.slot
-                    ),
-                    slot_dir=core._candidate_path(
-                        root, generation, slot_plan.slot
-                    ),
+                    candidate_id=core._candidate_id(generation, slot_plan.slot),
+                    slot_dir=core._candidate_path(root, generation, slot_plan.slot),
                 )
                 for slot_plan in manifest.slots
             ]
@@ -2138,13 +2170,14 @@ def run_sustained_search(
                 *,
                 block: bool,
                 generation_entries: list[_PendingCommit] = entries,
+                generation_panel: tuple[core.DevelopmentCaseV1, ...] = panel,
             ) -> None:
                 nonlocal commit_cursor, exact_verified
                 while commit_cursor < len(generation_entries):
                     outcome = _commit_pending(
                         pending=generation_entries[commit_cursor],
                         root=root,
-                        panel=panel,
+                        panel=generation_panel,
                         telemetry=telemetry,
                         block=block,
                         boundary_hook=boundary_hook,
@@ -2157,9 +2190,7 @@ def run_sustained_search(
                     if infrastructure_error is not None:
                         raise infrastructure_error
 
-            provider_futures: dict[
-                str, Future[core.M5ProviderResultV1]
-            ] = {}
+            provider_futures: dict[str, Future[core.M5ProviderResultV1]] = {}
             provider_task_list: list[_ProviderTask] = []
             for slot_plan, pending, initial_key in zip(
                 manifest.slots, entries, primary_keys, strict=True
@@ -2208,9 +2239,7 @@ def run_sustained_search(
                 provider_key = initial_key
                 idempotency_key = slot_plan.request_key
                 artifact_dir = pending.slot_dir / "provider-initial"
-                durable_result_path = (
-                    artifact_dir / "m5-provider-result.json.gz"
-                )
+                durable_result_path = artifact_dir / "m5-provider-result.json.gz"
                 if (
                     resume_budget is not None
                     and telemetry.primary_was_started(initial_key)
@@ -2229,21 +2258,14 @@ def run_sustained_search(
                             / "m5-provider-result.json.gz"
                         ).is_file()
 
-                    provider_key, retry_attempt = (
-                        telemetry.admit_primary_retry(
-                            initial_key,
-                            limit=options.primary_program_slots,
-                            durable_result_exists=retry_result_exists,
-                        )
+                    provider_key, retry_attempt = telemetry.admit_primary_retry(
+                        initial_key,
+                        limit=options.primary_program_slots,
+                        durable_result_exists=retry_result_exists,
                     )
                     idempotency_key = provider_key
-                    artifact_dir = (
-                        pending.slot_dir
-                        / f"provider-resume-{retry_attempt:02d}"
-                    )
-                    durable_result_path = (
-                        artifact_dir / "m5-provider-result.json.gz"
-                    )
+                    artifact_dir = pending.slot_dir / f"provider-resume-{retry_attempt:02d}"
+                    durable_result_path = artifact_dir / "m5-provider-result.json.gz"
                 if slot_plan.kind == "root":
                     prompt = _root_prompt(snapshot)
                     operation = partial(
@@ -2261,18 +2283,14 @@ def run_sustained_search(
                 else:
                     parent_id = slot_plan.parent_candidate_id
                     if parent_id is None or parent_id not in by_id:
-                        raise core.M5InfrastructureError(
-                            "frozen child parent is unavailable"
-                        )
+                        raise core.M5InfrastructureError("frozen child parent is unavailable")
                     parent = by_id[parent_id]
                     parent_source = parent.get("source")
                     parent_profile = parent.get("behavior_profile")
                     if not isinstance(parent_source, str) or not isinstance(
                         parent_profile, Mapping
                     ):
-                        raise core.M5InfrastructureError(
-                            "selected parent evidence is incomplete"
-                        )
+                        raise core.M5InfrastructureError("selected parent evidence is incomplete")
                     prompt = _child_prompt(
                         snapshot=snapshot,
                         parent_source=parent_source,
@@ -2306,12 +2324,10 @@ def run_sustained_search(
 
             if (
                 resume_budget is not None
-                and len(provider_task_list)
-                != resume_budget.expected_pending_primary_slots
+                and len(provider_task_list) != resume_budget.expected_pending_primary_slots
             ):
                 raise core.M5InfrastructureError(
-                    "pending primary task identities changed after resume "
-                    "validation"
+                    "pending primary task identities changed after resume validation"
                 )
 
             lane_tasks: dict[int, list[_ProviderTask]] = {
@@ -2323,9 +2339,7 @@ def run_sustained_search(
                     slot=task.slot_plan.slot,
                 )
                 if lane not in lane_tasks:
-                    raise core.M5InfrastructureError(
-                        "provider returned an invalid frozen lane"
-                    )
+                    raise core.M5InfrastructureError("provider returned an invalid frozen lane")
                 lane_tasks[lane].append(task)
             for offset in range(core.POPULATION_SIZE):
                 submitted = False
@@ -2358,12 +2372,8 @@ def run_sustained_search(
                             provider_result,
                             expected_history=task.expected_history,
                         )
-                    elif anchor.turn_id not in (
-                        provider_result.context.included_turn_ids
-                    ):
-                        raise core.M5InfrastructureError(
-                            "fresh root lost the specification anchor"
-                        )
+                    elif anchor.turn_id not in (provider_result.context.included_turn_ids):
+                        raise core.M5InfrastructureError("fresh root lost the specification anchor")
                 except core.M5InfrastructureError:
                     raise
                 except Exception as error:
@@ -2379,9 +2389,7 @@ def run_sustained_search(
                         repairs=0,
                         prompt=task.prompt,
                     )
-                    pending.terminal_payload = _provider_failure(
-                        base=base, error=error
-                    )
+                    pending.terminal_payload = _provider_failure(base=base, error=error)
                     provider.release_primary_slot(
                         generation=generation,
                         slot=task.slot_plan.slot,
@@ -2390,12 +2398,8 @@ def run_sustained_search(
                     continue
                 if boundary_hook is not None:
                     boundary_hook(f"{pending.candidate_id}_provider")
-                attempts: list[Mapping[str, JsonValue]] = [
-                    provider_result.as_dict()
-                ]
-                validation = validate_python_policy_response(
-                    provider_result.response_text
-                )
+                attempts: list[Mapping[str, JsonValue]] = [provider_result.as_dict()]
+                validation = validate_python_policy_response(provider_result.response_text)
                 base = _candidate_base(
                     candidate_id=pending.candidate_id,
                     generation=generation,
@@ -2426,9 +2430,7 @@ def run_sustained_search(
                     commit_ready(block=False)
                     continue
                 repair_key = f"{task.slot_plan.request_key}-repair-01"
-                if not telemetry.reserve_repair(
-                    repair_key, limit=options.repair_turn_limit
-                ):
+                if not telemetry.reserve_repair(repair_key, limit=options.repair_turn_limit):
                     base = _candidate_base(
                         candidate_id=pending.candidate_id,
                         generation=generation,
@@ -2454,9 +2456,7 @@ def run_sustained_search(
                     continue
                 repair_prompt = _repair_prompt(
                     snapshot=snapshot,
-                    diagnostics=[
-                        item.as_dict() for item in validation.diagnostics
-                    ],
+                    diagnostics=[item.as_dict() for item in validation.diagnostics],
                 )
                 core._assert_model_prompt_hygiene(repair_prompt)
                 previous_result = provider_result
@@ -2477,9 +2477,7 @@ def run_sustained_search(
                     key=repair_key,
                     kind="repair",
                     durable_result_path=(
-                        pending.slot_dir
-                        / "provider-repair-01"
-                        / "m5-provider-result.json.gz"
+                        pending.slot_dir / "provider-repair-01" / "m5-provider-result.json.gz"
                     ),
                     operation=operation,
                 )
@@ -2487,9 +2485,7 @@ def run_sustained_search(
                     repaired_result = repair_future.result()
                     core._assert_provider_turn_boundary(
                         repaired_result,
-                        expected_history=(
-                            previous_result.context.included_turn_ids
-                        ),
+                        expected_history=(previous_result.context.included_turn_ids),
                         expected_thread_id=previous_result.context.thread_id,
                     )
                 except core.M5InfrastructureError:
@@ -2507,9 +2503,7 @@ def run_sustained_search(
                         repairs=1,
                         prompt=task.prompt,
                     )
-                    pending.terminal_payload = _provider_failure(
-                        base=base, error=error
-                    )
+                    pending.terminal_payload = _provider_failure(base=base, error=error)
                     provider.release_primary_slot(
                         generation=generation,
                         slot=task.slot_plan.slot,
@@ -2520,9 +2514,7 @@ def run_sustained_search(
                     *attempts,
                     repaired_result.as_dict(),
                 ]
-                repaired_validation = validate_python_policy_response(
-                    repaired_result.response_text
-                )
+                repaired_validation = validate_python_policy_response(repaired_result.response_text)
                 base = _candidate_base(
                     candidate_id=pending.candidate_id,
                     generation=generation,
@@ -2557,9 +2549,33 @@ def run_sustained_search(
 
             commit_ready(block=True)
             if commit_cursor != core.POPULATION_SIZE:
-                raise core.M5InfrastructureError(
-                    "generation did not reach eight terminal slots"
+                raise core.M5InfrastructureError("generation did not reach eight terminal slots")
+            baseline_summary = (
+                retained_baselines
+                if retained_baselines is not None
+                else _commit_generation_baselines(
+                    generation=generation,
+                    generation_dir=generation_dir,
+                    panel=panel,
+                    options=options.evaluation,
+                    futures=baseline_futures,
+                    telemetry=telemetry,
+                    boundary_hook=boundary_hook,
                 )
+            )
+            if baseline_summary.get("panel_hash") != core.panel_hash(panel):
+                raise core.M5InfrastructureError(
+                    "retained baseline panel differs from the generation"
+                )
+            raw_baselines = baseline_summary.get("baselines")
+            if not isinstance(raw_baselines, Mapping) or set(raw_baselines) != set(
+                options.evaluation.baselines
+            ):
+                raise core.M5InfrastructureError("generation baseline summary is malformed")
+            exact_verified |= any(
+                isinstance(profile, Mapping) and profile.get("exact_verified") is True
+                for profile in raw_baselines.values()
+            )
             telemetry.boundary(f"generation_{generation}_committed")
             if exact_verified:
                 stop_reason = "exact_verified_counterexample"
@@ -2575,9 +2591,7 @@ def run_sustained_search(
         telemetry.boundary("provider_turn_budget_exhausted")
     except (core.M5InfrastructureError, core.M5OperatorStop) as error:
         reason = (
-            "operator_stop"
-            if isinstance(error, core.M5OperatorStop)
-            else "infrastructure_failure"
+            "operator_stop" if isinstance(error, core.M5OperatorStop) else "infrastructure_failure"
         )
         telemetry.finish(reason)
         write_json(root / M10_STOP_FILENAME, stop_payload(reason, error))
@@ -2602,7 +2616,6 @@ def run_sustained_search(
     telemetry.finish(stop_reason)
     report = _report(
         root=root,
-        panel=panel,
         provider_model=provider.model,
         provider_effort=provider.effort,
         anchor_result=anchor_result,
@@ -2626,6 +2639,7 @@ __all__ = [
     "M10_RUNTIME_FILENAME",
     "M10_SEARCH_PROTOCOL_ID",
     "M10_STOP_FILENAME",
+    "M10ScientificEvaluator",
     "ScientificResumeBudgetV1",
     "ScientificSearchOptionsV2",
     "resolve_resume_generation",

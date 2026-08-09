@@ -30,12 +30,18 @@ from .contracts import (
 )
 from .provenance import M5_PROVENANCE_FILENAME, ensure_m5_acceptance_provenance
 from .runtime_contracts import PolicyRuntimeLimitsV1
+from .scientific_evaluation import (
+    ScientificEvaluationOptionsV1,
+    workload_projection,
+)
 from .scientific_search import (
+    M10_BASELINE_FILENAME,
     M10_REPORT_FILENAME,
     M10_REPORT_PROTOCOL_ID,
     M10_RUNTIME_FILENAME,
     M10_SEARCH_PROTOCOL_ID,
     M10_STOP_FILENAME,
+    M10ScientificEvaluator,
     ScientificResumeBudgetV1,
     ScientificSearchOptionsV2,
     hourly_token_usage,
@@ -59,15 +65,11 @@ from .search_provider import (
     specification_ack_schema,
 )
 
-PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION = (
-    "mforge.experiment.native_python_preview_config.v1"
-)
+PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION = "mforge.experiment.native_python_preview_config.v1"
 PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION = (
     "mforge.experiment.native_python_scientific_search_config.v2"
 )
-PYTHON_PREVIEW_STATE_SCHEMA_VERSION = (
-    "mforge.experiment.status.native_python_preview.v1"
-)
+PYTHON_PREVIEW_STATE_SCHEMA_VERSION = "mforge.experiment.status.native_python_preview.v1"
 PYTHON_PREVIEW_PROTOCOL_VERSION = "mforge.native.python_preview.v1"
 PYTHON_PREVIEW_MODE = "ordinary-python"
 V2_PROTOCOL = "native-v2"
@@ -76,9 +78,7 @@ _STATE_NAME = "python-preview-state.json.gz"
 _CONFIG_NAME = "python-preview.toml"
 _STOP_REQUEST_NAME = "python-preview-stop-request.json.gz"
 _STOP_REQUEST_PROTOCOL_ID = "mforge.native.python_preview.stop_request.v1"
-_M10_PAUSE_RECORD_SCHEMA_VERSION = (
-    "mforge.native.python_m10_emergency_stop_evidence.v1"
-)
+_M10_PAUSE_RECORD_SCHEMA_VERSION = "mforge.native.python_m10_emergency_stop_evidence.v1"
 _PAUSED_FOR_BUDGET = "PAUSED_FOR_BUDGET"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _TERMINAL_CANDIDATE_STATUSES = frozenset(
@@ -214,6 +214,26 @@ def _boolean(value: object, name: str) -> bool:
     return value
 
 
+def _integer_tuple(value: object, name: str) -> tuple[int, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(isinstance(item, bool) or not isinstance(item, int) for item in value)
+    ):
+        raise ValueError(f"{name} must be a nonempty integer array")
+    return tuple(value)
+
+
+def _string_tuple(value: object, name: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item for item in value)
+    ):
+        raise ValueError(f"{name} must be a nonempty string array")
+    return tuple(value)
+
+
 def _resolved_path(value: object, name: str, source_dir: Path) -> Path:
     raw = Path(_string(value, name))
     return (source_dir / raw).resolve() if not raw.is_absolute() else raw.resolve()
@@ -227,9 +247,7 @@ def load_python_preview_config(
     source_path, source_bytes, raw = _raw_config(path)
     mixed = sorted(_V2_TOP_LEVEL_FIELDS.intersection(raw))
     if mixed:
-        raise ValueError(
-            f"Python preview configuration cannot contain Native v2 fields: {mixed}"
-        )
+        raise ValueError(f"Python preview configuration cannot contain Native v2 fields: {mixed}")
     allowed = {
         "schema_version",
         "protocol",
@@ -245,13 +263,9 @@ def load_python_preview_config(
         PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION,
         PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION,
     }:
-        raise ValueError(
-            "Python preview requires a supported schema_version"
-        )
+        raise ValueError("Python preview requires a supported schema_version")
     if raw.get("protocol") != PYTHON_EXPERIMENT_PROTOCOL_ID:
-        raise ValueError(
-            f"Python preview requires protocol {PYTHON_EXPERIMENT_PROTOCOL_ID!r}"
-        )
+        raise ValueError(f"Python preview requires protocol {PYTHON_EXPERIMENT_PROTOCOL_ID!r}")
     exp_id = validate_experiment_id(raw.get("exp_id"))
     workspace = _resolved_path(
         raw.get("workspace"),
@@ -271,9 +285,7 @@ def load_python_preview_config(
     }
     unknown_preview = sorted(set(preview).difference(allowed_preview))
     if unknown_preview:
-        raise ValueError(
-            f"unsupported [python_preview] fields: {unknown_preview}"
-        )
+        raise ValueError(f"unsupported [python_preview] fields: {unknown_preview}")
     model = _string(preview.get("model"), "python_preview.model")
     effort = _string(preview.get("effort"), "python_preview.effort")
     if effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
@@ -292,13 +304,10 @@ def load_python_preview_config(
     if scientific_value is not None:
         if schema_version != PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION:
             raise ValueError(
-                "python_preview.scientific_search requires the scientific "
-                "search config schema"
+                "python_preview.scientific_search requires the scientific search config schema"
             )
         if not isinstance(scientific_value, dict):
-            raise ValueError(
-                "[python_preview.scientific_search] must be a table"
-            )
+            raise ValueError("[python_preview.scientific_search] must be a table")
         scientific = cast(dict[str, Any], scientific_value)
         scientific_fields = {
             "generation_limit",
@@ -314,14 +323,12 @@ def load_python_preview_config(
             "stop_on_verified",
             "resume_enabled",
             "replace_terminal_slots",
+            "evaluation",
         }
-        unknown_scientific = sorted(
-            set(scientific).difference(scientific_fields)
-        )
+        unknown_scientific = sorted(set(scientific).difference(scientific_fields))
         if unknown_scientific:
             raise ValueError(
-                "unsupported [python_preview.scientific_search] fields: "
-                f"{unknown_scientific}"
+                f"unsupported [python_preview.scientific_search] fields: {unknown_scientific}"
             )
         optional_budget_fields = {
             "generation_limit",
@@ -331,16 +338,38 @@ def load_python_preview_config(
             "repair_turn_limit",
             "provider_total_turn_limit",
         }
-        required_scientific_fields = (
-            scientific_fields - optional_budget_fields
-        )
+        required_scientific_fields = scientific_fields - optional_budget_fields
         if not required_scientific_fields.issubset(scientific):
-            missing = sorted(
-                required_scientific_fields.difference(scientific)
-            )
+            missing = sorted(required_scientific_fields.difference(scientific))
+            raise ValueError(f"missing [python_preview.scientific_search] fields: {missing}")
+        evaluation_value = scientific["evaluation"]
+        if not isinstance(evaluation_value, dict):
+            raise ValueError("[python_preview.scientific_search.evaluation] must be a table")
+        evaluation = cast(dict[str, Any], evaluation_value)
+        evaluation_fields = {
+            "graph_mode",
+            "order_schedule",
+            "min_order",
+            "max_order",
+            "orders_per_generation",
+            "graph_seeds",
+            "policy_seeds",
+            "horizon",
+            "witness_cap",
+            "baselines",
+            "replay",
+        }
+        unknown_evaluation = sorted(set(evaluation).difference(evaluation_fields))
+        if unknown_evaluation:
             raise ValueError(
-                "missing [python_preview.scientific_search] fields: "
-                f"{missing}"
+                "unsupported "
+                "[python_preview.scientific_search.evaluation] fields: "
+                f"{unknown_evaluation}"
+            )
+        if set(evaluation) != evaluation_fields:
+            missing = sorted(evaluation_fields.difference(evaluation))
+            raise ValueError(
+                f"missing [python_preview.scientific_search.evaluation] fields: {missing}"
             )
         scientific_search = ScientificSearchOptionsV2(
             generation_limit=(
@@ -370,10 +399,7 @@ def load_python_preview_config(
             max_total_tokens_per_hour=(
                 _positive_integer(
                     scientific["max_total_tokens_per_hour"],
-                    (
-                        "python_preview.scientific_search."
-                        "max_total_tokens_per_hour"
-                    ),
+                    ("python_preview.scientific_search.max_total_tokens_per_hour"),
                 )
                 if "max_total_tokens_per_hour" in scientific
                 else None
@@ -422,12 +448,55 @@ def load_python_preview_config(
                 scientific["replace_terminal_slots"],
                 "python_preview.scientific_search.replace_terminal_slots",
             ),
+            evaluation=ScientificEvaluationOptionsV1(
+                graph_mode=_string(
+                    evaluation["graph_mode"],
+                    ("python_preview.scientific_search.evaluation.graph_mode"),
+                ),
+                order_schedule=_string(
+                    evaluation["order_schedule"],
+                    ("python_preview.scientific_search.evaluation.order_schedule"),
+                ),
+                min_order=_positive_integer(
+                    evaluation["min_order"],
+                    ("python_preview.scientific_search.evaluation.min_order"),
+                ),
+                max_order=_positive_integer(
+                    evaluation["max_order"],
+                    ("python_preview.scientific_search.evaluation.max_order"),
+                ),
+                orders_per_generation=_positive_integer(
+                    evaluation["orders_per_generation"],
+                    ("python_preview.scientific_search.evaluation.orders_per_generation"),
+                ),
+                graph_seeds=_integer_tuple(
+                    evaluation["graph_seeds"],
+                    ("python_preview.scientific_search.evaluation.graph_seeds"),
+                ),
+                policy_seeds=_integer_tuple(
+                    evaluation["policy_seeds"],
+                    ("python_preview.scientific_search.evaluation.policy_seeds"),
+                ),
+                horizon=_positive_integer(
+                    evaluation["horizon"],
+                    ("python_preview.scientific_search.evaluation.horizon"),
+                ),
+                witness_cap=_positive_integer(
+                    evaluation["witness_cap"],
+                    ("python_preview.scientific_search.evaluation.witness_cap"),
+                ),
+                baselines=_string_tuple(
+                    evaluation["baselines"],
+                    ("python_preview.scientific_search.evaluation.baselines"),
+                ),
+                replay=_boolean(
+                    evaluation["replay"],
+                    ("python_preview.scientific_search.evaluation.replay"),
+                ),
+            ),
         )
     elif schema_version == PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION:
-        raise ValueError(
-            "scientific search config requires "
-            "[python_preview.scientific_search]"
-        )
+        raise ValueError("scientific search config requires [python_preview.scientific_search]")
     return PythonPreviewConfig(
         schema_version=str(schema_version),
         protocol=PYTHON_EXPERIMENT_PROTOCOL_ID,
@@ -476,11 +545,7 @@ def _base_state(config: PythonPreviewConfig) -> dict[str, Any]:
 
 
 def _public(value: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        str(key): item
-        for key, item in value.items()
-        if key in _PUBLIC_STATE_FIELDS
-    }
+    return {str(key): item for key, item in value.items() if key in _PUBLIC_STATE_FIELDS}
 
 
 def _safe_error(error: Exception, config: PythonPreviewConfig) -> str:
@@ -569,9 +634,7 @@ def _load_mapping(path: Path) -> dict[str, Any] | None:
 
 def _candidates(root: Path) -> list[dict[str, Any]]:
     values: list[dict[str, Any]] = []
-    for path in sorted(
-        root.glob("generations/generation-*/slot-*/candidate.json.gz")
-    ):
+    for path in sorted(root.glob("generations/generation-*/slot-*/candidate.json.gz")):
         value = _load_mapping(path)
         if value is not None:
             values.append(value)
@@ -580,9 +643,7 @@ def _candidates(root: Path) -> list[dict[str, Any]]:
 
 def _manifests(root: Path) -> list[dict[str, Any]]:
     values: list[dict[str, Any]] = []
-    for path in sorted(
-        root.glob("generations/generation-*/manifest.json.gz")
-    ):
+    for path in sorted(root.glob("generations/generation-*/manifest.json.gz")):
         value = _load_mapping(path)
         if value is not None:
             values.append(value)
@@ -611,12 +672,8 @@ def _usage_total(
         attempts.append(anchor)
     for candidate in candidates:
         raw_attempts = candidate.get("provider_attempts")
-        if isinstance(raw_attempts, Sequence) and not isinstance(
-            raw_attempts, str | bytes
-        ):
-            attempts.extend(
-                item for item in raw_attempts if isinstance(item, Mapping)
-            )
+        if isinstance(raw_attempts, Sequence) and not isinstance(raw_attempts, str | bytes):
+            attempts.extend(item for item in raw_attempts if isinstance(item, Mapping))
     for attempt in attempts:
         usage = attempt.get("usage")
         if not isinstance(usage, Mapping):
@@ -639,11 +696,7 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
     selector_wall_seconds = 0.0
     action_wall_seconds = 0.0
     scoring_wall_seconds = 0.0
-    for path in sorted(
-        root.glob(
-            "generations/generation-*/slot-*/evaluations/*.json.gz"
-        )
-    ):
+    for path in sorted(root.glob("generations/generation-*/slot-*/evaluations/*.json.gz")):
         evaluation = _load_mapping(path)
         if evaluation is None:
             continue
@@ -657,9 +710,7 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
                 raw = runtime_profile.get(key)
                 value = (
                     float(raw)
-                    if isinstance(raw, int | float)
-                    and not isinstance(raw, bool)
-                    and raw >= 0
+                    if isinstance(raw, int | float) and not isinstance(raw, bool) and raw >= 0
                     else 0.0
                 )
                 if target == "sandbox":
@@ -683,12 +734,8 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
         steps = scientific.get("steps")
         if isinstance(steps, Sequence) and not isinstance(steps, str | bytes):
             policy_invocations += len(steps)
-        graph_score_attempts += _nonnegative_int(
-            scientific.get("score_attempts")
-        )
-        unique_graph_scores += _nonnegative_int(
-            scientific.get("unique_graph_scores")
-        )
+        graph_score_attempts += _nonnegative_int(scientific.get("score_attempts"))
+        unique_graph_scores += _nonnegative_int(scientific.get("unique_graph_scores"))
         stack: list[object] = [scientific]
         while stack:
             item = stack.pop()
@@ -702,9 +749,7 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
                 ):
                     scoring_wall_seconds += wall_time_ns / 1_000_000_000
                 stack.extend(item.values())
-            elif isinstance(item, Sequence) and not isinstance(
-                item, str | bytes
-            ):
+            elif isinstance(item, Sequence) and not isinstance(item, str | bytes):
                 stack.extend(item)
         failure = scientific.get("failure")
         if isinstance(failure, Mapping) and failure.get("code") == "PROPOSE_TIMEOUT":
@@ -738,9 +783,7 @@ def _provider_telemetry(
     )
     repairs = sum(_nonnegative_int(item.get("repairs")) for item in candidates)
     warnings = sum(_nonnegative_int(item.get("warnings")) for item in candidates)
-    provider_state = _load_mapping(
-        root / "provider-runtime" / "provider-state.json.gz"
-    )
+    provider_state = _load_mapping(root / "provider-runtime" / "provider-state.json.gz")
     counters = (
         provider_state.get("telemetry")
         if isinstance(provider_state, Mapping)
@@ -755,9 +798,7 @@ def _provider_telemetry(
             cast(Mapping[str, Any], counters).get("transport_retries")
         ),
         "warnings": warnings
-        + _nonnegative_int(
-            cast(Mapping[str, Any], anchor or {}).get("warnings")
-        ),
+        + _nonnegative_int(cast(Mapping[str, Any], anchor or {}).get("warnings")),
         "process_restarts": _nonnegative_int(
             cast(Mapping[str, Any], counters).get("process_restarts")
         ),
@@ -766,10 +807,7 @@ def _provider_telemetry(
         ),
         "forks": len(
             list(
-                root.glob(
-                    "generations/generation-*/slot-*/provider-*/"
-                    "fork/m5-fork-result.json.gz"
-                )
+                root.glob("generations/generation-*/slot-*/provider-*/fork/m5-fork-result.json.gz")
             )
         ),
         "usage": _usage_total(candidates, anchor),
@@ -793,19 +831,13 @@ def _program_projection(
                 "program_hash": candidate.get("program_hash"),
                 "behavior_signature": candidate.get("behavior_signature"),
                 "fitness_interval": (
-                    profile.get("fitness_interval")
-                    if isinstance(profile, Mapping)
-                    else None
+                    profile.get("fitness_interval") if isinstance(profile, Mapping) else None
                 ),
                 "selector_frequencies": (
-                    profile.get("selector_frequencies")
-                    if isinstance(profile, Mapping)
-                    else {}
+                    profile.get("selector_frequencies") if isinstance(profile, Mapping) else {}
                 ),
                 "action_frequencies": (
-                    profile.get("action_frequencies")
-                    if isinstance(profile, Mapping)
-                    else {}
+                    profile.get("action_frequencies") if isinstance(profile, Mapping) else {}
                 ),
                 "accepted_rewrites": (
                     _nonnegative_int(profile.get("accepted_rewrite_count"))
@@ -861,12 +893,8 @@ def _progress(
         for slot in cast(Sequence[Mapping[str, Any]], manifest.get("slots", ()))
         if isinstance(slot, Mapping)
     )
-    report = _load_mapping(root / M10_REPORT_FILENAME) or _load_mapping(
-        root / "m5-report.json.gz"
-    )
-    stop = _load_mapping(root / M10_STOP_FILENAME) or _load_mapping(
-        root / "m5-stop.json.gz"
-    )
+    report = _load_mapping(root / M10_REPORT_FILENAME) or _load_mapping(root / "m5-report.json.gz")
+    stop = _load_mapping(root / M10_STOP_FILENAME) or _load_mapping(root / "m5-stop.json.gz")
     runtime = _load_mapping(root / M10_RUNTIME_FILENAME) or {}
     state = str(retained_state.get("state", "ready"))
     resumable = bool(retained_state.get("resumable", True))
@@ -876,57 +904,101 @@ def _progress(
         if retained_state.get("terminal_reason") is not None
         else None
     )
-    result_kind = str(
-        retained_state.get("scientific_result_kind", "NONE")
-    )
+    result_kind = str(retained_state.get("scientific_result_kind", "NONE"))
     exact = retained_state.get("scientific_success") is True
     report_protocol = report.get("protocol_id") if report is not None else None
     if report is not None and (
         report_protocol == M10_REPORT_PROTOCOL_ID
-        or (
-            report_protocol == M5_REPORT_PROTOCOL_ID
-            and retained_state.get("state") == "completed"
-        )
+        or (report_protocol == M5_REPORT_PROTOCOL_ID and retained_state.get("state") == "completed")
     ):
-        terminal_reason = str(
-            report.get("stop_reason", "generation_budget")
-        )
-        generation_count = _nonnegative_int(
-            report.get("generation_count")
-        )
+        terminal_reason = str(report.get("stop_reason", "generation_budget"))
+        generation_count = _nonnegative_int(report.get("generation_count"))
         configured_generation_limit = (
             config.scientific_search.generation_limit
             if config.scientific_search is not None
-            else None
+            else generation_count
         )
-        generation_budget_extended = (
-            terminal_reason == "generation_budget"
-            and (
-                configured_generation_limit is None
-                or configured_generation_limit > generation_count
-            )
+        generation_budget_extended = terminal_reason == "generation_budget" and (
+            configured_generation_limit is None or configured_generation_limit > generation_count
         )
-        report_resumable = (
-            generation_budget_extended
-            or terminal_reason == "hourly_token_limit"
-        )
+        report_resumable = generation_budget_extended or terminal_reason == "hourly_token_limit"
         state = "blocked" if report_resumable else "completed"
         resumable = report_resumable
         run_terminal = not report_resumable
         exact = report.get("exact_verified") is True
-        result_kind = (
-            "VERIFIED_COUNTEREXAMPLE"
-            if exact
-            else "DEVELOPMENT_SEARCH_EVIDENCE"
-        )
+        result_kind = "VERIFIED_COUNTEREXAMPLE" if exact else "DEVELOPMENT_SEARCH_EVIDENCE"
     elif stop is not None and state != "running":
         state = "blocked"
         resumable = stop.get("resumable") is True
         result_kind = "NO_SCIENTIFIC_RESULT"
-    generations = [
-        _nonnegative_int(manifest.get("generation"))
-        for manifest in manifests
-    ]
+    generations = [_nonnegative_int(manifest.get("generation")) for manifest in manifests]
+    evaluation_workload: Mapping[str, JsonValue] | None = None
+    baseline_projection: dict[str, JsonValue] = {}
+    baseline_profiles: list[Mapping[str, Any]] = []
+    if config.scientific_search is not None:
+        baseline_projection = {
+            baseline: None for baseline in config.scientific_search.evaluation.baselines
+        }
+        for generation in generations:
+            summary = _load_mapping(
+                root / "generations" / f"generation-{generation:04d}" / M10_BASELINE_FILENAME
+            )
+            if summary is None:
+                continue
+            raw_baselines = summary.get("baselines")
+            if not isinstance(raw_baselines, Mapping):
+                continue
+            for baseline, profile in raw_baselines.items():
+                if isinstance(profile, Mapping):
+                    baseline_profiles.append(profile)
+                    if generation == max(generations, default=-1):
+                        baseline_projection[str(baseline)] = cast(
+                            JsonValue,
+                            {
+                                "status": "complete",
+                                "fitness_interval": profile.get("fitness_interval"),
+                                "evaluation_case_count": len(
+                                    cast(
+                                        Sequence[object],
+                                        profile.get(
+                                            "episode_statuses",
+                                            (),
+                                        ),
+                                    )
+                                )
+                                if isinstance(
+                                    profile.get("episode_statuses"),
+                                    Sequence,
+                                )
+                                and not isinstance(
+                                    profile.get("episode_statuses"),
+                                    str | bytes,
+                                )
+                                else 0,
+                            },
+                        )
+        if generations:
+            current_generation = max(generations)
+            current_manifest = next(
+                (
+                    manifest
+                    for manifest in manifests
+                    if _nonnegative_int(manifest.get("generation")) == current_generation
+                ),
+                None,
+            )
+            raw_panel = current_manifest.get("panel") if current_manifest is not None else None
+            if isinstance(raw_panel, Sequence) and not isinstance(raw_panel, str | bytes):
+                panel = tuple(
+                    DevelopmentCaseV1.from_dict(case)
+                    for case in raw_panel
+                    if isinstance(case, Mapping)
+                )
+                evaluation_workload = workload_projection(
+                    generation=current_generation,
+                    panel=panel,
+                    options=config.scientific_search.evaluation,
+                )
     telemetry = _evaluation_telemetry(root)
     profiles = _program_projection(candidates)
     behavior_profiles = [
@@ -935,24 +1007,17 @@ def _progress(
         if isinstance(item.get("behavior_profile"), Mapping)
     ]
     program_failure_episodes = sum(
-        _nonnegative_int(profile.get("program_failure_count"))
-        for profile in behavior_profiles
+        _nonnegative_int(profile.get("program_failure_count")) for profile in behavior_profiles
     )
     program_failed_candidates = sum(
-        _nonnegative_int(profile.get("program_failure_count")) > 0
-        for profile in behavior_profiles
+        _nonnegative_int(profile.get("program_failure_count")) > 0 for profile in behavior_profiles
     )
     accepted_rewrites = sum(
-        _nonnegative_int(profile.get("accepted_rewrite_count"))
-        for profile in behavior_profiles
+        _nonnegative_int(profile.get("accepted_rewrite_count")) for profile in behavior_profiles
     )
-    no_plans = sum(
-        _nonnegative_int(profile.get("no_plan_count"))
-        for profile in behavior_profiles
-    )
+    no_plans = sum(_nonnegative_int(profile.get("no_plan_count")) for profile in behavior_profiles)
     illegal_final_states = sum(
-        _nonnegative_int(profile.get("illegal_final_state_count"))
-        for profile in behavior_profiles
+        _nonnegative_int(profile.get("illegal_final_state_count")) for profile in behavior_profiles
     )
     selector_frequencies: Counter[str] = Counter()
     action_frequencies: Counter[str] = Counter()
@@ -960,18 +1025,12 @@ def _progress(
         selectors = profile.get("selector_frequencies")
         if isinstance(selectors, Mapping):
             selector_frequencies.update(
-                {
-                    str(key): _nonnegative_int(value)
-                    for key, value in selectors.items()
-                }
+                {str(key): _nonnegative_int(value) for key, value in selectors.items()}
             )
         actions = profile.get("action_frequencies")
         if isinstance(actions, Mapping):
             action_frequencies.update(
-                {
-                    str(key): _nonnegative_int(value)
-                    for key, value in actions.items()
-                }
+                {str(key): _nonnegative_int(value) for key, value in actions.items()}
             )
     elapsed = max(
         0.0,
@@ -990,9 +1049,7 @@ def _progress(
     provider_active_wall = max(
         0.0,
         float(runtime.get("provider_active_wall_seconds", 0.0))
-        if isinstance(
-            runtime.get("provider_active_wall_seconds"), int | float
-        )
+        if isinstance(runtime.get("provider_active_wall_seconds"), int | float)
         and not isinstance(runtime.get("provider_active_wall_seconds"), bool)
         else 0.0,
     )
@@ -1028,9 +1085,7 @@ def _progress(
         else dominant_key
     )
     configured_workers = (
-        config.scientific_search.evaluator_workers
-        if config.scientific_search is not None
-        else 1
+        config.scientific_search.evaluator_workers if config.scientific_search is not None else 1
     )
     active_workers = _nonnegative_int(runtime.get("active_evaluators"))
     evaluator_capacity_seconds = elapsed * configured_workers
@@ -1053,29 +1108,18 @@ def _progress(
     )
     policy_invocations = telemetry["policy_invocations"]
     graph_score_attempts = telemetry["graph_score_attempts"]
-    last_improvement = runtime.get(
-        "last_scientific_improvement_epoch_seconds"
-    )
+    last_improvement = runtime.get("last_scientific_improvement_epoch_seconds")
     time_since_improvement = (
         max(0.0, time.time() - float(last_improvement))
-        if isinstance(last_improvement, int | float)
-        and not isinstance(last_improvement, bool)
+        if isinstance(last_improvement, int | float) and not isinstance(last_improvement, bool)
         else None
     )
     best_candidate_id = runtime.get("best_candidate_id")
     best_candidate = next(
-        (
-            item
-            for item in candidates
-            if item.get("candidate_id") == best_candidate_id
-        ),
+        (item for item in candidates if item.get("candidate_id") == best_candidate_id),
         None,
     )
-    best_program = (
-        _program_projection([best_candidate])[0]
-        if best_candidate is not None
-        else None
-    )
+    best_program = _program_projection([best_candidate])[0] if best_candidate is not None else None
     verifier_submissions = sum(
         _nonnegative_int(
             cast(Mapping[str, Any], item.get("behavior_profile", {})).get(
@@ -1085,15 +1129,20 @@ def _progress(
         for item in candidates
         if isinstance(item.get("behavior_profile"), Mapping)
     )
+    verifier_submissions += sum(
+        _nonnegative_int(profile.get("exact_verifier_submissions")) for profile in baseline_profiles
+    )
     verifier_records = sum(
         _nonnegative_int(
-            cast(Mapping[str, Any], item.get("behavior_profile", {})).get(
-                "exact_verifier_records"
-            )
+            cast(Mapping[str, Any], item.get("behavior_profile", {})).get("exact_verifier_records")
         )
         for item in candidates
         if isinstance(item.get("behavior_profile"), Mapping)
     )
+    verifier_records += sum(
+        _nonnegative_int(profile.get("exact_verifier_records")) for profile in baseline_profiles
+    )
+    exact |= any(profile.get("exact_verified") is True for profile in baseline_profiles)
     provider_projection = _provider_telemetry(root, candidates)
     if config.scientific_search is not None:
         reserved_turns = runtime.get("provider_turns_submitted")
@@ -1103,9 +1152,7 @@ def _progress(
             and reserved_turns >= 0
         ):
             provider_projection["candidate_turns"] = reserved_turns
-            provider_projection["turns"] = reserved_turns + int(
-                (root / "anchor.json.gz").is_file()
-            )
+            provider_projection["turns"] = reserved_turns + int((root / "anchor.json.gz").is_file())
     candidates_by_id = {
         str(item["candidate_id"]): item
         for item in candidates
@@ -1113,9 +1160,7 @@ def _progress(
     }
     provider_turns_by_key: dict[str, Mapping[str, Any]] = {}
     raw_timeline = runtime.get("provider_concurrency_timeline", ())
-    if isinstance(raw_timeline, Sequence) and not isinstance(
-        raw_timeline, str | bytes
-    ):
+    if isinstance(raw_timeline, Sequence) and not isinstance(raw_timeline, str | bytes):
         for raw_turn in raw_timeline:
             if not isinstance(raw_turn, Mapping):
                 continue
@@ -1126,9 +1171,7 @@ def _progress(
     for manifest in manifests:
         generation = _nonnegative_int(manifest.get("generation"))
         raw_slots = manifest.get("slots", ())
-        if not isinstance(raw_slots, Sequence) or isinstance(
-            raw_slots, str | bytes
-        ):
+        if not isinstance(raw_slots, Sequence) or isinstance(raw_slots, str | bytes):
             continue
         for raw_slot in raw_slots:
             if not isinstance(raw_slot, Mapping):
@@ -1145,14 +1188,10 @@ def _progress(
                 else None
             )
             provider_started = (
-                provider_turn.get("started_epoch_seconds")
-                if provider_turn is not None
-                else None
+                provider_turn.get("started_epoch_seconds") if provider_turn is not None else None
             )
             provider_finished = (
-                provider_turn.get("finished_epoch_seconds")
-                if provider_turn is not None
-                else None
+                provider_turn.get("finished_epoch_seconds") if provider_turn is not None else None
             )
             started_epoch = (
                 float(provider_started)
@@ -1201,8 +1240,7 @@ def _progress(
                     "state": candidate_status,
                     "phase": (
                         "archived"
-                        if candidate_status
-                        in _TERMINAL_CANDIDATE_STATUSES
+                        if candidate_status in _TERMINAL_CANDIDATE_STATUSES
                         else "evaluation"
                         if prepared
                         else "provider"
@@ -1210,9 +1248,7 @@ def _progress(
                     "started_epoch_seconds": started_epoch,
                     "elapsed_seconds": elapsed_seconds,
                     "repairs": (
-                        _nonnegative_int(candidate.get("repairs"))
-                        if candidate is not None
-                        else 0
+                        _nonnegative_int(candidate.get("repairs")) if candidate is not None else 0
                     ),
                     "usage": cast(
                         JsonValue,
@@ -1223,10 +1259,7 @@ def _progress(
                                     candidate.get("usage", {}),
                                 )
                             )
-                            if candidate is not None
-                            and isinstance(
-                                candidate.get("usage"), Mapping
-                            )
+                            if candidate is not None and isinstance(candidate.get("usage"), Mapping)
                             else {}
                         ),
                     ),
@@ -1256,9 +1289,7 @@ def _progress(
         ),
         "safe_api_expanded": config.scientific_search is not None,
         "generation_index": max(generations, default=None),
-        "generation_manifest_hashes": [
-            manifest.get("sha256") for manifest in manifests
-        ],
+        "generation_manifest_hashes": [manifest.get("sha256") for manifest in manifests],
         "counts": {
             "planned": planned,
             "terminal": terminal,
@@ -1267,9 +1298,7 @@ def _progress(
             "contract_invalid": statuses["contract_invalid"],
             "duplicate": statuses["duplicate"],
             "provider_failed": statuses["provider_failed"],
-            "evaluation_infrastructure_failure": statuses[
-                "evaluation_infrastructure_failure"
-            ],
+            "evaluation_infrastructure_failure": statuses["evaluation_infrastructure_failure"],
             "evaluated": statuses["evaluated"],
             "missing": statuses["missing"],
             "roots": allocations["root"],
@@ -1290,29 +1319,17 @@ def _progress(
         "candidate_status_counts": dict(sorted(statuses.items())),
         "provider": {
             **provider_projection,
-            "program_turns_reserved": _nonnegative_int(
-                runtime.get("provider_turns_submitted")
-            ),
-            "primary_turns": _nonnegative_int(
-                runtime.get("primary_turns_submitted")
-            ),
-            "repair_turns": _nonnegative_int(
-                runtime.get("repair_turns_submitted")
-            ),
-            "active": _nonnegative_int(
-                runtime.get("active_provider_turns")
-            ),
-            "peak_active": _nonnegative_int(
-                runtime.get("peak_active_provider_turns")
-            ),
+            "program_turns_reserved": _nonnegative_int(runtime.get("provider_turns_submitted")),
+            "primary_turns": _nonnegative_int(runtime.get("primary_turns_submitted")),
+            "repair_turns": _nonnegative_int(runtime.get("repair_turns_submitted")),
+            "active": _nonnegative_int(runtime.get("active_provider_turns")),
+            "peak_active": _nonnegative_int(runtime.get("peak_active_provider_turns")),
             "configured_concurrency": (
                 config.scientific_search.provider_concurrency
                 if config.scientific_search is not None
                 else 1
             ),
-            "active_wall_seconds": max(
-                0.0, provider_active_wall
-            ),
+            "active_wall_seconds": max(0.0, provider_active_wall),
             "concurrency_timeline": cast(
                 JsonValue,
                 runtime.get("provider_concurrency_timeline", []),
@@ -1338,16 +1355,10 @@ def _progress(
             "configured": configured_workers,
             "active": active_workers,
             "idle": max(0, configured_workers - active_workers),
-            "peak_active": _nonnegative_int(
-                runtime.get("peak_active_evaluators")
-            ),
+            "peak_active": _nonnegative_int(runtime.get("peak_active_evaluators")),
             "queued": _nonnegative_int(runtime.get("queued_evaluations")),
-            "peak_queued": _nonnegative_int(
-                runtime.get("peak_queued_evaluations")
-            ),
-            "completed": _nonnegative_int(
-                runtime.get("completed_evaluations")
-            ),
+            "peak_queued": _nonnegative_int(runtime.get("peak_queued_evaluations")),
+            "completed": _nonnegative_int(runtime.get("completed_evaluations")),
             "failed": _nonnegative_int(runtime.get("failed_evaluations")),
             "busy_seconds": evaluator_busy,
             "idle_capacity_seconds": evaluator_idle_seconds,
@@ -1359,44 +1370,29 @@ def _progress(
             ),
         },
         "throughput": {
-            "policy_invocations_per_second": (
-                policy_invocations / elapsed if elapsed > 0 else 0.0
-            ),
+            "policy_invocations_per_second": (policy_invocations / elapsed if elapsed > 0 else 0.0),
             "graph_score_attempts_per_second": (
                 graph_score_attempts / elapsed if elapsed > 0 else 0.0
             ),
-            "accepted_rewrites_per_second": (
-                accepted_rewrites / elapsed if elapsed > 0 else 0.0
-            ),
+            "accepted_rewrites_per_second": (accepted_rewrites / elapsed if elapsed > 0 else 0.0),
             "valid_unique_programs_per_provider_minute": (
-                statuses["evaluated"]
-                / (provider_active_wall / 60.0)
+                statuses["evaluated"] / (provider_active_wall / 60.0)
                 if provider_active_wall > 0
                 else 0.0
             ),
-            "provider_wait_share": (
-                provider_active_wall / elapsed if elapsed > 0 else 0.0
-            ),
+            "provider_wait_share": (provider_active_wall / elapsed if elapsed > 0 else 0.0),
             "elapsed_seconds": elapsed,
         },
         "scientific_activity": {
             "accepted_rewrites": accepted_rewrites,
             "program_failure_episodes": program_failure_episodes,
             "no_plan_count": no_plans,
-            "no_plan_rate": (
-                no_plans / policy_invocations
-                if policy_invocations > 0
-                else 0.0
-            ),
+            "no_plan_rate": (no_plans / policy_invocations if policy_invocations > 0 else 0.0),
             "illegal_final_state_count": illegal_final_states,
             "illegal_final_state_rate": (
-                illegal_final_states / policy_invocations
-                if policy_invocations > 0
-                else 0.0
+                illegal_final_states / policy_invocations if policy_invocations > 0 else 0.0
             ),
-            "selector_frequencies": dict(
-                sorted(selector_frequencies.items())
-            ),
+            "selector_frequencies": dict(sorted(selector_frequencies.items())),
             "action_frequencies": dict(sorted(action_frequencies.items())),
         },
         "phase_timings": {
@@ -1419,15 +1415,9 @@ def _progress(
         "slots": slot_projection,
         "recovery": {
             "state": (
-                "terminal"
-                if run_terminal
-                else "resumable"
-                if resumable and candidates
-                else "fresh"
+                "terminal" if run_terminal else "resumable" if resumable and candidates else "fresh"
             ),
-            "resume_attempts": _nonnegative_int(
-                retained_state.get("resume_attempts")
-            ),
+            "resume_attempts": _nonnegative_int(retained_state.get("resume_attempts")),
             "last_boundary": retained_state.get("last_boundary"),
             "completed_slots_will_not_repeat": True,
         },
@@ -1438,9 +1428,11 @@ def _progress(
             "verified": exact,
             "queue": 0,
         },
+        "evaluation_workload": evaluation_workload,
+        "baselines": baseline_projection,
         "equal_development_panel": (
-            _load_mapping(root / "protocol.json.gz") or {}
-        ).get("panel_hash"),
+            evaluation_workload.get("panel_hash") if evaluation_workload is not None else None
+        ),
     }
 
 
@@ -1498,9 +1490,8 @@ def _apply_pause_record(
         raise PythonPreviewWorkspaceError("Budget pause slot accounting is malformed")
     terminal = _nonnegative_int(slots_record.get("terminal_total"))
     pending = _nonnegative_int(slots_record.get("pending_total"))
-    if (
-        terminal != _nonnegative_int(counts.get("terminal"))
-        or pending != _nonnegative_int(counts.get("pending"))
+    if terminal != _nonnegative_int(counts.get("terminal")) or pending != _nonnegative_int(
+        counts.get("pending")
     ):
         raise PythonPreviewWorkspaceError(
             "Budget pause slot accounting does not match durable workspace artifacts"
@@ -1515,9 +1506,7 @@ def _apply_pause_record(
         "slots.pending_unstarted_slots",
     )
     if (
-        len(interrupted) != _nonnegative_int(
-            slots_record.get("in_flight_cancelled_at_stop")
-        )
+        len(interrupted) != _nonnegative_int(slots_record.get("in_flight_cancelled_at_stop"))
         or len(interrupted) + len(unstarted) != pending
         or set(interrupted).intersection(unstarted)
     ):
@@ -1545,8 +1534,7 @@ def _apply_pause_record(
         "totalTokens": "total_tokens",
     }
     usage = {
-        target: _nonnegative_int(raw_usage.get(source))
-        for target, source in usage_fields.items()
+        target: _nonnegative_int(raw_usage.get(source)) for target, source in usage_fields.items()
     }
     usage["cacheWriteInputTokens"] = 0
 
@@ -1562,18 +1550,10 @@ def _apply_pause_record(
     recovery_projection = dict(recovery) if isinstance(recovery, Mapping) else {}
     provider_projection.update(
         {
-            "program_turns_reserved": _nonnegative_int(
-                provider_record.get("started_reservations")
-            ),
-            "primary_turns": _nonnegative_int(
-                provider_record.get("primary_turns_submitted")
-            ),
-            "repair_turns": _nonnegative_int(
-                provider_record.get("repair_turns_submitted")
-            ),
-            "completed_turns": _nonnegative_int(
-                provider_record.get("completed_turns")
-            ),
+            "program_turns_reserved": _nonnegative_int(provider_record.get("started_reservations")),
+            "primary_turns": _nonnegative_int(provider_record.get("primary_turns_submitted")),
+            "repair_turns": _nonnegative_int(provider_record.get("repair_turns_submitted")),
+            "completed_turns": _nonnegative_int(provider_record.get("completed_turns")),
             "interrupted_turns": _nonnegative_int(
                 provider_record.get("in_flight_started_without_finished")
             ),
@@ -1586,14 +1566,20 @@ def _apply_pause_record(
         {
             "candidate_id": best_record.get("candidate_id"),
             "program_hash": best_record.get("program_hash"),
+            "program": {
+                **(
+                    dict(best_projection["program"])
+                    if isinstance(best_projection.get("program"), Mapping)
+                    else {}
+                ),
+                "program_hash": best_record.get("program_hash"),
+            },
             "fitness_interval": dict(fitness),
         }
     )
     exact_projection.update(
         {
-            "submissions": _nonnegative_int(
-                exact_record.get("candidate_submissions")
-            ),
+            "submissions": _nonnegative_int(exact_record.get("candidate_submissions")),
             "records": _nonnegative_int(exact_record.get("candidate_results")),
             "verified": exact_record.get("all_candidate_exact_verified") is True,
         }
@@ -1659,9 +1645,7 @@ def _string_sequence(value: object, name: str) -> tuple[str, ...]:
         raise PythonPreviewWorkspaceError(f"Budget pause {name} must be a list")
     items = tuple(value)
     if any(not isinstance(item, str) or not item for item in items):
-        raise PythonPreviewWorkspaceError(
-            f"Budget pause {name} must contain non-empty strings"
-        )
+        raise PythonPreviewWorkspaceError(f"Budget pause {name} must contain non-empty strings")
     return cast(tuple[str, ...], items)
 
 
@@ -1679,9 +1663,7 @@ def _stop_requested(config: PythonPreviewConfig) -> bool:
         or value.get("protocol_id") != _STOP_REQUEST_PROTOCOL_ID
         or not isinstance(value.get("active"), bool)
     ):
-        raise PythonPreviewWorkspaceError(
-            "Python preview stop request is malformed"
-        )
+        raise PythonPreviewWorkspaceError("Python preview stop request is malformed")
     return value["active"] is True
 
 
@@ -1723,25 +1705,26 @@ def _consume_stop_request(config: PythonPreviewConfig) -> None:
 
 def _prompt_inputs() -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
     system_prompt = (
-        _PROJECT_ROOT / "prompts/native-v3-python/m5-system.md"
-    ).read_text(encoding="utf-8").strip()
-    request_template = (
-        _PROJECT_ROOT / "prompts/native-v3-python/m4-request.md"
-    ).read_text(encoding="utf-8")
+        (_PROJECT_ROOT / "prompts/native-v3-python/m5-system.md")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    request_template = (_PROJECT_ROOT / "prompts/native-v3-python/m4-request.md").read_text(
+        encoding="utf-8"
+    )
     specification_prompt = (
         "Retain the complete policy specification below for later root and "
         "mutation turns. Do not generate a policy on this turn. Return only "
-        "the required specification acknowledgement.\n\n"
-        + request_template
+        "the required specification acknowledgement.\n\n" + request_template
     )
     policy_schema = json.loads(
-        (
-            _PROJECT_ROOT
-            / "configs/native/native-v3-python-policy-response.schema.json"
-        ).read_text(encoding="utf-8")
+        (_PROJECT_ROOT / "configs/native/native-v3-python-policy-response.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     if not isinstance(policy_schema, dict):
         raise ValueError("Python policy output schema must be an object")
+    _assert_current_policy_contract(request_template, policy_schema)
     return (
         system_prompt,
         request_template,
@@ -1749,6 +1732,31 @@ def _prompt_inputs() -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
         policy_schema,
         specification_ack_schema(),
     )
+
+
+def _assert_current_policy_contract(
+    request_template: str,
+    policy_schema: Mapping[str, Any],
+) -> None:
+    if (
+        "def propose(ctx, graph, api, seed):" not in request_template
+        or "priority(ctx, proposal)" in request_template
+    ):
+        raise ValueError("ordinary-Python request does not use the canonical propose contract")
+    properties = policy_schema.get("properties")
+    required = policy_schema.get("required")
+    if (
+        not isinstance(properties, Mapping)
+        or set(properties) != {"schema_version", "source"}
+        or not isinstance(required, Sequence)
+        or isinstance(required, str | bytes)
+        or set(required) != {"schema_version", "source"}
+        or policy_schema.get("additionalProperties") is not False
+        or not isinstance(properties.get("schema_version"), Mapping)
+        or cast(Mapping[str, Any], properties["schema_version"]).get("const")
+        != "mforge.native.python_policy_response.v1"
+    ):
+        raise ValueError("ordinary-Python output schema is not the canonical two-field schema")
 
 
 def _panel(backend: GraphBackend) -> tuple[DevelopmentCaseV1, ...]:
@@ -1762,6 +1770,7 @@ def _panel(backend: GraphBackend) -> tuple[DevelopmentCaseV1, ...]:
             horizon=1,
             witness_cap=64,
             forbidden_lengths=forbidden_lengths,
+            graph_mode="unrestricted_min_degree_3",
         ),
         DevelopmentCaseV1(
             case_id="order-30-seed-103",
@@ -1771,6 +1780,7 @@ def _panel(backend: GraphBackend) -> tuple[DevelopmentCaseV1, ...]:
             horizon=1,
             witness_cap=64,
             forbidden_lengths=forbidden_lengths,
+            graph_mode="unrestricted_min_degree_3",
         ),
     )
 
@@ -1787,12 +1797,8 @@ def _default_provider(
             base_instructions=system_prompt,
             auth_json=Path.home() / ".codex" / "auth.json",
             turn_timeout_seconds=config.timeout_seconds,
-            provider_concurrency=(
-                config.scientific_search.provider_concurrency
-            ),
-            provider_total_turn_limit=(
-                config.scientific_search.provider_total_turn_limit
-            ),
+            provider_concurrency=(config.scientific_search.provider_concurrency),
+            provider_total_turn_limit=(config.scientific_search.provider_total_turn_limit),
         )
     return CodexM5SearchProvider(
         workspace=config.experiment_root / "provider-runtime",
@@ -1806,13 +1812,18 @@ def _default_provider(
 
 
 def _default_backend(config: PythonPreviewConfig) -> GraphBackend:
-    return HegBackend(config.heg_repo)
+    graph_mode = (
+        config.scientific_search.evaluation.graph_mode
+        if config.scientific_search is not None
+        else "unrestricted_min_degree_3"
+    )
+    return HegBackend(config.heg_repo, graph_mode=graph_mode)
 
 
 def _default_evaluator(
     config: PythonPreviewConfig,
     backend: GraphBackend,
-) -> M5ScientificEvaluator:
+) -> M10ScientificEvaluator:
     return PythonPanelScientificEvaluator(
         backend=backend,
         artifact_root=config.experiment_root / "scientific-artifacts",
@@ -1826,7 +1837,7 @@ class _BackendOwnedEvaluator:
     def __init__(
         self,
         *,
-        evaluator: M5ScientificEvaluator,
+        evaluator: M10ScientificEvaluator,
         backend: GraphBackend,
     ) -> None:
         self._evaluator = evaluator
@@ -1843,6 +1854,19 @@ class _BackendOwnedEvaluator:
             source=source,
             case=case,
             candidate_id=candidate_id,
+        )
+
+    def evaluate_baseline(
+        self,
+        *,
+        baseline: str,
+        case: DevelopmentCaseV1,
+        generation: int,
+    ) -> Mapping[str, JsonValue]:
+        return self._evaluator.evaluate_baseline(
+            baseline=baseline,
+            case=case,
+            generation=generation,
         )
 
     def close(self) -> None:
@@ -1865,13 +1889,10 @@ def run_python_preview(
     existed = config.experiment_root.exists()
     state = _load_state(config) if existed else _initialize_workspace(config)
     if resume_budget is not None and (
-        not existed
-        or config.scientific_search is None
-        or state.get("resumable") is not True
+        not existed or config.scientific_search is None or state.get("resumable") is not True
     ):
         raise PythonPreviewWorkspaceError(
-            "current-generation budget requires a resumable scientific "
-            "workspace"
+            "current-generation budget requires a resumable scientific workspace"
         )
     if resume_budget is not None:
         assert config.scientific_search is not None
@@ -1902,12 +1923,11 @@ def run_python_preview(
         policy_schema,
         ack_schema,
     ) = _prompt_inputs()
+    _assert_current_policy_contract(request_template, policy_schema)
     try:
         provenance_guard(
             workspace=config.experiment_root,
-            resume=(
-                config.experiment_root / M5_PROVENANCE_FILENAME
-            ).is_file(),
+            resume=(config.experiment_root / M5_PROVENANCE_FILENAME).is_file(),
             repository_root=_PROJECT_ROOT,
             heg_root=config.heg_repo,
             experiment_config=config.source_path,
@@ -1967,8 +1987,7 @@ def run_python_preview(
         "resumable": True,
         "run_terminal": False,
         "last_error": None,
-        "resume_attempts": _nonnegative_int(state.get("resume_attempts"))
-        + int(existed),
+        "resume_attempts": _nonnegative_int(state.get("resume_attempts")) + int(existed),
     }
     _write_state(config, running)
 
@@ -1982,9 +2001,9 @@ def run_python_preview(
     primary_error: Exception | None = None
     try:
         backend = backend_factory(config)
-        panel = _panel(backend)
         provider = provider_factory(config, system_prompt)
         if config.scientific_search is None:
+            panel = _panel(backend)
             evaluator = evaluator_factory(config, backend)
             report = run_m5_search(
                 provider=provider,
@@ -2001,11 +2020,16 @@ def run_python_preview(
                 operator_stop=lambda: _stop_requested(config),
             )
         else:
+            scientific_search = config.scientific_search
+            scientific_backend = backend
 
-            def make_evaluator() -> M5ScientificEvaluator:
+            def make_evaluator() -> M10ScientificEvaluator:
                 worker_backend = backend_factory(config)
                 try:
-                    evaluator = evaluator_factory(config, worker_backend)
+                    evaluator = cast(
+                        M10ScientificEvaluator,
+                        evaluator_factory(config, worker_backend),
+                    )
                 except BaseException:
                     with suppress(Exception):
                         worker_backend.close()
@@ -2019,7 +2043,10 @@ def run_python_preview(
                 provider=cast(M10SearchProvider, provider),
                 evaluator_factory=make_evaluator,
                 workspace=config.experiment_root,
-                panel=panel,
+                panel_factory=lambda generation: scientific_search.evaluation.panel_for_generation(
+                    generation=generation,
+                    backend=scientific_backend,
+                ),
                 system_prompt=system_prompt,
                 specification_prompt=specification_prompt,
                 specification_ack_schema=ack_schema,
@@ -2036,9 +2063,7 @@ def run_python_preview(
         }
         final_state = {
             **running,
-            "state": (
-                "blocked" if resumable_stop else "completed"
-            ),
+            "state": ("blocked" if resumable_stop else "completed"),
             "resumable": resumable_stop,
             "run_terminal": not resumable_stop,
             "terminal_reason": report.get("stop_reason"),
@@ -2077,13 +2102,10 @@ def run_python_preview(
     cleanup_errors: list[Exception] = []
     if provider is not None:
         try:
-            if isinstance(
-                provider, CodexM5SearchProvider | CodexM10SearchProvider
-            ):
+            if isinstance(provider, CodexM5SearchProvider | CodexM10SearchProvider):
                 provider.close(
                     cleanup_capsule=(
-                        primary_error is None
-                        and final_state.get("state") == "completed"
+                        primary_error is None and final_state.get("state") == "completed"
                     )
                 )
             else:

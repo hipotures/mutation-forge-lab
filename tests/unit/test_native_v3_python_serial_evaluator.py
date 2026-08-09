@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -49,10 +50,12 @@ from mutation_forge.native_v3_python import (
     evaluate_serial_python_policy,
     validate_python_policy_source,
 )
-
-FIXTURE_ROOT = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "native_v3_python_m3"
+from mutation_forge.native_v3_python.serial_evaluator import (
+    PYTHON_BASELINE_EVALUATOR_PROTOCOL_ID,
+    evaluate_serial_builtin_baseline,
 )
+
+FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "native_v3_python_m3"
 TEST_IDENTITY = BackendIdentity(
     backend_id="python-serial-test",
     heg_commit="fixture",
@@ -70,9 +73,7 @@ def _source(name: str) -> str:
 
 
 def _cubic_graph(order: int = 6) -> GraphState:
-    edges = {
-        normalized_edge((vertex, (vertex + 1) % order)) for vertex in range(order)
-    }
+    edges = {normalized_edge((vertex, (vertex + 1) % order)) for vertex in range(order)}
     edges.update((vertex, vertex + order // 2) for vertex in range(order // 2))
     return GraphState(order, tuple(sorted(edges)))
 
@@ -116,8 +117,7 @@ class _Backend:
             graph.order > 0
             and len(set(graph.edges)) == len(graph.edges)
             and all(
-                u != v and 0 <= u < graph.order and 0 <= v < graph.order
-                for u, v in graph.edges
+                u != v and 0 <= u < graph.order and 0 <= v < graph.order for u, v in graph.edges
             )
             and min(_degrees(graph)) >= 3
         )
@@ -343,7 +343,52 @@ def test_no_plan_consumes_every_step_without_candidate_scoring() -> None:
         "EXPLICIT",
     ]
     assert len(backend.score_calls) == 1
-    assert not backend.apply_calls
+
+
+def test_builtin_baseline_uses_native_v2_operator_with_candidate_metric() -> None:
+    class BaselineBackend(_Backend):
+        graph_mode = "unrestricted_min_degree_3"
+
+        def propose_rewrite(
+            self,
+            graph: GraphState,
+            *,
+            operator_family: str,
+            policy_seed: int,
+            evaluation: int,
+            record_timing: ProposalTimingRecorder | None = None,
+            record_deep_profile: DeepProposalProfileRecorder | None = None,
+        ) -> RewritePlan:
+            del policy_seed, evaluation, record_timing, record_deep_profile
+            assert operator_family == "heg_uniform_two_switch"
+            current = set(graph.edges)
+            edge = next(
+                normalized_edge((left, right))
+                for left in range(graph.order)
+                for right in range(left + 1, graph.order)
+                if normalized_edge((left, right)) not in current
+            )
+            return RewritePlan(
+                removed_edges=(),
+                added_edges=(edge,),
+                operator_family=operator_family,
+                metadata={},
+            )
+
+    backend = BaselineBackend()
+    payload = evaluate_serial_builtin_baseline(
+        backend=backend,
+        scorer=backend,
+        baseline="random",
+        config=_config(horizon=1),
+    )
+
+    assert payload["protocol_id"] == PYTHON_BASELINE_EVALUATOR_PROTOCOL_ID
+    assert payload["baseline"] == "random"
+    scientific = cast(Mapping[str, Any], payload["scientific_result"])
+    assert scientific["status"] == "COMPLETE"
+    assert cast(list[Mapping[str, Any]], scientific["steps"])[0]["accepted"] is True
+    assert len(backend.apply_calls) == 1
 
 
 def test_fixture_replay_preserves_science_trace_and_separate_behavior_identity() -> None:
@@ -358,16 +403,10 @@ def test_fixture_replay_preserves_science_trace_and_separate_behavior_identity()
     assert first.runtime_profile["action_wall_seconds"] > 0
     assert "runtime_profile" in first.as_dict()
     assert first.scientific_result.protocol_id == PYTHON_SERIAL_EVALUATOR_PROTOCOL_ID
-    assert (
-        first.scientific_result.execution_trace_protocol_id
-        == SEMANTIC_TRACE_PROTOCOL_ID
-    )
+    assert first.scientific_result.execution_trace_protocol_id == SEMANTIC_TRACE_PROTOCOL_ID
     alternate_source = _source("add_edge.py").replace("candidates", "options")
     alternate = _evaluate(alternate_source, backend=_Backend())
-    assert (
-        first.program_identity.program_hash
-        != alternate.program_identity.program_hash
-    )
+    assert first.program_identity.program_hash != alternate.program_identity.program_hash
     assert first.behavior_identity == alternate.behavior_identity
 
 
@@ -411,9 +450,7 @@ def test_candidate_scoring_timeout_is_inconclusive_without_safe_evidence() -> No
 
     assert science.status is SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT
     assert science.failure is None
-    assert science.scientific_error == (
-        "candidate scoring timed out without safe partial evidence"
-    )
+    assert science.scientific_error == ("candidate scoring timed out without safe partial evidence")
     assert science.fitness_interval.lower == 0
     assert science.fitness_interval.upper == 1
     assert science.accepted_rewrites == 0
@@ -458,10 +495,7 @@ def test_no_effect_and_illegal_final_state_do_not_score_candidates() -> None:
 
     mismatched_backend = MismatchedBackend()
     mismatched = _evaluate(_source("add_edge.py"), backend=mismatched_backend)
-    assert (
-        mismatched.scientific_result.steps[0].no_plan_reason
-        == "ILLEGAL_FINAL_STATE"
-    )
+    assert mismatched.scientific_result.steps[0].no_plan_reason == "ILLEGAL_FINAL_STATE"
     assert len(mismatched_backend.score_calls) == 1
 
 

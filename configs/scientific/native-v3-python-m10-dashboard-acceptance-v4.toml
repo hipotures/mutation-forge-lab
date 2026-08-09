@@ -22,3 +22,16 @@ validated_queue_capacity = 48
 stop_on_verified = true
 resume_enabled = true
 replace_terminal_slots = false
+
+[python_preview.scientific_search.evaluation]
+graph_mode = "unrestricted_min_degree_3"
+order_schedule = "adaptive"
+min_order = 30
+max_order = 30
+orders_per_generation = 1
+graph_seeds = [101, 103]
+policy_seeds = [17, 19]
+horizon = 1
+witness_cap = 64
+baselines = ["random", "structural"]
+replay = false

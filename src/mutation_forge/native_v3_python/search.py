@@ -91,6 +91,7 @@ class DevelopmentCaseV1:
     horizon: int
     witness_cap: int
     forbidden_lengths: tuple[int, ...]
+    graph_mode: str = "unrestricted_min_degree_3"
 
     def __post_init__(self) -> None:
         if (
@@ -101,6 +102,7 @@ class DevelopmentCaseV1:
             or self.horizon < 0
             or self.witness_cap < 1
             or not self.forbidden_lengths
+            or not self.graph_mode
             or tuple(sorted(set(self.forbidden_lengths))) != self.forbidden_lengths
         ):
             raise ValueError("invalid development case")
@@ -114,7 +116,24 @@ class DevelopmentCaseV1:
             "horizon": self.horizon,
             "witness_cap": self.witness_cap,
             "forbidden_lengths": list(self.forbidden_lengths),
+            "graph_mode": self.graph_mode,
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> DevelopmentCaseV1:
+        forbidden = value.get("forbidden_lengths")
+        if not isinstance(forbidden, Sequence) or isinstance(forbidden, str | bytes):
+            raise ValueError("development case forbidden_lengths are malformed")
+        return cls(
+            case_id=str(value["case_id"]),
+            order=int(value["order"]),
+            graph_seed=int(value["graph_seed"]),
+            policy_seed=int(value["policy_seed"]),
+            horizon=int(value["horizon"]),
+            witness_cap=int(value["witness_cap"]),
+            forbidden_lengths=tuple(int(item) for item in forbidden),
+            graph_mode=str(value["graph_mode"]),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,9 +169,7 @@ class M5ProviderContextV1:
             thread_id=str(value["thread_id"]),
             turn_id=str(value["turn_id"]),
             thread_path=(
-                str(value["thread_path"])
-                if value.get("thread_path") is not None
-                else None
+                str(value["thread_path"]) if value.get("thread_path") is not None else None
             ),
             included_turn_ids=tuple(
                 str(item) for item in cast(Sequence[object], value["included_turn_ids"])
@@ -291,13 +308,9 @@ class M10SearchProvider(M5SearchProvider, Protocol):
 
     def primary_lane(self, *, generation: int, slot: str) -> int: ...
 
-    def await_primary_slot(
-        self, *, generation: int, slot: str
-    ) -> None: ...
+    def await_primary_slot(self, *, generation: int, slot: str) -> None: ...
 
-    def release_primary_slot(
-        self, *, generation: int, slot: str
-    ) -> None: ...
+    def release_primary_slot(self, *, generation: int, slot: str) -> None: ...
 
 
 class M5ScientificEvaluator(Protocol):
@@ -507,8 +520,7 @@ def aggregate_behavior(
                 records = counterexample.get("records")
                 verifier_records += (
                     len(records)
-                    if isinstance(records, Sequence)
-                    and not isinstance(records, str | bytes)
+                    if isinstance(records, Sequence) and not isinstance(records, str | bytes)
                     else 1
                 )
                 verified |= str(counterexample.get("decision", "")).lower() == "stop_verified"
@@ -518,14 +530,10 @@ def aggregate_behavior(
             records = initial_counterexample.get("records")
             verifier_records += (
                 len(records)
-                if isinstance(records, Sequence)
-                and not isinstance(records, str | bytes)
+                if isinstance(records, Sequence) and not isinstance(records, str | bytes)
                 else 1
             )
-            verified |= (
-                str(initial_counterexample.get("decision", "")).lower()
-                == "stop_verified"
-            )
+            verified |= str(initial_counterexample.get("decision", "")).lower() == "stop_verified"
         initial = _component_map(scientific.get("initial_evidence"))
         terminal = _component_map(scientific.get("terminal_evidence"))
         for length in sorted(initial.keys() | terminal.keys()):
@@ -715,31 +723,24 @@ def behavior_distance(
         distance += sum(
             (
                 abs(
-                    Fraction(int(left_counts.get(key, 0)))
-                    - Fraction(int(right_counts.get(key, 0)))
+                    Fraction(int(left_counts.get(key, 0))) - Fraction(int(right_counts.get(key, 0)))
                 )
                 for key in sorted(
-                    {str(item) for item in left_counts}
-                    | {str(item) for item in right_counts}
+                    {str(item) for item in left_counts} | {str(item) for item in right_counts}
                 )
             ),
             Fraction(),
         )
     left_witnesses = left.get("witness_deltas", {})
     right_witnesses = right.get("witness_deltas", {})
-    if not isinstance(left_witnesses, Mapping) or not isinstance(
-        right_witnesses, Mapping
-    ):
+    if not isinstance(left_witnesses, Mapping) or not isinstance(right_witnesses, Mapping):
         raise M5SearchError("behavior witness deltas are malformed")
     for length in sorted(
-        {str(item) for item in left_witnesses}
-        | {str(item) for item in right_witnesses}
+        {str(item) for item in left_witnesses} | {str(item) for item in right_witnesses}
     ):
         left_delta = left_witnesses.get(length, {})
         right_delta = right_witnesses.get(length, {})
-        if not isinstance(left_delta, Mapping) or not isinstance(
-            right_delta, Mapping
-        ):
+        if not isinstance(left_delta, Mapping) or not isinstance(right_delta, Mapping):
             raise M5SearchError("behavior witness delta is malformed")
         for bound in (
             "initial_lower",
@@ -749,8 +750,7 @@ def behavior_distance(
             "proved_reduction",
         ):
             distance += abs(
-                Fraction(int(left_delta.get(bound, 0)))
-                - Fraction(int(right_delta.get(bound, 0)))
+                Fraction(int(left_delta.get(bound, 0))) - Fraction(int(right_delta.get(bound, 0)))
             )
     return distance
 
@@ -767,11 +767,7 @@ def select_parent_candidates(
         and item.get("duplicate_of") is None
         and isinstance(item.get("behavior_signature"), str)
         and isinstance(item.get("behavior_profile"), Mapping)
-        and int(
-            cast(Mapping[str, Any], item["behavior_profile"]).get(
-                "program_failure_count", 0
-            )
-        )
+        and int(cast(Mapping[str, Any], item["behavior_profile"]).get("program_failure_count", 0))
         == 0
     ]
     eligible.sort(
@@ -877,19 +873,13 @@ def _memory_pattern(candidate: Mapping[str, Any]) -> dict[str, JsonValue]:
     profile = cast(Mapping[str, Any], candidate["behavior_profile"])
     witness_deltas = cast(Mapping[str, Any], profile["witness_deltas"])
     return {
-        "outcome": (
-            "successful"
-            if int(profile["accepted_rewrite_count"]) > 0
-            else "tested"
-        ),
+        "outcome": ("successful" if int(profile["accepted_rewrite_count"]) > 0 else "tested"),
         "fitness_interval": cast(JsonValue, profile["fitness_interval"]),
         "selectors": cast(
             JsonValue,
             sorted(
                 str(key)
-                for key, value in cast(
-                    Mapping[str, Any], profile["selector_frequencies"]
-                ).items()
+                for key, value in cast(Mapping[str, Any], profile["selector_frequencies"]).items()
                 if int(value) > 0
             ),
         ),
@@ -897,16 +887,12 @@ def _memory_pattern(candidate: Mapping[str, Any]) -> dict[str, JsonValue]:
             JsonValue,
             sorted(
                 str(key)
-                for key, value in cast(
-                    Mapping[str, Any], profile["action_frequencies"]
-                ).items()
+                for key, value in cast(Mapping[str, Any], profile["action_frequencies"]).items()
                 if int(value) > 0
             ),
         ),
         "proved_witness_reductions": {
-            str(length): int(
-                cast(Mapping[str, Any], delta).get("proved_reduction", 0)
-            )
+            str(length): int(cast(Mapping[str, Any], delta).get("proved_reduction", 0))
             for length, delta in sorted(witness_deltas.items())
             if isinstance(delta, Mapping)
         },
@@ -946,31 +932,17 @@ def build_search_memory(
     successful = [
         _memory_pattern(item)
         for item in identity_retained
-        if int(
-            cast(Mapping[str, Any], item["behavior_profile"])[
-                "accepted_rewrite_count"
-            ]
-        )
-        > 0
+        if int(cast(Mapping[str, Any], item["behavior_profile"])["accepted_rewrite_count"]) > 0
     ][-MAX_MEMORY_PATTERNS:]
     tested = [
         _memory_pattern(item)
         for item in identity_retained
-        if int(
-            cast(Mapping[str, Any], item["behavior_profile"])[
-                "accepted_rewrite_count"
-            ]
-        )
-        == 0
+        if int(cast(Mapping[str, Any], item["behavior_profile"])["accepted_rewrite_count"]) == 0
     ][-MAX_MEMORY_PATTERNS:]
     host: dict[str, JsonValue] = {
         "protocol_id": M5_SEARCH_MEMORY_PROTOCOL_ID,
-        "seen_program_hashes": [
-            str(item["program_hash"]) for item in identity_retained
-        ],
-        "seen_behavior_signatures": [
-            str(item["behavior_signature"]) for item in identity_retained
-        ],
+        "seen_program_hashes": [str(item["program_hash"]) for item in identity_retained],
+        "seen_behavior_signatures": [str(item["behavior_signature"]) for item in identity_retained],
         "active_lineages": [
             {
                 "candidate_id": str(item["candidate_id"]),
@@ -996,20 +968,14 @@ def build_search_memory(
     host["model_projection"] = model
     while True:
         host.pop("sha256", None)
-        host["sha256"] = domain_hash(
-            _MEMORY_DOMAIN, canonical_json_bytes(host)
-        )
+        host["sha256"] = domain_hash(_MEMORY_DOMAIN, canonical_json_bytes(host))
         if len(canonical_json_bytes(host)) <= MAX_MEMORY_BYTES:
             break
         program_hashes = cast(list[JsonValue], host["seen_program_hashes"])
-        behavior_signatures = cast(
-            list[JsonValue], host["seen_behavior_signatures"]
-        )
+        behavior_signatures = cast(list[JsonValue], host["seen_behavior_signatures"])
         active_lineages = cast(list[JsonValue], host["active_lineages"])
         archive_ids = cast(list[JsonValue], host["validated_archive_ids"])
-        successful_patterns = cast(
-            list[JsonValue], model["successful_patterns"]
-        )
+        successful_patterns = cast(list[JsonValue], model["successful_patterns"])
         tested_patterns = cast(list[JsonValue], model["tested_patterns"])
         if len(program_hashes) > MAX_ARCHIVE_IDS:
             program_hashes.pop(0)
@@ -1029,9 +995,7 @@ def build_search_memory(
             program_hashes.pop(0)
             behavior_signatures.pop(0)
         else:
-            raise M5SearchError(
-                "minimal Search Memory exceeds 16 KiB"
-            )
+            raise M5SearchError("minimal Search Memory exceeds 16 KiB")
     model_text = json.dumps(model, sort_keys=True, separators=(",", ":"))
     if any(
         token in model_text
@@ -1089,8 +1053,11 @@ def _assert_model_prompt_hygiene(prompt: str) -> None:
         or _UUID.search(prompt)
         or _PRIVATE_PATH.search(prompt)
         or any(term in lowered for term in forbidden_terms)
+        or "priority(ctx, proposal)" in prompt
     ):
-        raise M5SearchError("model-facing prompt contains a prohibited host identity")
+        raise M5SearchError(
+            "model-facing prompt contains a prohibited host identity or legacy ranker contract"
+        )
 
 
 def build_repair_prompt(diagnostics: Sequence[Mapping[str, Any]]) -> str:
@@ -1100,9 +1067,7 @@ def build_repair_prompt(diagnostics: Sequence[Mapping[str, Any]]) -> str:
             "path": str(item.get("path", "/"))[:512],
             "message": str(item.get("message", "invalid response"))[:512],
             "line": item.get("line") if isinstance(item.get("line"), int) else None,
-            "column": (
-                item.get("column") if isinstance(item.get("column"), int) else None
-            ),
+            "column": (item.get("column") if isinstance(item.get("column"), int) else None),
         }
         for item in diagnostics[:32]
     ]
@@ -1146,12 +1111,10 @@ def _verify_retained_candidate(
         or candidate.get("generation") != expected_generation
         or candidate.get("slot") != expected_slot
         or candidate.get("kind") != slot_plan.kind
-        or candidate.get("parent_candidate_id")
-        != slot_plan.parent_candidate_id
+        or candidate.get("parent_candidate_id") != slot_plan.parent_candidate_id
         or candidate.get("panel_hash") != panel_hash(panel)
         or candidate.get("panel_case_ids") != [item.case_id for item in panel]
-        or candidate.get("search_memory_sha256")
-        != search_memory_sha256
+        or candidate.get("search_memory_sha256") != search_memory_sha256
     ):
         raise M5InfrastructureError(f"retained candidate identity changed: {path}")
     candidates = _all_candidates(root)
@@ -1163,28 +1126,20 @@ def _verify_retained_candidate(
     )
     if slot_plan.kind == "child" and parent is None:
         raise M5InfrastructureError("retained child parent is unavailable")
-    expected_parent_program_hash = (
-        parent.get("program_hash") if parent is not None else None
-    )
+    expected_parent_program_hash = parent.get("program_hash") if parent is not None else None
     expected_parent_behavior_signature = (
         parent.get("behavior_signature") if parent is not None else None
     )
     if (
-        candidate.get("parent_program_hash")
-        != expected_parent_program_hash
-        or candidate.get("parent_behavior_signature")
-        != expected_parent_behavior_signature
+        candidate.get("parent_program_hash") != expected_parent_program_hash
+        or candidate.get("parent_behavior_signature") != expected_parent_behavior_signature
     ):
         raise M5InfrastructureError("retained parent identity changed")
     raw_attempts = candidate.get("provider_attempts")
-    if not isinstance(raw_attempts, Sequence) or isinstance(
-        raw_attempts, str | bytes
-    ):
+    if not isinstance(raw_attempts, Sequence) or isinstance(raw_attempts, str | bytes):
         raise M5InfrastructureError(f"retained provider attempts are malformed: {path}")
     attempts = [
-        M5ProviderResultV1.from_dict(item)
-        for item in raw_attempts
-        if isinstance(item, Mapping)
+        M5ProviderResultV1.from_dict(item) for item in raw_attempts if isinstance(item, Mapping)
     ]
     if len(attempts) != len(raw_attempts):
         raise M5InfrastructureError(f"retained provider attempt changed: {path}")
@@ -1212,9 +1167,7 @@ def _verify_retained_candidate(
     ):
         raise M5InfrastructureError(f"retained provider context changed: {path}")
     retained_validation = candidate.get("validation")
-    replayed_validation = validate_python_policy_response(
-        attempts[-1].response_text
-    )
+    replayed_validation = validate_python_policy_response(attempts[-1].response_text)
     if (
         not isinstance(retained_validation, Mapping)
         or dict(retained_validation) != replayed_validation.as_dict()
@@ -1247,10 +1200,8 @@ def _verify_retained_candidate(
         or not source_path.is_file()
         or source_path.read_text(encoding="utf-8") != source
         or candidate.get("source") != source
-        or candidate.get("program_hash")
-        != replayed_validation.identity.program_hash
-        or candidate.get("source_sha256")
-        != replayed_validation.identity.source_sha256
+        or candidate.get("program_hash") != replayed_validation.identity.program_hash
+        or candidate.get("source_sha256") != replayed_validation.identity.source_sha256
         or candidate.get("canonical_ast_sha256")
         != replayed_validation.identity.canonical_ast_sha256
     ):
@@ -1266,23 +1217,16 @@ def _verify_retained_candidate(
             or candidate.get("behavior_signature") is not None
             or candidate.get("duplicate_of") is not None
         ):
-            raise M5InfrastructureError(
-                "retained evaluation infrastructure failure changed"
-            )
+            raise M5InfrastructureError("retained evaluation infrastructure failure changed")
         for index, case in enumerate(panel):
-            evaluation_path = (
-                path.parent / "evaluations" / f"{case.case_id}.json.gz"
-            )
+            evaluation_path = path.parent / "evaluations" / f"{case.case_id}.json.gz"
             if evaluation_path.is_file() != (index < evaluation_count):
-                raise M5InfrastructureError(
-                    "retained partial evaluation boundary changed"
-                )
+                raise M5InfrastructureError("retained partial evaluation boundary changed")
             if index < evaluation_count:
                 _load_mapping(evaluation_path)
         return candidate
     evaluations = [
-        _load_mapping(path.parent / "evaluations" / f"{case.case_id}.json.gz")
-        for case in panel
+        _load_mapping(path.parent / "evaluations" / f"{case.case_id}.json.gz") for case in panel
     ]
     if candidate.get("evaluation_case_count") != len(evaluations):
         raise M5InfrastructureError("retained candidate evaluation budget changed")
@@ -1290,8 +1234,7 @@ def _verify_retained_candidate(
     if (
         canonical_json_bytes(candidate.get("behavior_profile"))
         != canonical_json_bytes(replayed_profile)
-        or candidate.get("behavior_signature")
-        != replayed_profile["behavior_signature"]
+        or candidate.get("behavior_signature") != replayed_profile["behavior_signature"]
     ):
         raise M5InfrastructureError(f"retained behavior evidence changed: {path}")
     duplicate_of = candidate.get("duplicate_of")
@@ -1299,9 +1242,7 @@ def _verify_retained_candidate(
         raise M5InfrastructureError("retained duplicate classification changed")
     if status == "duplicate":
         if not isinstance(duplicate_of, str):
-            raise M5InfrastructureError(
-                "retained duplicate classification changed"
-            )
+            raise M5InfrastructureError("retained duplicate classification changed")
         candidate_key = (expected_generation, expected_slot)
         duplicate = next(
             (
@@ -1318,12 +1259,9 @@ def _verify_retained_candidate(
         )
         if duplicate is None or (
             duplicate.get("program_hash") != candidate.get("program_hash")
-            and duplicate.get("behavior_signature")
-            != candidate.get("behavior_signature")
+            and duplicate.get("behavior_signature") != candidate.get("behavior_signature")
         ):
-            raise M5InfrastructureError(
-                "retained duplicate target changed"
-            )
+            raise M5InfrastructureError("retained duplicate target changed")
     return candidate
 
 
@@ -1357,9 +1295,7 @@ def _write_source_exclusive_or_verify(path: Path, source: str) -> None:
             os.link(temporary_path, path)
         except FileExistsError:
             if path.read_text(encoding="utf-8") != source:
-                raise M5InfrastructureError(
-                    f"program identity collision: {path}"
-                ) from None
+                raise M5InfrastructureError(f"program identity collision: {path}") from None
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -1379,10 +1315,7 @@ def _all_candidates(root: Path) -> list[dict[str, Any]]:
 
 def _generation_candidates(root: Path, generation: int) -> list[dict[str, Any]]:
     directory = root / "generations" / f"generation-{generation:04d}"
-    return [
-        _load_mapping(path)
-        for path in sorted(directory.glob("slot-*/candidate.json.gz"))
-    ]
+    return [_load_mapping(path) for path in sorted(directory.glob("slot-*/candidate.json.gz"))]
 
 
 def _seen_duplicates(
@@ -1413,13 +1346,8 @@ def _assert_provider_turn_boundary(
     expected_thread_id: str | None = None,
 ) -> None:
     if result.context.included_turn_ids[:-1] != expected_history:
-        raise M5InfrastructureError(
-            "provider result crossed its exact inclusive fork boundary"
-        )
-    if (
-        expected_thread_id is not None
-        and result.context.thread_id != expected_thread_id
-    ):
+        raise M5InfrastructureError("provider result crossed its exact inclusive fork boundary")
+    if expected_thread_id is not None and result.context.thread_id != expected_thread_id:
         raise M5InfrastructureError("provider repair changed thread")
 
 
@@ -1434,8 +1362,7 @@ def _usage_total(candidates: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     )
     return {
         key: sum(
-            int(cast(Mapping[str, Any], item.get("usage", {})).get(key, 0))
-            for item in candidates
+            int(cast(Mapping[str, Any], item.get("usage", {})).get(key, 0)) for item in candidates
         )
         for key in keys
     }
@@ -1544,11 +1471,7 @@ def run_m5_search(
         exact_verified = False
         stopped_reason = "generation_budget"
         for generation in range(MAX_GENERATIONS):
-            previous = (
-                _generation_candidates(root, generation - 1)
-                if generation > 0
-                else []
-            )
+            previous = _generation_candidates(root, generation - 1) if generation > 0 else []
             manifest = build_generation_manifest(
                 generation=generation,
                 panel=panel,
@@ -1611,18 +1534,14 @@ def run_m5_search(
                     else:
                         parent_id = slot_plan.parent_candidate_id
                         if parent_id is None or parent_id not in by_id:
-                            raise M5InfrastructureError(
-                                "frozen child parent is unavailable"
-                            )
+                            raise M5InfrastructureError("frozen child parent is unavailable")
                         parent = by_id[parent_id]
                         parent_source = parent.get("source")
                         parent_profile = parent.get("behavior_profile")
                         if not isinstance(parent_source, str) or not isinstance(
                             parent_profile, Mapping
                         ):
-                            raise M5InfrastructureError(
-                                "selected parent evidence is incomplete"
-                            )
+                            raise M5InfrastructureError("selected parent evidence is incomplete")
                         prompt = build_child_prompt(
                             parent_source=parent_source,
                             parent_profile=parent_profile,
@@ -1640,9 +1559,7 @@ def run_m5_search(
                         )
                         _assert_provider_turn_boundary(
                             provider_result,
-                            expected_history=_provider_context(
-                                parent
-                            ).included_turn_ids,
+                            expected_history=_provider_context(parent).included_turn_ids,
                         )
                 except Exception as error:
                     failure = {
@@ -1653,14 +1570,10 @@ def run_m5_search(
                         "kind": slot_plan.kind,
                         "parent_candidate_id": slot_plan.parent_candidate_id,
                         "parent_program_hash": (
-                            parent.get("program_hash")
-                            if parent is not None
-                            else None
+                            parent.get("program_hash") if parent is not None else None
                         ),
                         "parent_behavior_signature": (
-                            parent.get("behavior_signature")
-                            if parent is not None
-                            else None
+                            parent.get("behavior_signature") if parent is not None else None
                         ),
                         "panel_hash": slot_plan.panel_hash,
                         "panel_case_ids": [item.case_id for item in panel],
@@ -1684,20 +1597,15 @@ def run_m5_search(
                     if boundary_hook is not None:
                         boundary_hook(f"{candidate_id}_committed")
                     raise M5InfrastructureError(
-                        f"provider failed for {candidate_id}: "
-                        f"{type(error).__name__}: {error}"
+                        f"provider failed for {candidate_id}: {type(error).__name__}: {error}"
                     ) from error
                 if boundary_hook is not None:
                     boundary_hook(f"{candidate_id}_provider")
-                validation = validate_python_policy_response(
-                    provider_result.response_text
-                )
+                validation = validate_python_policy_response(provider_result.response_text)
                 repairs = 0
                 attempts = [provider_result.as_dict()]
                 if not validation.valid:
-                    diagnostics = [
-                        item.as_dict() for item in validation.diagnostics[:32]
-                    ]
+                    diagnostics = [item.as_dict() for item in validation.diagnostics[:32]]
                     previous_result = provider_result
                     repair_prompt = build_repair_prompt(diagnostics)
                     _assert_model_prompt_hygiene(repair_prompt)
@@ -1714,9 +1622,7 @@ def run_m5_search(
                         )
                         _assert_provider_turn_boundary(
                             provider_result,
-                            expected_history=(
-                                previous_result.context.included_turn_ids
-                            ),
+                            expected_history=(previous_result.context.included_turn_ids),
                             expected_thread_id=previous_result.context.thread_id,
                         )
                     except Exception as error:
@@ -1728,14 +1634,10 @@ def run_m5_search(
                             "kind": slot_plan.kind,
                             "parent_candidate_id": slot_plan.parent_candidate_id,
                             "parent_program_hash": (
-                                parent.get("program_hash")
-                                if parent is not None
-                                else None
+                                parent.get("program_hash") if parent is not None else None
                             ),
                             "parent_behavior_signature": (
-                                parent.get("behavior_signature")
-                                if parent is not None
-                                else None
+                                parent.get("behavior_signature") if parent is not None else None
                             ),
                             "panel_hash": slot_plan.panel_hash,
                             "panel_case_ids": [item.case_id for item in panel],
@@ -1763,9 +1665,7 @@ def run_m5_search(
                             f"{type(error).__name__}: {error}"
                         ) from error
                     attempts.append(provider_result.as_dict())
-                    validation = validate_python_policy_response(
-                        provider_result.response_text
-                    )
+                    validation = validate_python_policy_response(provider_result.response_text)
                     repairs = 1
                 base: dict[str, Any] = {
                     "protocol_id": M5_CANDIDATE_PROTOCOL_ID,
@@ -1788,15 +1688,11 @@ def run_m5_search(
                     "repairs": repairs,
                     "usage": _attempt_usage_total(attempts),
                     "duration_ms": sum(
-                        _json_nonnegative_int(
-                            attempt.get("duration_ms"), field="duration_ms"
-                        )
+                        _json_nonnegative_int(attempt.get("duration_ms"), field="duration_ms")
                         for attempt in attempts
                     ),
                     "warnings": sum(
-                        _json_nonnegative_int(
-                            attempt.get("warnings"), field="warnings"
-                        )
+                        _json_nonnegative_int(attempt.get("warnings"), field="warnings")
                         for attempt in attempts
                     ),
                     "request_prompt_bytes": len(prompt.encode("utf-8")),
@@ -1830,9 +1726,7 @@ def run_m5_search(
                     boundary_hook(f"{candidate_id}_source_persisted")
                 evaluation_payloads: list[dict[str, Any]] = []
                 for case in panel:
-                    evaluation_path = (
-                        slot_dir / "evaluations" / f"{case.case_id}.json.gz"
-                    )
+                    evaluation_path = slot_dir / "evaluations" / f"{case.case_id}.json.gz"
                     if evaluation_path.exists():
                         evaluation = _load_mapping(evaluation_path)
                     else:
@@ -1859,9 +1753,7 @@ def run_m5_search(
                                     "behavior_signature": None,
                                     "behavior_profile": None,
                                     "duplicate_of": None,
-                                    "evaluation_case_count": len(
-                                        evaluation_payloads
-                                    ),
+                                    "evaluation_case_count": len(evaluation_payloads),
                                     "failure": {
                                         "type": type(error).__name__,
                                         "message": str(error)[:1024],
@@ -1894,9 +1786,7 @@ def run_m5_search(
                         "source": source,
                         "source_path": str(source_path.relative_to(root)),
                         "source_sha256": validation.identity.source_sha256,
-                        "canonical_ast_sha256": (
-                            validation.identity.canonical_ast_sha256
-                        ),
+                        "canonical_ast_sha256": (validation.identity.canonical_ast_sha256),
                         "program_hash": program_hash,
                         "behavior_signature": behavior_signature,
                         "behavior_profile": behavior_profile,
@@ -1916,15 +1806,8 @@ def run_m5_search(
             if exact_verified:
                 break
         candidates = _all_candidates(root)
-        generations = sorted(
-            {
-                int(item["generation"])
-                for item in candidates
-            }
-        )
-        candidates_by_id = {
-            str(item["candidate_id"]): item for item in candidates
-        }
+        generations = sorted({int(item["generation"]) for item in candidates})
+        candidates_by_id = {str(item["candidate_id"]): item for item in candidates}
         child_mutation_proofs = [
             {
                 "candidate_id": item["candidate_id"],
@@ -1932,41 +1815,37 @@ def run_m5_search(
                 "source_changed": (
                     isinstance(item.get("source"), str)
                     and isinstance(
-                        candidates_by_id.get(
-                            str(item["parent_candidate_id"]), {}
-                        ).get("source"),
+                        candidates_by_id.get(str(item["parent_candidate_id"]), {}).get("source"),
                         str,
                     )
                     and item.get("source")
-                    != candidates_by_id.get(
-                        str(item["parent_candidate_id"]), {}
-                    ).get("source")
+                    != candidates_by_id.get(str(item["parent_candidate_id"]), {}).get("source")
                 ),
                 "program_changed": (
                     isinstance(item.get("program_hash"), str)
                     and isinstance(
-                        candidates_by_id.get(
-                            str(item["parent_candidate_id"]), {}
-                        ).get("program_hash"),
+                        candidates_by_id.get(str(item["parent_candidate_id"]), {}).get(
+                            "program_hash"
+                        ),
                         str,
                     )
                     and item.get("program_hash")
-                    != candidates_by_id.get(
-                        str(item["parent_candidate_id"]), {}
-                    ).get("program_hash")
+                    != candidates_by_id.get(str(item["parent_candidate_id"]), {}).get(
+                        "program_hash"
+                    )
                 ),
                 "semantic_behavior_changed": (
                     isinstance(item.get("behavior_signature"), str)
                     and isinstance(
-                        candidates_by_id.get(
-                            str(item["parent_candidate_id"]), {}
-                        ).get("behavior_signature"),
+                        candidates_by_id.get(str(item["parent_candidate_id"]), {}).get(
+                            "behavior_signature"
+                        ),
                         str,
                     )
                     and item.get("behavior_signature")
-                    != candidates_by_id.get(
-                        str(item["parent_candidate_id"]), {}
-                    ).get("behavior_signature")
+                    != candidates_by_id.get(str(item["parent_candidate_id"]), {}).get(
+                        "behavior_signature"
+                    )
                 ),
             }
             for item in candidates
@@ -2029,19 +1908,13 @@ def run_m5_search(
             },
             "generation_manifest_hashes": {
                 str(generation): _load_mapping(
-                    root
-                    / "generations"
-                    / f"generation-{generation:04d}"
-                    / "manifest.json.gz"
+                    root / "generations" / f"generation-{generation:04d}" / "manifest.json.gz"
                 )["sha256"]
                 for generation in generations
             },
             "search_memory_hashes": {
                 str(generation): _load_mapping(
-                    root
-                    / "generations"
-                    / f"generation-{generation:04d}"
-                    / "search-memory.json.gz"
+                    root / "generations" / f"generation-{generation:04d}" / "search-memory.json.gz"
                 )["sha256"]
                 for generation in generations
             },
@@ -2050,9 +1923,7 @@ def run_m5_search(
                     "candidate_id": item["candidate_id"],
                     "parent_candidate_id": item["parent_candidate_id"],
                     "parent_program_hash": item.get("parent_program_hash"),
-                    "parent_behavior_signature": item.get(
-                        "parent_behavior_signature"
-                    ),
+                    "parent_behavior_signature": item.get("parent_behavior_signature"),
                     "generation": item["generation"],
                     "slot": item["slot"],
                     "kind": item["kind"],
@@ -2062,9 +1933,7 @@ def run_m5_search(
                 }
                 for item in candidates
             ],
-            "provider_order": [
-                item["candidate_id"] for item in candidates
-            ],
+            "provider_order": [item["candidate_id"] for item in candidates],
             "evaluation_order": [
                 {
                     "candidate_id": item["candidate_id"],
@@ -2083,8 +1952,7 @@ def run_m5_search(
             ],
             "child_mutation_proofs": child_mutation_proofs,
             "behavior_profiles": {
-                str(item["candidate_id"]): item["behavior_profile"]
-                for item in candidates
+                str(item["candidate_id"]): item["behavior_profile"] for item in candidates
             },
             "duplicates": [
                 {
@@ -2096,14 +1964,10 @@ def run_m5_search(
             ],
             "usage": _usage_with_anchor(candidates, anchor_result.usage),
             "provider_turns": 1
-            + sum(
-                len(cast(Sequence[object], item["provider_attempts"]))
-                for item in candidates
-            ),
+            + sum(len(cast(Sequence[object], item["provider_attempts"])) for item in candidates),
             "specification_anchor_turns": 1,
             "candidate_program_turns": sum(
-                len(cast(Sequence[object], item["provider_attempts"]))
-                for item in candidates
+                len(cast(Sequence[object], item["provider_attempts"])) for item in candidates
             ),
             "repair_turns": sum(int(item["repairs"]) for item in candidates),
             "provider_accounting": {
@@ -2111,8 +1975,7 @@ def run_m5_search(
                 "effort": provider.effort,
                 "specification_anchor_turns": 1,
                 "candidate_program_turns": sum(
-                    len(cast(Sequence[object], item["provider_attempts"]))
-                    for item in candidates
+                    len(cast(Sequence[object], item["provider_attempts"])) for item in candidates
                 ),
                 "warnings": anchor_result.warnings
                 + sum(int(item.get("warnings", 0)) for item in candidates),
@@ -2126,13 +1989,8 @@ def run_m5_search(
                         for item in candidates
                     )
                     and all(
-                        cast(Mapping[str, Any], attempt.get("usage", {})).get(
-                            "final"
-                        )
-                        is True
-                        and cast(
-                            Mapping[str, Any], attempt.get("usage", {})
-                        ).get("partial")
+                        cast(Mapping[str, Any], attempt.get("usage", {})).get("final") is True
+                        and cast(Mapping[str, Any], attempt.get("usage", {})).get("partial")
                         is False
                         for item in candidates
                         for attempt in cast(
@@ -2142,12 +2000,8 @@ def run_m5_search(
                     )
                 ),
                 "system_prompt_bytes": len(system_prompt.encode("utf-8")),
-                "specification_prompt_bytes": len(
-                    specification_prompt.encode("utf-8")
-                ),
-                "specification_schema_bytes": len(
-                    canonical_json_bytes(specification_ack_schema)
-                ),
+                "specification_prompt_bytes": len(specification_prompt.encode("utf-8")),
+                "specification_schema_bytes": len(canonical_json_bytes(specification_ack_schema)),
                 "policy_schema_bytes": len(canonical_json_bytes(policy_schema)),
             },
             "exact_verified": exact_verified,
@@ -2196,8 +2050,7 @@ def run_m5_search(
             },
             "acceptance_checks": {
                 "generation_zero_eight_roots": sum(
-                    int(item["generation"]) == 0 and item["kind"] == "root"
-                    for item in candidates
+                    int(item["generation"]) == 0 and item["kind"] == "root" for item in candidates
                 )
                 == 8,
                 "generation_one_four_children_four_roots": (
@@ -2213,12 +2066,10 @@ def run_m5_search(
                     == 4
                 ),
                 "child_source_changed": any(
-                    item["source_changed"] is True
-                    for item in child_mutation_proofs
+                    item["source_changed"] is True for item in child_mutation_proofs
                 ),
                 "child_program_or_behavior_changed": any(
-                    item["program_changed"] is True
-                    or item["semantic_behavior_changed"] is True
+                    item["program_changed"] is True or item["semantic_behavior_changed"] is True
                     for item in child_mutation_proofs
                 ),
                 "equal_development_panel_and_budget": all(
@@ -2226,9 +2077,7 @@ def run_m5_search(
                     for item in candidates
                     if item.get("status") in {"evaluated", "duplicate"}
                 ),
-                "behavior_profile_for_every_evaluated_program": (
-                    complete_behavior_profiles
-                ),
+                "behavior_profile_for_every_evaluated_program": (complete_behavior_profiles),
                 "scientific_evaluator_model_provider_activity_zero": (
                     scientific_external_activity_zero
                 ),
