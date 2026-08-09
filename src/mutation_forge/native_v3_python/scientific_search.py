@@ -827,6 +827,7 @@ class _ConcurrentEvaluatorPool:
         self._local = threading.local()
         self._owned: list[M10ScientificEvaluator] = []
         self._owned_lock = threading.Lock()
+        self._closing = False
         self._capacity = threading.BoundedSemaphore(queue_capacity)
         self._executor = ThreadPoolExecutor(
             max_workers=workers,
@@ -839,6 +840,11 @@ class _ConcurrentEvaluatorPool:
             evaluator = self._factory()
             self._local.evaluator = evaluator
             with self._owned_lock:
+                if self._closing:
+                    close = getattr(evaluator, "close", None)
+                    if callable(close):
+                        close()
+                    raise RuntimeError("evaluator pool is closing")
                 self._owned.append(evaluator)
             self._telemetry.evaluator_created()
         return cast(M10ScientificEvaluator, evaluator)
@@ -981,19 +987,47 @@ class _ConcurrentEvaluatorPool:
         future.add_done_callback(lambda _: self._capacity.release())
         return future
 
-    def close(self) -> Exception | None:
+    def close(self, *, force: bool = False) -> Exception | None:
         errors: list[Exception] = []
+        if force:
+            # Stop accepting/running queued evaluator work before closing the
+            # owned backends.  A normal shutdown waits for evaluator threads
+            # first, but an in-flight HEG score call can only be released by
+            # closing its score worker.
+            with self._owned_lock:
+                self._closing = True
+                owned = tuple(self._owned)
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception as error:
+                errors.append(error)
+        else:
+            try:
+                self._executor.shutdown(wait=True, cancel_futures=False)
+            except Exception as error:
+                errors.append(error)
+            owned = tuple(self._owned)
+        if force:
+            for evaluator in owned:
+                close = getattr(evaluator, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as error:
+                        errors.append(error)
         try:
-            self._executor.shutdown(wait=True, cancel_futures=False)
+            if force:
+                self._executor.shutdown(wait=True, cancel_futures=True)
         except Exception as error:
             errors.append(error)
-        for evaluator in self._owned:
-            close = getattr(evaluator, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception as error:
-                    errors.append(error)
+        if not force:
+            for evaluator in owned:
+                close = getattr(evaluator, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as error:
+                        errors.append(error)
         return errors[0] if errors else None
 
 
@@ -2020,13 +2054,18 @@ def run_sustained_search(
         telemetry=telemetry,
     )
     provider_executor = ThreadPoolExecutor(
-        max_workers=options.provider_concurrency * 2,
+        # Keep the host-side provider workers equal to the configured number
+        # of AI lanes.  Additional queued futures made the dashboard look as
+        # if six or eight model connections were active, even though only two
+        # provider lanes were allowed to enter the app-server.
+        max_workers=options.provider_concurrency,
         thread_name_prefix="mforge-m10-provider",
     )
     stop_reason: str | None = None
     anchor_result: core.M5ProviderResultV1 | None = None
     exact_verified = False
     close_error: Exception | None = None
+    provider_abort = False
 
     def check_force_stop() -> None:
         if force_stop is None or not force_stop():
@@ -2039,11 +2078,23 @@ def run_sustained_search(
 
     def wait_for_provider_result(
         future: Future[core.M5ProviderResultV1],
+        *,
+        submitted_at: float | None = None,
     ) -> core.M5ProviderResultV1:
+        nonlocal provider_abort
+        deadline = (submitted_at or time.monotonic()) + provider_turn_timeout_seconds
         while True:
             check_force_stop()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                provider_abort = True
+                with suppress(Exception):
+                    provider.close()
+                raise core.M5InfrastructureError(
+                    f"provider turn exceeded {provider_turn_timeout_seconds:.0f}s"
+                )
             try:
-                return future.result(timeout=0.1)
+                return future.result(timeout=min(0.1, remaining))
             except FutureTimeoutError:
                 continue
 
@@ -2214,6 +2265,7 @@ def run_sustained_search(
                         raise infrastructure_error
 
             provider_futures: dict[str, Future[core.M5ProviderResultV1]] = {}
+            provider_submitted_at: dict[str, float] = {}
             provider_task_list: list[_ProviderTask] = []
             for slot_plan, pending, initial_key in zip(
                 manifest.slots, entries, primary_keys, strict=True
@@ -2364,32 +2416,49 @@ def run_sustained_search(
                 if lane not in lane_tasks:
                     raise core.M5InfrastructureError("provider returned an invalid frozen lane")
                 lane_tasks[lane].append(task)
-            for offset in range(core.POPULATION_SIZE):
-                submitted = False
-                for lane in range(options.provider_concurrency):
-                    if offset >= len(lane_tasks[lane]):
-                        continue
-                    task = lane_tasks[lane][offset]
-                    future = provider_executor.submit(
-                        _primary_provider_call,
-                        provider=provider,
-                        generation=generation,
-                        slot=task.slot_plan.slot,
-                        telemetry=telemetry,
-                        key=task.key,
-                        durable_result_path=task.durable_result_path,
-                        operation=task.operation,
-                    )
-                    provider_futures[task.pending.candidate_id] = future
-                    submitted = True
-                if not submitted:
-                    break
+            next_provider_task = 0
+
+            def submit_next_provider_task(
+                *,
+                task_list: list[_ProviderTask] = provider_task_list,
+                future_map: dict[str, Future[core.M5ProviderResultV1]] = provider_futures,
+                submitted_map: dict[str, float] = provider_submitted_at,
+                executor: ThreadPoolExecutor = provider_executor,
+                provider_instance: core.M10SearchProvider = provider,
+                generation_number: int = generation,
+            ) -> None:
+                nonlocal next_provider_task
+                if next_provider_task >= len(task_list):
+                    return
+                task = task_list[next_provider_task]
+                next_provider_task += 1
+                submitted_at = time.monotonic()
+                future_map[task.pending.candidate_id] = executor.submit(
+                    _primary_provider_call,
+                    provider=provider_instance,
+                    generation=generation_number,
+                    slot=task.slot_plan.slot,
+                    telemetry=telemetry,
+                    key=task.key,
+                    durable_result_path=task.durable_result_path,
+                    operation=task.operation,
+                )
+                submitted_map[task.pending.candidate_id] = submitted_at
+
+            # Keep at most one future per configured provider lane in flight.
+            # The next task is submitted only after its predecessor has been
+            # consumed and its lane released below.
+            for _ in range(min(options.provider_concurrency, len(provider_task_list))):
+                submit_next_provider_task()
 
             for task in provider_task_list:
                 future = provider_futures[task.pending.candidate_id]
                 pending = task.pending
                 try:
-                    provider_result = wait_for_provider_result(future)
+                    provider_result = wait_for_provider_result(
+                        future,
+                        submitted_at=provider_submitted_at.get(pending.candidate_id),
+                    )
                     check_force_stop()
                     if task.slot_plan.kind == "child":
                         core._assert_provider_turn_boundary(
@@ -2421,6 +2490,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
+                    submit_next_provider_task()
                     continue
                 if boundary_hook is not None:
                     boundary_hook(f"{pending.candidate_id}_provider")
@@ -2454,6 +2524,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
+                    submit_next_provider_task()
                     continue
                 repair_key = f"{task.slot_plan.request_key}-repair-01"
                 if not telemetry.reserve_repair(repair_key, limit=options.repair_turn_limit):
@@ -2479,6 +2550,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
+                    submit_next_provider_task()
                     continue
                 repair_prompt = _repair_prompt(
                     snapshot=snapshot,
@@ -2497,6 +2569,7 @@ def run_sustained_search(
                     idempotency_key=task.slot_plan.request_key + "-repair-01",
                     artifact_dir=pending.slot_dir / "provider-repair-01",
                 )
+                repair_submitted_at = time.monotonic()
                 repair_future = provider_executor.submit(
                     _provider_call,
                     telemetry=telemetry,
@@ -2508,7 +2581,10 @@ def run_sustained_search(
                     operation=operation,
                 )
                 try:
-                    repaired_result = wait_for_provider_result(repair_future)
+                    repaired_result = wait_for_provider_result(
+                        repair_future,
+                        submitted_at=repair_submitted_at,
+                    )
                     check_force_stop()
                     core._assert_provider_turn_boundary(
                         repaired_result,
@@ -2538,6 +2614,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
+                    submit_next_provider_task()
                     continue
                 repaired_attempts = [
                     *attempts,
@@ -2575,6 +2652,7 @@ def run_sustained_search(
                     slot=task.slot_plan.slot,
                 )
                 commit_ready(block=False)
+                submit_next_provider_task()
 
             commit_ready(block=True)
             if commit_cursor != core.POPULATION_SIZE:
@@ -2626,11 +2704,12 @@ def run_sustained_search(
         write_json(root / M10_STOP_FILENAME, stop_payload(reason, error))
         raise
     finally:
+        immediate_stop = provider_abort or (force_stop is not None and force_stop())
         provider_executor.shutdown(
-            wait=True,
-            cancel_futures=force_stop is not None and force_stop(),
+            wait=not immediate_stop,
+            cancel_futures=immediate_stop,
         )
-        close_error = pool.close()
+        close_error = pool.close(force=immediate_stop)
     if close_error is not None:
         telemetry.finish("infrastructure_failure")
         cleanup_failure = core.M5InfrastructureError(

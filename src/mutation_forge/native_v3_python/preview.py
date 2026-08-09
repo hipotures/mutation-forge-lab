@@ -1831,6 +1831,16 @@ class _BackendOwnedEvaluator:
         self._evaluator = evaluator
         self._backend = backend
 
+    @staticmethod
+    def _process_name(candidate_id: str) -> str:
+        suffix = candidate_id.rsplit("-slot-", 1)[-1]
+        return f"mforge-eval-{suffix}"[:15]
+
+    def _name_score_worker(self, name: str) -> None:
+        setter = getattr(self._backend, "set_score_worker_name", None)
+        if callable(setter):
+            setter(name)
+
     def evaluate(
         self,
         *,
@@ -1838,6 +1848,7 @@ class _BackendOwnedEvaluator:
         case: DevelopmentCaseV1,
         candidate_id: str,
     ) -> Mapping[str, JsonValue]:
+        self._name_score_worker(self._process_name(candidate_id))
         return self._evaluator.evaluate(
             source=source,
             case=case,
@@ -1851,6 +1862,7 @@ class _BackendOwnedEvaluator:
         case: DevelopmentCaseV1,
         generation: int,
     ) -> Mapping[str, JsonValue]:
+        self._name_score_worker("mforge-eval-base")
         return self._evaluator.evaluate_baseline(
             baseline=baseline,
             case=case,

@@ -98,6 +98,7 @@ class HegBackend:
         self._validation_context_class = target_base.GraphValidationContext
         self._validation_result_class = target_base.ValidationResult
         self._worker: Any | None = None
+        self._score_worker_name: str | None = None
         self._worker_disabled = False
         self.score_implementation = "heg-cpp-score-worker"
         self._score_timeout_seconds = score_timeout_seconds
@@ -263,6 +264,34 @@ class HegBackend:
             )
         return self._worker
 
+    def set_score_worker_name(self, name: str) -> None:
+        """Set the Linux process name used by this backend's scorer."""
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("score-worker process name must be non-empty")
+        # Linux exposes at most 15 bytes through /proc/<pid>/comm.  The
+        # evaluator names are ASCII, so truncating characters is sufficient.
+        self._score_worker_name = name[:15]
+        self._apply_score_worker_name()
+
+    def _apply_score_worker_name(self) -> None:
+        name = self._score_worker_name
+        worker = self._worker
+        if name is None or worker is None or not sys.platform.startswith("linux"):
+            return
+        process = getattr(worker, "process", None)
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return
+        try:
+            (Path(f"/proc/{pid}/comm")).write_text(
+                name + "\n",
+                encoding="ascii",
+            )
+        except (OSError, UnicodeError):
+            # Process naming is observability only and must not affect scoring.
+            return
+
     def _reference_cycle_counts(
         self, graph: Any, lengths: tuple[int, ...], *, limit: int, node_budget: int
     ) -> tuple[Any, ...]:
@@ -362,7 +391,13 @@ class HegBackend:
         for attempt in range(2):
             started_ns = time.perf_counter_ns() if recorder is not None else 0
             try:
-                response = self._score_worker().score(
+                worker = self._score_worker()
+                if self._score_worker_name is not None:
+                    # Start the child before the first request so top/ps sees
+                    # its evaluator identity throughout the scoring call.
+                    worker.start()
+                    self._apply_score_worker_name()
+                response = worker.score(
                     graph,
                     lengths=lengths,
                     limit=limit,
@@ -395,6 +430,7 @@ class HegBackend:
                     )
                     try:
                         self._worker.restart()
+                        self._apply_score_worker_name()
                     except self._worker_error:
                         self._record(
                             recorder,

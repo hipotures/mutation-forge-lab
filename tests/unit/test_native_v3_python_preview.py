@@ -92,6 +92,16 @@ def _usage() -> dict[str, JsonValue]:
     }
 
 
+def test_backend_owned_evaluator_uses_numbered_score_worker_names() -> None:
+    owned = preview_module._BackendOwnedEvaluator(
+        evaluator=_Evaluator(),
+        backend=_Backend(),
+    )
+
+    assert owned._process_name("g0000-slot-00") == "mforge-eval-00"
+    assert owned._process_name("g0000-slot-07") == "mforge-eval-07"
+
+
 class _Backend:
     backend_id = "fixture"
     score_implementation = "fixture"
