@@ -1933,6 +1933,24 @@ def run_python_preview(
         }
         _write_state(config, failed)
         return _progress(config, failed)
+    if config.scientific_search is not None:
+        hourly_usage = hourly_token_usage(
+            config.experiment_root,
+            config.scientific_search.max_total_tokens_per_hour,
+        )
+        if hourly_usage["hourly_limit_reached"] is True:
+            blocked = {
+                **state,
+                "state": "blocked",
+                "resumable": True,
+                "run_terminal": False,
+                "terminal_reason": "hourly_token_limit",
+                "scientific_result_kind": "DEVELOPMENT_SEARCH_EVIDENCE",
+                "scientific_success": False,
+                "last_error": None,
+            }
+            _write_state(config, blocked)
+            return _progress(config, blocked)
     auth_json = Path.home() / ".codex" / "auth.json"
     if not auth_available(auth_json):
         blocked = {
