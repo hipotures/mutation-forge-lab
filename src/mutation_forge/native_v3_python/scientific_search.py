@@ -15,7 +15,6 @@ from typing import Any, cast
 
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
-from mutation_forge.native_v3.canonical import canonical_json_bytes
 
 from . import search as core
 from .validation import normalize_source_newlines, validate_python_policy_response
@@ -97,8 +96,7 @@ class _RuntimeTelemetry:
             state = dict(raw)
             if (
                 state.get("protocol_id") != M9_RUNTIME_PROTOCOL_ID
-                or canonical_json_bytes(state.get("options"))
-                != canonical_json_bytes(options.as_dict())
+                or state.get("options") != options.as_dict()
             ):
                 raise core.M5InfrastructureError(
                     "M9 runtime telemetry options changed on resume"
@@ -406,7 +404,14 @@ class _ConcurrentEvaluatorPool:
 
 
 def _write_or_verify(path: Path, value: Mapping[str, Any]) -> None:
-    core._write_exclusive_or_verify(path, value)
+    if path.exists():
+        retained = read_json(path)
+        if retained != dict(value):
+            raise core.M5InfrastructureError(
+                f"immutable M9 metadata changed: {path}"
+            )
+        return
+    write_json(path, value, exclusive=True)
 
 
 def _prepared_path(slot_dir: Path) -> Path:
@@ -1154,7 +1159,7 @@ def run_sustained_search(
         "native_v2_default": True,
         "dsl_runtime_used": False,
     }
-    core._write_exclusive_or_verify(root / "protocol.json.gz", protocol)
+    _write_or_verify(root / "protocol.json.gz", protocol)
     if boundary_hook is not None:
         boundary_hook("protocol_persisted")
     telemetry = _RuntimeTelemetry(root, options)

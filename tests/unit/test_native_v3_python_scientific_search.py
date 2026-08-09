@@ -326,7 +326,7 @@ def _options(
         generation_limit=generations,
         evaluator_workers=workers,
         provider_concurrency=1,
-        wall_seconds=60,
+        wall_seconds=60.0,
         provider_program_turn_limit=turns,
         stop_on_verified=True,
         resume_enabled=True,
@@ -607,6 +607,7 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
     )
     loaded = load_python_preview_config(config_path)
     assert loaded.scientific_search == _options()
+    assert isinstance(loaded.scientific_search.wall_seconds, float)
     concurrency = _Concurrency()
     provider = _Provider()
 
