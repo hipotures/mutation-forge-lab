@@ -1662,7 +1662,7 @@ def request_python_preview_stop(
 
     config = load_python_preview_config(config_path)
     state = _load_state(config)
-    if state.get("state") != "running" or state.get("run_terminal") is True:
+    if state.get("state") not in {"ready", "running"} or state.get("run_terminal") is True:
         raise PythonPreviewWorkspaceError(
             "Python preview is not running and cannot accept a stop request"
         )
@@ -1870,6 +1870,7 @@ def run_python_preview(
     provenance_guard: ProvenanceGuard = _disabled_provenance_guard,
     auth_available: Callable[[Path], bool] = Path.is_file,
     resume_budget: ScientificResumeBudgetV1 | None = None,
+    force_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Run or resume the explicit ordinary-Python preview."""
 
@@ -2040,6 +2041,7 @@ def run_python_preview(
                 resume_budget=resume_budget,
                 boundary_hook=boundary_hook,
                 operator_stop=lambda: _stop_requested(config),
+                force_stop=force_stop,
             )
         resumable_stop = report.get("stop_reason") in {
             "resume_generation_complete",

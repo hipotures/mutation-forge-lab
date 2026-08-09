@@ -1007,11 +1007,16 @@ def test_q_arms_graceful_stop_then_requests_immediate_interrupt() -> None:
     state, action = reduce_dashboard_key(state, "q")
 
     assert action is not None and action.kind == "quit"
+    assert action.immediate is False
     assert state.experiment_state == "stopping"
     assert state.generations[0].slots[0].state == "evaluating"
     assert state.generations[0].slots[1].state == "accepted"
     assert state.generations[0].slots[2].state == "stopping"
     assert "press q again" in state.status_message
+
+    state, action = reduce_dashboard_key(state, "q")
+    assert action is not None and action.kind == "quit"
+    assert action.immediate is True
 
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=True),
@@ -1034,6 +1039,27 @@ def test_q_arms_graceful_stop_then_requests_immediate_interrupt() -> None:
 
     assert action is not None and action.kind == "quit"
     assert state.status_message == "Immediate interrupt requested"
+
+
+def test_dashboard_q_dispatches_second_press_to_immediate_interrupt() -> None:
+    graceful = Mock()
+    interrupt = Mock()
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=True),
+        capabilities=DashboardCapabilities(
+            quit=graceful,
+            interrupt=interrupt,
+        ),
+        start_live=False,
+    )
+    try:
+        sink.handle_key("q")
+        sink.handle_key("q")
+    finally:
+        sink.close()
+
+    graceful.assert_called_once_with()
+    interrupt.assert_called_once_with()
 
 
 def test_persisted_dashboard_hydrates_previous_generations_and_objectives(
@@ -1499,6 +1525,7 @@ def test_profiling_panel_is_numbered_and_copyable() -> None:
     )
     assert title == "Profiling · top-N"
     assert "provider.generate" in copied
+    assert "calls=1" in copied
     sink.close()
 
 
@@ -2298,7 +2325,9 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
         )
         == 0
     )
-    run.assert_called_once_with(Path("m10.toml"))
+    run.assert_called_once()
+    assert run.call_args.args == (Path("m10.toml"),)
+    assert callable(run.call_args.kwargs["force_stop"])
     dashboard_factory.assert_called_once()
     initial = dashboard_factory.call_args.kwargs["initial_state"]
     assert initial.completed_slots == 8

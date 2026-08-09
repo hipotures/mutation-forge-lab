@@ -312,6 +312,7 @@ class DashboardAction:
     kind: Literal["quit", "pause", "resume", "retry", "copy"]
     slot: str | None = None
     panel: str | None = None
+    immediate: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +325,7 @@ class DashboardCapabilities:
     pause: Callable[[bool], None] | None = None
     retry: Callable[[str], None] | None = None
     quit: Callable[[], None] | None = None
+    interrupt: Callable[[], None] | None = None
 
 
 def dashboard_state_from_python_status(
@@ -2291,7 +2293,7 @@ def reduce_dashboard_key(
         if state.experiment_state == "stopping":
             return (
                 replace(state, status_message="Immediate interrupt requested"),
-                DashboardAction("quit"),
+                DashboardAction("quit", immediate=True),
             )
         return (
             replace(
@@ -2613,10 +2615,28 @@ class InteractiveDashboardSink:
 
     def _dispatch(self, action: DashboardAction) -> None:
         if action.kind == "quit":
-            if self.capabilities.quit is not None:
-                self.capabilities.quit()
-            else:
-                _thread.interrupt_main()
+            callback = (
+                self.capabilities.interrupt
+                if action.immediate and self.capabilities.interrupt is not None
+                else self.capabilities.quit
+            )
+            try:
+                if callback is not None:
+                    callback()
+                else:
+                    _thread.interrupt_main()
+            except Exception as error:
+                # A stop request can race the worker's transition to running.
+                # Keep the input thread alive so the operator can retry or use
+                # the second-q interrupt path instead of losing keyboard input.
+                with self._lock:
+                    self.state = replace(
+                        self.state,
+                        status_message=(
+                            f"Dashboard action failed: {type(error).__name__}"
+                        ),
+                    )
+                    self._dirty.set()
         elif action.kind in {"pause", "resume"} and self.capabilities.pause is not None:
             self.capabilities.pause(action.kind == "pause")
         elif (
@@ -3501,13 +3521,13 @@ class InteractiveDashboardSink:
                 border_style="cyan",
             )
         measured = sum(value for _, value in rows)
-        table = Table.grid(expand=True)
+        table = Table.grid(expand=True, padding=(0, 1))
         table.add_column(overflow="ellipsis")
         table.add_column(justify="right")
         table.add_column(justify="right")
         for name, seconds in rows:
             count = calls.get(name) if isinstance(calls, Mapping) else None
-            table.add_row(name, f"{seconds / measured:5.1%}", _show(count))
+            table.add_row(name, f"{seconds / measured:5.1%}", f"calls={_show(count)}")
         unattributed = _number(profile.get("unattributed_fraction"))
         if unattributed is not None and unattributed > 0:
             table.add_row("unattributed", f"{unattributed:5.1%}", "—")

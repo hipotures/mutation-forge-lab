@@ -9,6 +9,8 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
@@ -1967,6 +1969,7 @@ def run_sustained_search(
     provider_turn_timeout_seconds: float,
     resume_budget: ScientificResumeBudgetV1 | None = None,
     operator_stop: Callable[[], bool] | None = None,
+    force_stop: Callable[[], bool] | None = None,
     boundary_hook: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run or resume one bounded, completion-order-independent campaign."""
@@ -2025,6 +2028,25 @@ def run_sustained_search(
     exact_verified = False
     close_error: Exception | None = None
 
+    def check_force_stop() -> None:
+        if force_stop is None or not force_stop():
+            return
+        # Kill app-server workers before raising so an immediate dashboard
+        # interrupt does not wait for an in-flight provider timeout.
+        with suppress(Exception):
+            provider.close()
+        raise core.M5OperatorStop("immediate operator stop requested")
+
+    def wait_for_provider_result(
+        future: Future[core.M5ProviderResultV1],
+    ) -> core.M5ProviderResultV1:
+        while True:
+            check_force_stop()
+            try:
+                return future.result(timeout=0.1)
+            except FutureTimeoutError:
+                continue
+
     def stop_payload(reason: str, error: Exception) -> dict[str, Any]:
         return {
             "protocol_id": M10_REPORT_PROTOCOL_ID,
@@ -2037,6 +2059,7 @@ def run_sustained_search(
         }
 
     try:
+        check_force_stop()
         anchor_result = provider.ensure_specification_anchor(
             prompt=specification_prompt,
             system_prompt=system_prompt,
@@ -2363,7 +2386,8 @@ def run_sustained_search(
                 future = provider_futures[task.pending.candidate_id]
                 pending = task.pending
                 try:
-                    provider_result = future.result()
+                    provider_result = wait_for_provider_result(future)
+                    check_force_stop()
                     if task.slot_plan.kind == "child":
                         core._assert_provider_turn_boundary(
                             provider_result,
@@ -2371,6 +2395,8 @@ def run_sustained_search(
                         )
                     elif anchor.turn_id not in (provider_result.context.included_turn_ids):
                         raise core.M5InfrastructureError("fresh root lost the specification anchor")
+                except core.M5OperatorStop:
+                    raise
                 except core.M5InfrastructureError:
                     raise
                 except Exception as error:
@@ -2479,12 +2505,15 @@ def run_sustained_search(
                     operation=operation,
                 )
                 try:
-                    repaired_result = repair_future.result()
+                    repaired_result = wait_for_provider_result(repair_future)
+                    check_force_stop()
                     core._assert_provider_turn_boundary(
                         repaired_result,
                         expected_history=(previous_result.context.included_turn_ids),
                         expected_thread_id=previous_result.context.thread_id,
                     )
+                except core.M5OperatorStop:
+                    raise
                 except core.M5InfrastructureError:
                     raise
                 except Exception as error:
@@ -2594,7 +2623,10 @@ def run_sustained_search(
         write_json(root / M10_STOP_FILENAME, stop_payload(reason, error))
         raise
     finally:
-        provider_executor.shutdown(wait=True, cancel_futures=False)
+        provider_executor.shutdown(
+            wait=True,
+            cancel_futures=force_stop is not None and force_stop(),
+        )
         close_error = pool.close()
     if close_error is not None:
         telemetry.finish("infrastructure_failure")

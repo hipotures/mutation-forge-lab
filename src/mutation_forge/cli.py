@@ -15,6 +15,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 from rich.console import Console
@@ -348,8 +349,15 @@ def _experiment_run(
                     wall_seconds=python_wall_seconds,
                 )
 
+            stop_control = ExperimentControl()
+            immediate_stop = Event()
+
             def request_stop() -> None:
+                if stop_control.graceful_stop_requested:
+                    _thread.interrupt_main()
+                    return
                 request_python_preview_stop(config_path)
+                stop_control.request_graceful_stop()
 
             preview_sink = InteractiveDashboardSink(
                 console=Console(file=sys.stdout),
@@ -365,7 +373,8 @@ def _experiment_run(
                 },
                 initial_state=project(python_preview_status(config_path)),
                 capabilities=DashboardCapabilities(
-                    quit=request_stop
+                    quit=request_stop,
+                    interrupt=immediate_stop.set,
                 ),
             )
             with ThreadPoolExecutor(
@@ -376,12 +385,14 @@ def _experiment_run(
                     future = executor.submit(
                         run_python_preview,
                         config_path,
+                        force_stop=immediate_stop.is_set,
                     )
                 else:
                     future = executor.submit(
                         run_python_preview,
                         config_path,
                         resume_budget=resume_budget,
+                        force_stop=immediate_stop.is_set,
                     )
                 try:
                     while True:
