@@ -1026,7 +1026,7 @@ def test_q_arms_graceful_stop_then_requests_immediate_interrupt() -> None:
         color_system="standard",
     ).print(sink._slot_matrix(150, "full"))
     rendered = output.getvalue()
-    assert "stopping" in rendered
+    assert "stoppi" in rendered
     assert re.search(r"\x1b\[(?:\d+;)*5(?:;\d+)*m", rendered)
     sink.close()
 

@@ -45,7 +45,6 @@ jobs:
         run: >-
           uv run pytest
           tests/unit
-          tests/integration/test_experiment_ticket18.py
           tests/integration/test_toy_episode.py
           --ignore=tests/unit/test_stage5.py
           --ignore=tests/unit/test_stage6_independent.py

@@ -21,6 +21,7 @@ SEMANTICS_GLOSSARY = REPO_ROOT / "configs/stage3-field-semantics.v2.json"
 SYSTEM_PROMPT_PATH = REPO_ROOT / "prompts/ranker_v1_system.md"
 REQUEST_PROMPT_PATH = REPO_ROOT / "prompts/ranker_v1_request.md"
 OUTPUT_SCHEMA_PATH = REPO_ROOT / "prompts/ranker_v1_output_schema.json"
+_STAGE3_PROMPT_LIMITS = SandboxLimits(max_ast_nodes=500)
 
 
 def _schema(path: Path) -> dict[str, Any]:
@@ -294,7 +295,9 @@ def validator_limits() -> str:
 
 
 def program_contract() -> str:
-    limits = SandboxLimits()
+    # Stage 3 runs against the frozen Stage 2b sandbox, whose AST bound is
+    # deliberately lower than the general-purpose sandbox default.
+    limits = _STAGE3_PROMPT_LIMITS
     builtins = ", ".join(sorted(SAFE_BUILTINS))
     return (
         "PROGRAM CONTRACT\n\n"
