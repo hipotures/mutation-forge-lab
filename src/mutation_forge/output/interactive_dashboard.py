@@ -390,6 +390,14 @@ def dashboard_state_from_python_status(
         total=integer(usage.get("totalTokens")),
         quality="exact",
     )
+    raw_hourly_limit = status.get("hourly_token_limit")
+    hourly_token_limit = (
+        raw_hourly_limit
+        if isinstance(raw_hourly_limit, int)
+        and not isinstance(raw_hourly_limit, bool)
+        and raw_hourly_limit > 0
+        else None
+    )
     groups: dict[int, list[DashboardSlot]] = {}
     programs_by_candidate: dict[str, Mapping[str, Any]] = {}
     raw_programs = status.get("programs")
@@ -595,6 +603,14 @@ def dashboard_state_from_python_status(
             ),
         ),
         max_model_turns=None,
+        hourly_token_limit=hourly_token_limit,
+        hourly_tokens_used=integer(status.get("hourly_tokens_used")),
+        hourly_limit_reached=status.get("hourly_limit_reached") is True,
+        hourly_retry_after=(
+            str(status["hourly_retry_after"])
+            if status.get("hourly_retry_after") is not None
+            else None
+        ),
         active_provider_turns=integer(provider.get("active")),
         configured_provider_concurrency=integer(
             provider.get("configured_concurrency")

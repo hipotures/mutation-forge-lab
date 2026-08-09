@@ -38,6 +38,7 @@ from .scientific_search import (
     M10_STOP_FILENAME,
     ScientificResumeBudgetV1,
     ScientificSearchOptionsV2,
+    hourly_token_usage,
     resolve_resume_generation,
     run_sustained_search,
 )
@@ -304,6 +305,7 @@ def load_python_preview_config(
             "evaluator_workers",
             "provider_concurrency",
             "wall_seconds",
+            "max_total_tokens_per_hour",
             "primary_program_slots",
             "repair_turn_limit",
             "provider_total_turn_limit",
@@ -324,6 +326,7 @@ def load_python_preview_config(
         optional_budget_fields = {
             "generation_limit",
             "wall_seconds",
+            "max_total_tokens_per_hour",
             "primary_program_slots",
             "repair_turn_limit",
             "provider_total_turn_limit",
@@ -362,6 +365,17 @@ def load_python_preview_config(
                     "python_preview.scientific_search.wall_seconds",
                 )
                 if "wall_seconds" in scientific
+                else None
+            ),
+            max_total_tokens_per_hour=(
+                _positive_integer(
+                    scientific["max_total_tokens_per_hour"],
+                    (
+                        "python_preview.scientific_search."
+                        "max_total_tokens_per_hour"
+                    ),
+                )
+                if "max_total_tokens_per_hour" in scientific
                 else None
             ),
             primary_program_slots=(
@@ -892,9 +906,13 @@ def _progress(
                 or configured_generation_limit > generation_count
             )
         )
-        state = "blocked" if generation_budget_extended else "completed"
-        resumable = generation_budget_extended
-        run_terminal = not generation_budget_extended
+        report_resumable = (
+            generation_budget_extended
+            or terminal_reason == "hourly_token_limit"
+        )
+        state = "blocked" if report_resumable else "completed"
+        resumable = report_resumable
+        run_terminal = not report_resumable
         exact = report.get("exact_verified") is True
         result_kind = (
             "VERIFIED_COUNTEREXAMPLE"
@@ -1214,8 +1232,17 @@ def _progress(
                     ),
                 }
             )
+    hourly_usage = hourly_token_usage(
+        root,
+        (
+            config.scientific_search.max_total_tokens_per_hour
+            if config.scientific_search is not None
+            else None
+        ),
+    )
     return {
         **_public(retained_state),
+        **hourly_usage,
         "state": state,
         "resumable": resumable,
         "run_terminal": run_terminal,
@@ -1985,16 +2012,17 @@ def run_python_preview(
                 boundary_hook=boundary_hook,
                 operator_stop=lambda: _stop_requested(config),
             )
-        resume_generation_complete = (
-            report.get("stop_reason") == "resume_generation_complete"
-        )
+        resumable_stop = report.get("stop_reason") in {
+            "resume_generation_complete",
+            "hourly_token_limit",
+        }
         final_state = {
             **running,
             "state": (
-                "blocked" if resume_generation_complete else "completed"
+                "blocked" if resumable_stop else "completed"
             ),
-            "resumable": resume_generation_complete,
-            "run_terminal": not resume_generation_complete,
+            "resumable": resumable_stop,
+            "run_terminal": not resumable_stop,
             "terminal_reason": report.get("stop_reason"),
             "scientific_result_kind": (
                 "VERIFIED_COUNTEREXAMPLE"

@@ -10,6 +10,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from functools import partial
 from itertools import count
@@ -55,6 +56,7 @@ class ScientificSearchOptionsV2:
     stop_on_verified: bool
     resume_enabled: bool
     replace_terminal_slots: bool
+    max_total_tokens_per_hour: int | None = None
 
     def __post_init__(self) -> None:
         if self.generation_limit is not None and self.generation_limit < 1:
@@ -65,6 +67,13 @@ class ScientificSearchOptionsV2:
             raise ValueError("provider_concurrency must be between 1 and 4")
         if self.wall_seconds is not None and self.wall_seconds <= 0:
             raise ValueError("wall_seconds must be positive when configured")
+        if (
+            self.max_total_tokens_per_hour is not None
+            and self.max_total_tokens_per_hour < 1
+        ):
+            raise ValueError(
+                "max_total_tokens_per_hour must be positive when configured"
+            )
         if (
             self.generation_limit is not None
             and self.primary_program_slots
@@ -121,6 +130,7 @@ class ScientificSearchOptionsV2:
             "evaluator_workers": self.evaluator_workers,
             "provider_concurrency": self.provider_concurrency,
             "wall_seconds": self.wall_seconds,
+            "max_total_tokens_per_hour": self.max_total_tokens_per_hour,
             "primary_program_slots": self.primary_program_slots,
             "repair_turn_limit": self.repair_turn_limit,
             "provider_total_turn_limit": self.provider_total_turn_limit,
@@ -146,6 +156,54 @@ class ScientificResumeBudgetV1:
             )
         if not 0 <= self.max_new_repair_turns <= core.POPULATION_SIZE:
             raise ValueError("max_new_repair_turns must be between 0 and 8")
+
+
+def hourly_token_usage(
+    root: Path,
+    limit: int | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, JsonValue]:
+    """Return rolling one-hour usage from durable provider results."""
+
+    current = now or datetime.now(UTC)
+    current = (
+        current.replace(tzinfo=UTC)
+        if current.tzinfo is None
+        else current.astimezone(UTC)
+    )
+    cutoff = current - timedelta(hours=1)
+    charges: list[tuple[datetime, int]] = []
+    for path in root.glob("**/m5-provider-result.json.gz"):
+        charged_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        if not cutoff < charged_at <= current:
+            continue
+        payload = read_json(path)
+        usage = payload.get("usage") if isinstance(payload, Mapping) else None
+        tokens = usage.get("totalTokens") if isinstance(usage, Mapping) else None
+        if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:
+            charges.append((charged_at, tokens))
+    charges.sort()
+    used = sum(tokens for _, tokens in charges)
+    reached = limit is not None and used >= limit
+    retry_after: str | None = None
+    if reached and limit is not None:
+        remaining = used
+        for charged_at, tokens in charges:
+            remaining -= tokens
+            if remaining < limit:
+                retry_after = (charged_at + timedelta(hours=1)).isoformat()
+                break
+    return {
+        "hourly_token_limit": limit,
+        "hourly_tokens_used": used,
+        "hourly_tokens_remaining": (
+            None if limit is None else max(0, limit - used)
+        ),
+        "hourly_window_seconds": 3600,
+        "hourly_limit_reached": reached,
+        "hourly_retry_after": retry_after,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +318,9 @@ def _generation_snapshot(
                 round(options.wall_seconds * 1000)
                 if options.wall_seconds is not None
                 else None
+            ),
+            "max_total_tokens_per_hour": (
+                options.max_total_tokens_per_hour
             ),
             "primary_program_slots": options.primary_program_slots,
             "repair_turn_limit": options.repair_turn_limit,
@@ -1963,6 +2024,12 @@ def run_sustained_search(
         for generation in generations:
             if operator_stop is not None and operator_stop():
                 raise core.M5OperatorStop("operator stop requested")
+            if hourly_token_usage(
+                root,
+                options.max_total_tokens_per_hour,
+            )["hourly_limit_reached"] is True:
+                stop_reason = "hourly_token_limit"
+                break
             if options.wall_seconds is not None and (
                 telemetry.wall_expired(options.wall_seconds)
                 or telemetry.wall_remaining(options.wall_seconds)
@@ -2529,6 +2596,10 @@ def run_sustained_search(
         options=options,
         runtime=telemetry.snapshot(),
         stop_reason=stop_reason,
+    )
+    report["hourly_token_usage"] = hourly_token_usage(
+        root,
+        options.max_total_tokens_per_hour,
     )
     write_json(root / M10_REPORT_FILENAME, report)
     if boundary_hook is not None:

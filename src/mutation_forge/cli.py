@@ -427,6 +427,14 @@ def _experiment_run(
                     f"({scientific.generation_limit} generations / "
                     f"{scientific.primary_program_slots} primary slots)"
                 )
+            elif reason == "hourly_token_limit":
+                reason = (
+                    f"hourly_token_limit "
+                    f"({result.get('hourly_tokens_used', 0)}/"
+                    f"{result.get('hourly_token_limit', '—')} tokens; "
+                    f"retry after "
+                    f"{result.get('hourly_retry_after') or '—'})"
+                )
             Console().print(
                 f"Run {preview_config.exp_id} · "
                 f"state {result.get('state', 'unknown')} · "
