@@ -12,6 +12,7 @@ import tomllib
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -430,14 +431,12 @@ def _experiment_run(
                 )
             elif reason == "hourly_token_limit":
                 retry_after = str(result.get("hourly_retry_after") or "—")
-                try:
+                with suppress(ValueError):
                     retry_after = (
                         datetime.fromisoformat(retry_after)
                         .astimezone()
                         .strftime("%H:%M:%S")
                     )
-                except ValueError:
-                    pass
                 reason = (
                     f"hourly_token_limit "
                     f"({result.get('hourly_tokens_used', 0)}/"
