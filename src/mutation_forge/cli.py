@@ -495,9 +495,13 @@ def _experiment_status(
         raise ValueError("experiment status dashboard cannot be combined with JSON")
     protocol = experiment_protocol(config_path)
     if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
-        result = python_preview_status(
-            config_path,
-            pause_record_path=pause_record_path,
+        result = (
+            python_preview_status(config_path)
+            if pause_record_path is None
+            else python_preview_status(
+                config_path,
+                pause_record_path=pause_record_path,
+            )
         )
         if dashboard:
             config = load_python_preview_config(config_path)

@@ -145,6 +145,8 @@ uv run mforge experiment stop \
 The running process finishes the already-started generation and stops before
 the next generation. Wait for it to exit and confirm
 `state=blocked`, `terminal_reason=operator_stop`, and `resumable=true`.
+Archived M8 wrapper instructions called this `--request-stop`; that option is
+not part of the canonical public CLI and must not be used for current runs.
 
 Resume the exact workspace with the same configuration:
 
