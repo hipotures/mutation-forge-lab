@@ -162,7 +162,11 @@ def test_switching_back_to_original_anchor_allows_another_root_fork(
 def test_switching_parent_rejects_changed_completed_history(
     tmp_path: Path,
 ) -> None:
-    adapter, _ = _adapter(tmp_path, FakeScenario())
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(),
+        limits=AppServerLimits(max_turns=8, max_campaigns=3),
+    )
     try:
         anchor = adapter.generate_persistent("anchor", FORK_PROFILE)
         branch = adapter.fork_persistent_thread(
