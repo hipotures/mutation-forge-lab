@@ -326,11 +326,6 @@ def _experiment_run(
             raise ValueError(
                 "ordinary-Python preview dashboard cannot be combined with JSON"
             )
-        if dashboard and resume_budget is not None:
-            raise ValueError(
-                "current-generation budgeted resume requires non-dashboard "
-                "output"
-            )
         if dashboard:
             preview_config = load_python_preview_config(config_path)
             scientific = preview_config.scientific_search
