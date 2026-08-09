@@ -235,6 +235,69 @@ def test_k_switch_and_edge_fold_preserve_donor_action_semantics() -> None:
     assert len(fold_session.overlay.edges) == len(graph.edges) - 1
 
 
+def test_edge_scoped_selectors_preserve_donor_semantics_and_contain_source_edge() -> None:
+    graph = _cubic_graph(8)
+
+    matching_session = _session(graph)
+    edge_ref = matching_session.handle_call("edges_removable", {})[0]  # type: ignore[index]
+    edge_token = edge_ref["$ref"]  # type: ignore[index]
+    source_edge = matching_session._references[edge_token].reference.payload  # noqa: SLF001
+    matchings = _references(
+        matching_session,
+        "matching_k_switch_reconnections_for_edge",
+        {"edge": edge_ref, "k": 2},
+    )
+    assert matchings
+    assert all(source_edge in payload[0] for _kind, payload in matchings)
+    assert all(kind == "matching" for kind, _payload in matchings)
+
+    relocation_session = _session(graph)
+    edge_ref = relocation_session.handle_call("edges_removable", {})[0]  # type: ignore[index]
+    edge_token = edge_ref["$ref"]  # type: ignore[index]
+    source_edge = relocation_session._references[edge_token].reference.payload  # noqa: SLF001
+    relocations = _references(
+        relocation_session,
+        "relocations_legal_for_edge",
+        {"edge": edge_ref},
+    )
+    assert relocations
+    assert all(payload[0] == source_edge for _kind, payload in relocations)
+    assert all(kind == "relocation" for kind, _payload in relocations)
+
+    fanout_session = _session(graph)
+    edge_ref = fanout_session.handle_call("edges_removable", {})[0]  # type: ignore[index]
+    edge_token = edge_ref["$ref"]  # type: ignore[index]
+    source_edge = fanout_session._references[edge_token].reference.payload  # noqa: SLF001
+    fanouts = _references(
+        fanout_session,
+        "edge_fanouts_legal_for_edge",
+        {"edge": edge_ref},
+    )
+    assert fanouts
+    assert all(payload[0] == source_edge for _kind, payload in fanouts)
+    assert all(kind == "fanout" for kind, _payload in fanouts)
+
+
+def test_edge_scoped_selectors_reject_stale_or_foreign_edges() -> None:
+    session = _session(_cubic_graph(8))
+    edge_ref = session.handle_call("edges_removable", {})[0]  # type: ignore[index]
+    session.handle_call("remove_edge", {"edge": edge_ref})
+    with pytest.raises(SafeAPIProgramError) as stale:
+        session.handle_call(
+            "matching_k_switch_reconnections_for_edge",
+            {"edge": edge_ref, "k": 2},
+        )
+    assert stale.value.code == "SELECTOR_PRECONDITION"
+
+    foreign = _session(_cubic_graph(8), context=_context(1))
+    with pytest.raises(SafeAPIProgramError) as wrong_invocation:
+        foreign.handle_call(
+            "relocations_legal_for_edge",
+            {"edge": edge_ref},
+        )
+    assert wrong_invocation.value.code == "STALE_OR_FOREIGN_REFERENCE"
+
+
 def test_emit_mints_plan_and_no_plan_with_fail_closed_final_checks() -> None:
     session = _session()
     non_edges = session.handle_call("non_edges_legal", {})

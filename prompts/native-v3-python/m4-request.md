@@ -82,8 +82,11 @@ api.non_edges_legal()
 api.non_edges_local_cycle_risk(mode="max")
 api.paths_length_two()
 api.matching_k_switch_reconnections(k)
+api.matching_k_switch_reconnections_for_edge(edge, k)
 api.relocations_legal()
+api.relocations_legal_for_edge(edge)
 api.edge_fanouts_legal()
+api.edge_fanouts_legal_for_edge(edge)
 ```
 
 Semantics:
@@ -100,6 +103,10 @@ Semantics:
 - local-cycle risk ranks absent edges by their number of common neighbours;
 - length-two paths identify two incident edges and their possible fold;
 - matching reconnections accept only `k` equal to 2, 3, or 4;
+- edge-scoped matching reconnections always include the supplied current edge
+  among the removed source edges;
+- edge-scoped relocation and fanout selectors use exactly the supplied current
+  source edge;
 - relocation and fanout selectors return syntactically applicable candidates;
   final graph validity is checked only by `emit()`.
 

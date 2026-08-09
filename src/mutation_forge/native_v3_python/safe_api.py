@@ -433,17 +433,30 @@ class SafeGraphSessionV1:
                 reservoir[selected] = references[index]
         return tuple(sorted(reservoir, key=_reference_key))
 
-    def _matching_candidates(self, k: int, *, path: str) -> tuple[_Reference, ...]:
+    def _matching_candidates(
+        self,
+        k: int,
+        *,
+        path: str,
+        required_edge: Edge | None = None,
+    ) -> tuple[_Reference, ...]:
         if k not in {2, 3, 4}:
             raise SafeAPIProgramError("INVALID_API_ARGUMENT", "k must be one of 2, 3, or 4")
         edges = tuple(sorted(self.overlay.edges))
         if len(edges) < k:
             return ()
+        if required_edge is not None and required_edge not in self.overlay.edges:
+            raise SafeAPIProgramError(
+                "SELECTOR_PRECONDITION",
+                "edge is absent from the current private overlay",
+            )
         candidates: set[tuple[tuple[Edge, ...], tuple[Edge, ...]]] = set()
         for attempt in range(64):
-            available = list(edges)
-            removed: list[Edge] = []
-            for index in range(k):
+            available = [edge for edge in edges if edge != required_edge]
+            removed: list[Edge] = (
+                [required_edge] if required_edge is not None else []
+            )
+            for index in range(len(removed), k):
                 selected = self._random_index(
                     f"{path}/attempt/{attempt}/edge/{index}",
                     (1,) * len(available),
@@ -653,22 +666,82 @@ class SafeGraphSessionV1:
                 raise SafeAPIProgramError("INVALID_API_ARGUMENT", "k must be an integer")
             references = self._matching_candidates(k, path=path)
             kind = "matching"
-        elif method == "relocations_legal":
-            self._require_keys(arguments)
+        elif method == "matching_k_switch_reconnections_for_edge":
+            self._require_keys(
+                arguments,
+                required=frozenset({"edge", "k"}),
+            )
+            edge = cast(
+                Edge,
+                self._decode_reference(arguments["edge"], "edge").payload,
+            )
+            k = arguments["k"]
+            if isinstance(k, bool) or not isinstance(k, int):
+                raise SafeAPIProgramError("INVALID_API_ARGUMENT", "k must be an integer")
+            references = self._matching_candidates(
+                k,
+                path=path,
+                required_edge=edge,
+            )
+            kind = "matching"
+        elif method in {"relocations_legal", "relocations_legal_for_edge"}:
+            self._require_keys(
+                arguments,
+                required=(
+                    frozenset({"edge"})
+                    if method == "relocations_legal_for_edge"
+                    else frozenset()
+                ),
+            )
+            required_edge = (
+                cast(
+                    Edge,
+                    self._decode_reference(arguments["edge"], "edge").payload,
+                )
+                if method == "relocations_legal_for_edge"
+                else None
+            )
+            if required_edge is not None and required_edge not in self.overlay.edges:
+                raise SafeAPIProgramError(
+                    "SELECTOR_PRECONDITION",
+                    "edge is absent from the current private overlay",
+                )
             references = tuple(
                 _Reference("relocation", (edge, keep, new))
                 for edge in sorted(self.overlay.edges)
+                if required_edge is None or edge == required_edge
                 for keep in edge
                 for new in range(self.overlay.order)
                 if new not in edge
                 and normalized_edge((keep, new)) not in self.overlay.edges
             )
             kind = "relocation"
-        elif method == "edge_fanouts_legal":
-            self._require_keys(arguments)
+        elif method in {"edge_fanouts_legal", "edge_fanouts_legal_for_edge"}:
+            self._require_keys(
+                arguments,
+                required=(
+                    frozenset({"edge"})
+                    if method == "edge_fanouts_legal_for_edge"
+                    else frozenset()
+                ),
+            )
+            required_edge = (
+                cast(
+                    Edge,
+                    self._decode_reference(arguments["edge"], "edge").payload,
+                )
+                if method == "edge_fanouts_legal_for_edge"
+                else None
+            )
+            if required_edge is not None and required_edge not in self.overlay.edges:
+                raise SafeAPIProgramError(
+                    "SELECTOR_PRECONDITION",
+                    "edge is absent from the current private overlay",
+                )
             references = tuple(
                 _Reference("fanout", (edge, vertex))
                 for edge in sorted(self.overlay.edges)
+                if required_edge is None or edge == required_edge
                 for vertex in range(self.overlay.order)
                 if vertex not in edge
                 and {

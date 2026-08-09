@@ -229,9 +229,21 @@ class SafeGraphAPIV1(Protocol):
 
     def matching_k_switch_reconnections(self, k: int) -> tuple[MatchingRef, ...]: ...
 
+    def matching_k_switch_reconnections_for_edge(
+        self, edge: EdgeRef, k: int
+    ) -> tuple[MatchingRef, ...]: ...
+
     def relocations_legal(self) -> tuple[RelocationRef, ...]: ...
 
+    def relocations_legal_for_edge(
+        self, edge: EdgeRef
+    ) -> tuple[RelocationRef, ...]: ...
+
     def edge_fanouts_legal(self) -> tuple[FanoutRef, ...]: ...
+
+    def edge_fanouts_legal_for_edge(
+        self, edge: EdgeRef
+    ) -> tuple[FanoutRef, ...]: ...
 
     def pick(
         self,
