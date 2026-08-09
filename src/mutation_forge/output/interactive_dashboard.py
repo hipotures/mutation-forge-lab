@@ -3949,6 +3949,10 @@ def _compact_count(value: int) -> str:
 
 
 def _clock_time(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%H:%M:%S")
+    except ValueError:
+        pass
     time_part = value.split("T", 1)[-1]
     return time_part[:8] if len(time_part) >= 8 else value
 
