@@ -353,6 +353,24 @@ def dashboard_state_from_python_status(
             else 0.0
         )
 
+    def fitness_objective(value: object) -> float | None:
+        if not isinstance(value, Mapping):
+            return None
+        lower = value.get("lower")
+        if not isinstance(lower, Mapping):
+            return None
+        numerator = lower.get("numerator")
+        denominator = lower.get("denominator")
+        if (
+            not isinstance(numerator, int)
+            or isinstance(numerator, bool)
+            or not isinstance(denominator, int)
+            or isinstance(denominator, bool)
+            or denominator == 0
+        ):
+            return None
+        return numerator / denominator
+
     counts = mapping("counts")
     provider = mapping("provider")
     evaluators = mapping("evaluators")
@@ -373,6 +391,17 @@ def dashboard_state_from_python_status(
         quality="exact",
     )
     groups: dict[int, list[DashboardSlot]] = {}
+    programs_by_candidate: dict[str, Mapping[str, Any]] = {}
+    raw_programs = status.get("programs")
+    if isinstance(raw_programs, Sequence) and not isinstance(
+        raw_programs, str | bytes
+    ):
+        for raw_program in raw_programs:
+            if not isinstance(raw_program, Mapping):
+                continue
+            candidate_id = raw_program.get("candidate_id")
+            if isinstance(candidate_id, str):
+                programs_by_candidate[candidate_id] = raw_program
     raw_slots = status.get("slots")
     if isinstance(raw_slots, Sequence) and not isinstance(
         raw_slots, str | bytes
@@ -437,6 +466,11 @@ def dashboard_state_from_python_status(
                     ),
                     candidate=candidate_id,
                     error=raw_state if state == "failed" else "",
+                    objective=fitness_objective(
+                        programs_by_candidate.get(candidate_id, {}).get(
+                            "fitness_interval"
+                        )
+                    ),
                 )
             )
     generation_groups = tuple(
@@ -495,6 +529,36 @@ def dashboard_state_from_python_status(
         f"records={integer(exact.get('records'))} · "
         f"verified={bool(exact.get('verified'))}"
     )
+    current_slots = groups.get(generation, ())
+    live_slots = sorted(
+        (
+            slot
+            for slot in current_slots
+            if slot.state in ACTIVE_STATES or slot.state == "queued"
+        ),
+        key=lambda slot: (slot.state == "queued", slot.slot),
+    )
+    live_activity = tuple(
+        ActivityEntry(
+            timestamp=(
+                _duration(slot.elapsed_seconds)
+                if slot.elapsed_seconds is not None
+                else "live"
+            ),
+            component=slot.phase,
+            severity="info",
+            message=(
+                f"{slot.state} · {slot.usage.total} tokens"
+                if slot.usage.total
+                else slot.state
+            ),
+            slot=slot.slot,
+        )
+        for slot in live_slots
+    )
+    best_program = best.get("program")
+    best_program = best_program if isinstance(best_program, Mapping) else {}
+    best_program_hash = str(best_program.get("program_hash") or "—")
     return DashboardState(
         run_id=run_id,
         session_id="ordinary-python",
@@ -549,7 +613,7 @@ def dashboard_state_from_python_status(
         current_objective=best_value,
         best_objective=best_value,
         best_candidate=str(best.get("candidate_id") or "—"),
-        best_program_hash=str(best.get("program_hash") or "—"),
+        best_program_hash=best_program_hash,
         best_fitness=best_fitness,
         improvement_rate=number(
             throughput.get("accepted_rewrites_per_second")
@@ -579,7 +643,8 @@ def dashboard_state_from_python_status(
         cumulative_usage=token_usage,
         session_usage=token_usage,
         generations=generation_groups,
-        activity=(
+        activity=live_activity
+        + (
             ActivityEntry(
                 timestamp="live",
                 component="science",
@@ -605,7 +670,7 @@ def dashboard_state_from_python_status(
                 timestamp="status",
                 component="program",
                 severity="info",
-                message=f"program {best.get('program_hash') or '—'}",
+                message=f"program {best_program_hash}",
             ),
         ),
         counterexample_state=(
