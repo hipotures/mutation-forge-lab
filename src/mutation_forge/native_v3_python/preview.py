@@ -562,6 +562,36 @@ def _provider_runtime_missing(root: Path) -> bool:
     return False
 
 
+def _seed_recovery_artifacts(source_root: Path, recovery_root: Path) -> None:
+    source_generations = source_root / "generations"
+    if not source_generations.is_dir():
+        return
+    for generation in sorted(source_generations.glob("generation-*")):
+        if not generation.is_dir():
+            continue
+        target_generation = recovery_root / "generations" / generation.name
+        for slot in sorted(generation.glob("slot-*")):
+            if not slot.is_dir():
+                continue
+            if not any(
+                (slot / name).is_file()
+                for name in ("candidate.json.gz", "prepared-candidate.json.gz")
+            ):
+                continue
+            shutil.copytree(
+                slot,
+                target_generation / slot.name,
+                dirs_exist_ok=True,
+            )
+        baselines = generation / "baselines"
+        if baselines.is_dir():
+            shutil.copytree(
+                baselines,
+                target_generation / "baselines",
+                dirs_exist_ok=True,
+            )
+
+
 def _new_recovery_config(config: PythonPreviewConfig) -> PythonPreviewConfig:
     config.workspace.mkdir(parents=True, exist_ok=True)
     recovery_parent = Path(
@@ -2070,9 +2100,20 @@ def run_python_preview(
 ) -> dict[str, Any]:
     """Run or resume the explicit ordinary-Python preview."""
 
-    config = _run_config(load_python_preview_config(config_path))
+    base_config = load_python_preview_config(config_path)
+    config = _run_config(base_config)
+    recovery_root = (
+        config.experiment_root
+        if config.experiment_root != base_config.experiment_root
+        else None
+    )
     existed = config.experiment_root.exists()
-    state = _load_state(config) if existed else _initialize_workspace(config)
+    if existed:
+        state = _load_state(config)
+    else:
+        state = _initialize_workspace(config)
+        if recovery_root is not None and config.scientific_search is not None:
+            _seed_recovery_artifacts(base_config.experiment_root, recovery_root)
     if resume_budget is not None and (
         not existed or config.scientific_search is None or state.get("resumable") is not True
     ):
