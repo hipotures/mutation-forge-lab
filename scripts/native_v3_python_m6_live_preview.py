@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 from mutation_forge.cli import main as mforge_main
 from mutation_forge.native_v3_python.preview import (
     PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION,
+    request_python_preview_stop,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,11 @@ def _parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         help="Resume the exact retained preview configuration.",
+    )
+    parser.add_argument(
+        "--request-stop",
+        action="store_true",
+        help="Request a resumable stop at the next durable candidate boundary.",
     )
     parser.add_argument("--heg-repo", type=Path, default=PROJECT_ROOT.parent / "heg")
     parser.add_argument("--model", default="gpt-5.6-luna")
@@ -62,6 +69,21 @@ heg_repo = "{args.heg_repo.resolve().as_posix()}"
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.request_stop:
+        if args.config is None:
+            raise ValueError("--request-stop requires --config")
+        result = request_python_preview_stop(
+            args.config.resolve(strict=True)
+        )
+        print(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
     config = (
         args.config.resolve(strict=True)
         if args.config is not None

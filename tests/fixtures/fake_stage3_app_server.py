@@ -19,7 +19,7 @@ class _Out:
         )
 
     def readline(self, _size: int = -1):
-        return self.q.get(timeout=0.05)
+        return self.q.get()
 
     def close(self):
         self.q.put(b"")
@@ -120,6 +120,7 @@ class FakeProcess:
     def receive(self, line: bytes):
         if self.scenario.crash:
             self.returncode = 1
+            self.stdout.close()
             return
         try:
             r = json.loads(line)

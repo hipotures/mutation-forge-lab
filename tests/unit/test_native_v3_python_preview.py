@@ -24,10 +24,12 @@ from mutation_forge.native_v3_python.preview import (
     experiment_protocol,
     load_python_preview_config,
     python_preview_status,
+    request_python_preview_stop,
     run_python_preview,
 )
 from mutation_forge.native_v3_python.search import (
     DevelopmentCaseV1,
+    M5OperatorStop,
     M5ProviderContextV1,
     M5ProviderResultV1,
 )
@@ -498,6 +500,49 @@ def test_provider_failure_is_not_scientific_success_and_resume_skips_it(
     assert len(resumed.calls) == 15
     assert ("root", 0, "slot-00") not in resumed.calls
     assert result["recovery"]["resume_attempts"] == 1
+
+
+def test_resumable_operator_stop_is_consumed_and_can_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _config(tmp_path)
+    original_run = preview_module.run_m5_search
+
+    def controlled_stop(**kwargs: Any) -> Mapping[str, JsonValue]:
+        requested = request_python_preview_stop(path)
+        assert requested["stop_requested"] is True
+        assert kwargs["operator_stop"]() is True
+        raise M5OperatorStop("operator stop requested")
+
+    monkeypatch.setattr(preview_module, "run_m5_search", controlled_stop)
+    stopped = run_python_preview(
+        path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+    assert stopped["state"] == "blocked"
+    assert stopped["terminal_reason"] == "operator_stop"
+    assert stopped["resumable"] is True
+    assert stopped["last_error"] is None
+
+    monkeypatch.setattr(preview_module, "run_m5_search", original_run)
+    provider = _Provider()
+    resumed = run_python_preview(
+        path,
+        provider_factory=lambda *_: provider,
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+    assert resumed["state"] == "completed"
+    assert resumed["counts"]["pending"] == 0
+    assert resumed["recovery"]["resume_attempts"] == 1
+    assert len(provider.calls) == 16
 
 
 def test_provenance_failure_stops_before_provider_and_is_terminal(

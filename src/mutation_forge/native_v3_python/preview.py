@@ -31,6 +31,7 @@ from .runtime_contracts import PolicyRuntimeLimitsV1
 from .search import (
     M5_REPORT_PROTOCOL_ID,
     DevelopmentCaseV1,
+    M5OperatorStop,
     M5ScientificEvaluator,
     M5SearchProvider,
     run_m5_search,
@@ -53,6 +54,8 @@ V2_PROTOCOL = "native-v2"
 _SUPERSEDED_JSON_DSL_SELECTOR = "v3"
 _STATE_NAME = "python-preview-state.json.gz"
 _CONFIG_NAME = "python-preview.toml"
+_STOP_REQUEST_NAME = "python-preview-stop-request.json.gz"
+_STOP_REQUEST_PROTOCOL_ID = "mforge.native.python_preview.stop_request.v1"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _TERMINAL_CANDIDATE_STATUSES = frozenset(
     {
@@ -769,6 +772,62 @@ def python_preview_status(
     return _progress(config, state)
 
 
+def _stop_request_path(config: PythonPreviewConfig) -> Path:
+    return config.experiment_root / _STOP_REQUEST_NAME
+
+
+def _stop_requested(config: PythonPreviewConfig) -> bool:
+    path = _stop_request_path(config)
+    if not path.is_file():
+        return False
+    value = _load_mapping(path)
+    if (
+        value is None
+        or value.get("protocol_id") != _STOP_REQUEST_PROTOCOL_ID
+        or not isinstance(value.get("active"), bool)
+    ):
+        raise PythonPreviewWorkspaceError(
+            "Python preview stop request is malformed"
+        )
+    return value["active"] is True
+
+
+def request_python_preview_stop(
+    config_path: str | Path,
+) -> dict[str, Any]:
+    """Request a resumable stop at the next durable candidate boundary."""
+
+    config = load_python_preview_config(config_path)
+    state = _load_state(config)
+    if state.get("state") != "running" or state.get("run_terminal") is True:
+        raise PythonPreviewWorkspaceError(
+            "Python preview is not running and cannot accept a stop request"
+        )
+    write_json(
+        _stop_request_path(config),
+        {
+            "protocol_id": _STOP_REQUEST_PROTOCOL_ID,
+            "active": True,
+        },
+    )
+    return {
+        **python_preview_status(config_path),
+        "stop_requested": True,
+    }
+
+
+def _consume_stop_request(config: PythonPreviewConfig) -> None:
+    if not _stop_requested(config):
+        return
+    write_json(
+        _stop_request_path(config),
+        {
+            "protocol_id": _STOP_REQUEST_PROTOCOL_ID,
+            "active": False,
+        },
+    )
+
+
 def _prompt_inputs() -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
     system_prompt = (
         _PROJECT_ROOT / "prompts/native-v3-python/m5-system.md"
@@ -965,6 +1024,7 @@ def run_python_preview(
             preview_active=True,
             close_provider=False,
             boundary_hook=boundary_hook,
+            operator_stop=lambda: _stop_requested(config),
         )
         final_state = {
             **running,
@@ -978,6 +1038,19 @@ def run_python_preview(
                 else "DEVELOPMENT_SEARCH_EVIDENCE"
             ),
             "scientific_success": report.get("exact_verified") is True,
+        }
+    except M5OperatorStop as error:
+        primary_error = error
+        _consume_stop_request(config)
+        final_state = {
+            **running,
+            "state": "blocked",
+            "resumable": True,
+            "run_terminal": False,
+            "terminal_reason": "operator_stop",
+            "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
+            "scientific_success": False,
+            "last_error": None,
         }
     except Exception as error:
         primary_error = error
@@ -1034,5 +1107,6 @@ __all__ = [
     "experiment_protocol",
     "load_python_preview_config",
     "python_preview_status",
+    "request_python_preview_stop",
     "run_python_preview",
 ]
