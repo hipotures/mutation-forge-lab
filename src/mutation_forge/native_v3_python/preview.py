@@ -12,7 +12,7 @@ import tomllib
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -77,6 +77,7 @@ _SUPERSEDED_JSON_DSL_SELECTOR = "v3"
 _STATE_NAME = "python-preview-state.json.gz"
 _CONFIG_NAME = "python-preview.toml"
 _STOP_REQUEST_NAME = "python-preview-stop-request.json.gz"
+_RECOVERY_MARKER_PROTOCOL = "mforge.native.python_preview.recovery.v1"
 _STOP_REQUEST_PROTOCOL_ID = "mforge.native.python_preview.stop_request.v1"
 _M10_PAUSE_RECORD_SCHEMA_VERSION = "mforge.native.python_m10_emergency_stop_evidence.v1"
 _PAUSED_FOR_BUDGET = "PAUSED_FOR_BUDGET"
@@ -518,6 +519,77 @@ def load_python_preview_config(
 
 def _state_path(config: PythonPreviewConfig) -> Path:
     return config.experiment_root / _STATE_NAME
+
+
+def _recovery_marker_path(config: PythonPreviewConfig) -> Path:
+    return config.workspace / f".{config.exp_id}.active-recovery.json.gz"
+
+
+def _config_for_root(config: PythonPreviewConfig, root: Path) -> PythonPreviewConfig:
+    return replace(config, workspace=root.resolve().parent)
+
+
+def _active_recovery_root(config: PythonPreviewConfig) -> Path | None:
+    marker = _recovery_marker_path(config)
+    raw = _load_mapping(marker)
+    if raw is None or raw.get("protocol_id") != _RECOVERY_MARKER_PROTOCOL:
+        return None
+    value = raw.get("root")
+    if not isinstance(value, str) or not value:
+        return None
+    root = Path(value).resolve()
+    try:
+        root.relative_to(config.workspace.resolve())
+    except ValueError:
+        return None
+    if root == config.experiment_root.resolve():
+        return None
+    return root
+
+
+def _provider_runtime_missing(root: Path) -> bool:
+    state_paths = (
+        root / "provider-runtime" / "coordinator" / "provider-state.json.gz",
+        root / "provider-runtime" / "provider-state.json.gz",
+    )
+    for state_path in state_paths:
+        state = _load_mapping(state_path)
+        if state is None:
+            continue
+        capsule_root = state.get("capsule_root")
+        if isinstance(capsule_root, str) and capsule_root:
+            return not Path(capsule_root).is_dir()
+    return False
+
+
+def _new_recovery_config(config: PythonPreviewConfig) -> PythonPreviewConfig:
+    config.workspace.mkdir(parents=True, exist_ok=True)
+    recovery_parent = Path(
+        tempfile.mkdtemp(
+            prefix=f".{config.exp_id}.recovery-",
+            dir=config.workspace,
+        )
+    )
+    recovery_config = _config_for_root(config, recovery_parent / config.exp_id)
+    write_json(
+        _recovery_marker_path(config),
+        {
+            "protocol_id": _RECOVERY_MARKER_PROTOCOL,
+            "root": str(recovery_config.experiment_root),
+        },
+    )
+    return recovery_config
+
+
+def _run_config(config: PythonPreviewConfig) -> PythonPreviewConfig:
+    active_root = _active_recovery_root(config)
+    if active_root is not None:
+        active_config = _config_for_root(config, active_root)
+        if not _provider_runtime_missing(active_root):
+            return active_config
+    if config.experiment_root.exists() and _provider_runtime_missing(config.experiment_root):
+        return _new_recovery_config(config)
+    return config
 
 
 def _base_state(config: PythonPreviewConfig) -> dict[str, Any]:
@@ -1539,7 +1611,9 @@ def python_preview_status(
 ) -> dict[str, Any]:
     """Return a bounded read-only status projection without provider contact."""
 
-    config = load_python_preview_config(config_path)
+    base_config = load_python_preview_config(config_path)
+    active_root = _active_recovery_root(base_config)
+    config = _config_for_root(base_config, active_root) if active_root is not None else base_config
     if not config.experiment_root.exists():
         return _progress(config, _base_state(config))
     try:
@@ -1768,7 +1842,9 @@ def request_python_preview_stop(
 ) -> dict[str, Any]:
     """Request a resumable stop at the next durable candidate boundary."""
 
-    config = load_python_preview_config(config_path)
+    base_config = load_python_preview_config(config_path)
+    active_root = _active_recovery_root(base_config)
+    config = _config_for_root(base_config, active_root) if active_root is not None else base_config
     state = _load_state(config)
     if state.get("state") not in {"ready", "running"} or state.get("run_terminal") is True:
         raise PythonPreviewWorkspaceError(
@@ -1994,7 +2070,7 @@ def run_python_preview(
 ) -> dict[str, Any]:
     """Run or resume the explicit ordinary-Python preview."""
 
-    config = load_python_preview_config(config_path)
+    config = _run_config(load_python_preview_config(config_path))
     existed = config.experiment_root.exists()
     state = _load_state(config) if existed else _initialize_workspace(config)
     if resume_budget is not None and (

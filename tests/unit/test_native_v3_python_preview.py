@@ -636,6 +636,48 @@ def test_current_provider_error_is_not_masked_by_retained_report(
     assert python_preview_status(path)["state"] == "running"
 
 
+def test_missing_provider_runtime_uses_preserved_recovery_workspace(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+    run_python_preview(
+        path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+    base_config = load_python_preview_config(path)
+    provider_state = base_config.experiment_root / "provider-runtime" / "provider-state.json.gz"
+    provider_state.parent.mkdir(parents=True, exist_ok=True)
+    write_json(provider_state, {"capsule_root": str(tmp_path / "missing-capsule")})
+    old_candidate = base_config.experiment_root / "generations/generation-0000/slot-00"
+    assert old_candidate.is_dir()
+
+    roots: list[Path] = []
+
+    def provider_factory(config: Any, _: str) -> _Provider:
+        roots.append(config.experiment_root)
+        return _Provider()
+
+    resumed = run_python_preview(
+        path,
+        provider_factory=provider_factory,
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+
+    assert resumed["state"] == "completed"
+    assert roots and roots[0] != base_config.experiment_root
+    assert old_candidate.is_dir()
+    marker = base_config.workspace / f".{base_config.exp_id}.active-recovery.json.gz"
+    assert marker.is_file()
+    assert python_preview_status(path)["state"] == "completed"
+
+
 def test_resumable_operator_stop_is_consumed_and_can_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
