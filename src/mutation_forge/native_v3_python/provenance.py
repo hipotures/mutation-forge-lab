@@ -108,21 +108,30 @@ def _run_git(repository: Path, *arguments: str) -> str:
 
 def read_git_repository_identity(
     repository: Path,
+    *,
+    ignored_path: Path | None = None,
 ) -> GitRepositoryIdentityV1:
     """Read the exact commit, tree, and dirty state of one Git repository."""
 
     root = repository.resolve(strict=True)
+    status_arguments = [
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ]
+    if ignored_path is not None:
+        try:
+            relative = ignored_path.resolve(strict=True).relative_to(root)
+        except ValueError:
+            pass
+        else:
+            status_arguments.extend(
+                ("--", ".", f":(exclude){relative.as_posix()}")
+            )
     return GitRepositoryIdentityV1(
         commit_sha=_run_git(root, "rev-parse", "HEAD"),
         tree_sha=_run_git(root, "rev-parse", "HEAD^{tree}"),
-        dirty=bool(
-            _run_git(
-                root,
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-            )
-        ),
+        dirty=bool(_run_git(root, *status_arguments)),
     )
 
 
@@ -167,7 +176,14 @@ def build_m5_acceptance_provenance(
 
     if not model or not effort or not system_prompt or not request_template:
         raise ValueError("M5 provenance inputs must be non-empty")
-    repository = git_identity_loader(repository_root)
+    repository = (
+        read_git_repository_identity(
+            repository_root,
+            ignored_path=experiment_config,
+        )
+        if git_identity_loader is read_git_repository_identity
+        else git_identity_loader(repository_root)
+    )
     heg = git_identity_loader(heg_root)
     limits = runtime_limits or PolicyRuntimeLimitsV1()
     payload: dict[str, JsonValue] = {
