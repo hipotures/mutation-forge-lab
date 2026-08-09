@@ -27,6 +27,7 @@ from mutation_forge.native_v3_python.preview import (
     request_python_preview_stop,
     run_python_preview,
 )
+from mutation_forge.native_v3_python.scientific_search import M10_REPORT_PROTOCOL_ID
 from mutation_forge.native_v3_python.search import (
     DevelopmentCaseV1,
     M5OperatorStop,
@@ -586,6 +587,53 @@ def test_wall_clock_budget_state_is_resumed_after_legacy_completed_marker(
     assert calls["provider"] == 1
     assert result["state"] == "blocked"
     assert result["last_error"] == "RuntimeError"
+
+
+def test_current_provider_error_is_not_masked_by_retained_report(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path)
+
+    def missing_provider(*_: Any) -> _Provider:
+        raise FileNotFoundError("provider capsule missing")
+
+    result = run_python_preview(
+        path,
+        provider_factory=missing_provider,
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+    assert result["terminal_reason"] == "provider_runtime_missing"
+
+    config = load_python_preview_config(path)
+    write_json(
+        config.experiment_root / "m10-report.json.gz",
+        {
+            "protocol_id": M10_REPORT_PROTOCOL_ID,
+            "stop_reason": "wall_clock_budget",
+            "generation_count": 1,
+            "exact_verified": False,
+        },
+    )
+    status = python_preview_status(path)
+    assert status["state"] == "blocked"
+    assert status["terminal_reason"] == "provider_runtime_missing"
+
+    state_path = config.experiment_root / "python-preview-state.json.gz"
+    state = read_json(state_path)
+    assert isinstance(state, dict)
+    state.update(
+        {
+            "state": "running",
+            "last_error": None,
+            "terminal_reason": None,
+            "last_boundary": "protocol_persisted",
+        }
+    )
+    write_json(state_path, state)
+    assert python_preview_status(path)["state"] == "running"
 
 
 def test_resumable_operator_stop_is_consumed_and_can_resume(

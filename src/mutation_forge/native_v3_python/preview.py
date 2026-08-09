@@ -892,13 +892,21 @@ def _progress(
         if retained_state.get("terminal_reason") is not None
         else None
     )
+    if terminal_reason is None and retained_state.get("last_error") == "FileNotFoundError":
+        terminal_reason = "provider_runtime_missing"
+    elif terminal_reason is None and retained_state.get("last_error"):
+        terminal_reason = "infrastructure_failure"
     result_kind = str(retained_state.get("scientific_result_kind", "NONE"))
     exact = retained_state.get("scientific_success") is True
     report_protocol = report.get("protocol_id") if report is not None else None
+    active_boundary = (
+        state == "running"
+        and retained_state.get("last_boundary") not in {None, "report_persisted"}
+    )
     if report is not None and (
         report_protocol == M10_REPORT_PROTOCOL_ID
         or (report_protocol == M5_REPORT_PROTOCOL_ID and retained_state.get("state") == "completed")
-    ):
+    ) and not active_boundary and not retained_state.get("last_error"):
         terminal_reason = str(report.get("stop_reason", "generation_budget"))
         generation_count = _nonnegative_int(report.get("generation_count"))
         configured_generation_limit = (
@@ -2203,6 +2211,11 @@ def run_python_preview(
             "state": "blocked",
             "resumable": True,
             "run_terminal": False,
+            "terminal_reason": (
+                "provider_runtime_missing"
+                if isinstance(error, FileNotFoundError)
+                else "infrastructure_failure"
+            ),
             "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
             "scientific_success": False,
             "last_error": _safe_error(error, config),
