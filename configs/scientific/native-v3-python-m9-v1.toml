@@ -1,0 +1,20 @@
+schema_version = "mforge.experiment.native_python_scientific_search_config.v1"
+protocol = "native-v3-python-v1"
+exp_id = "native-v3-python-m9-sustained-v1"
+workspace = "../../../mutation-forge-lab-evidence/m9/sustained"
+
+[python_preview]
+model = "gpt-5.6-luna"
+effort = "medium"
+timeout_seconds = 300
+heg_repo = "../../../heg"
+
+[python_preview.scientific_search]
+generation_limit = 8
+evaluator_workers = 12
+provider_concurrency = 1
+wall_seconds = 28800
+provider_program_turn_limit = 64
+stop_on_verified = true
+resume_enabled = true
+replace_terminal_slots = false

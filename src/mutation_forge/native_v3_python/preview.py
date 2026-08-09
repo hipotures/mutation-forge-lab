@@ -7,9 +7,11 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import tomllib
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -28,8 +30,18 @@ from .contracts import (
 )
 from .provenance import M5_PROVENANCE_FILENAME, ensure_m5_acceptance_provenance
 from .runtime_contracts import PolicyRuntimeLimitsV1
+from .scientific_search import (
+    M9_REPORT_FILENAME,
+    M9_REPORT_PROTOCOL_ID,
+    M9_RUNTIME_FILENAME,
+    M9_SEARCH_PROTOCOL_ID,
+    M9_STOP_FILENAME,
+    ScientificSearchOptionsV1,
+    run_sustained_search,
+)
 from .search import (
     M5_REPORT_PROTOCOL_ID,
+    M5_SEARCH_PROTOCOL_ID,
     DevelopmentCaseV1,
     M5OperatorStop,
     M5ScientificEvaluator,
@@ -44,6 +56,9 @@ from .search_provider import (
 
 PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION = (
     "mforge.experiment.native_python_preview_config.v1"
+)
+PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION = (
+    "mforge.experiment.native_python_scientific_search_config.v1"
 )
 PYTHON_PREVIEW_STATE_SCHEMA_VERSION = (
     "mforge.experiment.status.native_python_preview.v1"
@@ -117,6 +132,7 @@ class PythonPreviewConfig:
     effort: str
     timeout_seconds: float
     heg_repo: Path
+    scientific_search: ScientificSearchOptionsV1 | None
     source_path: Path
     source_bytes: bytes = field(repr=False, compare=False)
 
@@ -171,6 +187,18 @@ def _positive_number(value: object, name: str) -> float:
     return float(value)
 
 
+def _positive_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
 def _resolved_path(value: object, name: str, source_dir: Path) -> Path:
     raw = Path(_string(value, name))
     return (source_dir / raw).resolve() if not raw.is_absolute() else raw.resolve()
@@ -197,10 +225,13 @@ def load_python_preview_config(
     unknown = sorted(set(raw).difference(allowed))
     if unknown:
         raise ValueError(f"unsupported top-level fields: {unknown}")
-    if raw.get("schema_version") != PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION:
+    schema_version = raw.get("schema_version")
+    if schema_version not in {
+        PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION,
+        PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION,
+    }:
         raise ValueError(
-            "Python preview requires schema_version "
-            f"{PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION!r}"
+            "Python preview requires a supported schema_version"
         )
     if raw.get("protocol") != PYTHON_EXPERIMENT_PROTOCOL_ID:
         raise ValueError(
@@ -216,7 +247,13 @@ def load_python_preview_config(
     if not isinstance(preview_value, dict):
         raise ValueError("[python_preview] must be a table")
     preview = cast(dict[str, Any], preview_value)
-    allowed_preview = {"model", "effort", "timeout_seconds", "heg_repo"}
+    allowed_preview = {
+        "model",
+        "effort",
+        "timeout_seconds",
+        "heg_repo",
+        "scientific_search",
+    }
     unknown_preview = sorted(set(preview).difference(allowed_preview))
     if unknown_preview:
         raise ValueError(
@@ -235,17 +272,94 @@ def load_python_preview_config(
         "python_preview.heg_repo",
         source_path.parent,
     )
+    scientific_value = preview.get("scientific_search")
+    scientific_search: ScientificSearchOptionsV1 | None = None
+    if scientific_value is not None:
+        if schema_version != PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION:
+            raise ValueError(
+                "python_preview.scientific_search requires the scientific "
+                "search config schema"
+            )
+        if not isinstance(scientific_value, dict):
+            raise ValueError(
+                "[python_preview.scientific_search] must be a table"
+            )
+        scientific = cast(dict[str, Any], scientific_value)
+        scientific_fields = {
+            "generation_limit",
+            "evaluator_workers",
+            "provider_concurrency",
+            "wall_seconds",
+            "provider_program_turn_limit",
+            "stop_on_verified",
+            "resume_enabled",
+            "replace_terminal_slots",
+        }
+        unknown_scientific = sorted(
+            set(scientific).difference(scientific_fields)
+        )
+        if unknown_scientific:
+            raise ValueError(
+                "unsupported [python_preview.scientific_search] fields: "
+                f"{unknown_scientific}"
+            )
+        if set(scientific) != scientific_fields:
+            missing = sorted(scientific_fields.difference(scientific))
+            raise ValueError(
+                "missing [python_preview.scientific_search] fields: "
+                f"{missing}"
+            )
+        scientific_search = ScientificSearchOptionsV1(
+            generation_limit=_positive_integer(
+                scientific["generation_limit"],
+                "python_preview.scientific_search.generation_limit",
+            ),
+            evaluator_workers=_positive_integer(
+                scientific["evaluator_workers"],
+                "python_preview.scientific_search.evaluator_workers",
+            ),
+            provider_concurrency=_positive_integer(
+                scientific["provider_concurrency"],
+                "python_preview.scientific_search.provider_concurrency",
+            ),
+            wall_seconds=_positive_number(
+                scientific["wall_seconds"],
+                "python_preview.scientific_search.wall_seconds",
+            ),
+            provider_program_turn_limit=_positive_integer(
+                scientific["provider_program_turn_limit"],
+                "python_preview.scientific_search.provider_program_turn_limit",
+            ),
+            stop_on_verified=_boolean(
+                scientific["stop_on_verified"],
+                "python_preview.scientific_search.stop_on_verified",
+            ),
+            resume_enabled=_boolean(
+                scientific["resume_enabled"],
+                "python_preview.scientific_search.resume_enabled",
+            ),
+            replace_terminal_slots=_boolean(
+                scientific["replace_terminal_slots"],
+                "python_preview.scientific_search.replace_terminal_slots",
+            ),
+        )
+    elif schema_version == PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION:
+        raise ValueError(
+            "scientific search config requires "
+            "[python_preview.scientific_search]"
+        )
     return PythonPreviewConfig(
-        PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION,
-        PYTHON_EXPERIMENT_PROTOCOL_ID,
-        exp_id,
-        workspace,
-        model,
-        effort,
-        timeout_seconds,
-        heg_repo,
-        source_path,
-        source_bytes,
+        schema_version=str(schema_version),
+        protocol=PYTHON_EXPERIMENT_PROTOCOL_ID,
+        exp_id=exp_id,
+        workspace=workspace,
+        model=model,
+        effort=effort,
+        timeout_seconds=timeout_seconds,
+        heg_repo=heg_repo,
+        scientific_search=scientific_search,
+        source_path=source_path,
+        source_bytes=source_bytes,
     )
 
 
@@ -441,6 +555,10 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
     policy_invocations = 0
     graph_score_attempts = 0
     unique_graph_scores = 0
+    sandbox_wall_seconds = 0.0
+    selector_wall_seconds = 0.0
+    action_wall_seconds = 0.0
+    scoring_wall_seconds = 0.0
     for path in sorted(
         root.glob(
             "generations/generation-*/slot-*/evaluations/*.json.gz"
@@ -449,6 +567,27 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
         evaluation = _load_mapping(path)
         if evaluation is None:
             continue
+        runtime_profile = evaluation.get("runtime_profile")
+        if isinstance(runtime_profile, Mapping):
+            for key, target in (
+                ("sandbox_wall_seconds", "sandbox"),
+                ("selector_wall_seconds", "selector"),
+                ("action_wall_seconds", "action"),
+            ):
+                raw = runtime_profile.get(key)
+                value = (
+                    float(raw)
+                    if isinstance(raw, int | float)
+                    and not isinstance(raw, bool)
+                    and raw >= 0
+                    else 0.0
+                )
+                if target == "sandbox":
+                    sandbox_wall_seconds += value
+                elif target == "selector":
+                    selector_wall_seconds += value
+                else:
+                    action_wall_seconds += value
         worker = evaluation.get("worker_telemetry")
         if isinstance(worker, Mapping):
             worker_starts += 1
@@ -470,6 +609,23 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
         unique_graph_scores += _nonnegative_int(
             scientific.get("unique_graph_scores")
         )
+        stack: list[object] = [scientific]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, Mapping):
+                wall_time_ns = item.get("wall_time_ns")
+                if (
+                    isinstance(wall_time_ns, int)
+                    and not isinstance(wall_time_ns, bool)
+                    and wall_time_ns >= 0
+                    and isinstance(item.get("forbidden_length"), int)
+                ):
+                    scoring_wall_seconds += wall_time_ns / 1_000_000_000
+                stack.extend(item.values())
+            elif isinstance(item, Sequence) and not isinstance(
+                item, str | bytes
+            ):
+                stack.extend(item)
         failure = scientific.get("failure")
         if isinstance(failure, Mapping) and failure.get("code") == "PROPOSE_TIMEOUT":
             worker_timeouts += 1
@@ -482,6 +638,10 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
         "policy_invocations": policy_invocations,
         "graph_score_attempts": graph_score_attempts,
         "unique_graph_scores": unique_graph_scores,
+        "sandbox_wall_seconds": sandbox_wall_seconds,
+        "selector_wall_seconds": selector_wall_seconds,
+        "action_wall_seconds": action_wall_seconds,
+        "scoring_wall_seconds": scoring_wall_seconds,
     }
 
 
@@ -540,7 +700,7 @@ def _program_projection(
     candidates: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    for candidate in candidates[:16]:
+    for candidate in candidates[:64]:
         profile = candidate.get("behavior_profile")
         result.append(
             {
@@ -621,8 +781,13 @@ def _progress(
         for slot in cast(Sequence[Mapping[str, Any]], manifest.get("slots", ()))
         if isinstance(slot, Mapping)
     )
-    report = _load_mapping(root / "m5-report.json.gz")
-    stop = _load_mapping(root / "m5-stop.json.gz")
+    report = _load_mapping(root / M9_REPORT_FILENAME) or _load_mapping(
+        root / "m5-report.json.gz"
+    )
+    stop = _load_mapping(root / M9_STOP_FILENAME) or _load_mapping(
+        root / "m5-stop.json.gz"
+    )
+    runtime = _load_mapping(root / M9_RUNTIME_FILENAME) or {}
     state = str(retained_state.get("state", "ready"))
     resumable = bool(retained_state.get("resumable", True))
     run_terminal = retained_state.get("run_terminal") is True
@@ -635,10 +800,13 @@ def _progress(
         retained_state.get("scientific_result_kind", "NONE")
     )
     exact = retained_state.get("scientific_success") is True
-    if (
-        report is not None
-        and report.get("protocol_id") == M5_REPORT_PROTOCOL_ID
-        and retained_state.get("state") == "completed"
+    report_protocol = report.get("protocol_id") if report is not None else None
+    if report is not None and (
+        report_protocol == M9_REPORT_PROTOCOL_ID
+        or (
+            report_protocol == M5_REPORT_PROTOCOL_ID
+            and retained_state.get("state") == "completed"
+        )
     ):
         state = "completed"
         resumable = False
@@ -660,6 +828,144 @@ def _progress(
     ]
     telemetry = _evaluation_telemetry(root)
     profiles = _program_projection(candidates)
+    behavior_profiles = [
+        cast(Mapping[str, Any], item["behavior_profile"])
+        for item in candidates
+        if isinstance(item.get("behavior_profile"), Mapping)
+    ]
+    program_failure_episodes = sum(
+        _nonnegative_int(profile.get("program_failure_count"))
+        for profile in behavior_profiles
+    )
+    program_failed_candidates = sum(
+        _nonnegative_int(profile.get("program_failure_count")) > 0
+        for profile in behavior_profiles
+    )
+    accepted_rewrites = sum(
+        _nonnegative_int(profile.get("accepted_rewrite_count"))
+        for profile in behavior_profiles
+    )
+    no_plans = sum(
+        _nonnegative_int(profile.get("no_plan_count"))
+        for profile in behavior_profiles
+    )
+    illegal_final_states = sum(
+        _nonnegative_int(profile.get("illegal_final_state_count"))
+        for profile in behavior_profiles
+    )
+    selector_frequencies: Counter[str] = Counter()
+    action_frequencies: Counter[str] = Counter()
+    for profile in behavior_profiles:
+        selectors = profile.get("selector_frequencies")
+        if isinstance(selectors, Mapping):
+            selector_frequencies.update(
+                {
+                    str(key): _nonnegative_int(value)
+                    for key, value in selectors.items()
+                }
+            )
+        actions = profile.get("action_frequencies")
+        if isinstance(actions, Mapping):
+            action_frequencies.update(
+                {
+                    str(key): _nonnegative_int(value)
+                    for key, value in actions.items()
+                }
+            )
+    elapsed = max(
+        0.0,
+        float(runtime.get("active_elapsed_seconds", 0.0))
+        if isinstance(runtime.get("active_elapsed_seconds"), int | float)
+        and not isinstance(runtime.get("active_elapsed_seconds"), bool)
+        else 0.0,
+    )
+    provider_wait = max(
+        0.0,
+        float(runtime.get("provider_wait_seconds", 0.0))
+        if isinstance(runtime.get("provider_wait_seconds"), int | float)
+        and not isinstance(runtime.get("provider_wait_seconds"), bool)
+        else 0.0,
+    )
+    evaluator_busy = max(
+        0.0,
+        float(runtime.get("evaluator_busy_seconds", 0.0))
+        if isinstance(runtime.get("evaluator_busy_seconds"), int | float)
+        and not isinstance(runtime.get("evaluator_busy_seconds"), bool)
+        else 0.0,
+    )
+    persistence = max(
+        0.0,
+        float(runtime.get("persistence_seconds", 0.0))
+        if isinstance(runtime.get("persistence_seconds"), int | float)
+        and not isinstance(runtime.get("persistence_seconds"), bool)
+        else 0.0,
+    )
+    phase_times = {
+        "provider": provider_wait,
+        "evaluator/scorer": evaluator_busy,
+        "persistence": persistence,
+    }
+    dominant_key, dominant_value = max(
+        phase_times.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+    sorted_phase_values = sorted(phase_times.values(), reverse=True)
+    bottleneck = (
+        "balanced"
+        if len(sorted_phase_values) > 1
+        and dominant_value > 0
+        and sorted_phase_values[1] / dominant_value >= 0.8
+        else dominant_key
+    )
+    configured_workers = (
+        config.scientific_search.evaluator_workers
+        if config.scientific_search is not None
+        else 1
+    )
+    active_workers = _nonnegative_int(runtime.get("active_evaluators"))
+    evaluator_capacity_seconds = elapsed * configured_workers
+    evaluator_idle_seconds = max(
+        0.0,
+        evaluator_capacity_seconds - evaluator_busy,
+    )
+    evaluator_queue_wait = max(
+        0.0,
+        float(runtime.get("evaluator_queue_wait_seconds", 0.0))
+        if isinstance(
+            runtime.get("evaluator_queue_wait_seconds"),
+            int | float,
+        )
+        and not isinstance(
+            runtime.get("evaluator_queue_wait_seconds"),
+            bool,
+        )
+        else 0.0,
+    )
+    policy_invocations = telemetry["policy_invocations"]
+    graph_score_attempts = telemetry["graph_score_attempts"]
+    last_improvement = runtime.get(
+        "last_scientific_improvement_epoch_seconds"
+    )
+    time_since_improvement = (
+        max(0.0, time.time() - float(last_improvement))
+        if isinstance(last_improvement, int | float)
+        and not isinstance(last_improvement, bool)
+        else None
+    )
+    best_candidate_id = runtime.get("best_candidate_id")
+    best_candidate = next(
+        (
+            item
+            for item in candidates
+            if item.get("candidate_id") == best_candidate_id
+        ),
+        None,
+    )
+    best_program = (
+        _program_projection([best_candidate])[0]
+        if best_candidate is not None
+        else None
+    )
     verifier_submissions = sum(
         _nonnegative_int(
             cast(Mapping[str, Any], item.get("behavior_profile", {})).get(
@@ -678,6 +984,18 @@ def _progress(
         for item in candidates
         if isinstance(item.get("behavior_profile"), Mapping)
     )
+    provider_projection = _provider_telemetry(root, candidates)
+    if config.scientific_search is not None:
+        reserved_turns = runtime.get("provider_turns_submitted")
+        if (
+            isinstance(reserved_turns, int)
+            and not isinstance(reserved_turns, bool)
+            and reserved_turns >= 0
+        ):
+            provider_projection["candidate_turns"] = reserved_turns
+            provider_projection["turns"] = reserved_turns + int(
+                (root / "anchor.json.gz").is_file()
+            )
     return {
         **_public(retained_state),
         "state": state,
@@ -686,6 +1004,12 @@ def _progress(
         "terminal_reason": terminal_reason,
         "scientific_result_kind": result_kind,
         "scientific_success": exact,
+        "search_protocol": (
+            M9_SEARCH_PROTOCOL_ID
+            if config.scientific_search is not None
+            else M5_SEARCH_PROTOCOL_ID
+        ),
+        "safe_api_expanded": config.scientific_search is not None,
         "generation_index": max(generations, default=None),
         "generation_manifest_hashes": [
             manifest.get("sha256") for manifest in manifests
@@ -705,9 +1029,20 @@ def _progress(
             "missing": statuses["missing"],
             "roots": allocations["root"],
             "children": allocations["child"],
+            **(
+                {"program_failed": program_failed_candidates}
+                if config.scientific_search is not None
+                else {}
+            ),
         },
         "candidate_status_counts": dict(sorted(statuses.items())),
-        "provider": _provider_telemetry(root, candidates),
+        "provider": {
+            **provider_projection,
+            "program_turns_reserved": _nonnegative_int(
+                runtime.get("provider_turns_submitted")
+            ),
+            "wait_seconds": provider_wait,
+        },
         "sandbox": {
             key: telemetry[key]
             for key in (
@@ -718,10 +1053,79 @@ def _progress(
                 "maximum_rss_kib",
             )
         },
-        "policy_invocations": telemetry["policy_invocations"],
+        "policy_invocations": policy_invocations,
         "graph_scores": {
-            "attempts": telemetry["graph_score_attempts"],
+            "attempts": graph_score_attempts,
             "unique_graphs": telemetry["unique_graph_scores"],
+        },
+        "evaluators": {
+            "configured": configured_workers,
+            "active": active_workers,
+            "idle": max(0, configured_workers - active_workers),
+            "peak_active": _nonnegative_int(
+                runtime.get("peak_active_evaluators")
+            ),
+            "queued": _nonnegative_int(runtime.get("queued_evaluations")),
+            "completed": _nonnegative_int(
+                runtime.get("completed_evaluations")
+            ),
+            "failed": _nonnegative_int(runtime.get("failed_evaluations")),
+            "busy_seconds": evaluator_busy,
+            "idle_capacity_seconds": evaluator_idle_seconds,
+            "queue_wait_seconds": evaluator_queue_wait,
+            "utilization": (
+                evaluator_busy / evaluator_capacity_seconds
+                if evaluator_capacity_seconds > 0
+                else 0.0
+            ),
+        },
+        "throughput": {
+            "policy_invocations_per_second": (
+                policy_invocations / elapsed if elapsed > 0 else 0.0
+            ),
+            "graph_score_attempts_per_second": (
+                graph_score_attempts / elapsed if elapsed > 0 else 0.0
+            ),
+            "accepted_rewrites_per_second": (
+                accepted_rewrites / elapsed if elapsed > 0 else 0.0
+            ),
+            "elapsed_seconds": elapsed,
+        },
+        "scientific_activity": {
+            "accepted_rewrites": accepted_rewrites,
+            "program_failure_episodes": program_failure_episodes,
+            "no_plan_count": no_plans,
+            "no_plan_rate": (
+                no_plans / policy_invocations
+                if policy_invocations > 0
+                else 0.0
+            ),
+            "illegal_final_state_count": illegal_final_states,
+            "illegal_final_state_rate": (
+                illegal_final_states / policy_invocations
+                if policy_invocations > 0
+                else 0.0
+            ),
+            "selector_frequencies": dict(
+                sorted(selector_frequencies.items())
+            ),
+            "action_frequencies": dict(sorted(action_frequencies.items())),
+        },
+        "phase_timings": {
+            "provider_wait_seconds": provider_wait,
+            "evaluator_busy_seconds": evaluator_busy,
+            "sandbox_seconds": telemetry["sandbox_wall_seconds"],
+            "selector_seconds": telemetry["selector_wall_seconds"],
+            "action_seconds": telemetry["action_wall_seconds"],
+            "heg_scoring_seconds": telemetry["scoring_wall_seconds"],
+            "persistence_seconds": persistence,
+            "dominant_bottleneck": bottleneck,
+        },
+        "best": {
+            "candidate_id": best_candidate_id,
+            "fitness_interval": runtime.get("best_fitness_interval"),
+            "program": best_program,
+            "seconds_since_scientific_improvement": time_since_improvement,
         },
         "programs": profiles,
         "recovery": {
@@ -743,6 +1147,7 @@ def _progress(
             "submissions": verifier_submissions,
             "records": verifier_records,
             "verified": exact,
+            "queue": 0,
         },
         "equal_development_panel": (
             _load_mapping(root / "protocol.json.gz") or {}
@@ -893,6 +1298,11 @@ def _default_provider(
         base_instructions=system_prompt,
         auth_json=Path.home() / ".codex" / "auth.json",
         turn_timeout_seconds=config.timeout_seconds,
+        program_turn_limit=(
+            config.scientific_search.provider_program_turn_limit
+            if config.scientific_search is not None
+            else None
+        ),
     )
 
 
@@ -909,6 +1319,35 @@ def _default_evaluator(
         artifact_root=config.experiment_root / "scientific-artifacts",
         runtime_limits=PolicyRuntimeLimitsV1(),
     )
+
+
+class _BackendOwnedEvaluator:
+    """Close one evaluator worker's private backend with the worker."""
+
+    def __init__(
+        self,
+        *,
+        evaluator: M5ScientificEvaluator,
+        backend: GraphBackend,
+    ) -> None:
+        self._evaluator = evaluator
+        self._backend = backend
+
+    def evaluate(
+        self,
+        *,
+        source: str,
+        case: DevelopmentCaseV1,
+        candidate_id: str,
+    ) -> Mapping[str, JsonValue]:
+        return self._evaluator.evaluate(
+            source=source,
+            case=case,
+            candidate_id=candidate_id,
+        )
+
+    def close(self) -> None:
+        self._backend.close()
 
 
 def run_python_preview(
@@ -1010,22 +1449,52 @@ def run_python_preview(
     try:
         backend = backend_factory(config)
         panel = _panel(backend)
-        evaluator = evaluator_factory(config, backend)
         provider = provider_factory(config, system_prompt)
-        report = run_m5_search(
-            provider=provider,
-            evaluator=evaluator,
-            workspace=config.experiment_root,
-            panel=panel,
-            system_prompt=system_prompt,
-            specification_prompt=specification_prompt,
-            specification_ack_schema=ack_schema,
-            policy_schema=policy_schema,
-            preview_active=True,
-            close_provider=False,
-            boundary_hook=boundary_hook,
-            operator_stop=lambda: _stop_requested(config),
-        )
+        if config.scientific_search is None:
+            evaluator = evaluator_factory(config, backend)
+            report = run_m5_search(
+                provider=provider,
+                evaluator=evaluator,
+                workspace=config.experiment_root,
+                panel=panel,
+                system_prompt=system_prompt,
+                specification_prompt=specification_prompt,
+                specification_ack_schema=ack_schema,
+                policy_schema=policy_schema,
+                preview_active=True,
+                close_provider=False,
+                boundary_hook=boundary_hook,
+                operator_stop=lambda: _stop_requested(config),
+            )
+        else:
+
+            def make_evaluator() -> M5ScientificEvaluator:
+                worker_backend = backend_factory(config)
+                try:
+                    evaluator = evaluator_factory(config, worker_backend)
+                except BaseException:
+                    with suppress(Exception):
+                        worker_backend.close()
+                    raise
+                return _BackendOwnedEvaluator(
+                    evaluator=evaluator,
+                    backend=worker_backend,
+                )
+
+            report = run_sustained_search(
+                provider=provider,
+                evaluator_factory=make_evaluator,
+                workspace=config.experiment_root,
+                panel=panel,
+                system_prompt=system_prompt,
+                specification_prompt=specification_prompt,
+                specification_ack_schema=ack_schema,
+                policy_schema=policy_schema,
+                options=config.scientific_search,
+                provider_turn_timeout_seconds=config.timeout_seconds,
+                boundary_hook=boundary_hook,
+                operator_stop=lambda: _stop_requested(config),
+            )
         final_state = {
             **running,
             "state": "completed",
@@ -1101,6 +1570,7 @@ __all__ = [
     "PYTHON_PREVIEW_MODE",
     "PYTHON_PREVIEW_PROTOCOL_VERSION",
     "PYTHON_PREVIEW_STATE_SCHEMA_VERSION",
+    "PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION",
     "V2_PROTOCOL",
     "PythonPreviewConfig",
     "PythonPreviewWorkspaceError",
