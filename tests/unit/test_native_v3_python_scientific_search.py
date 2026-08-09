@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import threading
 import time
 from collections.abc import Mapping
@@ -12,6 +13,7 @@ import pytest
 
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
+from mutation_forge.native_v3_python import scientific_search as search_module
 from mutation_forge.native_v3_python import search_provider as provider_module
 from mutation_forge.native_v3_python.contracts import (
     PYTHON_EXPERIMENT_PROTOCOL_ID,
@@ -26,6 +28,7 @@ from mutation_forge.native_v3_python.scientific_search import (
     M10_REPORT_PROTOCOL_ID,
     M10_SEARCH_PROTOCOL_ID,
     M10_STOP_FILENAME,
+    ScientificResumeBudgetV1,
     ScientificSearchOptionsV2,
     run_sustained_search,
 )
@@ -413,6 +416,7 @@ def _run(
     options: ScientificSearchOptionsV2,
     operator_stop: Any = None,
     boundary_hook: Any = None,
+    resume_budget: ScientificResumeBudgetV1 | None = None,
 ) -> dict[str, Any]:
     return run_sustained_search(
         provider=provider,
@@ -425,6 +429,7 @@ def _run(
         policy_schema=_POLICY_SCHEMA,
         options=options,
         provider_turn_timeout_seconds=1,
+        resume_budget=resume_budget,
         operator_stop=operator_stop,
         boundary_hook=boundary_hook,
     )
@@ -787,6 +792,256 @@ def test_interrupted_provider_turn_is_consumed_without_external_repeat(
             options=_options(),
         )
     assert resumed.calls == []
+
+
+def test_current_generation_resume_retries_pending_and_caps_new_repairs(
+    tmp_path: Path,
+) -> None:
+    durable: dict[str, M5ProviderResultV1] = {}
+    options = _options(generations=4, repairs=24)
+    initial_provider = _Provider(durable)
+    with pytest.raises(M5OperatorStop):
+        _run(
+            tmp_path,
+            provider=initial_provider,
+            concurrency=_Concurrency(parties=1),
+            options=options,
+            operator_stop=lambda: len(initial_provider.calls) >= 24,
+        )
+
+    manifest = cast(
+        Mapping[str, Any],
+        read_json(
+            tmp_path
+            / "generations"
+            / "generation-0002"
+            / "manifest.json.gz"
+        ),
+    )
+    slots = cast(list[Mapping[str, Any]], manifest["slots"])
+    pending_slots = {f"slot-{index:02d}" for index in range(1, 8)}
+    request_keys: dict[str, str] = {}
+    for slot in slots:
+        slot_name = str(slot["slot"])
+        if slot_name not in pending_slots:
+            continue
+        request_key = str(slot["request_key"])
+        request_keys[slot_name] = request_key
+        slot_dir = (
+            tmp_path
+            / "generations"
+            / "generation-0002"
+            / slot_name
+        )
+        (slot_dir / "candidate.json.gz").unlink()
+        (slot_dir / "prepared-candidate.json.gz").unlink()
+        shutil.rmtree(slot_dir / "provider-initial")
+        durable.pop(request_key)
+
+    runtime_path = tmp_path / "m10-runtime.json.gz"
+    runtime = cast(dict[str, Any], read_json(runtime_path))
+    unstarted = {
+        f"{request_keys[slot]}-initial"
+        for slot in ("slot-03", "slot-04", "slot-05")
+    }
+    started = [
+        str(key)
+        for key in cast(list[object], runtime["provider_started_keys"])
+        if str(key) not in unstarted
+    ]
+    started.append("historical-repair")
+    runtime.update(
+        {
+            "provider_started_keys": started,
+            "provider_turns_submitted": 22,
+            "primary_turns_submitted": 21,
+            "repair_turn_keys": ["historical-repair"],
+            "repair_turns_submitted": 1,
+            "active_provider_turns": 0,
+        }
+    )
+    write_json(runtime_path, runtime)
+
+    class ResumeProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__(durable)
+            self.repair_slots: list[str] = []
+
+        def _program(self, **kwargs: Any) -> M5ProviderResultV1:
+            result = super()._program(**kwargs)
+            if kwargs["slot"] not in {
+                "slot-01",
+                "slot-02",
+                "slot-03",
+            }:
+                return result
+            invalid = M5ProviderResultV1(
+                response_text=json.dumps(
+                    {
+                        "schema_version": (
+                            "mforge.native.python_policy_response.v1"
+                        ),
+                        "source": "import os\n",
+                    },
+                    separators=(",", ":"),
+                ),
+                context=result.context,
+                usage=result.usage,
+                duration_ms=result.duration_ms,
+                warnings=result.warnings,
+            )
+            key = str(kwargs["idempotency_key"])
+            self.durable[key] = invalid
+            write_json(
+                Path(kwargs["artifact_dir"])
+                / "m5-provider-result.json.gz",
+                invalid.as_dict(),
+            )
+            return invalid
+
+        def repair(
+            self,
+            *,
+            previous: M5ProviderResultV1,
+            generation: int,
+            slot: str,
+            idempotency_key: str,
+            artifact_dir: Path,
+            **_: Any,
+        ) -> M5ProviderResultV1:
+            self.repair_slots.append(slot)
+            turn = f"repair-{generation}-{slot}"
+            result = M5ProviderResultV1(
+                response_text=json.dumps(
+                    {
+                        "schema_version": (
+                            "mforge.native.python_policy_response.v1"
+                        ),
+                        "source": _source(f"repair-{slot}"),
+                    },
+                    separators=(",", ":"),
+                ),
+                context=M5ProviderContextV1(
+                    previous.context.thread_id,
+                    turn,
+                    None,
+                    previous.context.included_turn_ids + (turn,),
+                ),
+                usage=_usage(),
+                duration_ms=1,
+                warnings=0,
+            )
+            self.durable[idempotency_key] = result
+            write_json(
+                artifact_dir / "m5-provider-result.json.gz",
+                result.as_dict(),
+            )
+            return result
+
+    resumed = ResumeProvider()
+    report = _run(
+        tmp_path,
+        provider=resumed,
+        concurrency=_Concurrency(parties=1),
+        options=options,
+        resume_budget=ScientificResumeBudgetV1(
+            expected_pending_primary_slots=7,
+            max_new_repair_turns=2,
+        ),
+    )
+
+    assert sorted(resumed.calls) == [
+        (2, f"slot-{index:02d}") for index in range(1, 8)
+    ]
+    assert resumed.repair_slots == ["slot-01", "slot-02"]
+    assert report["stop_reason"] == "resume_generation_complete"
+    assert report["candidate_count"] == 24
+    assert report["pending_candidate_count"] == 0
+    assert not (
+        tmp_path
+        / "generations"
+        / "generation-0003"
+        / "manifest.json.gz"
+    ).exists()
+    final_runtime = cast(dict[str, Any], read_json(runtime_path))
+    assert final_runtime["primary_turns_submitted"] == 28
+    assert final_runtime["repair_turns_submitted"] == 3
+    assert final_runtime["provider_turns_submitted"] == 31
+    assert len(
+        cast(
+            Mapping[str, object],
+            final_runtime["interrupted_primary_retries"],
+        )
+    ) == 4
+
+
+def test_resume_budget_remains_cumulative_across_process_restarts(
+    tmp_path: Path,
+) -> None:
+    options = _options(generations=4, repairs=24)
+    primary_keys = [f"primary-{index}" for index in range(8)]
+    initial = search_module._RuntimeTelemetry(tmp_path, options)
+    initial.reserve_primary_generation(
+        primary_keys,
+        limit=options.primary_program_slots,
+    )
+    assert initial.provider_started(primary_keys[0], kind="primary")
+    initial.provider_finished(0.0, key=primary_keys[0], failed=True)
+
+    budget = ScientificResumeBudgetV1(
+        expected_pending_primary_slots=7,
+        max_new_repair_turns=2,
+    )
+    first_resume = search_module._RuntimeTelemetry(
+        tmp_path,
+        options,
+        budget,
+    )
+    retry_key, attempt = first_resume.admit_primary_retry(
+        primary_keys[0],
+        limit=options.primary_program_slots,
+        durable_result_exists=lambda _: False,
+    )
+    assert (retry_key, attempt) == ("primary-0-resume-01", 1)
+    assert first_resume.provider_started(retry_key, kind="primary")
+    first_resume.provider_finished(0.0, key=retry_key, failed=False)
+
+    restarted = search_module._RuntimeTelemetry(tmp_path, options, budget)
+    assert restarted.admit_primary_retry(
+        primary_keys[0],
+        limit=options.primary_program_slots,
+        durable_result_exists=lambda retry_attempt: retry_attempt == 1,
+    ) == (retry_key, 1)
+    assert not restarted.provider_started(retry_key, kind="primary")
+    for key in primary_keys[1:7]:
+        assert restarted.provider_started(key, kind="primary")
+        restarted.provider_finished(0.0, key=key, failed=False)
+    with pytest.raises(
+        search_module._ProviderTurnBudgetExhausted,
+        match="resume primary turn budget is exhausted",
+    ):
+        restarted.provider_started(primary_keys[7], kind="primary")
+
+    for repair_key in ("repair-a", "repair-b"):
+        assert restarted.reserve_repair(
+            repair_key,
+            limit=options.repair_turn_limit,
+        )
+        assert restarted.provider_started(repair_key, kind="repair")
+        restarted.provider_finished(0.0, key=repair_key, failed=False)
+    assert not restarted.reserve_repair(
+        "repair-c",
+        limit=options.repair_turn_limit,
+    )
+    restarted_again = search_module._RuntimeTelemetry(
+        tmp_path,
+        options,
+        budget,
+    )
+    assert not restarted_again.reserve_repair(
+        "repair-c",
+        limit=options.repair_turn_limit,
+    )
 
 
 def test_one_provider_failure_consumes_its_slot_and_search_continues(

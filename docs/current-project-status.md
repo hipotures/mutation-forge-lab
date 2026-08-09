@@ -96,12 +96,14 @@ counterexample.
 - Exact resume command:
 
   ```console
-  uv run mforge experiment run --config configs/scientific/native-v3-python-m10-v1.toml --json
+  uv run mforge experiment run --config configs/scientific/native-v3-python-m10-v1.toml --json --resume-current-generation 7 --max-new-repair-turns 2
   ```
 
 The campaign must not be resumed without new, explicit provider-budget
 authorization. Resume must use the frozen scientific configuration and must
-preserve existing terminal work.
+preserve existing terminal work. The guarded command admits exactly the
+seven pending primary slots, at most two additional repair turns, and no
+next generation: at most nine token-consuming calls.
 
 ## Dashboard operation
 
@@ -120,7 +122,7 @@ uv run mforge experiment status --config /home/user/DEV/mutation-forge-lab-evide
 Future authorized resume:
 
 ```console
-uv run mforge experiment run --config configs/scientific/native-v3-python-m10-v1.toml --json
+uv run mforge experiment run --config configs/scientific/native-v3-python-m10-v1.toml --json --resume-current-generation 7 --max-new-repair-turns 2
 ```
 
 The status commands read the existing workspace, display
