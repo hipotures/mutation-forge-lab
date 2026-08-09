@@ -42,6 +42,9 @@ M5_PROVIDER_MAX_TURNS = 40
 M5_PROVIDER_MAX_CAMPAIGNS = 40
 M5_PROVIDER_TRANSCRIPT_BYTES = 16 * 1024 * 1024
 M5_PROVIDER_STDOUT_BYTES = 16 * 1024 * 1024
+M9_PROVIDER_MAX_EVENTS = 100_000
+M9_PROVIDER_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+M9_PROVIDER_STDOUT_BYTES = 64 * 1024 * 1024
 
 
 def _write_or_verify(path: Path, value: Mapping[str, Any]) -> None:
@@ -137,6 +140,7 @@ class CodexM5SearchProvider:
         adapter: CodexAppServerAdapter | None = None,
         turn_timeout_seconds: float = 300.0,
         cleanup_capsule: bool = True,
+        program_turn_limit: int | None = None,
     ) -> None:
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -148,6 +152,8 @@ class CodexM5SearchProvider:
         self._capsule: IsolatedCapsule | None = None
         self._owns_adapter = adapter is None
         self._anchor_can_activate = False
+        if program_turn_limit is not None and not 1 <= program_turn_limit <= 64:
+            raise ValueError("program_turn_limit must be between 1 and 64")
         if adapter is not None:
             self.adapter = adapter
             if self._state_path.exists():
@@ -168,14 +174,36 @@ class CodexM5SearchProvider:
                 sandbox_mode="read-only",
                 approval_policy="never",
             )
+        max_turns = (
+            M5_PROVIDER_MAX_TURNS
+            if program_turn_limit is None
+            else program_turn_limit + 1
+        )
         self.adapter = CodexAppServerAdapter(
             capsule=self._capsule,
             limits=AppServerLimits(
-                max_turns=M5_PROVIDER_MAX_TURNS,
-                max_campaigns=M5_PROVIDER_MAX_CAMPAIGNS,
+                max_turns=max_turns,
+                max_campaigns=(
+                    M5_PROVIDER_MAX_CAMPAIGNS
+                    if program_turn_limit is None
+                    else max_turns
+                ),
+                max_events=(
+                    10_000
+                    if program_turn_limit is None
+                    else M9_PROVIDER_MAX_EVENTS
+                ),
                 response_bytes=64 * 1024,
-                transcript_bytes=M5_PROVIDER_TRANSCRIPT_BYTES,
-                stdout_bytes=M5_PROVIDER_STDOUT_BYTES,
+                transcript_bytes=(
+                    M5_PROVIDER_TRANSCRIPT_BYTES
+                    if program_turn_limit is None
+                    else M9_PROVIDER_TRANSCRIPT_BYTES
+                ),
+                stdout_bytes=(
+                    M5_PROVIDER_STDOUT_BYTES
+                    if program_turn_limit is None
+                    else M9_PROVIDER_STDOUT_BYTES
+                ),
                 turn_timeout=turn_timeout_seconds,
                 resource_cpu_seconds=600,
             ),

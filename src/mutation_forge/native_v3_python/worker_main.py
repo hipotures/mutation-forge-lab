@@ -356,11 +356,39 @@ class _APIProxy:
     def matching_k_switch_reconnections(self, k: int) -> tuple[_OpaqueRef, ...]:
         return self._call("matching_k_switch_reconnections", {"k": k})  # type: ignore[return-value]
 
+    def matching_k_switch_reconnections_for_edge(
+        self,
+        edge: _OpaqueRef,
+        k: int,
+    ) -> tuple[_OpaqueRef, ...]:
+        return self._call(  # type: ignore[return-value]
+            "matching_k_switch_reconnections_for_edge",
+            {"edge": edge, "k": k},
+        )
+
     def relocations_legal(self) -> tuple[_OpaqueRef, ...]:
         return self._call("relocations_legal", {})  # type: ignore[return-value]
 
+    def relocations_legal_for_edge(
+        self,
+        edge: _OpaqueRef,
+    ) -> tuple[_OpaqueRef, ...]:
+        return self._call(  # type: ignore[return-value]
+            "relocations_legal_for_edge",
+            {"edge": edge},
+        )
+
     def edge_fanouts_legal(self) -> tuple[_OpaqueRef, ...]:
         return self._call("edge_fanouts_legal", {})  # type: ignore[return-value]
+
+    def edge_fanouts_legal_for_edge(
+        self,
+        edge: _OpaqueRef,
+    ) -> tuple[_OpaqueRef, ...]:
+        return self._call(  # type: ignore[return-value]
+            "edge_fanouts_legal_for_edge",
+            {"edge": edge},
+        )
 
     def pick(
         self,

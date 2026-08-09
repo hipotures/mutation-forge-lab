@@ -1,0 +1,92 @@
+{
+  "schema_version": "mforge.native.python.m9.result.v1",
+  "branch": "native-v3-python-scientific-search",
+  "implementation_head": "602245e88680527baf0403451ec6a88f4cd7b222",
+  "campaign_head": "69f8e444d4fbca8ddd06caeb58c5098a2237b22c",
+  "merged_main_base": "60285f623fa0f0670518337d114d0e52866926f2",
+  "heg_commit": "27cbec9c2307b6ea5f936f858821d11d808b68f3",
+  "campaign": {
+    "exp_id": "native-v3-python-m9-sustained-v1-fix1",
+    "mode": "ordinary-python",
+    "model": "gpt-5.6-luna",
+    "effort": "medium",
+    "active_elapsed_seconds": 3045.3873683649945,
+    "wall_elapsed_seconds": 4623.211114,
+    "stop_reason": "provider_turn_budget",
+    "scientific_success": false
+  },
+  "protocol": {
+    "generation_limit": 8,
+    "population_size": 8,
+    "generation_0": {
+      "children": 0,
+      "roots": 8
+    },
+    "later_generations": {
+      "children": 4,
+      "roots": 4
+    },
+    "evaluator_workers": 12,
+    "provider_concurrency": 1,
+    "provider_program_turn_limit": 64,
+    "wall_seconds": 28800,
+    "replace_terminal_slots": false,
+    "stop_on_verified": true
+  },
+  "results": {
+    "planned_slots": 64,
+    "terminal_slots": 56,
+    "pending_slots": 8,
+    "evaluated_candidates": 48,
+    "contract_invalid_candidates": 8,
+    "duplicate_candidates": 0,
+    "provider_failed_candidates": 0,
+    "program_failure_episodes": 6,
+    "evaluation_records": 96,
+    "complete_evaluation_records": 90,
+    "generated_source_files": 48
+  },
+  "provider": {
+    "anchor_turns": 1,
+    "candidate_program_turns": 64,
+    "repair_turns": 8,
+    "warnings": 57,
+    "total_tokens": 556439
+  },
+  "best_candidate": {
+    "candidate_id": "g0004-slot-04",
+    "kind": "root",
+    "program_hash": "485e744c0fbe5666a4224317aaf487424907fcd5af0553e6646b7fce5abcd142",
+    "source_sha256": "819bb5e003e5a040a1600c1536b76e4c4151a4a872dfe2d297fddbde271edf69",
+    "fitness": {
+      "lower": {
+        "numerator": 316968447,
+        "denominator": 541220632
+      },
+      "upper": {
+        "numerator": 316968447,
+        "denominator": 541220632
+      },
+      "decimal": "0.585654774151329840655446409515"
+    },
+    "exact_verified": false
+  },
+  "exact_verification": {
+    "authority": "exact_verifier_only",
+    "queue": 0,
+    "submissions": 0,
+    "records": 0,
+    "verified": false
+  },
+  "durable_evidence": {
+    "workspace": "/home/user/DEV/mutation-forge-lab-evidence/m9/sustained/native-v3-python-m9-sustained-v1-fix1",
+    "report_sha256": "12cb5fbe56fdca4c9472d5f31a82d2020027c7b2ae05c7684181a9babbb05af2",
+    "immutable_file_count": 2167,
+    "immutable_aggregate_sha256": "cfc92dcadb3b14e4d612ae249a5427a550ce4dd5e6a592f11bec0bdf3d5b3b6d",
+    "source_hashes_verified": true,
+    "manifest_hashes_verified": true,
+    "search_memory_hashes_verified": true,
+    "offline_finalized": true,
+    "provider_or_backend_started_during_finalization": false
+  }
+}

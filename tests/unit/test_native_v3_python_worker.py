@@ -192,6 +192,12 @@ def test_worker_returns_only_host_minted_plan_and_replays_trace() -> None:
             )
             assert result.outcome == "REWRITE_PLAN"
             assert result.rewrite_plan is not None
+            assert result.selector_wall_seconds > 0
+            assert result.action_wall_seconds > 0
+            assert (
+                result.selector_wall_seconds + result.action_wall_seconds
+                <= result.wall_seconds
+            )
             plans.append(result.rewrite_plan)
             traces.append(tuple(event.as_dict() for event in result.semantic_trace))
         assert worker.telemetry()["calls"] == 2

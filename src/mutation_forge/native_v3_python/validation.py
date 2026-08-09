@@ -64,8 +64,11 @@ SELECTOR_METHODS = frozenset(
         "non_edges_local_cycle_risk",
         "paths_length_two",
         "matching_k_switch_reconnections",
+        "matching_k_switch_reconnections_for_edge",
         "relocations_legal",
+        "relocations_legal_for_edge",
         "edge_fanouts_legal",
+        "edge_fanouts_legal_for_edge",
     }
 )
 ACTION_METHODS = frozenset(

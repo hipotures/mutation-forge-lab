@@ -37,7 +37,7 @@ only:
 ```
 
 The request explains the Erdős–Gyárfás objective, immutable context and graph
-views, all 24 accepted safe API methods, opaque reference semantics, terminal
+views, all 27 accepted safe API methods, opaque reference semantics, terminal
 results, and the M1 Python subset. Tests prove that model-facing text contains
 no host hashes, UUIDs, workspace paths, provider bookkeeping, raw labels,
 adjacency, scorer state, verifier state, or held-out data.

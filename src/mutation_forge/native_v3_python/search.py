@@ -970,9 +970,44 @@ def build_search_memory(
         "active_parent": None,
     }
     host["model_projection"] = model
-    host["sha256"] = domain_hash(_MEMORY_DOMAIN, canonical_json_bytes(host))
-    if len(canonical_json_bytes(host)) > MAX_MEMORY_BYTES:
-        raise M5SearchError("Search Memory exceeds 16 KiB")
+    while True:
+        host.pop("sha256", None)
+        host["sha256"] = domain_hash(
+            _MEMORY_DOMAIN, canonical_json_bytes(host)
+        )
+        if len(canonical_json_bytes(host)) <= MAX_MEMORY_BYTES:
+            break
+        program_hashes = cast(list[JsonValue], host["seen_program_hashes"])
+        behavior_signatures = cast(
+            list[JsonValue], host["seen_behavior_signatures"]
+        )
+        active_lineages = cast(list[JsonValue], host["active_lineages"])
+        archive_ids = cast(list[JsonValue], host["validated_archive_ids"])
+        successful_patterns = cast(
+            list[JsonValue], model["successful_patterns"]
+        )
+        tested_patterns = cast(list[JsonValue], model["tested_patterns"])
+        if len(program_hashes) > MAX_ARCHIVE_IDS:
+            program_hashes.pop(0)
+            behavior_signatures.pop(0)
+        elif successful_patterns or tested_patterns:
+            target = (
+                successful_patterns
+                if len(successful_patterns) >= len(tested_patterns)
+                else tested_patterns
+            )
+            target.pop(0)
+        elif active_lineages:
+            active_lineages.pop(0)
+        elif archive_ids:
+            archive_ids.pop(0)
+        elif program_hashes:
+            program_hashes.pop(0)
+            behavior_signatures.pop(0)
+        else:
+            raise M5SearchError(
+                "minimal Search Memory exceeds 16 KiB"
+            )
     model_text = json.dumps(model, sort_keys=True, separators=(",", ":"))
     if any(
         token in model_text

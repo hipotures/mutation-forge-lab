@@ -558,6 +558,46 @@ def test_search_memory_exact_bounds_and_canonical_order() -> None:
     )
 
 
+def test_search_memory_adaptively_trims_large_semantic_patterns() -> None:
+    profile = aggregate_behavior(
+        [_evaluation(source=_source("memory"), case=_PANEL[0], accepted=True)]
+    )
+    profile["selector_frequencies"] = {
+        f"relation_selector_{index:02d}_{'x' * 48}": 1
+        for index in range(32)
+    }
+    candidates = [
+        {
+            "candidate_id": f"g{index // 8:04d}-slot-{index % 8:02d}",
+            "parent_candidate_id": None,
+            "generation": index // 8,
+            "slot": f"slot-{index % 8:02d}",
+            "status": "evaluated",
+            "program_hash": f"{index + 1:064x}",
+            "behavior_signature": f"{index + 1001:064x}",
+            "behavior_profile": profile,
+            "control_flow": {"if_count": 1, "for_count": 0},
+        }
+        for index in range(56)
+    ]
+
+    memory = build_search_memory(candidates)
+
+    assert (
+        len(
+            json.dumps(
+                memory,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        <= 16 * 1024
+    )
+    assert len(memory["seen_program_hashes"]) < 56
+    assert memory["seen_program_hashes"][-1] == f"{56:064x}"
+    assert build_search_memory(tuple(reversed(candidates))) == memory
+
+
 def test_child_prompt_resends_exact_parent_and_only_host_feedback() -> None:
     source = _source("parent")
     profile = aggregate_behavior(

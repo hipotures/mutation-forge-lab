@@ -10,10 +10,13 @@ import tempfile
 import time
 import tomllib
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, cast
 
 from rich.console import Console
+from rich.live import Live
 from rich.table import Table
 
 from mutation_forge import __version__
@@ -281,6 +284,101 @@ def _emit_policy_result(result: object, *, json_output: bool) -> None:
         Console().print_json(canonical)
 
 
+def _python_preview_dashboard(status: Mapping[str, Any]) -> Table:
+    """Render the bounded live status already exposed by the Python route."""
+
+    counts = status.get("counts")
+    provider = status.get("provider")
+    evaluators = status.get("evaluators")
+    throughput = status.get("throughput")
+    activity = status.get("scientific_activity")
+    phase = status.get("phase_timings")
+    best = status.get("best")
+    exact = status.get("exact_verification")
+    counts = counts if isinstance(counts, Mapping) else {}
+    provider = provider if isinstance(provider, Mapping) else {}
+    evaluators = evaluators if isinstance(evaluators, Mapping) else {}
+    throughput = throughput if isinstance(throughput, Mapping) else {}
+    activity = activity if isinstance(activity, Mapping) else {}
+    phase = phase if isinstance(phase, Mapping) else {}
+    best = best if isinstance(best, Mapping) else {}
+    exact = exact if isinstance(exact, Mapping) else {}
+    usage = provider.get("usage")
+    total_tokens = (
+        usage.get("totalTokens", 0) if isinstance(usage, Mapping) else 0
+    )
+    recovery = status.get("recovery")
+    last_boundary = (
+        recovery.get("last_boundary")
+        if isinstance(recovery, Mapping)
+        else None
+    )
+    table = Table(
+        title="Native v3 ordinary-Python scientific search",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("Metric")
+    table.add_column("Value", overflow="fold")
+    rows = (
+        ("state", status.get("state")),
+        ("generation", status.get("generation_index")),
+        (
+            "slots",
+            f"{counts.get('terminal', 0)}/{counts.get('planned', 0)} "
+            f"terminal; {counts.get('pending', 0)} remaining",
+        ),
+        (
+            "candidates",
+            "valid={valid} invalid={invalid} duplicate={duplicate} "
+            "provider_failed={provider_failed} program_failed={program_failed}".format(
+                valid=counts.get("valid", 0),
+                invalid=counts.get("contract_invalid", 0),
+                duplicate=counts.get("duplicate", 0),
+                provider_failed=counts.get("provider_failed", 0),
+                program_failed=counts.get("program_failed", 0),
+            ),
+        ),
+        (
+            "provider",
+            f"turns={provider.get('program_turns_reserved', 0)} "
+            f"tokens={total_tokens}",
+        ),
+        (
+            "evaluators",
+            f"active={evaluators.get('active', 0)} "
+            f"idle={evaluators.get('idle', 0)} "
+            f"queued={evaluators.get('queued', 0)} "
+            f"peak={evaluators.get('peak_active', 0)} "
+            f"utilization={float(evaluators.get('utilization', 0.0)):.1%}",
+        ),
+        (
+            "throughput",
+            f"policy={float(throughput.get('policy_invocations_per_second', 0.0)):.3f}/s "
+            f"scores={float(throughput.get('graph_score_attempts_per_second', 0.0)):.3f}/s "
+            f"accepted={float(throughput.get('accepted_rewrites_per_second', 0.0)):.3f}/s",
+        ),
+        (
+            "outcomes",
+            f"NoPlan={float(activity.get('no_plan_rate', 0.0)):.1%} "
+            f"illegal-final={float(activity.get('illegal_final_state_rate', 0.0)):.1%}",
+        ),
+        ("best", f"{best.get('candidate_id')} {best.get('fitness_interval')}"),
+        (
+            "exact verifier",
+            f"queue={exact.get('queue', 0)} "
+            f"submissions={exact.get('submissions', 0)} "
+            f"records={exact.get('records', 0)} "
+            f"verified={exact.get('verified', False)}",
+        ),
+        ("bottleneck", phase.get("dominant_bottleneck", "unknown")),
+        ("last boundary", last_boundary),
+    )
+    for label, value in rows:
+        table.add_row(label, str(value))
+    return table
+
+
 def _experiment_run(
     config_path: Path,
     *,
@@ -291,12 +389,42 @@ def _experiment_run(
 ) -> int:
     protocol = experiment_protocol(config_path)
     if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
-        if dashboard or until_complete or profiling is not None:
+        if until_complete or profiling is not None:
             raise ValueError(
-                "ordinary-Python preview does not accept Native v2 dashboard, "
-                "until-complete, or profiling options"
+                "ordinary-Python preview does not accept Native v2 "
+                "until-complete or profiling options"
             )
-        result = run_python_preview(config_path)
+        if dashboard and json_output:
+            raise ValueError(
+                "ordinary-Python preview dashboard cannot be combined with JSON"
+            )
+        if dashboard:
+            console = Console(file=sys.stdout)
+            with ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="mforge-python-preview",
+            ) as executor:
+                future = executor.submit(run_python_preview, config_path)
+                with Live(
+                    _python_preview_dashboard(
+                        python_preview_status(config_path)
+                    ),
+                    console=console,
+                    refresh_per_second=2,
+                ) as live:
+                    while True:
+                        try:
+                            result = future.result(timeout=0.5)
+                            break
+                        except FutureTimeoutError:
+                            live.update(
+                                _python_preview_dashboard(
+                                    python_preview_status(config_path)
+                                )
+                            )
+                    live.update(_python_preview_dashboard(result), refresh=True)
+        else:
+            result = run_python_preview(config_path)
         encoded = json.dumps(
             result,
             ensure_ascii=False,

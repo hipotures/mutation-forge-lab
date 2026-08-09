@@ -230,6 +230,8 @@ class PolicyInvocationResultV1:
     failure: ProgramFailureV1 | None = None
     semantic_trace: tuple[SemanticAPIEventV1, ...] = ()
     wall_seconds: float = 0.0
+    selector_wall_seconds: float = 0.0
+    action_wall_seconds: float = 0.0
     worker_rss_kib: int = 0
     loop_body_entries: int = 0
     helper_invocations: int = 0
@@ -251,3 +253,9 @@ class PolicyInvocationResultV1:
             raise ValueError("invocation outcome and payload are inconsistent")
         if self.protocol_id != RUNTIME_PROTOCOL_ID:
             raise ValueError("invalid runtime protocol ID")
+        if (
+            self.wall_seconds < 0
+            or self.selector_wall_seconds < 0
+            or self.action_wall_seconds < 0
+        ):
+            raise ValueError("invocation telemetry durations must be non-negative")

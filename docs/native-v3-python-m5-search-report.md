@@ -186,9 +186,9 @@ means, NoPlan reasons, witness deltas for lengths 4, 8, and 16, semantic trace
 hashes, acceptance/rejection counts, and exact rational fitness for every
 evaluated program.
 
-The safe API still cannot causally constrain k-switch, fanout, or relocation
-candidates to a witness-selected edge or vertex. M5 did not expand the API.
-This remains an evidence-backed limitation for a later operator decision.
+The M5 API could not causally constrain k-switch, fanout, or relocation
+candidates to a witness-selected edge or vertex. M9 later added edge-scoped
+selector variants while preserving the original M5 evidence and behavior.
 
 ## Provider and exact-verifier accounting
 

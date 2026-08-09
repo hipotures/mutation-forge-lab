@@ -499,6 +499,8 @@ class IsolatedPolicyWorkerV1:
             failure=failure,
             semantic_trace=session.semantic_trace,
             wall_seconds=wall_seconds,
+            selector_wall_seconds=session.timing["selector_wall_seconds"],
+            action_wall_seconds=session.timing["action_wall_seconds"],
             worker_rss_kib=rss_kib if rss_kib is not None else self._last_rss_kib,
             loop_body_entries=counts.get("loop_body_entries", 0),
             helper_invocations=counts.get("helper_invocations", 0),
@@ -683,6 +685,12 @@ class IsolatedPolicyWorkerV1:
                         rewrite_plan=host_result,
                         semantic_trace=session.semantic_trace,
                         wall_seconds=wall_seconds,
+                        selector_wall_seconds=session.timing[
+                            "selector_wall_seconds"
+                        ],
+                        action_wall_seconds=session.timing[
+                            "action_wall_seconds"
+                        ],
                         worker_rss_kib=rss_kib,
                         loop_body_entries=guard_counts["loop_body_entries"],
                         helper_invocations=guard_counts["helper_invocations"],
@@ -692,6 +700,12 @@ class IsolatedPolicyWorkerV1:
                     no_plan=host_result,
                     semantic_trace=session.semantic_trace,
                     wall_seconds=wall_seconds,
+                    selector_wall_seconds=session.timing[
+                        "selector_wall_seconds"
+                    ],
+                    action_wall_seconds=session.timing[
+                        "action_wall_seconds"
+                    ],
                     worker_rss_kib=rss_kib,
                     loop_body_entries=guard_counts["loop_body_entries"],
                     helper_invocations=guard_counts["helper_invocations"],
