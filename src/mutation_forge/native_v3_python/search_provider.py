@@ -20,6 +20,7 @@ from mutation_forge.stage3.app_server import (
     ForkResult,
     GenerationResult,
     ModelProfile,
+    ProtocolError,
 )
 from mutation_forge.stage3.isolation import IsolatedCapsule, secure_capsule_parent
 
@@ -926,31 +927,32 @@ class CodexM10SearchProvider:
     def _ensure_workers(self) -> None:
         if self._workers:
             return
-        capsule = self._coordinator.capsule
         for worker in range(self.provider_concurrency):
-            adapter = CodexAppServerAdapter(
-                capsule=capsule,
-                limits=_app_server_limits(
-                    program_turn_limit=self._provider_total_turn_limit,
-                    turn_timeout_seconds=self._turn_timeout_seconds,
-                ),
-                base_instructions=self._base_instructions,
-                sandbox_mode="read-only",
-                approval_policy="never",
-                compress_json_artifacts=True,
-                copy_rollout_artifact=True,
-            )
-            self._workers.append(
-                CodexM5SearchProvider(
-                    workspace=self.workspace / "workers" / f"worker-{worker:02d}",
-                    model=self.model,
-                    effort=self.effort,
-                    base_instructions=self._base_instructions,
-                    adapter=adapter,
-                    capsule=capsule,
-                    cleanup_capsule=False,
-                )
-            )
+            self._workers.append(self._new_worker(worker))
+
+    def _new_worker(self, worker: int) -> CodexM5SearchProvider:
+        capsule = self._coordinator.capsule
+        adapter = CodexAppServerAdapter(
+            capsule=capsule,
+            limits=_app_server_limits(
+                program_turn_limit=self._provider_total_turn_limit,
+                turn_timeout_seconds=self._turn_timeout_seconds,
+            ),
+            base_instructions=self._base_instructions,
+            sandbox_mode="read-only",
+            approval_policy="never",
+            compress_json_artifacts=True,
+            copy_rollout_artifact=True,
+        )
+        return CodexM5SearchProvider(
+            workspace=self.workspace / "workers" / f"worker-{worker:02d}",
+            model=self.model,
+            effort=self.effort,
+            base_instructions=self._base_instructions,
+            adapter=adapter,
+            capsule=capsule,
+            cleanup_capsule=False,
+        )
 
     def ensure_specification_anchor(
         self,
@@ -985,16 +987,30 @@ class CodexM10SearchProvider:
         for worker, provider in enumerate(self._workers):
             context = self._root_workers.get(worker)
             if context is None:
-                context = provider.prepare_root_worker(
-                    anchor=anchor,
-                    worker=worker,
-                    artifact_dir=(
-                        self.workspace
-                        / "root-workers"
-                        / f"worker-{worker:02d}"
-                        / "fork"
-                    ),
+                artifact_dir = (
+                    self.workspace
+                    / "root-workers"
+                    / f"worker-{worker:02d}"
+                    / "fork"
                 )
+                try:
+                    context = provider.prepare_root_worker(
+                        anchor=anchor,
+                        worker=worker,
+                        artifact_dir=artifact_dir,
+                    )
+                except ProtocolError as error:
+                    if str(error) != "request thread/resume failed":
+                        raise
+                    provider._increment_telemetry("process_restarts")
+                    provider.close(cleanup_capsule=False)
+                    replacement = self._new_worker(worker)
+                    self._workers[worker] = replacement
+                    context = replacement.prepare_root_worker(
+                        anchor=anchor,
+                        worker=worker,
+                        artifact_dir=artifact_dir,
+                    )
                 self._root_workers[worker] = context
                 self._thread_owners[context.thread_id] = worker
             else:

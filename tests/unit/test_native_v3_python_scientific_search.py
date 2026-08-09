@@ -1054,6 +1054,11 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
         def ensure_context(self, _: M5ProviderContextV1) -> None:
             return None
 
+        def _increment_telemetry(
+            self, _: str, amount: int = 1
+        ) -> None:
+            assert amount == 1
+
         def close(self, *, cleanup_capsule: bool = True) -> None:
             kind = "coordinator" if self.coordinator else "worker"
             events.append(f"{kind}-close-{cleanup_capsule}")
@@ -1103,3 +1108,93 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
     ]
     provider.close(cleanup_capsule=False)
     assert events[-1] == "coordinator-close-False"
+
+
+def test_m10_provider_retries_only_transient_worker_resume_setup_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: dict[str, int] = {}
+    restarts: list[str] = []
+    providers: list[object] = []
+
+    class FakeProvider:
+        capsule = object()
+
+        def __init__(self, *, workspace: Path, coordinator: bool) -> None:
+            self.workspace = workspace
+            self.coordinator = coordinator
+
+        def prepare_root_worker(
+            self,
+            *,
+            anchor: M5ProviderContextV1,
+            worker: int,
+            artifact_dir: Path,
+        ) -> M5ProviderContextV1:
+            key = self.workspace.name
+            attempts[key] = attempts.get(key, 0) + 1
+            if key == "worker-00" and attempts[key] == 1:
+                raise provider_module.ProtocolError(
+                    "request thread/resume failed"
+                )
+            return M5ProviderContextV1(
+                f"thread-{worker}",
+                anchor.turn_id,
+                None,
+                anchor.included_turn_ids,
+            )
+
+        def ensure_context(self, _: M5ProviderContextV1) -> None:
+            return None
+
+        def _increment_telemetry(
+            self, field: str, amount: int = 1
+        ) -> None:
+            assert amount == 1
+            restarts.append(field)
+
+        def close(self, *, cleanup_capsule: bool = True) -> None:
+            return None
+
+    def provider_factory(**kwargs: Any) -> FakeProvider:
+        provider = FakeProvider(
+            workspace=Path(kwargs["workspace"]),
+            coordinator=not providers,
+        )
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        provider_module, "CodexM5SearchProvider", provider_factory
+    )
+    monkeypatch.setattr(
+        provider_module, "CodexAppServerAdapter", lambda **_: object()
+    )
+    provider = CodexM10SearchProvider(
+        workspace=tmp_path / "provider",
+        model="fixture",
+        effort="medium",
+        base_instructions="system",
+        auth_json=tmp_path / "auth.json",
+        turn_timeout_seconds=60,
+        provider_concurrency=4,
+        provider_total_turn_limit=16,
+    )
+    anchor = M5ProviderContextV1(
+        "anchor-thread", "anchor-turn", None, ("anchor-turn",)
+    )
+    provider._anchor = anchor
+    provider.prepare_generation(
+        snapshot={
+            "generation": 0,
+            "slots": [
+                {"slot": f"slot-{slot:02d}", "kind": "root"}
+                for slot in range(8)
+            ],
+        },
+        anchor=anchor,
+        artifact_dir=tmp_path / "generation-provider",
+    )
+    assert attempts["worker-00"] == 2
+    assert restarts == ["process_restarts"]
