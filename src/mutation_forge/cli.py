@@ -354,10 +354,18 @@ def _experiment_run(
 
             def request_stop() -> None:
                 if stop_control.graceful_stop_requested:
-                    _thread.interrupt_main()
                     return
-                request_python_preview_stop(config_path)
+                with suppress(Exception):
+                    request_python_preview_stop(config_path)
                 stop_control.request_graceful_stop()
+
+            def interrupt_stop() -> None:
+                # The second q is an immediate stop, not another graceful
+                # request.  Persist the request as well so a worker that is
+                # between protocol calls observes the same operator intent.
+                immediate_stop.set()
+                with suppress(Exception):
+                    request_python_preview_stop(config_path)
 
             preview_sink = InteractiveDashboardSink(
                 console=Console(file=sys.stdout),
@@ -374,7 +382,7 @@ def _experiment_run(
                 initial_state=project(python_preview_status(config_path)),
                 capabilities=DashboardCapabilities(
                     quit=request_stop,
-                    interrupt=immediate_stop.set,
+                    interrupt=interrupt_stop,
                 ),
             )
             with ThreadPoolExecutor(

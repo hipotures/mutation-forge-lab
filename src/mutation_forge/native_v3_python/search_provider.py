@@ -814,8 +814,17 @@ class CodexM5SearchProvider:
             history=previous.context.included_turn_ids,
         )
 
-    def close(self, *, cleanup_capsule: bool | None = None) -> None:
-        self.adapter.close()
+    def close(
+        self,
+        *,
+        cleanup_capsule: bool | None = None,
+        force: bool = False,
+    ) -> None:
+        try:
+            self.adapter.close(force=force)
+        except TypeError:
+            # Test adapters and older local adapters expose only close().
+            self.adapter.close()
         cleanup = self._cleanup_capsule if cleanup_capsule is None else cleanup_capsule
         if self._owns_adapter and cleanup and self._capsule is not None:
             self._capsule.cleanup()
@@ -1235,15 +1244,21 @@ class CodexM10SearchProvider:
             )
             return result
 
-    def close(self, *, cleanup_capsule: bool = True) -> None:
+    def close(self, *, cleanup_capsule: bool = True, force: bool = False) -> None:
         primary_error: Exception | None = None
         for worker in self._workers:
             try:
-                worker.close(cleanup_capsule=False)
+                try:
+                    worker.close(cleanup_capsule=False, force=force)
+                except TypeError:
+                    worker.close(cleanup_capsule=False)
             except Exception as error:
                 primary_error = primary_error or error
         try:
-            self._coordinator.close(cleanup_capsule=cleanup_capsule)
+            try:
+                self._coordinator.close(cleanup_capsule=cleanup_capsule, force=force)
+            except TypeError:
+                self._coordinator.close(cleanup_capsule=cleanup_capsule)
         except Exception as error:
             primary_error = primary_error or error
         if primary_error is not None:

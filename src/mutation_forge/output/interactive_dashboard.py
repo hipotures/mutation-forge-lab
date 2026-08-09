@@ -255,6 +255,8 @@ class DashboardState:
     active_provider_turns: int = 0
     configured_provider_concurrency: int | None = None
     evaluations_completed: int = 0
+    evaluation_cases_completed: int = 0
+    evaluation_cases_total: int | None = None
     evaluation_workers_active: int | None = None
     evaluation_workers_configured: int | None = None
     archive_size: int = 0
@@ -377,6 +379,7 @@ def dashboard_state_from_python_status(
     counts = mapping("counts")
     provider = mapping("provider")
     evaluators = mapping("evaluators")
+    evaluation_cases = mapping("evaluation_cases")
     throughput = mapping("throughput")
     activity = mapping("scientific_activity")
     phase = mapping("phase_timings")
@@ -417,6 +420,18 @@ def dashboard_state_from_python_status(
             if isinstance(candidate_id, str):
                 programs_by_candidate[candidate_id] = raw_program
     raw_slots = status.get("slots")
+    raw_active_candidate_ids = provider.get("active_candidate_ids")
+    active_candidate_ids = (
+        frozenset(item for item in raw_active_candidate_ids if isinstance(item, str))
+        if isinstance(raw_active_candidate_ids, Sequence)
+        and not isinstance(raw_active_candidate_ids, str | bytes)
+        else frozenset()
+    )
+    provider_active = integer(provider.get("active"))
+    evaluator_active = integer(evaluators.get("active"))
+    evaluation_cases_active = integer(evaluation_cases.get("active_total"))
+    evaluation_progress = status.get("evaluation_progress")
+    evaluation_progress = evaluation_progress if isinstance(evaluation_progress, Mapping) else {}
     if isinstance(raw_slots, Sequence) and not isinstance(raw_slots, str | bytes):
         for raw in raw_slots:
             if not isinstance(raw, Mapping):
@@ -424,6 +439,24 @@ def dashboard_state_from_python_status(
             generation = integer(raw.get("generation"))
             candidate_id = str(raw.get("candidate_id", raw.get("slot", "—")))
             raw_state = str(raw.get("state", "queued"))
+            raw_phase = str(raw.get("phase", "queued"))
+            reset_stale_timing = False
+            if raw_state == "model" and raw_phase == "provider":
+                if active_candidate_ids:
+                    if candidate_id not in active_candidate_ids:
+                        raw_state = "queued"
+                        reset_stale_timing = True
+                elif provider_active == 0:
+                    raw_state = "queued"
+                    reset_stale_timing = True
+            elif (
+                raw_state == "evaluating"
+                and raw_phase == "evaluation"
+                and evaluator_active == 0
+                and evaluation_cases_active == 0
+            ):
+                raw_state = "queued"
+                reset_stale_timing = True
             state = {
                 "evaluated": "accepted",
                 "contract_invalid": "invalid",
@@ -433,8 +466,18 @@ def dashboard_state_from_python_status(
             }.get(raw_state, raw_state)
             raw_usage = raw.get("usage")
             raw_usage = raw_usage if isinstance(raw_usage, Mapping) else {}
+            raw_progress = evaluation_progress.get(f"candidate:{candidate_id}")
+            raw_progress = raw_progress if isinstance(raw_progress, Mapping) else {}
+            evaluation_completed = integer(
+                raw.get("evaluation_completed", raw_progress.get("completed"))
+            )
+            raw_evaluation_total = raw.get("evaluation_total", raw_progress.get("total"))
+            evaluation_total = optional_integer(raw_evaluation_total)
             started_epoch = number(raw.get("started_epoch_seconds"))
             slot_elapsed = number(raw.get("elapsed_seconds"))
+            if reset_stale_timing:
+                started_epoch = 0.0
+                slot_elapsed = 0.0
             groups.setdefault(generation, []).append(
                 DashboardSlot(
                     slot=candidate_id,
@@ -444,7 +487,7 @@ def dashboard_state_from_python_status(
                         if raw.get("parent_candidate_id") is not None
                         else "root"
                     ),
-                    phase=str(raw.get("phase", "queued")),
+                    phase=raw_phase,
                     state=state,
                     started_monotonic=(
                         time.monotonic() - max(0.0, time.time() - started_epoch)
@@ -462,6 +505,8 @@ def dashboard_state_from_python_status(
                         total=optional_integer(raw_usage.get("totalTokens")),
                         quality="exact",
                     ),
+                    evaluation_completed=evaluation_completed,
+                    evaluation_total=evaluation_total,
                     validation=(
                         "pass"
                         if state in {"accepted", "duplicate"}
@@ -483,7 +528,15 @@ def dashboard_state_from_python_status(
         )
         for generation, slots in sorted(groups.items())
     )
-    elapsed = number(throughput.get("elapsed_seconds"))
+    raw_current_elapsed = throughput.get("current_run_elapsed_seconds")
+    if isinstance(raw_current_elapsed, int | float) and not isinstance(raw_current_elapsed, bool):
+        elapsed = max(0.0, float(raw_current_elapsed))
+    elif str(status.get("state")) == "running":
+        # Older workspaces do not have a per-resume clock.  Never render the
+        # retained campaign total as if it were this process's uptime.
+        elapsed = 0.0
+    else:
+        elapsed = number(throughput.get("elapsed_seconds"))
     generation = integer(status.get("generation_index"))
     best_interval = best.get("fitness_interval")
     best_value: float | None = None
@@ -611,6 +664,15 @@ def dashboard_state_from_python_status(
         active_provider_turns=integer(provider.get("active")),
         configured_provider_concurrency=integer(provider.get("configured_concurrency")),
         evaluations_completed=integer(evaluators.get("completed")),
+        evaluation_cases_completed=max(
+            integer(evaluation_cases.get("active_completed")),
+            integer(evaluation_cases.get("completed")),
+        ),
+        evaluation_cases_total=(
+            optional_integer(evaluation_cases.get("active_total"))
+            if integer(evaluation_cases.get("active_total")) > 0
+            else optional_integer(evaluation_cases.get("total"))
+        ),
         evaluation_workers_active=integer(evaluators.get("active")),
         evaluation_workers_configured=integer(evaluators.get("configured")),
         archive_size=integer(counts.get("valid")),
@@ -3002,6 +3064,11 @@ class InteractiveDashboardSink:
                 "Slots Complete",
                 self.state.completed_slots,
                 self.state.population_size,
+            ),
+            (
+                "Evaluation cases",
+                self.state.evaluation_cases_completed,
+                self.state.evaluation_cases_total,
             ),
             (
                 "Model Turn Budget",

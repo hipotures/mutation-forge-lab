@@ -1094,6 +1094,29 @@ def _progress(
         )
         else 0.0,
     )
+    current_run_elapsed = max(
+        0.0,
+        float(runtime.get("current_run_elapsed_seconds", 0.0))
+        if isinstance(runtime.get("current_run_elapsed_seconds"), int | float)
+        and not isinstance(runtime.get("current_run_elapsed_seconds"), bool)
+        else 0.0,
+    )
+    raw_evaluation_progress = runtime.get("evaluation_progress", {})
+    evaluation_progress: dict[str, dict[str, int | float]] = {}
+    if isinstance(raw_evaluation_progress, Mapping):
+        for raw_key, raw_value in raw_evaluation_progress.items():
+            if not isinstance(raw_key, str) or not isinstance(raw_value, Mapping):
+                continue
+            completed = _nonnegative_int(raw_value.get("completed"))
+            total = _nonnegative_int(raw_value.get("total"))
+            evaluation_progress[raw_key] = {
+                "completed": min(completed, total),
+                "total": total,
+            }
+    active_evaluation_cases = sum(
+        int(item["completed"]) for item in evaluation_progress.values()
+    )
+    active_evaluation_total = sum(int(item["total"]) for item in evaluation_progress.values())
     policy_invocations = telemetry["policy_invocations"]
     graph_score_attempts = telemetry["graph_score_attempts"]
     last_improvement = runtime.get("last_scientific_improvement_epoch_seconds")
@@ -1148,6 +1171,13 @@ def _progress(
     }
     provider_turns_by_key: dict[str, Mapping[str, Any]] = {}
     raw_timeline = runtime.get("provider_concurrency_timeline", ())
+    resume_started_epoch = runtime.get("resume_started_epoch_seconds")
+    resume_started_epoch = (
+        float(resume_started_epoch)
+        if isinstance(resume_started_epoch, int | float)
+        and not isinstance(resume_started_epoch, bool)
+        else None
+    )
     if isinstance(raw_timeline, Sequence) and not isinstance(raw_timeline, str | bytes):
         for raw_turn in raw_timeline:
             if not isinstance(raw_turn, Mapping):
@@ -1155,6 +1185,26 @@ def _progress(
             key = raw_turn.get("key")
             if isinstance(key, str):
                 provider_turns_by_key[key] = raw_turn
+    active_provider_keys = {
+        key
+        for key, raw_turn in provider_turns_by_key.items()
+        if isinstance(raw_turn, Mapping)
+        and "finished_epoch_seconds" not in raw_turn
+        and (
+            resume_started_epoch is None
+            or (
+                isinstance(raw_turn.get("started_epoch_seconds"), int | float)
+                and not isinstance(raw_turn.get("started_epoch_seconds"), bool)
+                and float(raw_turn["started_epoch_seconds"]) >= resume_started_epoch
+            )
+        )
+    }
+    legacy_runtime_stale = (
+        resume_started_epoch is None
+        and not isinstance(runtime.get("current_run_elapsed_seconds"), int | float)
+        and _nonnegative_int(runtime.get("active_provider_turns")) == 0
+    )
+    active_provider_candidate_ids: list[str] = []
     slot_projection: list[dict[str, JsonValue]] = []
     for manifest in manifests:
         generation = _nonnegative_int(manifest.get("generation"))
@@ -1187,6 +1237,19 @@ def _progress(
                 and not isinstance(provider_started, bool)
                 else None
             )
+            current_provider_turn = (
+                provider_turn
+                if provider_turn is not None
+                and not legacy_runtime_stale
+                and (
+                    resume_started_epoch is None
+                    or (
+                        started_epoch is not None
+                        and started_epoch >= resume_started_epoch
+                    )
+                )
+                else None
+            )
             finished_epoch = (
                 float(provider_finished)
                 if isinstance(provider_finished, int | float)
@@ -1211,9 +1274,24 @@ def _progress(
                 else "evaluating"
                 if prepared
                 else "model"
-                if provider_turn is not None
+                if (
+                    current_provider_turn is not None
+                    and isinstance(request_key, str)
+                    and request_key + "-initial" in active_provider_keys
+                )
+                else "failed"
+                if (
+                    current_provider_turn is not None
+                    and current_provider_turn.get("failed") is True
+                )
                 else "queued"
             )
+            if (
+                isinstance(request_key, str)
+                and request_key + "-initial" in active_provider_keys
+            ):
+                active_provider_candidate_ids.append(candidate_id)
+            progress = evaluation_progress.get(f"candidate:{candidate_id}")
             slot_projection.append(
                 {
                     "candidate_id": candidate_id,
@@ -1233,8 +1311,12 @@ def _progress(
                         if prepared
                         else "provider"
                     ),
-                    "started_epoch_seconds": started_epoch,
-                    "elapsed_seconds": elapsed_seconds,
+                    "started_epoch_seconds": (
+                        started_epoch if current_provider_turn is not None else None
+                    ),
+                    "elapsed_seconds": (
+                        elapsed_seconds if current_provider_turn is not None else None
+                    ),
                     "repairs": (
                         _nonnegative_int(candidate.get("repairs")) if candidate is not None else 0
                     ),
@@ -1250,6 +1332,12 @@ def _progress(
                             if candidate is not None and isinstance(candidate.get("usage"), Mapping)
                             else {}
                         ),
+                    ),
+                    "evaluation_completed": (
+                        int(progress["completed"]) if progress is not None else 0
+                    ),
+                    "evaluation_total": (
+                        int(progress["total"]) if progress is not None else None
                     ),
                 }
             )
@@ -1317,12 +1405,20 @@ def _progress(
                 if config.scientific_search is not None
                 else 1
             ),
+            "active_candidate_ids": active_provider_candidate_ids,
             "active_wall_seconds": max(0.0, provider_active_wall),
             "concurrency_timeline": cast(
                 JsonValue,
                 runtime.get("provider_concurrency_timeline", []),
             ),
             "wait_seconds": provider_wait,
+        },
+        "evaluation_progress": cast(JsonValue, evaluation_progress),
+        "evaluation_cases": {
+            "active_completed": active_evaluation_cases,
+            "active_total": active_evaluation_total,
+            "completed": _nonnegative_int(runtime.get("evaluation_cases_completed")),
+            "total": _nonnegative_int(runtime.get("evaluation_cases_total")),
         },
         "sandbox": {
             key: telemetry[key]
@@ -1370,6 +1466,7 @@ def _progress(
             ),
             "provider_wait_share": (provider_active_wall / elapsed if elapsed > 0 else 0.0),
             "elapsed_seconds": elapsed,
+            "current_run_elapsed_seconds": current_run_elapsed,
         },
         "scientific_activity": {
             "accepted_rewrites": accepted_rewrites,
@@ -1983,6 +2080,7 @@ def run_python_preview(
         "state": "running",
         "resumable": True,
         "run_terminal": False,
+        "terminal_reason": None,
         "last_error": None,
         "resume_attempts": _nonnegative_int(state.get("resume_attempts")) + int(existed),
     }
