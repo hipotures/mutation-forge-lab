@@ -375,11 +375,17 @@ def _experiment_run(
                 max_workers=1,
                 thread_name_prefix="mforge-python-preview",
             ) as executor:
-                future = executor.submit(
-                    run_python_preview,
-                    config_path,
-                    resume_budget=resume_budget,
-                )
+                if resume_budget is None:
+                    future = executor.submit(
+                        run_python_preview,
+                        config_path,
+                    )
+                else:
+                    future = executor.submit(
+                        run_python_preview,
+                        config_path,
+                        resume_budget=resume_budget,
+                    )
                 try:
                     while True:
                         try:
@@ -393,10 +399,13 @@ def _experiment_run(
                 finally:
                     preview_sink.close()
         else:
-            result = run_python_preview(
-                config_path,
-                resume_budget=resume_budget,
-            )
+            if resume_budget is None:
+                result = run_python_preview(config_path)
+            else:
+                result = run_python_preview(
+                    config_path,
+                    resume_budget=resume_budget,
+                )
         encoded = json.dumps(
             result,
             ensure_ascii=False,
