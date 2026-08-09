@@ -13,10 +13,22 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mutation-forge-lab
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          path: mutation-forge-lab
+
+      - name: Check out HEG dependency
+        uses: actions/checkout@v4
+        with:
+          repository: hipotures/heg
+          ref: 27cbec9c2307b6ea5f936f858821d11d808b68f3
+          path: heg
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,6 +43,14 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked
+
+      - name: Install sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Configure offline Codex fixture
+        run: echo "$GITHUB_WORKSPACE/mutation-forge-lab/tests/fixtures/bin" >> "$GITHUB_PATH"
 
       - name: Check lockfile
         run: uv lock --check

@@ -65,15 +65,32 @@ M8 added fail-closed checks discovered during independent integration:
 - the preview supports a controlled resumable stop at the next durable
   candidate boundary.
 
-## Baseline comparison
+## Baseline and final verification
 
 Current `main` collected 637 tests: 610 passed, 25 failed, and 2 errored.
 The exact current-main node IDs are stored under
 `m8-rc1/current-main/current-main-full-suite.json`. Historical M7 counts are
 not used as the M8 baseline.
 
-The final integration result, release-candidate campaign, replay hashes, and
-draft pull request are appended after final verification.
+The final implementation head before this report and CI-only follow-up was
+`5f7f259e2cc92898c324e7032713c1a60707bad0`. It collected 920 tests: 898
+passed, 20 failed, and 2 errored. It introduced no new failure or error node
+ID and resolved five current-main failures:
+
+- two Stage 3 prompt consistency failures were resolved by aligning the
+  renderer with the frozen 500-node sandbox contract;
+- the graceful-stop dashboard test accounts for intentional table ellipsis;
+- two Stage 4 App Server fork-isolation tests pass after the merge resolution.
+
+Ruff, mypy, the 709-test self-contained CI set, the focused M1–M8 tests,
+App Server artifact parity, the M7 and M8 durable replays, and a real Native
+v2 smoke all passed. The CI workflow provisions its test-only dependencies
+explicitly: a pinned sibling HEG checkout, `bubblewrap`, and an offline Codex
+executable that cannot start App Server or make model calls.
+
+Draft pull request [#60](https://github.com/hipotures/mutation-forge-lab/pull/60)
+targets `main`. It remains a draft and is not authorized for merge or for a
+default switch.
 
 ## Durable release-candidate campaign
 
@@ -132,9 +149,11 @@ The campaign and replay report `dsl_runtime_used=false`,
 - Integration offline gates: `m8-rc1/integration`
 - M8 live campaign, sources, provider artifacts, snapshots, and replay:
   `m8-rc1/live-rc`
+- Final static, smoke, full-suite, and CI evidence: `m8-rc1/final`
 
 Large runtime trees remain outside Git. This repository commits only this
 human-readable report, the operator guide, the roadmap, and the small example
-configuration. Final command results and the exact current-main failure/error
-delta are recorded in the M8 issue and draft pull request from the durable
-manifests above.
+configuration. The exact current-main failure/error delta and final command
+results are recorded in the durable manifests, M8 issue
+[#59](https://github.com/hipotures/mutation-forge-lab/issues/59), and draft
+pull request.
