@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mforge.native.python_policy_response.v1",
+  "title": "Native v3 ordinary-Python policy response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "mforge.native.python_policy_response.v1"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768
+    }
+  }
+}

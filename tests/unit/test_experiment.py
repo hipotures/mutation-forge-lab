@@ -796,6 +796,21 @@ def test_generation_graceful_stop_finishes_active_provider_only(
     assert {slot.status for slot in result.slots} == {"stopped"}
     assert result.summary["stop_reason"] == "operator_stop"
 
+    resumed_provider = Provider()
+    resumed = GenerationCoordinator(
+        resumed_provider,
+        config=GenerationConfig(
+            generations=1,
+            population_size=3,
+            concurrency=1,
+            max_repairs=0,
+            checkpoint_path=tmp_path / "generation.json.gz",
+        ),
+    ).run()
+
+    assert resumed_provider.calls == 2
+    assert {slot.status for slot in resumed.slots} <= {"accepted", "duplicate"}
+
 
 def test_generation_graceful_stop_finishes_validation_without_starting_probe(
     tmp_path: Path,

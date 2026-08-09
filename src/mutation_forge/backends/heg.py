@@ -14,6 +14,7 @@ from typing import Any
 
 from mutation_forge.backends.base import (
     DeepProposalProfileRecorder,
+    InvalidRewriteError,
     ProposalTimingRecorder,
     ScoreProfileRecorder,
 )
@@ -545,11 +546,13 @@ class HegBackend:
         record_score_profile: ScoreProfileRecorder | None = None,
     ) -> GraphState:
         if len(rewrite.removed_edges) > 4 or len(rewrite.added_edges) > 4:
-            raise ValueError("rewrites are limited to four removed and added edges")
+            raise InvalidRewriteError(
+                "rewrites are limited to four removed and added edges"
+            )
         if len(set(rewrite.removed_edges)) != len(rewrite.removed_edges):
-            raise ValueError("rewrite contains duplicate removed edges")
+            raise InvalidRewriteError("rewrite contains duplicate removed edges")
         if len(set(rewrite.added_edges)) != len(rewrite.added_edges):
-            raise ValueError("rewrite contains duplicate added edges")
+            raise InvalidRewriteError("rewrite contains duplicate added edges")
         prepared_proposal = self._prepared_proposal
         self._prepared_proposal = None
         if (
@@ -584,12 +587,12 @@ class HegBackend:
         current = set(graph.edges)
         removed = set(rewrite.removed_edges)
         if not removed.issubset(current):
-            raise ValueError("rewrite removes a missing edge")
+            raise InvalidRewriteError("rewrite removes a missing edge")
         remaining = current.difference(removed)
         if any(u == v for u, v in rewrite.added_edges):
-            raise ValueError("rewrite adds a loop")
+            raise InvalidRewriteError("rewrite adds a loop")
         if set(rewrite.added_edges).intersection(remaining):
-            raise ValueError("rewrite adds an existing edge")
+            raise InvalidRewriteError("rewrite adds an existing edge")
         candidate = GraphState(
             graph.order,
             tuple(sorted(remaining.union(rewrite.added_edges))),
@@ -602,7 +605,7 @@ class HegBackend:
             record_score_profile,
         )
         if not validation.valid:
-            raise ValueError("; ".join(validation.errors))
+            raise InvalidRewriteError("; ".join(validation.errors))
         return candidate
 
     def propose_rewrite(

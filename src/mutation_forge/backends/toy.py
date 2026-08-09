@@ -5,6 +5,7 @@ import random
 
 from mutation_forge.backends.base import (
     DeepProposalProfileRecorder,
+    InvalidRewriteError,
     ProposalTimingRecorder,
     ScoreProfileRecorder,
 )
@@ -160,21 +161,23 @@ class ToyBackend:
         removed = tuple(normalized_edge(edge) for edge in rewrite.removed_edges)
         added = tuple(normalized_edge(edge) for edge in rewrite.added_edges)
         if len(removed) > 4 or len(added) > 4:
-            raise ValueError("rewrites are limited to four removed and added edges")
+            raise InvalidRewriteError(
+                "rewrites are limited to four removed and added edges"
+            )
         if len(set(removed)) != len(removed) or len(set(added)) != len(added):
-            raise ValueError("rewrite contains duplicate edges")
+            raise InvalidRewriteError("rewrite contains duplicate edges")
         current = set(graph.edges)
         if not set(removed).issubset(current):
-            raise ValueError("rewrite removes a missing edge")
+            raise InvalidRewriteError("rewrite removes a missing edge")
         remaining = current.difference(removed)
         if any(u == v for u, v in added):
-            raise ValueError("rewrite adds a loop")
+            raise InvalidRewriteError("rewrite adds a loop")
         if set(added).intersection(remaining):
-            raise ValueError("rewrite adds an existing edge")
+            raise InvalidRewriteError("rewrite adds an existing edge")
         candidate = GraphState(graph.order, tuple(sorted(remaining.union(added))))
         validation = self.validate(candidate)
         if not validation.valid:
-            raise ValueError("; ".join(validation.errors))
+            raise InvalidRewriteError("; ".join(validation.errors))
         return candidate
 
     def propose_rewrite(

@@ -1845,7 +1845,7 @@ class GenerationCoordinator:
                         retained_initial = cached.get("initial")
                         if not isinstance(retained_initial, Mapping):
                             retained_initial = cached.get("raw_result")
-                        if isinstance(retained_initial, Mapping):
+                        if isinstance(retained_initial, Mapping) and retained_initial:
                             reassessed = self.run_request(
                                 request,
                                 allow_repair=False,
