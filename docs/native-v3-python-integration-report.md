@@ -63,7 +63,9 @@ M8 added fail-closed checks discovered during independent integration:
 - retained Search Memory is deterministically rebuilt from prior generations
   and compared byte-for-byte before reuse;
 - the preview supports a controlled resumable stop at the next durable
-  candidate boundary.
+  candidate boundary;
+- pre-attestation worker crashes retain bounded private startup diagnostics
+  without adding those bytes to public error text or model-facing projections.
 
 ## Baseline and final verification
 
@@ -72,20 +74,22 @@ The exact current-main node IDs are stored under
 `m8-rc1/current-main/current-main-full-suite.json`. Historical M7 counts are
 not used as the M8 baseline.
 
-The final implementation head before this report and CI-only follow-up was
-`5f7f259e2cc92898c324e7032713c1a60707bad0`. It collected 920 tests: 898
-passed, 20 failed, and 2 errored. It introduced no new failure or error node
-ID and resolved five current-main failures:
+The verified release-candidate tree before this report-only update was
+`886c07c202e3b7e2ea1bfd90d743fab091399c8f`. It collected 920 tests: 898
+passed, 20 failed, and 2 errored. It introduced no new failure or error node ID
+and resolved five current-main failures:
 
 - two Stage 3 prompt consistency failures were resolved by aligning the
   renderer with the frozen 500-node sandbox contract;
 - the graceful-stop dashboard test accounts for intentional table ellipsis;
 - two Stage 4 App Server fork-isolation tests pass after the merge resolution.
 
-Ruff, mypy, the 709-test self-contained CI set, the focused M1–M8 tests,
-App Server artifact parity, the M7 and M8 durable replays, and a real Native
-v2 smoke all passed. The CI workflow provisions its test-only dependencies
-explicitly: a pinned sibling HEG checkout, `bubblewrap`, and an offline Codex
+Ruff, mypy, the 709-test self-contained CI set, the focused M1–M8 tests, App
+Server artifact parity, the M7 and M8 durable replays, and a real Native v2
+smoke all passed. The final GitHub Actions run used uv-managed CPython 3.12.13
+and completed all 709 tests. The workflow provisions its test-only
+dependencies explicitly: a pinned sibling HEG checkout, `bubblewrap`, a
+namespace preflight on the ephemeral Ubuntu 24.04 runner, and an offline Codex
 executable that cannot start App Server or make model calls.
 
 Draft pull request [#60](https://github.com/hipotures/mutation-forge-lab/pull/60)
