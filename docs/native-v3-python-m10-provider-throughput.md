@@ -103,7 +103,7 @@ Two smaller versioned profiles support the required live acceptance:
 
 - `native-v3-python-m10-dashboard-acceptance-v4.toml` exercises Rich,
   durable stop/resume, no-repeat, and JSON parity;
-- `native-v3-python-m10-benchmark-v3.toml` runs one eight-slot generation for
+- `native-v3-python-m10-benchmark-v4.toml` runs one eight-slot generation for
   the quick throughput benchmark.
 
 They are explicit ordinary-Python configurations and do not alter
