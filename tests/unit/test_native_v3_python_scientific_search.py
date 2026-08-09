@@ -1035,15 +1035,15 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
         def __init__(self, *, coordinator: bool) -> None:
             self.coordinator = coordinator
 
-        def prepare_root_worker(
+        def fork_root_worker_from_active_anchor(
             self,
             *,
             anchor: M5ProviderContextV1,
             worker: int,
             artifact_dir: Path,
         ) -> M5ProviderContextV1:
-            assert "coordinator-close-False" in events
-            events.append(f"worker-{worker}-resume")
+            assert self.coordinator
+            events.append(f"coordinator-fork-{worker}")
             return M5ProviderContextV1(
                 f"worker-{worker}",
                 anchor.turn_id,
@@ -1051,8 +1051,14 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
                 anchor.included_turn_ids,
             )
 
-        def ensure_context(self, _: M5ProviderContextV1) -> None:
-            return None
+        def ensure_anchor_context(
+            self, context: M5ProviderContextV1
+        ) -> None:
+            assert not self.coordinator
+            assert "coordinator-close-False" in events
+            events.append(
+                f"worker-{context.thread_id.removeprefix('worker-')}-resume"
+            )
 
         def _increment_telemetry(
             self, _: str, amount: int = 1
@@ -1099,7 +1105,11 @@ def test_m10_provider_releases_specification_process_before_worker_resume(
         anchor=anchor,
         artifact_dir=tmp_path / "generation-provider",
     )
-    assert events[:5] == [
+    assert events[:9] == [
+        "coordinator-fork-0",
+        "coordinator-fork-1",
+        "coordinator-fork-2",
+        "coordinator-fork-3",
         "coordinator-close-False",
         "worker-0-resume",
         "worker-1-resume",
@@ -1125,19 +1135,14 @@ def test_m10_provider_retries_only_transient_worker_resume_setup_once(
             self.workspace = workspace
             self.coordinator = coordinator
 
-        def prepare_root_worker(
+        def fork_root_worker_from_active_anchor(
             self,
             *,
             anchor: M5ProviderContextV1,
             worker: int,
             artifact_dir: Path,
         ) -> M5ProviderContextV1:
-            key = self.workspace.name
-            attempts[key] = attempts.get(key, 0) + 1
-            if key == "worker-00" and attempts[key] == 1:
-                raise provider_module.ProtocolError(
-                    "request thread/resume failed"
-                )
+            assert self.coordinator
             return M5ProviderContextV1(
                 f"thread-{worker}",
                 anchor.turn_id,
@@ -1145,8 +1150,16 @@ def test_m10_provider_retries_only_transient_worker_resume_setup_once(
                 anchor.included_turn_ids,
             )
 
-        def ensure_context(self, _: M5ProviderContextV1) -> None:
-            return None
+        def ensure_anchor_context(
+            self, context: M5ProviderContextV1
+        ) -> None:
+            assert not self.coordinator
+            key = self.workspace.name
+            attempts[key] = attempts.get(key, 0) + 1
+            if key == "worker-00" and attempts[key] == 1:
+                raise provider_module.ProtocolError(
+                    "request thread/resume failed"
+                )
 
         def _increment_telemetry(
             self, field: str, amount: int = 1

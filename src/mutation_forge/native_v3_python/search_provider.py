@@ -696,6 +696,39 @@ class CodexM5SearchProvider:
         self._resumed_thread_ids.add(context.thread_id)
         return context
 
+    def fork_root_worker_from_active_anchor(
+        self,
+        *,
+        anchor: M5ProviderContextV1,
+        worker: int,
+        artifact_dir: Path,
+    ) -> M5ProviderContextV1:
+        """Fork a root worker while this process exclusively owns the anchor."""
+
+        state = self._state()
+        retained_anchor = state.get("anchor")
+        if (
+            not isinstance(retained_anchor, Mapping)
+            or M5ProviderContextV1.from_dict(retained_anchor) != anchor
+        ):
+            raise M5InfrastructureError(
+                "root worker uses a foreign specification anchor"
+            )
+        fork = self._fork(
+            last_turn_id=anchor.turn_id,
+            expected_history=anchor.included_turn_ids,
+            artifact_dir=artifact_dir,
+            prefix=f"root-worker-{worker:02d}-fork",
+        )
+        context = M5ProviderContextV1(
+            thread_id=fork.child_thread_id,
+            turn_id=fork.last_turn_id,
+            thread_path=fork.thread_path,
+            included_turn_ids=fork.included_turn_ids,
+        )
+        self._save_context(context=context)
+        return context
+
     def generate_root_on_worker(
         self,
         *,
@@ -977,6 +1010,23 @@ class CodexM10SearchProvider:
         _write_or_verify(artifact_dir / "provider-snapshot.json.gz", snapshot)
         if self._anchor != anchor:
             raise M5InfrastructureError("generation uses a foreign anchor")
+        if not self._root_workers:
+            for worker in range(self.provider_concurrency):
+                context = (
+                    self._coordinator.fork_root_worker_from_active_anchor(
+                        anchor=anchor,
+                        worker=worker,
+                        artifact_dir=(
+                            self.workspace
+                            / "root-workers"
+                            / f"worker-{worker:02d}"
+                            / "fork"
+                        ),
+                    )
+                )
+                self._root_workers[worker] = context
+                self._thread_owners[context.thread_id] = worker
+            self._save_state()
         if not self._coordinator_released:
             # A durable thread may be resumed by a replacement app-server
             # process only after the process that created it has released it.
@@ -985,36 +1035,17 @@ class CodexM10SearchProvider:
             self._coordinator_released = True
         self._ensure_workers()
         for worker, provider in enumerate(self._workers):
-            context = self._root_workers.get(worker)
-            if context is None:
-                artifact_dir = (
-                    self.workspace
-                    / "root-workers"
-                    / f"worker-{worker:02d}"
-                    / "fork"
-                )
-                try:
-                    context = provider.prepare_root_worker(
-                        anchor=anchor,
-                        worker=worker,
-                        artifact_dir=artifact_dir,
-                    )
-                except ProtocolError as error:
-                    if str(error) != "request thread/resume failed":
-                        raise
-                    provider._increment_telemetry("process_restarts")
-                    provider.close(cleanup_capsule=False)
-                    replacement = self._new_worker(worker)
-                    self._workers[worker] = replacement
-                    context = replacement.prepare_root_worker(
-                        anchor=anchor,
-                        worker=worker,
-                        artifact_dir=artifact_dir,
-                    )
-                self._root_workers[worker] = context
-                self._thread_owners[context.thread_id] = worker
-            else:
-                provider.ensure_context(context)
+            context = self._root_workers[worker]
+            try:
+                provider.ensure_anchor_context(context)
+            except ProtocolError as error:
+                if str(error) != "request thread/resume failed":
+                    raise
+                provider._increment_telemetry("process_restarts")
+                provider.close(cleanup_capsule=False)
+                replacement = self._new_worker(worker)
+                self._workers[worker] = replacement
+                replacement.ensure_anchor_context(context)
         slots = snapshot.get("slots")
         generation = snapshot.get("generation")
         if (
