@@ -327,8 +327,8 @@ def dashboard_state_from_python_status(
     run_id: str,
     model: str,
     effort: str,
-    generation_limit: int,
-    wall_seconds: float,
+    generation_limit: int | None,
+    wall_seconds: float | None,
 ) -> DashboardState:
     """Project the canonical ordinary-Python JSON status into Rich state."""
 
@@ -2907,7 +2907,7 @@ class InteractiveDashboardSink:
                 (
                     "Gen",
                     (
-                        str(_human_generation(self.state.generation))
+                        f"{_human_generation(self.state.generation)}/∞"
                         if self.state.generation_limit is None
                         else f"{_human_generation(self.state.generation)}/"
                         f"{self.state.generation_limit}"
@@ -2948,7 +2948,15 @@ class InteractiveDashboardSink:
                 ("Graph mode", self.state.graph_mode, None),
                 ("Started", self.state.started_at, None),
                 ("Uptime", _duration(elapsed), None),
-                ("Wall budget", _duration(self.state.wall_seconds), None),
+                (
+                    "Wall budget",
+                    (
+                        "∞"
+                        if self.state.wall_seconds is None
+                        else _duration(self.state.wall_seconds)
+                    ),
+                    None,
+                ),
             )
         )
         return Panel(

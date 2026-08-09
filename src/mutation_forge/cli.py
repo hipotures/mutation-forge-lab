@@ -416,6 +416,17 @@ def _experiment_run(
             usage = usage if isinstance(usage, Mapping) else {}
             exact = result.get("exact_verification")
             exact = exact if isinstance(exact, Mapping) else {}
+            reason = str(result.get("terminal_reason") or "—")
+            if (
+                reason == "generation_budget"
+                and scientific is not None
+                and scientific.generation_limit is not None
+            ):
+                reason = (
+                    f"generation_budget "
+                    f"({scientific.generation_limit} generations / "
+                    f"{scientific.primary_program_slots} primary slots)"
+                )
             Console().print(
                 f"Run {preview_config.exp_id} · "
                 f"state {result.get('state', 'unknown')} · "
@@ -425,7 +436,7 @@ def _experiment_run(
                 f"provider turns {provider.get('turns', 0)} · "
                 f"tokens {usage.get('totalTokens', 0)} · "
                 f"exact verified {bool(exact.get('verified'))} · "
-                f"reason {result.get('terminal_reason') or '—'}"
+                f"reason {reason}"
             )
         elif json_output:
             print(encoded)

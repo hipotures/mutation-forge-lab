@@ -936,7 +936,11 @@ class RichLiveSink:
         if generation is not None:
             add(
                 "gen",
-                generation if generation_limit is None else f"{generation}/{generation_limit}",
+                (
+                    f"{generation}/∞"
+                    if generation_limit is None
+                    else f"{generation}/{generation_limit}"
+                ),
             )
         model = state.get("model")
         effort = state.get("effort")
@@ -1046,7 +1050,7 @@ class RichLiveSink:
         bar_width = 10 if available >= 130 else 7 if available >= 90 else 5
         segments = [
             (
-                f"Gen {integer('generation')} · current"
+                f"Gen {integer('generation')}/∞"
                 if integer("generation") is not None and state.get("generation_limit") is None
                 else segment("Gen", generation, bar_width=bar_width)
             ),
@@ -1560,7 +1564,13 @@ class RichLiveSink:
             ("Latest checkpoint", value("checkpoint")),
             (
                 "Generation",
-                f"{value('generation', 0)} / {value('generation_limit', value('max_generations'))}",
+                (
+                    f"{value('generation', 0)} / ∞"
+                    if value("generation_limit", value("max_generations"))
+                    is None
+                    else f"{value('generation', 0)} / "
+                    f"{value('generation_limit', value('max_generations'))}"
+                ),
             ),
             (
                 "Slots completed",

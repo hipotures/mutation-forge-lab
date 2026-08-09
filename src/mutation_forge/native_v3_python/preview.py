@@ -321,16 +321,32 @@ def load_python_preview_config(
                 "unsupported [python_preview.scientific_search] fields: "
                 f"{unknown_scientific}"
             )
-        if set(scientific) != scientific_fields:
-            missing = sorted(scientific_fields.difference(scientific))
+        optional_budget_fields = {
+            "generation_limit",
+            "wall_seconds",
+            "primary_program_slots",
+            "repair_turn_limit",
+            "provider_total_turn_limit",
+        }
+        required_scientific_fields = (
+            scientific_fields - optional_budget_fields
+        )
+        if not required_scientific_fields.issubset(scientific):
+            missing = sorted(
+                required_scientific_fields.difference(scientific)
+            )
             raise ValueError(
                 "missing [python_preview.scientific_search] fields: "
                 f"{missing}"
             )
         scientific_search = ScientificSearchOptionsV2(
-            generation_limit=_positive_integer(
-                scientific["generation_limit"],
-                "python_preview.scientific_search.generation_limit",
+            generation_limit=(
+                _positive_integer(
+                    scientific["generation_limit"],
+                    "python_preview.scientific_search.generation_limit",
+                )
+                if "generation_limit" in scientific
+                else None
             ),
             evaluator_workers=_positive_integer(
                 scientific["evaluator_workers"],
@@ -340,21 +356,37 @@ def load_python_preview_config(
                 scientific["provider_concurrency"],
                 "python_preview.scientific_search.provider_concurrency",
             ),
-            wall_seconds=_positive_number(
-                scientific["wall_seconds"],
-                "python_preview.scientific_search.wall_seconds",
+            wall_seconds=(
+                _positive_number(
+                    scientific["wall_seconds"],
+                    "python_preview.scientific_search.wall_seconds",
+                )
+                if "wall_seconds" in scientific
+                else None
             ),
-            primary_program_slots=_positive_integer(
-                scientific["primary_program_slots"],
-                "python_preview.scientific_search.primary_program_slots",
+            primary_program_slots=(
+                _positive_integer(
+                    scientific["primary_program_slots"],
+                    "python_preview.scientific_search.primary_program_slots",
+                )
+                if "primary_program_slots" in scientific
+                else None
             ),
-            repair_turn_limit=_nonnegative_integer(
-                scientific["repair_turn_limit"],
-                "python_preview.scientific_search.repair_turn_limit",
+            repair_turn_limit=(
+                _nonnegative_integer(
+                    scientific["repair_turn_limit"],
+                    "python_preview.scientific_search.repair_turn_limit",
+                )
+                if "repair_turn_limit" in scientific
+                else None
             ),
-            provider_total_turn_limit=_positive_integer(
-                scientific["provider_total_turn_limit"],
-                "python_preview.scientific_search.provider_total_turn_limit",
+            provider_total_turn_limit=(
+                _positive_integer(
+                    scientific["provider_total_turn_limit"],
+                    "python_preview.scientific_search.provider_total_turn_limit",
+                )
+                if "provider_total_turn_limit" in scientific
+                else None
             ),
             validated_queue_target=_positive_integer(
                 scientific["validated_queue_target"],
@@ -842,10 +874,27 @@ def _progress(
             and retained_state.get("state") == "completed"
         )
     ):
-        state = "completed"
-        resumable = False
-        run_terminal = True
-        terminal_reason = str(report.get("stop_reason", "generation_budget"))
+        terminal_reason = str(
+            report.get("stop_reason", "generation_budget")
+        )
+        generation_count = _nonnegative_int(
+            report.get("generation_count")
+        )
+        configured_generation_limit = (
+            config.scientific_search.generation_limit
+            if config.scientific_search is not None
+            else None
+        )
+        generation_budget_extended = (
+            terminal_reason == "generation_budget"
+            and (
+                configured_generation_limit is None
+                or configured_generation_limit > generation_count
+            )
+        )
+        state = "blocked" if generation_budget_extended else "completed"
+        resumable = generation_budget_extended
+        run_terminal = not generation_budget_extended
         exact = report.get("exact_verified") is True
         result_kind = (
             "VERIFIED_COUNTEREXAMPLE"

@@ -53,8 +53,8 @@ class AppServerLimits:
     stdout_bytes: int = 2 * 1024 * 1024
     stderr_bytes: int = 64 * 1024
     transcript_bytes: int = 2 * 1024 * 1024
-    max_turns: int = 1
-    max_campaigns: int = 1
+    max_turns: int | None = 1
+    max_campaigns: int | None = 1
     max_events: int = 10_000
     turn_timeout: float = 120.0
     usage_grace: float = 10.0
@@ -531,7 +531,10 @@ class CodexAppServerAdapter:
         # one ephemeral thread in its own private capsule.
         if self._failed:
             raise AppServerError("failed adapter cannot be reused")
-        if self._campaigns >= self.limits.max_campaigns:
+        if (
+            self.limits.max_campaigns is not None
+            and self._campaigns >= self.limits.max_campaigns
+        ):
             raise TurnError("campaign limit exceeded")
         selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
         if selected.provider != "codex":
@@ -669,7 +672,10 @@ class CodexAppServerAdapter:
         thread_id: str,
         thread_path: str | None,
     ) -> Json:
-        if self._campaigns >= self.limits.max_campaigns:
+        if (
+            self.limits.max_campaigns is not None
+            and self._campaigns >= self.limits.max_campaigns
+        ):
             raise TurnError("campaign limit exceeded")
         selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
         if selected.provider != "codex":
@@ -786,7 +792,10 @@ class CodexAppServerAdapter:
 
         if self._thread is None or self._thread.get("ephemeral") is not False:
             raise IsolationError("compaction requires a durable thread")
-        if self._turns >= self.limits.max_turns:
+        if (
+            self.limits.max_turns is not None
+            and self._turns >= self.limits.max_turns
+        ):
             raise TurnError("turn limit exceeded")
         thread_id = cast(str, self._thread["id"])
         self._turns += 1
@@ -828,7 +837,10 @@ class CodexAppServerAdapter:
             raise IsolationError("fork requires an idle durable thread")
         if not isinstance(last_turn_id, str) or not last_turn_id:
             raise ValueError("last_turn_id must be non-empty")
-        if self._campaigns >= self.limits.max_campaigns:
+        if (
+            self.limits.max_campaigns is not None
+            and self._campaigns >= self.limits.max_campaigns
+        ):
             raise TurnError("campaign limit exceeded")
         selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
         if selected.provider != "codex":
@@ -987,7 +999,10 @@ class CodexAppServerAdapter:
         elif self._thread.get("ephemeral") is persistent:
             expected = "durable" if persistent else "ephemeral"
             raise IsolationError(f"generation requires an {expected} thread")
-        if self._turns >= self.limits.max_turns:
+        if (
+            self.limits.max_turns is not None
+            and self._turns >= self.limits.max_turns
+        ):
             raise TurnError("turn limit exceeded")
         thread = cast(Json, self._thread)
         selected = resolve_model_profile(profile) if isinstance(profile, str) else profile

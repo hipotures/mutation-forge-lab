@@ -40,14 +40,11 @@ _ANCHOR_ACK = {
     "schema_version": "mforge.native.python_m5_specification_ack.v1",
     "ack": "specification-retained",
 }
-M5_PROVIDER_MAX_TURNS = 40
-M5_PROVIDER_MAX_CAMPAIGNS = 40
 M5_PROVIDER_TRANSCRIPT_BYTES = 16 * 1024 * 1024
 M5_PROVIDER_STDOUT_BYTES = 16 * 1024 * 1024
 M10_PROVIDER_MAX_EVENTS = 100_000
 M10_PROVIDER_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 M10_PROVIDER_STDOUT_BYTES = 64 * 1024 * 1024
-M10_PROVIDER_MAX_PROGRAM_TURNS = 120
 _M10_POOL_STATE_PROTOCOL = "mforge.native.python_provider_pool.v1"
 
 
@@ -84,14 +81,14 @@ def _app_server_limits(
     turn_timeout_seconds: float,
 ) -> AppServerLimits:
     max_turns = (
-        M5_PROVIDER_MAX_TURNS
+        None
         if program_turn_limit is None
         else program_turn_limit + 1
     )
     return AppServerLimits(
         max_turns=max_turns,
         max_campaigns=(
-            M5_PROVIDER_MAX_CAMPAIGNS
+            None
             if program_turn_limit is None
             else max_turns
         ),
@@ -196,10 +193,8 @@ class CodexM5SearchProvider:
         self._owns_adapter = adapter is None
         self._resumed_thread_ids: set[str] = set()
         self._anchor_can_activate = False
-        if program_turn_limit is not None and not (
-            1 <= program_turn_limit <= M10_PROVIDER_MAX_PROGRAM_TURNS
-        ):
-            raise ValueError("program_turn_limit must be between 1 and 120")
+        if program_turn_limit is not None and program_turn_limit < 1:
+            raise ValueError("program_turn_limit must be positive")
         if adapter is not None:
             self.adapter = adapter
             if self._state_path.exists():
@@ -843,12 +838,15 @@ class CodexM10SearchProvider:
         auth_json: str | Path,
         turn_timeout_seconds: float,
         provider_concurrency: int,
-        provider_total_turn_limit: int,
+        provider_total_turn_limit: int | None,
     ) -> None:
         if not 1 <= provider_concurrency <= 4:
             raise ValueError("provider_concurrency must be between 1 and 4")
-        if not 1 <= provider_total_turn_limit <= M10_PROVIDER_MAX_PROGRAM_TURNS:
-            raise ValueError("provider_total_turn_limit must be between 1 and 120")
+        if (
+            provider_total_turn_limit is not None
+            and provider_total_turn_limit < 1
+        ):
+            raise ValueError("provider_total_turn_limit must be positive")
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.model = model

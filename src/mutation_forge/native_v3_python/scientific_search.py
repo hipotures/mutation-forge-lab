@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import partial
+from itertools import count
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,13 +43,13 @@ class _ProviderTurnBudgetExhausted(core.M5SearchError):
 class ScientificSearchOptionsV2:
     """Immutable host-owned controls for one sustained campaign."""
 
-    generation_limit: int
+    generation_limit: int | None
     evaluator_workers: int
     provider_concurrency: int
-    wall_seconds: float
-    primary_program_slots: int
-    repair_turn_limit: int
-    provider_total_turn_limit: int
+    wall_seconds: float | None
+    primary_program_slots: int | None
+    repair_turn_limit: int | None
+    provider_total_turn_limit: int | None
     validated_queue_target: int
     validated_queue_capacity: int
     stop_on_verified: bool
@@ -56,27 +57,48 @@ class ScientificSearchOptionsV2:
     replace_terminal_slots: bool
 
     def __post_init__(self) -> None:
-        if not 1 <= self.generation_limit <= 12:
-            raise ValueError("generation_limit must be between 1 and 12")
+        if self.generation_limit is not None and self.generation_limit < 1:
+            raise ValueError("generation_limit must be positive when configured")
         if not 1 <= self.evaluator_workers <= 12:
             raise ValueError("evaluator_workers must be between 1 and 12")
         if not 1 <= self.provider_concurrency <= 4:
             raise ValueError("provider_concurrency must be between 1 and 4")
-        if not 1 <= self.wall_seconds <= 10 * 60 * 60:
-            raise ValueError("wall_seconds must be between 1 and 36,000")
-        if self.primary_program_slots != self.generation_limit * 8:
+        if self.wall_seconds is not None and self.wall_seconds <= 0:
+            raise ValueError("wall_seconds must be positive when configured")
+        if (
+            self.generation_limit is not None
+            and self.primary_program_slots
+            != self.generation_limit * core.POPULATION_SIZE
+        ):
             raise ValueError(
                 "primary_program_slots must provide exactly eight slots per "
                 "generation"
             )
-        if not 0 <= self.repair_turn_limit <= 24:
-            raise ValueError("repair_turn_limit must be between 0 and 24")
         if (
-            self.provider_total_turn_limit
+            self.generation_limit is None
+            and self.primary_program_slots is not None
+        ):
+            raise ValueError(
+                "primary_program_slots must be omitted for unlimited generations"
+            )
+        if self.repair_turn_limit is not None and self.repair_turn_limit < 0:
+            raise ValueError("repair_turn_limit cannot be negative")
+        if (
+            self.primary_program_slots is not None
+            and self.repair_turn_limit is not None
+            and self.provider_total_turn_limit
             != self.primary_program_slots + self.repair_turn_limit
         ):
             raise ValueError(
                 "provider_total_turn_limit must equal primary slots plus repairs"
+            )
+        if (
+            self.primary_program_slots is None
+            or self.repair_turn_limit is None
+        ) and self.provider_total_turn_limit is not None:
+            raise ValueError(
+                "provider_total_turn_limit must be omitted when either provider "
+                "budget is unlimited"
             )
         if self.validated_queue_target != 2 * self.evaluator_workers:
             raise ValueError(
@@ -234,8 +256,10 @@ def _generation_snapshot(
             "generation_limit": options.generation_limit,
             "evaluator_workers": options.evaluator_workers,
             "provider_concurrency": options.provider_concurrency,
-            "wall_seconds_milliseconds": round(
-                options.wall_seconds * 1000
+            "wall_seconds_milliseconds": (
+                round(options.wall_seconds * 1000)
+                if options.wall_seconds is not None
+                else None
             ),
             "primary_program_slots": options.primary_program_slots,
             "repair_turn_limit": options.repair_turn_limit,
@@ -516,7 +540,7 @@ class _RuntimeTelemetry:
         self,
         keys: Sequence[str],
         *,
-        limit: int,
+        limit: int | None,
     ) -> None:
         if len(keys) != core.POPULATION_SIZE or len(set(keys)) != len(keys):
             raise core.M5InfrastructureError(
@@ -525,7 +549,7 @@ class _RuntimeTelemetry:
         with self._lock:
             retained = self._string_keys_locked("primary_slot_keys")
             new = [key for key in keys if key not in retained]
-            if len(retained) + len(new) > limit:
+            if limit is not None and len(retained) + len(new) > limit:
                 raise _ProviderTurnBudgetExhausted(
                     "fewer than eight primary program slots remain"
                 )
@@ -533,7 +557,7 @@ class _RuntimeTelemetry:
             self._state["primary_slot_keys"] = retained
             self._persist_locked()
 
-    def reserve_repair(self, key: str, *, limit: int) -> bool:
+    def reserve_repair(self, key: str, *, limit: int | None) -> bool:
         with self._lock:
             repairs = self._string_keys_locked("repair_turn_keys")
             if key in repairs:
@@ -544,7 +568,7 @@ class _RuntimeTelemetry:
                 >= self._resume_budget.max_new_repair_turns
             ):
                 return False
-            if len(repairs) >= limit:
+            if limit is not None and len(repairs) >= limit:
                 return False
             repairs.append(key)
             self._state["repair_turn_keys"] = repairs
@@ -559,7 +583,7 @@ class _RuntimeTelemetry:
         self,
         key: str,
         *,
-        limit: int,
+        limit: int | None,
         durable_result_exists: Callable[[int], bool],
     ) -> tuple[str, int]:
         with self._lock:
@@ -579,7 +603,7 @@ class _RuntimeTelemetry:
                         return retry_key, attempt
                     continue
                 if retry_key not in primary:
-                    if len(primary) >= limit:
+                    if limit is not None and len(primary) >= limit:
                         raise _ProviderTurnBudgetExhausted(
                             "primary retry exceeds the frozen provider budget"
                         )
@@ -1749,10 +1773,12 @@ def _report(
                 if item.get("status") in {"evaluated", "duplicate"}
             ),
             "exact_verifier_only_authority": True,
-            "provider_program_turn_budget_respected": int(
-                runtime_payload.get("provider_turns_submitted", 0)
-            )
-            <= options.provider_total_turn_limit,
+            "provider_program_turn_budget_respected": (
+                True
+                if options.provider_total_turn_limit is None
+                else int(runtime_payload.get("provider_turns_submitted", 0))
+                <= options.provider_total_turn_limit
+            ),
         },
     }
     return report
@@ -1767,7 +1793,11 @@ def resolve_resume_generation(
     manifests: list[int] = []
     incomplete: list[int] = []
     pending_primary: dict[int, tuple[str, ...]] = {}
-    for generation in range(options.generation_limit):
+    generations = sorted(
+        int(path.parent.name.removeprefix("generation-"))
+        for path in root.glob("generations/generation-*/manifest.json.gz")
+    )
+    for generation in generations:
         generation_dir = (
             root / "generations" / f"generation-{generation:04d}"
         )
@@ -1831,7 +1861,10 @@ def run_sustained_search(
 
     if not panel:
         raise ValueError("development panel must not be empty")
-    if not 0 < provider_turn_timeout_seconds < options.wall_seconds:
+    if provider_turn_timeout_seconds <= 0 or (
+        options.wall_seconds is not None
+        and provider_turn_timeout_seconds >= options.wall_seconds
+    ):
         raise ValueError(
             "provider turn timeout must be positive and below the wall budget"
         )
@@ -1882,7 +1915,7 @@ def run_sustained_search(
         max_workers=options.provider_concurrency * 2,
         thread_name_prefix="mforge-m10-provider",
     )
-    stop_reason = "generation_budget"
+    stop_reason: str | None = None
     anchor_result: core.M5ProviderResultV1 | None = None
     exact_verified = False
     close_error: Exception | None = None
@@ -1913,15 +1946,24 @@ def run_sustained_search(
         if boundary_hook is not None:
             boundary_hook("anchor_persisted")
 
+        retained_generations = sorted(
+            int(path.parent.name.removeprefix("generation-"))
+            for path in root.glob("generations/generation-*/manifest.json.gz")
+        )
+        next_generation = (
+            max(retained_generations) + 1 if retained_generations else 0
+        )
         generations = (
             range(resume_generation, resume_generation + 1)
             if resume_generation is not None
-            else range(options.generation_limit)
+            else count(next_generation)
+            if options.generation_limit is None
+            else range(next_generation, options.generation_limit)
         )
         for generation in generations:
             if operator_stop is not None and operator_stop():
                 raise core.M5OperatorStop("operator stop requested")
-            if (
+            if options.wall_seconds is not None and (
                 telemetry.wall_expired(options.wall_seconds)
                 or telemetry.wall_remaining(options.wall_seconds)
                 < provider_turn_timeout_seconds
@@ -2445,6 +2487,8 @@ def run_sustained_search(
             if resume_generation is not None:
                 stop_reason = "resume_generation_complete"
                 break
+        else:
+            stop_reason = "generation_budget"
         telemetry.boundary("report_pending")
     except _ProviderTurnBudgetExhausted:
         stop_reason = "provider_turn_budget"
@@ -2473,6 +2517,8 @@ def run_sustained_search(
         raise cleanup_failure from close_error
     if anchor_result is None:
         raise core.M5InfrastructureError("M10 specification anchor is missing")
+    if stop_reason is None:
+        raise core.M5InfrastructureError("scientific search stopped without a reason")
     telemetry.finish(stop_reason)
     report = _report(
         root=root,
