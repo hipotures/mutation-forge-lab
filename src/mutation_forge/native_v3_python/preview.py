@@ -1317,6 +1317,15 @@ def _progress(
         and not isinstance(runtime.get("current_run_elapsed_seconds"), int | float)
         and _nonnegative_int(runtime.get("active_provider_turns")) == 0
     )
+
+    def provider_turn_started(turn: Mapping[str, Any]) -> float:
+        value = turn.get("started_epoch_seconds")
+        return (
+            float(value)
+            if isinstance(value, int | float) and not isinstance(value, bool)
+            else 0.0
+        )
+
     active_provider_candidate_ids: list[str] = []
     slot_projection: list[dict[str, JsonValue]] = []
     for manifest in manifests:
@@ -1333,11 +1342,27 @@ def _progress(
             candidate_id = f"g{generation:04d}-{slot}"
             candidate = candidates_by_id.get(candidate_id)
             request_key = raw_slot.get("request_key")
-            provider_turn = (
-                provider_turns_by_key.get(f"{request_key}-initial")
-                if isinstance(request_key, str)
-                else None
-            )
+            provider_turn_key: str | None = None
+            provider_turn: Mapping[str, Any] | None = None
+            if isinstance(request_key, str):
+                request_prefix = f"{request_key}-"
+                related_turns = [
+                    (key, turn)
+                    for key, turn in provider_turns_by_key.items()
+                    if key == f"{request_key}-initial"
+                    or key.startswith(f"{request_prefix}repair-")
+                ]
+                if related_turns:
+                    # An active repair belongs to the same slot as its
+                    # completed initial turn.  Prefer it over the retained
+                    # initial record, then prefer the newest turn.
+                    provider_turn_key, provider_turn = min(
+                        related_turns,
+                        key=lambda item: (
+                            item[0] not in active_provider_keys,
+                            -provider_turn_started(item[1]),
+                        ),
+                    )
             provider_started = (
                 provider_turn.get("started_epoch_seconds") if provider_turn is not None else None
             )
@@ -1354,13 +1379,7 @@ def _progress(
                 provider_turn
                 if provider_turn is not None
                 and not legacy_runtime_stale
-                and (
-                    resume_started_epoch is None
-                    or (
-                        started_epoch is not None
-                        and started_epoch >= resume_started_epoch
-                    )
-                )
+                and provider_turn_key in active_provider_keys
                 else None
             )
             finished_epoch = (
@@ -1387,21 +1406,16 @@ def _progress(
                 else "evaluating"
                 if prepared
                 else "model"
-                if (
-                    current_provider_turn is not None
-                    and isinstance(request_key, str)
-                    and request_key + "-initial" in active_provider_keys
-                )
+                if current_provider_turn is not None
                 else "failed"
                 if (
-                    current_provider_turn is not None
-                    and current_provider_turn.get("failed") is True
+                    provider_turn is not None
+                    and provider_turn.get("failed") is True
                 )
                 else "queued"
             )
             if (
-                isinstance(request_key, str)
-                and request_key + "-initial" in active_provider_keys
+                current_provider_turn is not None
             ):
                 active_provider_candidate_ids.append(candidate_id)
             progress = evaluation_progress.get(f"candidate:{candidate_id}")
