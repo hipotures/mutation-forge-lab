@@ -9,6 +9,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -2334,6 +2335,67 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
     assert initial.provider_turns_attempted == 8
     assert initial.evaluations_completed == 1
     sink.update_canonical_state.assert_called_once()
+    sink.close.assert_called_once()
+
+
+def test_python_dashboard_retries_first_q_after_workspace_startup_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scientific = SimpleNamespace(
+        generation_limit=1,
+        wall_seconds=60.0,
+        as_dict=lambda: {"provider_concurrency": 2},
+    )
+    config = SimpleNamespace(
+        protocol="native-v3-python-v1",
+        source_path=Path("m10.toml"),
+        experiment_root=Path("/durable/m10"),
+        exp_id="m10-dashboard",
+        model="gpt-fixture",
+        effort="medium",
+        scientific_search=scientific,
+    )
+    status = {
+        "state": "completed",
+        "counts": {},
+        "provider": {},
+        "evaluators": {},
+        "throughput": {},
+        "scientific_activity": {},
+        "phase_timings": {},
+        "best": {},
+        "exact_verification": {},
+        "slots": [],
+        "recovery": {},
+    }
+    sink = Mock()
+    request_stop = Mock(side_effect=[RuntimeError("workspace not ready"), status])
+    release = threading.Event()
+
+    def dashboard_factory(**kwargs: Any) -> Mock:
+        kwargs["capabilities"].quit()
+        return sink
+
+    def fake_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        release.wait(timeout=0.6)
+        return status
+
+    monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "native-v3-python-v1")
+    monkeypatch.setattr(cli, "load_python_preview_config", lambda _path: config)
+    monkeypatch.setattr(cli, "python_preview_status", lambda _path: status)
+    monkeypatch.setattr(cli, "request_python_preview_stop", request_stop)
+    monkeypatch.setattr(cli, "run_python_preview", fake_run)
+    monkeypatch.setattr(cli, "InteractiveDashboardSink", dashboard_factory)
+
+    assert (
+        cli._experiment_run(
+            Path("m10.toml"),
+            json_output=False,
+            dashboard=True,
+        )
+        == 0
+    )
+    assert request_stop.call_count == 2
     sink.close.assert_called_once()
 
 

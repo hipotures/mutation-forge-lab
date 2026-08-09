@@ -351,13 +351,26 @@ def _experiment_run(
 
             stop_control = ExperimentControl()
             immediate_stop = Event()
+            pending_stop = Event()
+
+            def persist_stop_request() -> bool:
+                """Persist a graceful request once the worker workspace exists."""
+
+                try:
+                    request_python_preview_stop(config_path)
+                except Exception:
+                    # The dashboard is created before the worker initializes a
+                    # fresh workspace.  Retry from the polling loop instead of
+                    # losing the first q to that startup race.
+                    pending_stop.set()
+                    return False
+                pending_stop.clear()
+                return True
 
             def request_stop() -> None:
-                if stop_control.graceful_stop_requested:
+                if not stop_control.request_graceful_stop():
                     return
-                with suppress(Exception):
-                    request_python_preview_stop(config_path)
-                stop_control.request_graceful_stop()
+                persist_stop_request()
 
             def interrupt_stop() -> None:
                 # The second q is an immediate stop, not another graceful
@@ -408,6 +421,8 @@ def _experiment_run(
                             result = future.result(timeout=0.5)
                             break
                         except FutureTimeoutError:
+                            if pending_stop.is_set() and not immediate_stop.is_set():
+                                persist_stop_request()
                             preview_sink.update_canonical_state(
                                 project(python_preview_status(config_path))
                             )
