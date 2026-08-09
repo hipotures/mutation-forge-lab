@@ -389,6 +389,8 @@ def dashboard_state_from_python_status(
             }.get(raw_state, raw_state)
             raw_usage = raw.get("usage")
             raw_usage = raw_usage if isinstance(raw_usage, Mapping) else {}
+            started_epoch = number(raw.get("started_epoch_seconds"))
+            slot_elapsed = number(raw.get("elapsed_seconds"))
             groups.setdefault(generation, []).append(
                 DashboardSlot(
                     slot=candidate_id,
@@ -400,6 +402,15 @@ def dashboard_state_from_python_status(
                     ),
                     phase=str(raw.get("phase", "queued")),
                     state=state,
+                    started_monotonic=(
+                        time.monotonic()
+                        - max(0.0, time.time() - started_epoch)
+                        if started_epoch > 0
+                        else None
+                    ),
+                    elapsed_seconds=(
+                        slot_elapsed if slot_elapsed > 0 else None
+                    ),
                     repairs=integer(raw.get("repairs")),
                     usage=TokenUsage(
                         input=integer(raw_usage.get("inputTokens")),
@@ -2406,7 +2417,7 @@ class InteractiveDashboardSink:
         self,
         *,
         console: Console | None = None,
-        input_stream: TextIO = sys.stdin,
+        input_stream: TextIO | None = None,
         locked_config: Mapping[str, object] | None = None,
         capabilities: DashboardCapabilities | None = None,
         initial_state: DashboardState | None = None,
@@ -2431,7 +2442,10 @@ class InteractiveDashboardSink:
         self._pending_copy_action: str | None = None
         self._copy_notice_message: str | None = None
         self._copy_notice_until: float | None = None
-        self._input = _TerminalInput(input_stream, self.handle_key)
+        self._input = _TerminalInput(
+            input_stream if input_stream is not None else sys.stdin,
+            self.handle_key,
+        )
         self.live = Live(
             self.render(),
             console=self.console,
@@ -2463,11 +2477,40 @@ class InteractiveDashboardSink:
         """Replace the read-only projection without creating dashboard logic."""
 
         with self._lock:
-            self.state = state
+            previous = self.state
+            generations = {
+                group.generation for group in state.generations
+            }
+            self.state = replace(
+                state,
+                experiment_state=(
+                    "stopping"
+                    if previous.experiment_state == "stopping"
+                    and state.experiment_state == "running"
+                    else state.experiment_state
+                ),
+                displayed_generation=(
+                    previous.displayed_generation
+                    if previous.displayed_generation in generations
+                    else state.displayed_generation
+                ),
+                selected_index=previous.selected_index,
+                view=previous.view,
+                detail_tab=previous.detail_tab,
+                search_query=previous.search_query,
+                search_editing=previous.search_editing,
+                slot_icon_mode=previous.slot_icon_mode,
+                retry_confirmation=previous.retry_confirmation,
+                status_message=(
+                    previous.status_message or state.status_message
+                ),
+            )
             self._rendered.clear()
             self._dirty.set()
 
     def handle_key(self, key: str) -> None:
+        if len(key) == 1:
+            key = key.lower()
         with self._lock:
             generations = sorted(group.generation for group in self.state.generations)
             if (

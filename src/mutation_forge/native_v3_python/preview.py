@@ -1044,6 +1044,17 @@ def _progress(
         for item in candidates
         if isinstance(item.get("candidate_id"), str)
     }
+    provider_turns_by_key: dict[str, Mapping[str, Any]] = {}
+    raw_timeline = runtime.get("provider_concurrency_timeline", ())
+    if isinstance(raw_timeline, Sequence) and not isinstance(
+        raw_timeline, str | bytes
+    ):
+        for raw_turn in raw_timeline:
+            if not isinstance(raw_turn, Mapping):
+                continue
+            key = raw_turn.get("key")
+            if isinstance(key, str):
+                provider_turns_by_key[key] = raw_turn
     slot_projection: list[dict[str, JsonValue]] = []
     for manifest in manifests:
         generation = _nonnegative_int(manifest.get("generation"))
@@ -1060,9 +1071,53 @@ def _progress(
                 continue
             candidate_id = f"g{generation:04d}-{slot}"
             candidate = candidates_by_id.get(candidate_id)
+            request_key = raw_slot.get("request_key")
+            provider_turn = (
+                provider_turns_by_key.get(f"{request_key}-initial")
+                if isinstance(request_key, str)
+                else None
+            )
+            provider_started = (
+                provider_turn.get("started_epoch_seconds")
+                if provider_turn is not None
+                else None
+            )
+            provider_finished = (
+                provider_turn.get("finished_epoch_seconds")
+                if provider_turn is not None
+                else None
+            )
+            started_epoch = (
+                float(provider_started)
+                if isinstance(provider_started, int | float)
+                and not isinstance(provider_started, bool)
+                else None
+            )
+            finished_epoch = (
+                float(provider_finished)
+                if isinstance(provider_finished, int | float)
+                and not isinstance(provider_finished, bool)
+                else None
+            )
+            elapsed_seconds = (
+                max(0.0, (finished_epoch or time.time()) - started_epoch)
+                if started_epoch is not None
+                else None
+            )
+            prepared = (
+                root
+                / "generations"
+                / f"generation-{generation:04d}"
+                / slot
+                / "prepared-candidate.json.gz"
+            ).is_file()
             candidate_status = (
                 str(candidate.get("status"))
                 if candidate is not None
+                else "evaluating"
+                if prepared
+                else "model"
+                if provider_turn is not None
                 else "queued"
             )
             slot_projection.append(
@@ -1082,15 +1137,11 @@ def _progress(
                         if candidate_status
                         in _TERMINAL_CANDIDATE_STATUSES
                         else "evaluation"
-                        if (
-                            root
-                            / "generations"
-                            / f"generation-{generation:04d}"
-                            / slot
-                            / "prepared-candidate.json.gz"
-                        ).is_file()
+                        if prepared
                         else "provider"
                     ),
+                    "started_epoch_seconds": started_epoch,
+                    "elapsed_seconds": elapsed_seconds,
                     "repairs": (
                         _nonnegative_int(candidate.get("repairs"))
                         if candidate is not None
