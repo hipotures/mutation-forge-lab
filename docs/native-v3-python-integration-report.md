@@ -74,3 +74,67 @@ not used as the M8 baseline.
 
 The final integration result, release-candidate campaign, replay hashes, and
 draft pull request are appended after final verification.
+
+## Durable release-candidate campaign
+
+The one authorized M8 campaign used experiment
+`native-v3-python-m6-20260809T030126Z` under:
+
+```text
+/home/user/DEV/mutation-forge-lab-evidence/m8-rc1/live-rc
+```
+
+It completed the fixed population without replacement slots:
+
+| Measure | Result |
+|---|---:|
+| Planned / terminal / pending | 16 / 16 / 0 |
+| Generation 0 | 8 roots |
+| Generation 1 | 4 children + 4 roots |
+| Evaluated | 12 |
+| Contract-invalid | 4 |
+| Duplicate / provider-failed | 0 / 0 |
+| Candidate program turns / repairs | 20 / 4 |
+| Provider turns / warnings | 21 / 17 |
+| Total tokens | 133,429 |
+| Sandbox starts | 24 |
+| Sandbox failures / timeouts / rotations | 0 / 0 / 0 |
+| Exact-verifier submissions / records | 0 / 0 |
+
+The host requested a controlled stop after all eight generation-0 roots and
+the first two generation-1 slots were terminal. The stopped state was
+`blocked`, `operator_stop`, and resumable, with exactly six pending slots. One
+continuation submitted those six slots and reached `generation_budget`.
+All 438 immutable pre-resume artifact hashes remained byte-identical.
+
+Eight roots and four children were evaluated. All four evaluated children
+differed from their parents in both source and behavior. The retained traces
+recorded four `NoPlan` outcomes and no program failure. Nonzero action families
+were `add_edge`, `edge_fanout`, `k_switch`, `relocate_endpoint`, and
+`remove_edge`; selector profiles were derived from actual safe-API traces.
+All evaluated candidates received the same two-case development panel and
+budget.
+
+The offline M8 replay reproduced all 12 evaluated programs and 24 cases with
+matching semantic traces. Its internal report hash is:
+
+```text
+665fd9ee6515e6b7a28fbd1a8703b0f8f3939477fb0ebc3c6def5e76a2b3af56
+```
+
+The campaign and replay report `dsl_runtime_used=false`,
+`native_v2_default=true`, and `safe_api_expanded=false`.
+
+## Evidence index
+
+- M7 independent verification: `m8-rc1/m7-verification`
+- Current-main baseline: `m8-rc1/current-main`
+- Integration offline gates: `m8-rc1/integration`
+- M8 live campaign, sources, provider artifacts, snapshots, and replay:
+  `m8-rc1/live-rc`
+
+Large runtime trees remain outside Git. This repository commits only this
+human-readable report, the operator guide, the roadmap, and the small example
+configuration. Final command results and the exact current-main failure/error
+delta are recorded in the M8 issue and draft pull request from the durable
+manifests above.
