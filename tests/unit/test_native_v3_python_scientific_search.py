@@ -179,6 +179,7 @@ class _Provider:
             ("anchor-turn",),
         )
         self.snapshots: list[Mapping[str, Any]] = []
+        self.released: list[tuple[int, str]] = []
 
     def prepare_generation(
         self,
@@ -191,6 +192,11 @@ class _Provider:
     def primary_lane(self, *, generation: int, slot: str) -> int:
         del generation
         return int(slot.removeprefix("slot-")) % self.provider_concurrency
+
+    def release_primary_slot(
+        self, *, generation: int, slot: str
+    ) -> None:
+        self.released.append((generation, slot))
 
     def ensure_specification_anchor(
         self,
@@ -530,8 +536,13 @@ def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
         def __init__(self) -> None:
             super().__init__()
             self.repair_slots: list[str] = []
+            self.turn_order: list[str] = []
+            self.slot_zero_repaired = threading.Event()
 
         def generate_root(self, **kwargs: Any) -> M5ProviderResultV1:
+            if kwargs["slot"] == "slot-04":
+                assert self.slot_zero_repaired.wait(timeout=1)
+            self.turn_order.append(f"primary-{kwargs['slot']}")
             result = super().generate_root(**kwargs)
             slot = str(kwargs["slot"])
             if slot not in {"slot-00", "slot-01"}:
@@ -571,6 +582,9 @@ def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
             **_: Any,
         ) -> M5ProviderResultV1:
             self.repair_slots.append(slot)
+            self.turn_order.append(f"repair-{slot}")
+            if slot == "slot-00":
+                self.slot_zero_repaired.set()
             turn = f"repair-{generation}-{slot}"
             result = M5ProviderResultV1(
                 response_text=json.dumps(
@@ -608,6 +622,9 @@ def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
     )
 
     assert provider.repair_slots == ["slot-00"]
+    assert provider.turn_order.index("repair-slot-00") < (
+        provider.turn_order.index("primary-slot-04")
+    )
     assert report["candidate_status_counts"] == {
         "contract_invalid": 1,
         "evaluated": 7,

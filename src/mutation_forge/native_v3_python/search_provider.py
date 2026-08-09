@@ -879,6 +879,7 @@ class CodexM10SearchProvider:
         self._thread_owners: dict[str, int] = {}
         self._primary_slot_owners: dict[str, int] = {}
         self._completed_primary_slots: set[str] = set()
+        self._released_primary_slots: set[str] = set()
         self._coordinator_released = False
         self._load_state()
 
@@ -900,12 +901,16 @@ class CodexM10SearchProvider:
         root_workers = raw.get("root_workers", {})
         owners = raw.get("thread_owners", {})
         completed = raw.get("completed_primary_slots", [])
+        released = raw.get("released_primary_slots", [])
         if (
             not isinstance(root_workers, Mapping)
             or not isinstance(owners, Mapping)
             or not isinstance(completed, Sequence)
             or isinstance(completed, str | bytes)
             or not all(isinstance(item, str) and item for item in completed)
+            or not isinstance(released, Sequence)
+            or isinstance(released, str | bytes)
+            or not all(isinstance(item, str) and item for item in released)
         ):
             raise M5InfrastructureError("provider pool topology is malformed")
         self._root_workers = {
@@ -921,6 +926,11 @@ class CodexM10SearchProvider:
             and not isinstance(worker, bool)
         }
         self._completed_primary_slots = set(cast(Sequence[str], completed))
+        self._released_primary_slots = set(cast(Sequence[str], released))
+        if not self._released_primary_slots <= self._completed_primary_slots:
+            raise M5InfrastructureError(
+                "released provider slots are not completed"
+            )
         if any(
             worker not in range(self.provider_concurrency)
             for worker in (
@@ -953,6 +963,9 @@ class CodexM10SearchProvider:
                     "thread_owners": dict(sorted(self._thread_owners.items())),
                     "completed_primary_slots": sorted(
                         self._completed_primary_slots
+                    ),
+                    "released_primary_slots": sorted(
+                        self._released_primary_slots
                     ),
                 },
             )
@@ -1141,7 +1154,7 @@ class CodexM10SearchProvider:
             )
             self._turn_condition.wait_for(
                 lambda: all(
-                    item in self._completed_primary_slots
+                    item in self._released_primary_slots
                     for item in preceding
                 )
             )
@@ -1152,6 +1165,25 @@ class CodexM10SearchProvider:
                 self._completed_primary_slots.add(candidate_id)
                 self._save_state()
                 self._turn_condition.notify_all()
+
+    def release_primary_slot(
+        self, *, generation: int, slot: str
+    ) -> None:
+        """Advance the lane only after validation or same-thread repair."""
+
+        candidate_id = f"g{generation:04d}-{slot}"
+        with self._turn_condition:
+            if candidate_id not in self._completed_primary_slots:
+                raise M5InfrastructureError(
+                    "provider slot was released before its turn completed"
+                )
+            if candidate_id not in self._primary_slot_owners:
+                raise M5InfrastructureError(
+                    "provider slot release has no frozen owner"
+                )
+            self._released_primary_slots.add(candidate_id)
+            self._save_state()
+            self._turn_condition.notify_all()
 
     def primary_lane(self, *, generation: int, slot: str) -> int:
         candidate_id = f"g{generation:04d}-{slot}"

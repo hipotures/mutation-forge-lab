@@ -291,6 +291,10 @@ class M10SearchProvider(M5SearchProvider, Protocol):
 
     def primary_lane(self, *, generation: int, slot: str) -> int: ...
 
+    def release_primary_slot(
+        self, *, generation: int, slot: str
+    ) -> None: ...
+
 
 class M5ScientificEvaluator(Protocol):
     """Evaluate one source on exactly one immutable development case."""

@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import partial
@@ -1808,11 +1808,10 @@ def run_sustained_search(
                     if infrastructure_error is not None:
                         raise infrastructure_error
 
-            provider_tasks: dict[
-                Future[core.M5ProviderResultV1], _ProviderTask
+            provider_futures: dict[
+                str, Future[core.M5ProviderResultV1]
             ] = {}
             provider_task_list: list[_ProviderTask] = []
-            supply: dict[str, dict[str, Any]] = {}
             for slot_plan, pending, initial_key in zip(
                 manifest.slots, entries, primary_keys, strict=True
             ):
@@ -1828,6 +1827,10 @@ def run_sustained_search(
                     )
                     exact_verified |= retained.get("exact_verified") is True
                     pending.retained_terminal = True
+                    provider.release_primary_slot(
+                        generation=generation,
+                        slot=slot_plan.slot,
+                    )
                     commit_ready(block=False)
                     continue
                 if prepared_path.is_file():
@@ -1844,6 +1847,10 @@ def run_sustained_search(
                         panel=panel,
                         candidate_id=pending.candidate_id,
                         slot_dir=pending.slot_dir,
+                    )
+                    provider.release_primary_slot(
+                        generation=generation,
+                        slot=slot_plan.slot,
                     )
                     commit_ready(block=False)
                     continue
@@ -1939,13 +1946,13 @@ def run_sustained_search(
                         ),
                         operation=task.operation,
                     )
-                    provider_tasks[future] = task
+                    provider_futures[task.pending.candidate_id] = future
                     submitted = True
                 if not submitted:
                     break
 
-            for future in as_completed(provider_tasks):
-                task = provider_tasks[future]
+            for task in provider_task_list:
+                future = provider_futures[task.pending.candidate_id]
                 pending = task.pending
                 try:
                     provider_result = future.result()
@@ -1978,6 +1985,10 @@ def run_sustained_search(
                     pending.terminal_payload = _provider_failure(
                         base=base, error=error
                     )
+                    provider.release_primary_slot(
+                        generation=generation,
+                        slot=task.slot_plan.slot,
+                    )
                     commit_ready(block=False)
                     continue
                 if boundary_hook is not None:
@@ -2000,13 +2011,7 @@ def run_sustained_search(
                     repairs=0,
                     prompt=task.prompt,
                 )
-                supply[pending.candidate_id] = {
-                    "task": task,
-                    "result": provider_result,
-                    "attempts": attempts,
-                    "validation": validation,
-                }
-                if _queue_valid_candidate(
+                valid = _queue_valid_candidate(
                     pending=pending,
                     root=root,
                     panel=panel,
@@ -2015,18 +2020,14 @@ def run_sustained_search(
                     base=base,
                     validation=validation,
                     boundary_hook=boundary_hook,
-                ):
+                )
+                if valid:
+                    provider.release_primary_slot(
+                        generation=generation,
+                        slot=task.slot_plan.slot,
+                    )
                     commit_ready(block=False)
-
-            repair_tasks: dict[
-                Future[core.M5ProviderResultV1], tuple[_ProviderTask, dict[str, Any]]
-            ] = {}
-            for pending in entries:
-                supply_record = supply.get(pending.candidate_id)
-                if supply_record is None or pending.future is not None:
                     continue
-                task = cast(_ProviderTask, supply_record["task"])
-                validation = supply_record["validation"]
                 repair_key = f"{task.slot_plan.request_key}-repair-01"
                 if not telemetry.reserve_repair(
                     repair_key, limit=options.repair_turn_limit
@@ -2038,8 +2039,8 @@ def run_sustained_search(
                         parent=task.parent,
                         panel=panel,
                         memory=memory,
-                        provider_result=supply_record["result"],
-                        attempts=supply_record["attempts"],
+                        provider_result=provider_result,
+                        attempts=attempts,
                         repairs=0,
                         prompt=task.prompt,
                     )
@@ -2047,6 +2048,10 @@ def run_sustained_search(
                         base=base,
                         validation=validation.as_dict(),
                         repair_skipped="repair_turn_budget",
+                    )
+                    provider.release_primary_slot(
+                        generation=generation,
+                        slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
                     continue
@@ -2057,9 +2062,7 @@ def run_sustained_search(
                     ],
                 )
                 core._assert_model_prompt_hygiene(repair_prompt)
-                previous_result = cast(
-                    core.M5ProviderResultV1, supply_record["result"]
-                )
+                previous_result = provider_result
                 operation = partial(
                     provider.repair,
                     previous=previous_result,
@@ -2071,7 +2074,7 @@ def run_sustained_search(
                     idempotency_key=task.slot_plan.request_key + "-repair-01",
                     artifact_dir=pending.slot_dir / "provider-repair-01",
                 )
-                future = provider_executor.submit(
+                repair_future = provider_executor.submit(
                     _provider_call,
                     telemetry=telemetry,
                     key=repair_key,
@@ -2083,16 +2086,8 @@ def run_sustained_search(
                     ),
                     operation=operation,
                 )
-                repair_tasks[future] = (task, supply_record)
-
-            for future in as_completed(repair_tasks):
-                task, repair_record = repair_tasks[future]
-                pending = task.pending
-                previous_result = cast(
-                    core.M5ProviderResultV1, repair_record["result"]
-                )
                 try:
-                    repaired_result = future.result()
+                    repaired_result = repair_future.result()
                     core._assert_provider_turn_boundary(
                         repaired_result,
                         expected_history=(
@@ -2111,23 +2106,24 @@ def run_sustained_search(
                         panel=panel,
                         memory=memory,
                         provider_result=previous_result,
-                        attempts=repair_record["attempts"],
+                        attempts=attempts,
                         repairs=1,
                         prompt=task.prompt,
                     )
                     pending.terminal_payload = _provider_failure(
                         base=base, error=error
                     )
+                    provider.release_primary_slot(
+                        generation=generation,
+                        slot=task.slot_plan.slot,
+                    )
                     commit_ready(block=False)
                     continue
-                attempts = [
-                    *cast(
-                        Sequence[Mapping[str, JsonValue]],
-                        repair_record["attempts"],
-                    ),
+                repaired_attempts = [
+                    *attempts,
                     repaired_result.as_dict(),
                 ]
-                validation = validate_python_policy_response(
+                repaired_validation = validate_python_policy_response(
                     repaired_result.response_text
                 )
                 base = _candidate_base(
@@ -2138,7 +2134,7 @@ def run_sustained_search(
                     panel=panel,
                     memory=memory,
                     provider_result=repaired_result,
-                    attempts=attempts,
+                    attempts=repaired_attempts,
                     repairs=1,
                     prompt=task.prompt,
                 )
@@ -2149,43 +2145,19 @@ def run_sustained_search(
                     telemetry=telemetry,
                     pool=pool,
                     base=base,
-                    validation=validation,
+                    validation=repaired_validation,
                     boundary_hook=boundary_hook,
                 ):
                     pending.terminal_payload = _contract_invalid(
                         base=base,
-                        validation=validation.as_dict(),
+                        validation=repaired_validation.as_dict(),
                     )
+                provider.release_primary_slot(
+                    generation=generation,
+                    slot=task.slot_plan.slot,
+                )
                 commit_ready(block=False)
 
-            for pending in entries:
-                supply_record = supply.get(pending.candidate_id)
-                if (
-                    supply_record is None
-                    or pending.future is not None
-                    or pending.terminal_payload is not None
-                    or pending.retained_terminal
-                ):
-                    continue
-                task = cast(_ProviderTask, supply_record["task"])
-                validation = supply_record["validation"]
-                base = _candidate_base(
-                    candidate_id=pending.candidate_id,
-                    generation=generation,
-                    slot_plan=task.slot_plan,
-                    parent=task.parent,
-                    panel=panel,
-                    memory=memory,
-                    provider_result=supply_record["result"],
-                    attempts=supply_record["attempts"],
-                    repairs=0,
-                    prompt=task.prompt,
-                )
-                pending.terminal_payload = _contract_invalid(
-                    base=base,
-                    validation=validation.as_dict(),
-                    repair_skipped="repair_turn_budget",
-                )
             commit_ready(block=True)
             if commit_cursor != core.POPULATION_SIZE:
                 raise core.M5InfrastructureError(
