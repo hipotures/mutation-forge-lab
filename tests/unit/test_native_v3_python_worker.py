@@ -18,6 +18,7 @@ from mutation_forge.native_v3_python import (
     PolicyInfrastructureError,
     PolicyProtocolError,
     PolicyRuntimeLimitsV1,
+    PolicyWorkerStartupError,
     UnsupportedPolicySandboxError,
 )
 from mutation_forge.native_v3_python.runner import (
@@ -488,14 +489,22 @@ def test_initial_worker_startup_failures_are_infrastructure(
     startup_error: Exception,
 ) -> None:
     def fail_receive(
-        _worker: IsolatedPolicyWorkerV1,
+        worker: IsolatedPolicyWorkerV1,
         _deadline: float,
     ) -> dict[str, object]:
+        worker._stderr.write(b"private startup path: /secret/runtime\n")  # noqa: SLF001
+        worker._stderr.flush()  # noqa: SLF001
         raise startup_error
 
     monkeypatch.setattr(IsolatedPolicyWorkerV1, "_receive", fail_receive)
-    with pytest.raises(PolicyInfrastructureError, match="worker initialization failed"):
+    with pytest.raises(
+        PolicyWorkerStartupError,
+        match="worker initialization failed",
+    ) as captured:
         IsolatedPolicyWorkerV1(NO_PLAN_SOURCE)
+    assert "private startup path" not in str(captured.value)
+    assert captured.value.private_diagnostic == "private startup path: /secret/runtime\n"
+    assert captured.value.diagnostic_bytes == 38
 
 
 def test_failed_rotation_shutdown_is_infrastructure_and_reaps_process(

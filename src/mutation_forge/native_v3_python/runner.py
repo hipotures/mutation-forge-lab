@@ -27,6 +27,7 @@ from .runtime_contracts import (
     PolicyInvocationResultV1,
     PolicyProtocolError,
     PolicyRuntimeLimitsV1,
+    PolicyWorkerStartupError,
     ProgramFailureV1,
     RewriteHostV1,
     UnsupportedPolicySandboxError,
@@ -282,8 +283,13 @@ class IsolatedPolicyWorkerV1:
             raise
         if self._process.stdin is None or self._process.stdout is None:
             self._terminate()
+            diagnostic, diagnostic_bytes = self._startup_diagnostic()
             self._stderr.close()
-            raise PolicyInfrastructureError("worker protocol pipes were not created")
+            raise PolicyWorkerStartupError(
+                "worker protocol pipes were not created",
+                private_diagnostic=diagnostic,
+                diagnostic_bytes=diagnostic_bytes,
+            )
         self._stdin = cast(BinaryIO, self._process.stdin)
         self._stdout = cast(BinaryIO, self._process.stdout)
         try:
@@ -302,9 +308,12 @@ class IsolatedPolicyWorkerV1:
             self._startup_seconds = time.monotonic() - self._started_at
         except (_WorkerTimeout, _WorkerCrash) as error:
             self._terminate()
+            diagnostic, diagnostic_bytes = self._startup_diagnostic()
             self._stderr.close()
-            raise PolicyInfrastructureError(
-                f"worker initialization failed: {error}"
+            raise PolicyWorkerStartupError(
+                f"worker initialization failed: {error}",
+                private_diagnostic=diagnostic,
+                diagnostic_bytes=diagnostic_bytes,
             ) from error
         except BaseException:
             self._terminate()
@@ -737,6 +746,14 @@ class IsolatedPolicyWorkerV1:
             return os.fstat(self._stderr.fileno()).st_size
         except (OSError, ValueError):
             return 0
+
+    def _startup_diagnostic(self) -> tuple[str, int]:
+        try:
+            self._stderr.seek(0)
+            data = self._stderr.read(self.limits.diagnostics_bytes)
+        except (OSError, ValueError):
+            return "", 0
+        return data.decode("utf-8", errors="replace"), len(data)
 
     def captured_stderr(self) -> str:
         if self._stderr.closed:

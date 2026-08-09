@@ -77,6 +77,28 @@ jobs:
       - name: Configure offline Codex fixture
         run: echo "$GITHUB_WORKSPACE/mutation-forge-lab/tests/fixtures/bin" >> "$GITHUB_PATH"
 
+      - name: Validate M2 sandbox startup
+        run: |
+          uv run python - <<'PY'
+          import sys
+
+          from mutation_forge.native_v3_python import (
+              IsolatedPolicyWorkerV1,
+              PolicyWorkerStartupError,
+          )
+
+          source = """\
+          def propose(ctx, graph, api, seed):
+              return api.no_plan()
+          """
+          try:
+              worker = IsolatedPolicyWorkerV1(source)
+          except PolicyWorkerStartupError as error:
+              print(error.private_diagnostic, file=sys.stderr)
+              raise
+          worker.close()
+          PY
+
       - name: Check lockfile
         run: uv lock --check
 

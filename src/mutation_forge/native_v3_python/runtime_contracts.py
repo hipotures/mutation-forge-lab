@@ -25,6 +25,21 @@ class PolicyInfrastructureError(PolicyRuntimeError):
     """The host, sandbox, or worker protocol failed."""
 
 
+class PolicyWorkerStartupError(PolicyInfrastructureError):
+    """A worker failed before completing its trusted startup attestation."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        private_diagnostic: str,
+        diagnostic_bytes: int,
+    ) -> None:
+        super().__init__(message)
+        self.private_diagnostic = private_diagnostic
+        self.diagnostic_bytes = diagnostic_bytes
+
+
 class UnsupportedPolicySandboxError(PolicyInfrastructureError):
     """Required sandbox controls are unavailable."""
 
