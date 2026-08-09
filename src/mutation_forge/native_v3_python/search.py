@@ -1074,6 +1074,8 @@ def _verify_retained_candidate(
     root: Path,
     path: Path,
     panel: tuple[DevelopmentCaseV1, ...],
+    slot_plan: SlotPlanV1,
+    search_memory_sha256: str,
 ) -> dict[str, Any]:
     candidate = _load_mapping(path)
     expected_slot = path.parent.name
@@ -1084,10 +1086,37 @@ def _verify_retained_candidate(
         or candidate.get("candidate_id") != expected_id
         or candidate.get("generation") != expected_generation
         or candidate.get("slot") != expected_slot
+        or candidate.get("kind") != slot_plan.kind
+        or candidate.get("parent_candidate_id")
+        != slot_plan.parent_candidate_id
         or candidate.get("panel_hash") != panel_hash(panel)
         or candidate.get("panel_case_ids") != [item.case_id for item in panel]
+        or candidate.get("search_memory_sha256")
+        != search_memory_sha256
     ):
         raise M5InfrastructureError(f"retained candidate identity changed: {path}")
+    candidates = _all_candidates(root)
+    by_id = {str(item.get("candidate_id")): item for item in candidates}
+    parent = (
+        by_id.get(slot_plan.parent_candidate_id)
+        if slot_plan.parent_candidate_id is not None
+        else None
+    )
+    if slot_plan.kind == "child" and parent is None:
+        raise M5InfrastructureError("retained child parent is unavailable")
+    expected_parent_program_hash = (
+        parent.get("program_hash") if parent is not None else None
+    )
+    expected_parent_behavior_signature = (
+        parent.get("behavior_signature") if parent is not None else None
+    )
+    if (
+        candidate.get("parent_program_hash")
+        != expected_parent_program_hash
+        or candidate.get("parent_behavior_signature")
+        != expected_parent_behavior_signature
+    ):
+        raise M5InfrastructureError("retained parent identity changed")
     raw_attempts = candidate.get("provider_attempts")
     if not isinstance(raw_attempts, Sequence) or isinstance(
         raw_attempts, str | bytes
@@ -1206,14 +1235,36 @@ def _verify_retained_candidate(
         != replayed_profile["behavior_signature"]
     ):
         raise M5InfrastructureError(f"retained behavior evidence changed: {path}")
-    if (
-        status == "evaluated"
-        and candidate.get("duplicate_of") is not None
-    ) or (
-        status == "duplicate"
-        and not isinstance(candidate.get("duplicate_of"), str)
-    ):
+    duplicate_of = candidate.get("duplicate_of")
+    if status == "evaluated" and duplicate_of is not None:
         raise M5InfrastructureError("retained duplicate classification changed")
+    if status == "duplicate":
+        if not isinstance(duplicate_of, str):
+            raise M5InfrastructureError(
+                "retained duplicate classification changed"
+            )
+        candidate_key = (expected_generation, expected_slot)
+        duplicate = next(
+            (
+                item
+                for item in candidates
+                if item.get("candidate_id") == duplicate_of
+                and (
+                    int(item.get("generation", -1)),
+                    str(item.get("slot", "")),
+                )
+                < candidate_key
+            ),
+            None,
+        )
+        if duplicate is None or (
+            duplicate.get("program_hash") != candidate.get("program_hash")
+            and duplicate.get("behavior_signature")
+            != candidate.get("behavior_signature")
+        ):
+            raise M5InfrastructureError(
+                "retained duplicate target changed"
+            )
     return candidate
 
 
@@ -1450,11 +1501,13 @@ def run_m5_search(
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_manifest")
             memory_path = generation_dir / "search-memory.json.gz"
-            if memory_path.exists():
-                memory = _load_mapping(memory_path)
-            else:
-                memory = build_search_memory(_all_candidates(root))
-                _write_exclusive_or_verify(memory_path, memory)
+            memory_candidates = [
+                item
+                for item in _all_candidates(root)
+                if int(item.get("generation", -1)) < generation
+            ]
+            memory = build_search_memory(memory_candidates)
+            _write_exclusive_or_verify(memory_path, memory)
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_search_memory")
             prior_candidates = _all_candidates(root)
@@ -1467,6 +1520,8 @@ def run_m5_search(
                         root=root,
                         path=candidate_path,
                         panel=panel,
+                        slot_plan=slot_plan,
+                        search_memory_sha256=str(memory["sha256"]),
                     )
                     continue
                 if operator_stop is not None and operator_stop():

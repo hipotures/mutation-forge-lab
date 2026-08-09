@@ -168,6 +168,10 @@ class HegScoreEvidenceAdapter:
         finally:
             worker.timeout_seconds = previous_timeout
         elapsed_ns = time.perf_counter_ns() - started_ns
+        if response is None:
+            raise ScoringBackendError(
+                "authoritative HEG score worker produced no response"
+            )
         if response.dominated:
             raise ScoreContractViolation("uncut component request returned dominated")
         by_length = {int(result.length): result for result in response.results}

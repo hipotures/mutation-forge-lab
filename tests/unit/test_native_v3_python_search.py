@@ -949,6 +949,61 @@ def test_offline_resume_revalidates_retained_scientific_evidence(
         _run(root, _Provider(), _Evaluator())
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("kind", "root", "candidate identity changed"),
+        ("parent_candidate_id", "g9999-slot-99", "candidate identity changed"),
+        ("parent_program_hash", "0" * 64, "parent identity changed"),
+        ("duplicate_of", "g9999-slot-99", "duplicate target changed"),
+    ],
+)
+def test_resume_rejects_tampered_lineage_and_duplicate_identity(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    root = tmp_path / field
+    _run(root, _Provider(duplicate_child=True), _Evaluator())
+    candidate_path = (
+        root
+        / "generations"
+        / "generation-0001"
+        / "slot-00"
+        / "candidate.json.gz"
+    )
+    candidate = read_json(candidate_path)
+    assert isinstance(candidate, dict)
+    candidate[field] = value
+    write_json(candidate_path, candidate)
+
+    with pytest.raises(M5InfrastructureError, match=message):
+        _run(root, _Provider(duplicate_child=True), _Evaluator())
+
+
+def test_resume_rejects_tampered_search_memory_projection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tampered-memory"
+    _run(root, _Provider(), _Evaluator())
+    memory_path = (
+        root
+        / "generations"
+        / "generation-0000"
+        / "search-memory.json.gz"
+    )
+    memory = read_json(memory_path)
+    assert isinstance(memory, dict)
+    projection = memory["model_projection"]
+    assert isinstance(projection, dict)
+    projection["unrelated_source"] = "SECRET_SOURCE"
+    write_json(memory_path, memory)
+
+    with pytest.raises(M5InfrastructureError, match="immutable artifact changed"):
+        _run(root, _Provider(), _Evaluator())
+
+
 def test_heuristic_zero_does_not_stop_without_exact_verified(tmp_path: Path) -> None:
     report = _run(tmp_path / "run", _Provider(), _Evaluator())
     assert report["stop_reason"] == "generation_budget"

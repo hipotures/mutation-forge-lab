@@ -529,6 +529,7 @@ def _evaluate_serial(
     current_evidence = initial_evidence
     accepted_rewrites = 0
     failure: ProgramFailure | None = None
+    unsafe_score_timeout = False
     steps: list[SerialStepTrace] = []
     trajectory = [initial_utility]
     for step_index in range(config.horizon):
@@ -571,6 +572,7 @@ def _evaluate_serial(
                     )
                 except ScoreTimeoutWithoutPartial:
                     outcome = "score_timeout_without_partial"
+                    unsafe_score_timeout = True
                 if candidate_evidence is not None:
                     incumbent_energy = scale.interval(current_evidence)
                     candidate_energy = scale.interval(candidate_evidence)
@@ -651,23 +653,25 @@ def _evaluate_serial(
                 counterexample=counterexample,
             )
         )
-        if failure is not None:
+        if failure is not None or unsafe_score_timeout:
             break
 
     while len(trajectory) < config.horizon + 1:
         trajectory.append(_utility(scale, current_evidence))
     terminal_identity = _identity(backend, current)
-    status = (
-        SerialEvaluationStatus.PROGRAM_FAILURE
-        if failure is not None
-        else SerialEvaluationStatus.COMPLETE
-    )
+    if failure is not None:
+        status = SerialEvaluationStatus.PROGRAM_FAILURE
+    elif unsafe_score_timeout:
+        status = SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT
+    else:
+        status = SerialEvaluationStatus.COMPLETE
     auc = episode_auc(trajectory, horizon=config.horizon)
-    fitness = (
-        _program_failure_fitness()
-        if failure is not None
-        else candidate_fitness({config.order: (auc,)})
-    )
+    if failure is not None:
+        fitness = _program_failure_fitness()
+    elif unsafe_score_timeout:
+        fitness = _full_uncertainty()
+    else:
+        fitness = candidate_fitness({config.order: (auc,)})
     provisional = SerialEpisodeResult(
         protocol_id=protocol_id,
         program_hash=program_hash,
@@ -690,7 +694,11 @@ def _evaluate_serial(
         scientific_error=(
             f"{failure.code}@{failure.path}: {failure.message}"
             if failure is not None
-            else None
+            else (
+                "candidate scoring timed out without safe partial evidence"
+                if unsafe_score_timeout
+                else None
+            )
         ),
         semantic_trace_hash="",
         execution_trace_protocol_id=execution_trace_protocol_id,

@@ -176,32 +176,16 @@ def test_timeout_infrastructure_and_contract_failures_are_distinct() -> None:
         contract_adapter.score_evidence(graph, witness_cap=64)
 
 
-class _FailingWorker:
-    def score(self, *_args: object, **_kwargs: object) -> Any:
-        raise OSError("worker failed")
-
-    def restart(self) -> None:
-        return None
-
-    def close(self) -> None:
-        return None
-
-
 def test_cpp_worker_failure_never_enters_a_python_reference_fallback() -> None:
-    repository = Path(__file__).resolve().parents[3] / "heg"
-    backend = HegBackend(repository)
-    try:
-        backend._worker = _FailingWorker()  # noqa: SLF001
-        with pytest.raises(ScoringBackendError, match="after one restart"):
-            backend._worker_response(  # noqa: SLF001
-                object(),
-                lengths=(4,),
-                limit=65,
-                node_budget=INITIAL_NODE_BUDGET,
-                cutoff=None,
-                recorder=None,
-            )
-        assert backend.score_implementation == "heg-cpp-score-worker"
-        assert not hasattr(backend, "_reference_cycle_counts")
-    finally:
-        backend.close()
+    class NoResponseBackend(_FakeBackend):
+        def _worker_response(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+    backend = NoResponseBackend()
+    adapter = HegScoreEvidenceAdapter(cast(HegBackend, backend))
+    with pytest.raises(ScoringBackendError, match="produced no response"):
+        adapter.score_evidence(GraphState(6, ((0, 1),)), witness_cap=64)

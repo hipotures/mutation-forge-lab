@@ -34,6 +34,7 @@ from mutation_forge.native_v3.scoring import (
     CycleComponentEvidence,
     EvidenceStatus,
     ScoreEvidence,
+    ScoreTimeoutWithoutPartial,
 )
 from mutation_forge.native_v3.serial_evaluator import (
     CounterexampleInspector,
@@ -378,6 +379,44 @@ def test_one_host_minted_rewrite_gets_one_authoritative_candidate_score() -> Non
     assert len(backend.apply_calls) == 1
     assert len(backend.score_calls) == 2
     assert all(lengths == (4,) for _, lengths, _ in backend.score_calls)
+
+
+def test_candidate_scoring_timeout_is_inconclusive_without_safe_evidence() -> None:
+    class CandidateTimeoutBackend(_Backend):
+        def score_evidence(
+            self,
+            graph: GraphState,
+            *,
+            witness_cap: int,
+            forbidden_lengths: Iterable[int] | None = None,
+            attempt_kind: AttemptKind = AttemptKind.INITIAL,
+        ) -> ScoreEvidence:
+            if len(graph.edges) > len(_cubic_graph(graph.order).edges):
+                self.raw_graph_score_calls += 1
+                self.unique_graph_scores += 1
+                raise ScoreTimeoutWithoutPartial("candidate score timed out")
+            return super().score_evidence(
+                graph,
+                witness_cap=witness_cap,
+                forbidden_lengths=forbidden_lengths,
+                attempt_kind=attempt_kind,
+            )
+
+    result = _evaluate(_source("add_edge.py"), backend=CandidateTimeoutBackend())
+    science = result.scientific_result
+
+    assert science.status is SerialEvaluationStatus.INCONCLUSIVE_UNSAFE_TIMEOUT
+    assert science.failure is None
+    assert science.scientific_error == (
+        "candidate scoring timed out without safe partial evidence"
+    )
+    assert science.fitness_interval.lower == 0
+    assert science.fitness_interval.upper == 1
+    assert science.accepted_rewrites == 0
+    assert len(science.steps) == 1
+    assert science.steps[0].outcome == "score_timeout_without_partial"
+    assert science.steps[0].candidate_evidence is None
+    assert not science.steps[0].accepted
 
 
 def test_no_effect_and_illegal_final_state_do_not_score_candidates() -> None:
