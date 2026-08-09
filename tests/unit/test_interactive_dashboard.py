@@ -2132,6 +2132,29 @@ def test_terminal_input_restores_terminal_mode() -> None:
         os.close(slave_fd)
 
 
+def test_terminal_input_survives_callback_error() -> None:
+    master_fd, slave_fd = pty.openpty()
+    stream = os.fdopen(os.dup(slave_fd), "r", encoding="utf-8", buffering=1)
+    callback_seen = threading.Event()
+
+    def callback(_key: str) -> None:
+        callback_seen.set()
+        raise RuntimeError("simulated startup race")
+
+    reader = _TerminalInput(stream, callback)
+    try:
+        reader.start()
+        os.write(master_fd, b"q")
+        assert callback_seen.wait(timeout=1.0)
+        assert reader._thread is not None  # noqa: SLF001
+        assert reader._thread.is_alive()  # noqa: SLF001
+    finally:
+        reader.close()
+        stream.close()
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
 def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

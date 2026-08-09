@@ -2496,7 +2496,13 @@ class _TerminalInput:
             buffer += chunk
             keys, buffer = _decode_keys(buffer)
             for key in keys:
-                self.callback(key)
+                try:
+                    self.callback(key)
+                except Exception:
+                    # Keyboard input is a long-lived daemon.  A transient
+                    # callback race (for example while a workspace starts)
+                    # must not permanently disable subsequent key presses.
+                    continue
 
     def close(self) -> None:
         self._stop.set()
