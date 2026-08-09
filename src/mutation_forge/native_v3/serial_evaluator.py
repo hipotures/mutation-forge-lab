@@ -1,4 +1,4 @@
-"""Deterministic serial evaluation of one Native v3 program."""
+"""Representation-independent serial scientific evaluation."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from fractions import Fraction
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
-from mutation_forge.backends.base import GraphBackend, ScoreProfileRecorder
+from mutation_forge.backends.base import GraphBackend
 from mutation_forge.counterexamples import (
     CandidateProvenance,
     CounterexampleOutcome,
@@ -16,7 +16,6 @@ from mutation_forge.counterexamples import (
 from mutation_forge.models import GraphScore, GraphState, JsonValue, RewritePlan
 
 from .canonical import canonical_json_bytes, domain_hash
-from .contracts import ProgramContract, ValidatedProgram
 from .execution import ProgramFailure, SemanticEvent
 from .heg_scoring import (
     ScoreEvidenceScorer,
@@ -34,9 +33,6 @@ from .scoring import (
     episode_auc,
     proved_strict_energy_improvement,
 )
-
-if TYPE_CHECKING:
-    from .interpreter import InterpreterLimits
 
 SERIAL_EVALUATOR_PROTOCOL_ID = "native_v3_serial_interval_evaluator_v2"
 _TRACE_HASH_DOMAIN = b"mforge-native-v3-serial-trace\0"
@@ -285,27 +281,6 @@ class SerialEpisodeResult:
         if include_hash:
             result["semantic_trace_hash"] = self.semantic_trace_hash
         return result
-
-
-@dataclass(slots=True)
-class _CapturingRewriteHost:
-    backend: GraphBackend
-    candidate: GraphState | None = None
-
-    def apply_rewrite(
-        self,
-        graph: GraphState,
-        rewrite: RewritePlan,
-        *,
-        record_score_profile: ScoreProfileRecorder | None = None,
-    ) -> GraphState:
-        candidate = self.backend.apply_rewrite(
-            graph,
-            rewrite,
-            record_score_profile=record_score_profile,
-        )
-        self.candidate = candidate
-        return candidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -727,66 +702,4 @@ def _evaluate_serial(
     return replace(
         provisional,
         semantic_trace_hash=_trace_hash(payload),
-    )
-
-
-def evaluate_serial_program(
-    *,
-    backend: GraphBackend,
-    scorer: ScoreEvidenceScorer,
-    program: ValidatedProgram,
-    config: SerialEpisodeConfig,
-    interpreter_limits: InterpreterLimits | None = None,
-    program_contract: ProgramContract | None = None,
-    counterexample_pipeline: CounterexampleInspector | None = None,
-    provenance_source_kind: str = "native_v3_fixture",
-) -> SerialEpisodeResult:
-    """Run the existing JSON-DSL trajectory without changing its artifact shape."""
-
-    from .interpreter import ProgramContext, invoke_program
-
-    invocation_episode_id = f"{config.episode_id}/policy-{config.policy_seed}"
-
-    def invoke_step(
-        graph: GraphState,
-        step_index: int,
-        accepted_rewrites: int,
-    ) -> _SerialInvocation:
-        host = _CapturingRewriteHost(backend)
-        invocation = invoke_program(
-            program,
-            graph,
-            rewrite_host=host,
-            context=ProgramContext(
-                step_index=step_index,
-                horizon=config.horizon,
-                acceptance_profile_id="strict_improvement",
-                stagnation_steps=step_index - accepted_rewrites,
-                accepted_rewrites=accepted_rewrites,
-                witness_cap=config.witness_cap,
-                invocation_ordinal=step_index,
-            ),
-            episode_id=invocation_episode_id,
-            limits=interpreter_limits,
-            contract=program_contract,
-        )
-        return _SerialInvocation(
-            semantic_trace=invocation.semantic_trace,
-            no_plan_reason=(
-                invocation.no_plan.reason if invocation.no_plan is not None else None
-            ),
-            failure=invocation.failure,
-            rewrite=invocation.rewrite,
-            candidate=host.candidate if invocation.rewrite is not None else None,
-        )
-
-    return _evaluate_serial(
-        backend=backend,
-        scorer=scorer,
-        program_hash=program.program_hash,
-        config=config,
-        invoke_step=invoke_step,
-        counterexample_pipeline=counterexample_pipeline,
-        provenance_source_kind=provenance_source_kind,
-        protocol_id=SERIAL_EVALUATOR_PROTOCOL_ID,
     )

@@ -49,6 +49,8 @@ PYTHON_PREVIEW_STATE_SCHEMA_VERSION = (
 )
 PYTHON_PREVIEW_PROTOCOL_VERSION = "mforge.native.python_preview.v1"
 PYTHON_PREVIEW_MODE = "ordinary-python"
+V2_PROTOCOL = "native-v2"
+_SUPERSEDED_JSON_DSL_SELECTOR = "v3"
 _STATE_NAME = "python-preview-state.json.gz"
 _CONFIG_NAME = "python-preview.toml"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -135,6 +137,23 @@ def _raw_config(path: str | Path) -> tuple[Path, bytes, dict[str, Any]]:
     if not isinstance(value, dict):
         raise ValueError("Python preview configuration must be a TOML table")
     return source_path, source_bytes, value
+
+
+def experiment_protocol(path: str | Path = "experiment.toml") -> str:
+    """Select explicit Python preview or the unchanged Native v2 default."""
+
+    _, _, raw = _raw_config(path)
+    protocol = raw.get("protocol")
+    if protocol is None:
+        return V2_PROTOCOL
+    if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
+        return PYTHON_EXPERIMENT_PROTOCOL_ID
+    if protocol == _SUPERSEDED_JSON_DSL_SELECTOR:
+        raise ValueError("the superseded JSON-DSL experiment protocol was removed")
+    raise ValueError(
+        f"unsupported experiment protocol selector: {protocol!r}; "
+        f"expected {PYTHON_EXPERIMENT_PROTOCOL_ID!r} or omit it for Native v2"
+    )
 
 
 def _string(value: object, name: str) -> str:
@@ -1009,8 +1028,10 @@ __all__ = [
     "PYTHON_PREVIEW_MODE",
     "PYTHON_PREVIEW_PROTOCOL_VERSION",
     "PYTHON_PREVIEW_STATE_SCHEMA_VERSION",
+    "V2_PROTOCOL",
     "PythonPreviewConfig",
     "PythonPreviewWorkspaceError",
+    "experiment_protocol",
     "load_python_preview_config",
     "python_preview_status",
     "run_python_preview",

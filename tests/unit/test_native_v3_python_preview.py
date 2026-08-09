@@ -14,7 +14,6 @@ import pytest
 from mutation_forge import cli
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
-from mutation_forge.native_v3.experiment import experiment_protocol
 from mutation_forge.native_v3_python import preview as preview_module
 from mutation_forge.native_v3_python.contracts import (
     PYTHON_EXPERIMENT_PROTOCOL_ID,
@@ -22,6 +21,7 @@ from mutation_forge.native_v3_python.contracts import (
 from mutation_forge.native_v3_python.preview import (
     PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION,
     PythonPreviewWorkspaceError,
+    experiment_protocol,
     load_python_preview_config,
     python_preview_status,
     run_python_preview,
@@ -732,11 +732,7 @@ def test_public_cli_routes_python_preview_without_dsl_runner(
         "python_preview_status",
         lambda _: calls.append("status") or {"state": "completed"},
     )
-    monkeypatch.setattr(
-        cli,
-        "run_v3",
-        lambda *_: pytest.fail("JSON-DSL runner was called"),
-    )
+    assert not hasattr(cli, "run_v3")
 
     assert cli.main(["experiment", "run", "--config", str(path), "--json"]) == 0
     assert (
@@ -773,7 +769,12 @@ def test_python_preview_call_path_has_no_json_dsl_runtime_or_ir_compiler() -> No
                 "import sys;"
                 "import mutation_forge.native_v3_python.preview;"
                 "assert 'mutation_forge.native_v3.interpreter' not in sys.modules;"
-                "assert not any('single_program_ir' in name for name in sys.modules)"
+                "assert not any('single_program_ir' in name for name in sys.modules);"
+                "import importlib.util;"
+                "assert importlib.util.find_spec('mutation_forge.native_v3.interpreter')"
+                " is None;"
+                "assert importlib.util.find_spec("
+                "'mutation_forge.native_v3.single_program_ir') is None"
             ),
         ],
         check=False,

@@ -122,7 +122,6 @@ _GENERATED_POLICY_FIELDS = (
     "assumptions",
     "expected_failure_modes",
 )
-NATIVE_V3_PROGRAM_BATCH_PROJECTION = "native-v3-program-batch"
 NATIVE_V3_PYTHON_POLICY_PROJECTION = "native-v3-python-policy"
 _USED_FIELD_NAME = re.compile(r"^(?:ctx|proposal)\.[A-Za-z][A-Za-z0-9_]*$")
 
@@ -290,23 +289,6 @@ def render_generated_policy_markdown(value: Mapping[str, Any]) -> bytes:
     ).encode()
 
 
-def render_native_v3_program_batch_markdown(value: Mapping[str, Any]) -> bytes:
-    """Render a v3 batch projection without mislabelling its JSON as Python."""
-
-    source = value.get("source", "")
-    design_summary = value.get("design_summary", "")
-    hypothesis = value.get("hypothesis", "")
-    return (
-        "# Native v3 program batch\n\n"
-        "## Design summary\n\n"
-        f"{str(design_summary).strip()}\n\n"
-        "## Hypothesis\n\n"
-        f"{str(hypothesis).strip()}\n\n"
-        "## Program batch\n\n"
-        f"```json\n{str(source).strip()}\n```\n"
-    ).encode()
-
-
 def render_native_v3_python_policy_markdown(value: Mapping[str, Any]) -> bytes:
     """Render the two-field ordinary-Python response without changing source."""
 
@@ -326,8 +308,6 @@ def _source_artifact_name(request: object | None) -> str:
     projection = request.get("response_projection")
     if projection is None:
         return "source.py"
-    if projection == NATIVE_V3_PROGRAM_BATCH_PROJECTION:
-        return "program-batch.json"
     if projection == NATIVE_V3_PYTHON_POLICY_PROJECTION:
         return "source.py"
     raise ArtifactIncompleteError(
@@ -522,11 +502,7 @@ class TurnArtifactStore:
             # parsed, redacted, fenced, or otherwise rewritten.
             put(f"{slot_text}.response.raw.txt", _text(response_text, redact_value=False))
         if response_projection_valid and decoded_response is not None:
-            if source_artifact_name == "program-batch.json":
-                response_markdown = render_native_v3_program_batch_markdown(
-                    decoded_response
-                )
-            elif (
+            if (
                 isinstance(request, Mapping)
                 and request.get("response_projection")
                 == NATIVE_V3_PYTHON_POLICY_PROJECTION
@@ -1052,7 +1028,6 @@ __all__ = [
     "ArtifactIncompleteError",
     "ArtifactStore",
     "MAX_ARTIFACT_BYTES",
-    "NATIVE_V3_PROGRAM_BATCH_PROJECTION",
     "NATIVE_V3_PYTHON_POLICY_PROJECTION",
     "TurnArtifactStore",
     "copy_canonical_source",
@@ -1060,7 +1035,6 @@ __all__ = [
     "is_generated_policy",
     "redact",
     "render_generated_policy_markdown",
-    "render_native_v3_program_batch_markdown",
     "render_native_v3_python_policy_markdown",
     "usage_complete",
 ]

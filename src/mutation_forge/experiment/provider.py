@@ -21,14 +21,12 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from .artifacts import (
-    NATIVE_V3_PROGRAM_BATCH_PROJECTION,
     NATIVE_V3_PYTHON_POLICY_PROJECTION,
     TurnArtifactStore,
     generated_policy_diagnostics,
     is_generated_policy,
     redact,
     render_generated_policy_markdown,
-    render_native_v3_program_batch_markdown,
     render_native_v3_python_policy_markdown,
 )
 from .json_io import write_json
@@ -198,7 +196,6 @@ class _CodexTransport:
         response_projection = request.get("response_projection")
         if response_projection not in {
             None,
-            NATIVE_V3_PROGRAM_BATCH_PROJECTION,
             NATIVE_V3_PYTHON_POLICY_PROJECTION,
         }:
             raise NativeProviderError(
@@ -317,11 +314,7 @@ class _CodexTransport:
             adapter.logger.raw_text("request.md", prompt)
             adapter.logger.raw_text("response.raw.txt", response_text)
             if response_projection_valid and isinstance(response, Mapping):
-                if response_projection == NATIVE_V3_PROGRAM_BATCH_PROJECTION:
-                    response_markdown = render_native_v3_program_batch_markdown(
-                        response
-                    )
-                elif response_projection == NATIVE_V3_PYTHON_POLICY_PROJECTION:
+                if response_projection == NATIVE_V3_PYTHON_POLICY_PROJECTION:
                     response_markdown = render_native_v3_python_policy_markdown(
                         response
                     )

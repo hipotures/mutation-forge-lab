@@ -8,8 +8,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from mutation_forge.experiment.artifacts import TurnArtifactStore
 from mutation_forge.experiment.json_io import read_json
 from mutation_forge.experiment.provider import (
@@ -464,14 +462,7 @@ def test_app_server_turn_materializes_final_usage_before_manifest(
 
 def test_recorded_model_python_runs_one_root_and_replays_offline(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "mutation_forge.native_v3.interpreter.invoke_program",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError((args, kwargs, "DSL runtime used"))
-        ),
-    )
     semantic: list[dict[str, Any]] = []
     for name in ("first", "second"):
         backend = _Backend()

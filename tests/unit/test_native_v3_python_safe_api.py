@@ -5,17 +5,6 @@ from collections.abc import Mapping
 import pytest
 
 from mutation_forge.models import Edge, GraphState, GraphValidation, RewritePlan, normalized_edge
-from mutation_forge.native_v3.graph_runtime import (
-    EdgeRef as DonorEdgeRef,
-)
-from mutation_forge.native_v3.graph_runtime import (
-    GraphFeatureInput,
-    GraphRuntime,
-    population_items,
-)
-from mutation_forge.native_v3.graph_runtime import (
-    VertexRef as DonorVertexRef,
-)
 from mutation_forge.native_v3_python import (
     GraphFeatureInputV1,
     IllegalRewriteError,
@@ -143,33 +132,6 @@ def _references(
     return tuple(result)
 
 
-def _donor_payloads(
-    graph: GraphState,
-    selector: str,
-    arguments: Mapping[str, object],
-    *,
-    features: GraphFeatureInput | None = None,
-) -> tuple[object, ...]:
-    runtime = GraphRuntime(graph, features or GraphFeatureInput())
-    population = runtime.select(
-        selector,
-        arguments,
-        path=f"parity/{selector}",
-        random_index=lambda _path, _weights: 0,
-    )
-    result: list[object] = []
-    for item in population_items(population):
-        if hasattr(item, "vertex"):
-            result.append(item.vertex)
-        elif hasattr(item, "edge"):
-            result.append(item.edge)
-        elif all(hasattr(item, name) for name in ("u", "w", "v")):
-            result.append((item.u, item.w, item.v))
-        else:
-            result.append(item)
-    return tuple(result)
-
-
 def test_graph_view_is_exactly_label_opaque_scalars() -> None:
     graph = _cubic_graph(8)
     view = graph_view_v1(graph)
@@ -182,28 +144,6 @@ def test_graph_view_is_exactly_label_opaque_scalars() -> None:
         "minimum_degree",
         "maximum_degree",
     }
-
-
-@pytest.mark.parametrize(
-    ("method", "arguments"),
-    (
-        ("vertices_degree_extreme", {"mode": "max"}),
-        ("vertices_degree_class", {"degree": 3}),
-        ("vertices_articulation_risk", {"mode": "max"}),
-        ("edges_bridge_risk", {"mode": "max"}),
-        ("edges_removable", {}),
-        ("non_edges_legal", {}),
-        ("non_edges_local_cycle_risk", {"mode": "max"}),
-        ("paths_length_two", {}),
-    ),
-)
-def test_selector_payloads_match_graph_runtime_donor(
-    method: str,
-    arguments: Mapping[str, object],
-) -> None:
-    graph = _cubic_graph(6)
-    actual = tuple(payload for _kind, payload in _references(_session(graph), method, arguments))
-    assert actual == _donor_payloads(graph, method, arguments)
 
 
 def test_witness_selectors_match_donor_and_observe_private_overlay() -> None:
@@ -254,16 +194,9 @@ def test_distance_selector_requires_current_invocation_vertex_reference() -> Non
     )
     source_token = source["$ref"]  # type: ignore[index]
     source_vertex = session._references[source_token].reference.payload  # noqa: SLF001
-    donor = _donor_payloads(
-        session.graph,
-        "vertices_distance_band",
-        {
-            "source": DonorVertexRef(source_vertex),
-            "minimum": 1,
-            "maximum": 1,
-        },
-    )
-    assert tuple(payload for _kind, payload in actual) == donor
+    assert actual
+    assert all(kind == "vertex" for kind, _payload in actual)
+    assert source_vertex not in {payload for _kind, payload in actual}
 
     foreign = _session(context=_context(1))
     with pytest.raises(SafeAPIProgramError, match="current invocation") as error:
@@ -272,45 +205,6 @@ def test_distance_selector_requires_current_invocation_vertex_reference() -> Non
             {"source": source, "minimum": 1, "maximum": 1},
         )
     assert error.value.code == "STALE_OR_FOREIGN_REFERENCE"
-
-
-@pytest.mark.parametrize(
-    ("selector", "action"),
-    (
-        ("relocations_legal", "relocate_endpoint"),
-        ("edge_fanouts_legal", "edge_fanout"),
-    ),
-)
-def test_compound_selector_actions_match_donor_overlay(
-    selector: str,
-    action: str,
-) -> None:
-    graph = _cubic_graph(30)
-    session = _session(graph)
-    reference = session.handle_call(selector, {})[0]  # type: ignore[index]
-    argument_name = "relocation" if action == "relocate_endpoint" else "fanout"
-    session.handle_call(action, {argument_name: reference})
-    minted_token = reference["$ref"]  # type: ignore[index]
-    payload = session._references[minted_token].reference.payload  # noqa: SLF001
-
-    donor = GraphRuntime(graph, GraphFeatureInput())
-    if action == "relocate_endpoint":
-        edge, keep, new = payload
-        donor.apply_action(
-            action,
-            {
-                "edge": DonorEdgeRef(edge),
-                "keep": DonorVertexRef(keep),
-                "new": DonorVertexRef(new),
-            },
-        )
-    else:
-        edge, vertex = payload
-        donor.apply_action(
-            action,
-            {"edge": DonorEdgeRef(edge), "w": DonorVertexRef(vertex)},
-        )
-    assert session.overlay.graph() == donor.overlay.graph()
 
 
 def test_k_switch_and_edge_fold_preserve_donor_action_semantics() -> None:

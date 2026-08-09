@@ -31,14 +31,11 @@ from mutation_forge.experiment.rebuild import rebuild_experiment_state
 from mutation_forge.experiment.service import final_stop_experiment, run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
-from mutation_forge.native_v3.experiment import (
-    PYTHON_PREVIEW_SELECTOR,
-    V3_SELECTOR,
-    experiment_protocol,
-    run_v3,
-    v3_status,
+from mutation_forge.native_v3_python.contracts import (
+    PYTHON_EXPERIMENT_PROTOCOL_ID,
 )
 from mutation_forge.native_v3_python.preview import (
+    experiment_protocol,
     python_preview_status,
     run_python_preview,
 )
@@ -294,31 +291,13 @@ def _experiment_run(
     until_complete: bool = False,
 ) -> int:
     protocol = experiment_protocol(config_path)
-    if protocol == PYTHON_PREVIEW_SELECTOR:
+    if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
         if dashboard or until_complete or profiling is not None:
             raise ValueError(
                 "ordinary-Python preview does not accept Native v2 dashboard, "
                 "until-complete, or profiling options"
             )
         result = run_python_preview(config_path)
-        encoded = json.dumps(
-            result,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        if json_output:
-            print(encoded)
-        else:
-            Console().print_json(encoded)
-        return 0 if result.get("state") == "completed" else 1
-    if protocol == V3_SELECTOR:
-        if dashboard or until_complete or profiling is not None:
-            raise ValueError(
-                "v3 does not accept Native v2 dashboard, "
-                "until-complete, or profiling options"
-            )
-        result = run_v3(config_path)
         encoded = json.dumps(
             result,
             ensure_ascii=False,
@@ -441,21 +420,8 @@ def _experiment_run(
 
 def _experiment_status(config_path: Path, *, json_output: bool) -> int:
     protocol = experiment_protocol(config_path)
-    if protocol == PYTHON_PREVIEW_SELECTOR:
+    if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
         result = python_preview_status(config_path)
-        encoded = json.dumps(
-            result,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        if json_output:
-            print(encoded)
-        else:
-            Console().print_json(encoded)
-        return 0 if result.get("state") != "failed" else 1
-    if protocol == V3_SELECTOR:
-        result = v3_status(config_path)
         encoded = json.dumps(
             result,
             ensure_ascii=False,

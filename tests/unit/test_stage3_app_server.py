@@ -38,6 +38,7 @@ sys.modules[_SPEC.name] = _FIXTURE
 _SPEC.loader.exec_module(_FIXTURE)
 FakeProcess = _FIXTURE.FakeProcess
 FakeScenario = _FIXTURE.FakeScenario
+FORK_PROFILE = ModelProfile("codex", "gpt-5.6-luna", "high")
 
 
 def _capsule(tmp_path: Path) -> IsolatedCapsule:
@@ -87,6 +88,98 @@ def _fixed_process_factory(process: Any) -> Any:
         return process
 
     return factory
+
+
+def test_switching_back_to_completed_parent_allows_exact_child_fork(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(),
+        limits=AppServerLimits(max_turns=8, max_campaigns=4),
+    )
+    try:
+        anchor = adapter.generate_persistent("anchor", FORK_PROFILE)
+        parent_branch = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        parent = adapter.generate_persistent("parent", FORK_PROFILE)
+        sibling_branch = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        adapter.generate_persistent("sibling", FORK_PROFILE)
+        adapter.activate_forked_thread(
+            parent_branch.child_thread_id,
+            completed_turn_ids=(anchor.turn_id, parent.turn_id),
+        )
+        child = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=parent.turn_id,
+        )
+    finally:
+        adapter.close()
+
+    assert child.source_thread_id == parent_branch.child_thread_id
+    assert child.included_turn_ids == (anchor.turn_id, parent.turn_id)
+    assert sibling_branch.child_thread_id != child.source_thread_id
+
+
+def test_switching_back_to_original_anchor_allows_another_root_fork(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(),
+        limits=AppServerLimits(max_turns=8, max_campaigns=3),
+    )
+    try:
+        anchor = adapter.generate_persistent("anchor", FORK_PROFILE)
+        first_root = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        adapter.activate_forked_thread(
+            anchor.thread_id,
+            completed_turn_ids=(anchor.turn_id,),
+        )
+        second_root = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+        )
+    finally:
+        adapter.close()
+
+    assert first_root.source_thread_id == anchor.thread_id
+    assert second_root.source_thread_id == anchor.thread_id
+    assert second_root.included_turn_ids == (anchor.turn_id,)
+
+
+def test_switching_parent_rejects_changed_completed_history(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(tmp_path, FakeScenario())
+    try:
+        anchor = adapter.generate_persistent("anchor", FORK_PROFILE)
+        branch = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        parent = adapter.generate_persistent("parent", FORK_PROFILE)
+        with pytest.raises(ProtocolError, match="history changed"):
+            adapter.activate_forked_thread(
+                branch.child_thread_id,
+                completed_turn_ids=(anchor.turn_id, "different-turn"),
+            )
+    finally:
+        adapter.close()
+
+    assert parent.turn_id != "different-turn"
 
 
 @pytest.mark.parametrize("sandbox_mode", ["read-only", "danger-full-access"])

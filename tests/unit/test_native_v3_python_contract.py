@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import inspect
 import json
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
@@ -9,7 +8,6 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
-from mutation_forge.native_v3.experiment import V2_PROTOCOL, experiment_protocol
 from mutation_forge.native_v3_python import (
     ACTION_METHODS,
     API_METHODS,
@@ -41,6 +39,7 @@ from mutation_forge.native_v3_python import (
     validate_python_policy_response,
     validate_python_policy_source,
 )
+from mutation_forge.native_v3_python.preview import V2_PROTOCOL, experiment_protocol
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = ROOT / "configs/native/native-v3-python-policy-response.schema.json"
@@ -616,13 +615,10 @@ def test_inactive_python_protocol_rejects_json_dsl_workspace_and_leaves_v2_defau
     config = tmp_path / "experiment.toml"
     config.write_text('[run]\nexp_id = "unchanged-v2-default"\n', encoding="utf-8")
     assert experiment_protocol(config) == V2_PROTOCOL
-    active_routing_source = inspect.getsource(
-        __import__(
-            "mutation_forge.native_v3.experiment",
-            fromlist=["experiment_protocol"],
-        )
-    )
-    assert "native_v3_python" not in active_routing_source
+    json_dsl = tmp_path / "json-dsl.toml"
+    json_dsl.write_text('protocol = "v3"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="superseded JSON-DSL"):
+        experiment_protocol(json_dsl)
 
 
 def test_validation_never_executes_source_and_only_worker_has_execution_calls(
