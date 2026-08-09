@@ -1427,6 +1427,7 @@ def _commit_pending(
     telemetry: _RuntimeTelemetry,
     block: bool,
     boundary_hook: Callable[[str], None] | None,
+    force_stop: Callable[[], bool] | None = None,
 ) -> tuple[bool, core.M5InfrastructureError | None] | None:
     if pending.already_terminal:
         return False, None
@@ -1444,6 +1445,10 @@ def _commit_pending(
         raise core.M5InfrastructureError("M10 pending candidate is incomplete")
     if not block and not pending.future.done():
         return None
+    while block and not pending.future.done():
+        if force_stop is not None and force_stop():
+            raise core.M5OperatorStop("immediate operator stop requested")
+        time.sleep(0.05)
     outcome = pending.future.result()
     for case, evaluation in zip(panel, outcome.payloads, strict=False):
         evaluation_path = pending.slot_dir / "evaluations" / f"{case.case_id}.json.gz"
@@ -1531,10 +1536,16 @@ def _commit_generation_baselines(
     futures: Mapping[str, Future[_EvaluationOutcome]],
     telemetry: _RuntimeTelemetry,
     boundary_hook: Callable[[str], None] | None,
+    force_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     profiles: dict[str, JsonValue] = {}
     for baseline in options.baselines:
-        outcome = futures[baseline].result()
+        future = futures[baseline]
+        while not future.done():
+            if force_stop is not None and force_stop():
+                raise core.M5OperatorStop("immediate operator stop requested")
+            time.sleep(0.05)
+        outcome = future.result()
         for case, evaluation in zip(panel, outcome.payloads, strict=False):
             evaluation_path = (
                 generation_dir / "baselines" / baseline / "evaluations" / f"{case.case_id}.json.gz"
@@ -2255,6 +2266,7 @@ def run_sustained_search(
                         telemetry=telemetry,
                         block=block,
                         boundary_hook=boundary_hook,
+                        force_stop=force_stop,
                     )
                     if outcome is None:
                         return
@@ -2668,6 +2680,7 @@ def run_sustained_search(
                     futures=baseline_futures,
                     telemetry=telemetry,
                     boundary_hook=boundary_hook,
+                    force_stop=force_stop,
                 )
             )
             if baseline_summary.get("panel_hash") != core.panel_hash(panel):
