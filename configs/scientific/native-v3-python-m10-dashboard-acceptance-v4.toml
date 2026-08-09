@@ -1,0 +1,24 @@
+schema_version = "mforge.experiment.native_python_scientific_search_config.v2"
+protocol = "native-v3-python-v1"
+exp_id = "native-v3-python-m10-dashboard-acceptance-v4"
+workspace = "/home/user/DEV/mutation-forge-lab-evidence/m10/dashboard-acceptance"
+
+[python_preview]
+model = "gpt-5.6-luna"
+effort = "medium"
+timeout_seconds = 300
+heg_repo = "../../../heg"
+
+[python_preview.scientific_search]
+generation_limit = 2
+evaluator_workers = 12
+provider_concurrency = 4
+wall_seconds = 1800
+primary_program_slots = 16
+repair_turn_limit = 4
+provider_total_turn_limit = 20
+validated_queue_target = 24
+validated_queue_capacity = 48
+stop_on_verified = true
+resume_enabled = true
+replace_terminal_slots = false

@@ -31,13 +31,12 @@ from .contracts import (
 from .provenance import M5_PROVENANCE_FILENAME, ensure_m5_acceptance_provenance
 from .runtime_contracts import PolicyRuntimeLimitsV1
 from .scientific_search import (
-    M9_REPORT_FILENAME,
-    M9_REPORT_PROTOCOL_ID,
-    M9_RUNTIME_FILENAME,
-    M9_SEARCH_PROTOCOL_ID,
-    M9_STOP_FILENAME,
-    ScientificSearchOptionsV1,
-    finalize_budget_limited_search,
+    M10_REPORT_FILENAME,
+    M10_REPORT_PROTOCOL_ID,
+    M10_RUNTIME_FILENAME,
+    M10_SEARCH_PROTOCOL_ID,
+    M10_STOP_FILENAME,
+    ScientificSearchOptionsV2,
     run_sustained_search,
 )
 from .search import (
@@ -47,10 +46,12 @@ from .search import (
     M5OperatorStop,
     M5ScientificEvaluator,
     M5SearchProvider,
+    M10SearchProvider,
     run_m5_search,
 )
 from .search_provider import (
     CodexM5SearchProvider,
+    CodexM10SearchProvider,
     PythonPanelScientificEvaluator,
     specification_ack_schema,
 )
@@ -59,7 +60,7 @@ PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION = (
     "mforge.experiment.native_python_preview_config.v1"
 )
 PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION = (
-    "mforge.experiment.native_python_scientific_search_config.v1"
+    "mforge.experiment.native_python_scientific_search_config.v2"
 )
 PYTHON_PREVIEW_STATE_SCHEMA_VERSION = (
     "mforge.experiment.status.native_python_preview.v1"
@@ -72,6 +73,10 @@ _STATE_NAME = "python-preview-state.json.gz"
 _CONFIG_NAME = "python-preview.toml"
 _STOP_REQUEST_NAME = "python-preview-stop-request.json.gz"
 _STOP_REQUEST_PROTOCOL_ID = "mforge.native.python_preview.stop_request.v1"
+_M10_PAUSE_RECORD_SCHEMA_VERSION = (
+    "mforge.native.python_m10_emergency_stop_evidence.v1"
+)
+_PAUSED_FOR_BUDGET = "PAUSED_FOR_BUDGET"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _TERMINAL_CANDIDATE_STATUSES = frozenset(
     {
@@ -111,7 +116,7 @@ _PUBLIC_STATE_FIELDS = frozenset(
 
 type ProviderFactory = Callable[
     ["PythonPreviewConfig", str],
-    M5SearchProvider,
+    M5SearchProvider | M10SearchProvider,
 ]
 type BackendFactory = Callable[["PythonPreviewConfig"], GraphBackend]
 type EvaluatorFactory = Callable[
@@ -133,7 +138,7 @@ class PythonPreviewConfig:
     effort: str
     timeout_seconds: float
     heg_repo: Path
-    scientific_search: ScientificSearchOptionsV1 | None
+    scientific_search: ScientificSearchOptionsV2 | None
     source_path: Path
     source_bytes: bytes = field(repr=False, compare=False)
 
@@ -191,6 +196,12 @@ def _positive_number(value: object, name: str) -> float:
 def _positive_integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _nonnegative_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
     return value
 
 
@@ -274,7 +285,7 @@ def load_python_preview_config(
         source_path.parent,
     )
     scientific_value = preview.get("scientific_search")
-    scientific_search: ScientificSearchOptionsV1 | None = None
+    scientific_search: ScientificSearchOptionsV2 | None = None
     if scientific_value is not None:
         if schema_version != PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION:
             raise ValueError(
@@ -291,7 +302,11 @@ def load_python_preview_config(
             "evaluator_workers",
             "provider_concurrency",
             "wall_seconds",
-            "provider_program_turn_limit",
+            "primary_program_slots",
+            "repair_turn_limit",
+            "provider_total_turn_limit",
+            "validated_queue_target",
+            "validated_queue_capacity",
             "stop_on_verified",
             "resume_enabled",
             "replace_terminal_slots",
@@ -310,7 +325,7 @@ def load_python_preview_config(
                 "missing [python_preview.scientific_search] fields: "
                 f"{missing}"
             )
-        scientific_search = ScientificSearchOptionsV1(
+        scientific_search = ScientificSearchOptionsV2(
             generation_limit=_positive_integer(
                 scientific["generation_limit"],
                 "python_preview.scientific_search.generation_limit",
@@ -327,9 +342,25 @@ def load_python_preview_config(
                 scientific["wall_seconds"],
                 "python_preview.scientific_search.wall_seconds",
             ),
-            provider_program_turn_limit=_positive_integer(
-                scientific["provider_program_turn_limit"],
-                "python_preview.scientific_search.provider_program_turn_limit",
+            primary_program_slots=_positive_integer(
+                scientific["primary_program_slots"],
+                "python_preview.scientific_search.primary_program_slots",
+            ),
+            repair_turn_limit=_nonnegative_integer(
+                scientific["repair_turn_limit"],
+                "python_preview.scientific_search.repair_turn_limit",
+            ),
+            provider_total_turn_limit=_positive_integer(
+                scientific["provider_total_turn_limit"],
+                "python_preview.scientific_search.provider_total_turn_limit",
+            ),
+            validated_queue_target=_positive_integer(
+                scientific["validated_queue_target"],
+                "python_preview.scientific_search.validated_queue_target",
+            ),
+            validated_queue_capacity=_positive_integer(
+                scientific["validated_queue_capacity"],
+                "python_preview.scientific_search.validated_queue_capacity",
             ),
             stop_on_verified=_boolean(
                 scientific["stop_on_verified"],
@@ -782,13 +813,13 @@ def _progress(
         for slot in cast(Sequence[Mapping[str, Any]], manifest.get("slots", ()))
         if isinstance(slot, Mapping)
     )
-    report = _load_mapping(root / M9_REPORT_FILENAME) or _load_mapping(
+    report = _load_mapping(root / M10_REPORT_FILENAME) or _load_mapping(
         root / "m5-report.json.gz"
     )
-    stop = _load_mapping(root / M9_STOP_FILENAME) or _load_mapping(
+    stop = _load_mapping(root / M10_STOP_FILENAME) or _load_mapping(
         root / "m5-stop.json.gz"
     )
-    runtime = _load_mapping(root / M9_RUNTIME_FILENAME) or {}
+    runtime = _load_mapping(root / M10_RUNTIME_FILENAME) or {}
     state = str(retained_state.get("state", "ready"))
     resumable = bool(retained_state.get("resumable", True))
     run_terminal = retained_state.get("run_terminal") is True
@@ -803,7 +834,7 @@ def _progress(
     exact = retained_state.get("scientific_success") is True
     report_protocol = report.get("protocol_id") if report is not None else None
     if report is not None and (
-        report_protocol == M9_REPORT_PROTOCOL_ID
+        report_protocol == M10_REPORT_PROTOCOL_ID
         or (
             report_protocol == M5_REPORT_PROTOCOL_ID
             and retained_state.get("state") == "completed"
@@ -819,7 +850,7 @@ def _progress(
             if exact
             else "DEVELOPMENT_SEARCH_EVIDENCE"
         )
-    elif stop is not None:
+    elif stop is not None and state != "running":
         state = "blocked"
         resumable = stop.get("resumable") is True
         result_kind = "NO_SCIENTIFIC_RESULT"
@@ -885,6 +916,15 @@ def _progress(
         float(runtime.get("provider_wait_seconds", 0.0))
         if isinstance(runtime.get("provider_wait_seconds"), int | float)
         and not isinstance(runtime.get("provider_wait_seconds"), bool)
+        else 0.0,
+    )
+    provider_active_wall = max(
+        0.0,
+        float(runtime.get("provider_active_wall_seconds", 0.0))
+        if isinstance(
+            runtime.get("provider_active_wall_seconds"), int | float
+        )
+        and not isinstance(runtime.get("provider_active_wall_seconds"), bool)
         else 0.0,
     )
     evaluator_busy = max(
@@ -997,6 +1037,81 @@ def _progress(
             provider_projection["turns"] = reserved_turns + int(
                 (root / "anchor.json.gz").is_file()
             )
+    candidates_by_id = {
+        str(item["candidate_id"]): item
+        for item in candidates
+        if isinstance(item.get("candidate_id"), str)
+    }
+    slot_projection: list[dict[str, JsonValue]] = []
+    for manifest in manifests:
+        generation = _nonnegative_int(manifest.get("generation"))
+        raw_slots = manifest.get("slots", ())
+        if not isinstance(raw_slots, Sequence) or isinstance(
+            raw_slots, str | bytes
+        ):
+            continue
+        for raw_slot in raw_slots:
+            if not isinstance(raw_slot, Mapping):
+                continue
+            slot = raw_slot.get("slot")
+            if not isinstance(slot, str):
+                continue
+            candidate_id = f"g{generation:04d}-{slot}"
+            candidate = candidates_by_id.get(candidate_id)
+            candidate_status = (
+                str(candidate.get("status"))
+                if candidate is not None
+                else "queued"
+            )
+            slot_projection.append(
+                {
+                    "candidate_id": candidate_id,
+                    "generation": generation,
+                    "slot": slot,
+                    "kind": str(raw_slot.get("kind", "root")),
+                    "parent_candidate_id": (
+                        str(raw_slot["parent_candidate_id"])
+                        if raw_slot.get("parent_candidate_id") is not None
+                        else None
+                    ),
+                    "state": candidate_status,
+                    "phase": (
+                        "archived"
+                        if candidate_status
+                        in _TERMINAL_CANDIDATE_STATUSES
+                        else "evaluation"
+                        if (
+                            root
+                            / "generations"
+                            / f"generation-{generation:04d}"
+                            / slot
+                            / "prepared-candidate.json.gz"
+                        ).is_file()
+                        else "provider"
+                    ),
+                    "repairs": (
+                        _nonnegative_int(candidate.get("repairs"))
+                        if candidate is not None
+                        else 0
+                    ),
+                    "usage": cast(
+                        JsonValue,
+                        (
+                            dict(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    candidate.get("usage", {}),
+                                )
+                            )
+                            if candidate is not None
+                            and isinstance(
+                                candidate.get("usage"), Mapping
+                            )
+                            else {}
+                        ),
+                    ),
+                }
+            )
     return {
         **_public(retained_state),
         "state": state,
@@ -1006,7 +1121,7 @@ def _progress(
         "scientific_result_kind": result_kind,
         "scientific_success": exact,
         "search_protocol": (
-            M9_SEARCH_PROTOCOL_ID
+            M10_SEARCH_PROTOCOL_ID
             if config.scientific_search is not None
             else M5_SEARCH_PROTOCOL_ID
         ),
@@ -1031,7 +1146,14 @@ def _progress(
             "roots": allocations["root"],
             "children": allocations["child"],
             **(
-                {"program_failed": program_failed_candidates}
+                {
+                    "program_failed": program_failed_candidates,
+                    "repaired_valid": sum(
+                        _nonnegative_int(item.get("repairs")) > 0
+                        and item.get("status") in {"evaluated", "duplicate"}
+                        for item in candidates
+                    ),
+                }
                 if config.scientific_search is not None
                 else {}
             ),
@@ -1041,6 +1163,30 @@ def _progress(
             **provider_projection,
             "program_turns_reserved": _nonnegative_int(
                 runtime.get("provider_turns_submitted")
+            ),
+            "primary_turns": _nonnegative_int(
+                runtime.get("primary_turns_submitted")
+            ),
+            "repair_turns": _nonnegative_int(
+                runtime.get("repair_turns_submitted")
+            ),
+            "active": _nonnegative_int(
+                runtime.get("active_provider_turns")
+            ),
+            "peak_active": _nonnegative_int(
+                runtime.get("peak_active_provider_turns")
+            ),
+            "configured_concurrency": (
+                config.scientific_search.provider_concurrency
+                if config.scientific_search is not None
+                else 1
+            ),
+            "active_wall_seconds": max(
+                0.0, provider_active_wall
+            ),
+            "concurrency_timeline": cast(
+                JsonValue,
+                runtime.get("provider_concurrency_timeline", []),
             ),
             "wait_seconds": provider_wait,
         },
@@ -1067,6 +1213,9 @@ def _progress(
                 runtime.get("peak_active_evaluators")
             ),
             "queued": _nonnegative_int(runtime.get("queued_evaluations")),
+            "peak_queued": _nonnegative_int(
+                runtime.get("peak_queued_evaluations")
+            ),
             "completed": _nonnegative_int(
                 runtime.get("completed_evaluations")
             ),
@@ -1089,6 +1238,15 @@ def _progress(
             ),
             "accepted_rewrites_per_second": (
                 accepted_rewrites / elapsed if elapsed > 0 else 0.0
+            ),
+            "valid_unique_programs_per_provider_minute": (
+                statuses["evaluated"]
+                / (provider_active_wall / 60.0)
+                if provider_active_wall > 0
+                else 0.0
+            ),
+            "provider_wait_share": (
+                provider_active_wall / elapsed if elapsed > 0 else 0.0
             ),
             "elapsed_seconds": elapsed,
         },
@@ -1129,6 +1287,7 @@ def _progress(
             "seconds_since_scientific_improvement": time_since_improvement,
         },
         "programs": profiles,
+        "slots": slot_projection,
         "recovery": {
             "state": (
                 "terminal"
@@ -1158,6 +1317,8 @@ def _progress(
 
 def python_preview_status(
     config_path: str | Path,
+    *,
+    pause_record_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return a bounded read-only status projection without provider contact."""
 
@@ -1175,7 +1336,204 @@ def python_preview_status(
             "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
             "last_error": _safe_error(error, config),
         }
-    return _progress(config, state)
+    status = _progress(config, state)
+    if pause_record_path is None:
+        return status
+    return _apply_pause_record(config, status, Path(pause_record_path))
+
+
+def _apply_pause_record(
+    config: PythonPreviewConfig,
+    status: Mapping[str, Any],
+    pause_record_path: Path,
+) -> dict[str, Any]:
+    resolved_pause_record = pause_record_path.resolve()
+    try:
+        raw_record = json.loads(resolved_pause_record.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        raw_record = None
+    record = dict(raw_record) if isinstance(raw_record, Mapping) else None
+    if (
+        record is None
+        or record.get("schema_version") != _M10_PAUSE_RECORD_SCHEMA_VERSION
+        or record.get("state") != _PAUSED_FOR_BUDGET
+        or record.get("experiment") != config.exp_id
+    ):
+        raise PythonPreviewWorkspaceError(
+            "Budget pause record does not match this ordinary-Python workspace"
+        )
+
+    slots_record = record.get("slots")
+    counts = status.get("counts")
+    if not isinstance(slots_record, Mapping) or not isinstance(counts, Mapping):
+        raise PythonPreviewWorkspaceError("Budget pause slot accounting is malformed")
+    terminal = _nonnegative_int(slots_record.get("terminal_total"))
+    pending = _nonnegative_int(slots_record.get("pending_total"))
+    if (
+        terminal != _nonnegative_int(counts.get("terminal"))
+        or pending != _nonnegative_int(counts.get("pending"))
+    ):
+        raise PythonPreviewWorkspaceError(
+            "Budget pause slot accounting does not match durable workspace artifacts"
+        )
+
+    interrupted = _string_sequence(
+        slots_record.get("in_flight_slots"),
+        "slots.in_flight_slots",
+    )
+    unstarted = _string_sequence(
+        slots_record.get("pending_unstarted_slots"),
+        "slots.pending_unstarted_slots",
+    )
+    if (
+        len(interrupted) != _nonnegative_int(
+            slots_record.get("in_flight_cancelled_at_stop")
+        )
+        or len(interrupted) + len(unstarted) != pending
+        or set(interrupted).intersection(unstarted)
+    ):
+        raise PythonPreviewWorkspaceError("Budget pause pending identities are malformed")
+
+    provider_record = record.get("provider_turns")
+    best_record = record.get("best")
+    exact_record = record.get("exact_verifier")
+    if (
+        not isinstance(provider_record, Mapping)
+        or not isinstance(best_record, Mapping)
+        or not isinstance(exact_record, Mapping)
+    ):
+        raise PythonPreviewWorkspaceError("Budget pause scientific accounting is malformed")
+    raw_usage = provider_record.get("persisted_usage_including_specification_anchor")
+    fitness = best_record.get("fitness_interval")
+    if not isinstance(raw_usage, Mapping) or not isinstance(fitness, Mapping):
+        raise PythonPreviewWorkspaceError("Budget pause scientific accounting is malformed")
+
+    usage_fields = {
+        "inputTokens": "input_tokens",
+        "cachedInputTokens": "cached_input_tokens",
+        "outputTokens": "output_tokens",
+        "reasoningOutputTokens": "reasoning_output_tokens",
+        "totalTokens": "total_tokens",
+    }
+    usage = {
+        target: _nonnegative_int(raw_usage.get(source))
+        for target, source in usage_fields.items()
+    }
+    usage["cacheWriteInputTokens"] = 0
+
+    provider = status.get("provider")
+    evaluators = status.get("evaluators")
+    best = status.get("best")
+    exact = status.get("exact_verification")
+    recovery = status.get("recovery")
+    provider_projection = dict(provider) if isinstance(provider, Mapping) else {}
+    evaluator_projection = dict(evaluators) if isinstance(evaluators, Mapping) else {}
+    best_projection = dict(best) if isinstance(best, Mapping) else {}
+    exact_projection = dict(exact) if isinstance(exact, Mapping) else {}
+    recovery_projection = dict(recovery) if isinstance(recovery, Mapping) else {}
+    provider_projection.update(
+        {
+            "program_turns_reserved": _nonnegative_int(
+                provider_record.get("started_reservations")
+            ),
+            "primary_turns": _nonnegative_int(
+                provider_record.get("primary_turns_submitted")
+            ),
+            "repair_turns": _nonnegative_int(
+                provider_record.get("repair_turns_submitted")
+            ),
+            "completed_turns": _nonnegative_int(
+                provider_record.get("completed_turns")
+            ),
+            "interrupted_turns": _nonnegative_int(
+                provider_record.get("in_flight_started_without_finished")
+            ),
+            "active": 0,
+            "usage": usage,
+        }
+    )
+    evaluator_projection["active"] = 0
+    best_projection.update(
+        {
+            "candidate_id": best_record.get("candidate_id"),
+            "program_hash": best_record.get("program_hash"),
+            "fitness_interval": dict(fitness),
+        }
+    )
+    exact_projection.update(
+        {
+            "submissions": _nonnegative_int(
+                exact_record.get("candidate_submissions")
+            ),
+            "records": _nonnegative_int(exact_record.get("candidate_results")),
+            "verified": exact_record.get("all_candidate_exact_verified") is True,
+        }
+    )
+    recovery_projection.update(
+        {
+            "state": "resumable",
+            "completed_slots_will_not_repeat": True,
+        }
+    )
+
+    paused_slot_states = {
+        **{candidate_id: "interrupted" for candidate_id in interrupted},
+        **{candidate_id: "queued" for candidate_id in unstarted},
+    }
+    slot_projection: list[dict[str, Any]] = []
+    raw_slots = status.get("slots")
+    if isinstance(raw_slots, Sequence) and not isinstance(raw_slots, str | bytes):
+        for raw_slot in raw_slots:
+            if not isinstance(raw_slot, Mapping):
+                continue
+            candidate_id = raw_slot.get("candidate_id")
+            projected = dict(raw_slot)
+            if isinstance(candidate_id, str) and candidate_id in paused_slot_states:
+                projected["state"] = paused_slot_states[candidate_id]
+                projected["phase"] = "paused"
+            slot_projection.append(projected)
+    missing_pending = set(paused_slot_states).difference(
+        str(item.get("candidate_id")) for item in slot_projection
+    )
+    if missing_pending:
+        raise PythonPreviewWorkspaceError(
+            "Budget pause identities do not match durable generation manifests"
+        )
+
+    return {
+        **status,
+        "state": _PAUSED_FOR_BUDGET,
+        "resumable": True,
+        "run_terminal": False,
+        "terminal_reason": "provider_budget",
+        "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
+        "scientific_success": False,
+        "counts": {**counts, "terminal": terminal, "pending": pending},
+        "provider": provider_projection,
+        "evaluators": evaluator_projection,
+        "best": best_projection,
+        "slots": slot_projection,
+        "recovery": recovery_projection,
+        "exact_verification": exact_projection,
+        "pause": {
+            "state": _PAUSED_FOR_BUDGET,
+            "record_path": str(resolved_pause_record),
+            "interrupted_slots": list(interrupted),
+            "unstarted_slots": list(unstarted),
+            "resumable_pending": pending,
+        },
+    }
+
+
+def _string_sequence(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise PythonPreviewWorkspaceError(f"Budget pause {name} must be a list")
+    items = tuple(value)
+    if any(not isinstance(item, str) or not item for item in items):
+        raise PythonPreviewWorkspaceError(
+            f"Budget pause {name} must contain non-empty strings"
+        )
+    return cast(tuple[str, ...], items)
 
 
 def _stop_request_path(config: PythonPreviewConfig) -> Path:
@@ -1291,7 +1649,22 @@ def _panel(backend: GraphBackend) -> tuple[DevelopmentCaseV1, ...]:
 def _default_provider(
     config: PythonPreviewConfig,
     system_prompt: str,
-) -> M5SearchProvider:
+) -> M5SearchProvider | M10SearchProvider:
+    if config.scientific_search is not None:
+        return CodexM10SearchProvider(
+            workspace=config.experiment_root / "provider-runtime",
+            model=config.model,
+            effort=config.effort,
+            base_instructions=system_prompt,
+            auth_json=Path.home() / ".codex" / "auth.json",
+            turn_timeout_seconds=config.timeout_seconds,
+            provider_concurrency=(
+                config.scientific_search.provider_concurrency
+            ),
+            provider_total_turn_limit=(
+                config.scientific_search.provider_total_turn_limit
+            ),
+        )
     return CodexM5SearchProvider(
         workspace=config.experiment_root / "provider-runtime",
         model=config.model,
@@ -1299,11 +1672,7 @@ def _default_provider(
         base_instructions=system_prompt,
         auth_json=Path.home() / ".codex" / "auth.json",
         turn_timeout_seconds=config.timeout_seconds,
-        program_turn_limit=(
-            config.scientific_search.provider_program_turn_limit
-            if config.scientific_search is not None
-            else None
-        ),
+        program_turn_limit=None,
     )
 
 
@@ -1367,35 +1736,6 @@ def run_python_preview(
     state = _load_state(config) if existed else _initialize_workspace(config)
     if state.get("state") == "completed":
         return _progress(config, state)
-    if config.scientific_search is not None:
-        finalized = finalize_budget_limited_search(
-            workspace=config.experiment_root,
-            options=config.scientific_search,
-        )
-        if finalized is not None:
-            completed = {
-                **state,
-                "state": "completed",
-                "resumable": False,
-                "run_terminal": True,
-                "terminal_reason": str(
-                    finalized.get(
-                        "stop_reason", "provider_turn_budget"
-                    )
-                ),
-                "scientific_result_kind": (
-                    "VERIFIED_COUNTEREXAMPLE"
-                    if finalized.get("exact_verified") is True
-                    else "DEVELOPMENT_SEARCH_EVIDENCE"
-                ),
-                "scientific_success": (
-                    finalized.get("exact_verified") is True
-                ),
-                "last_boundary": "report_persisted",
-                "last_error": None,
-            }
-            _write_state(config, completed)
-            return _progress(config, completed)
     if state.get("state") == "failed" and state.get("resumable") is not True:
         raise PythonPreviewWorkspaceError(
             "Python preview workspace is terminal and cannot be resumed"
@@ -1472,7 +1812,7 @@ def run_python_preview(
         running["last_boundary"] = boundary
         _write_state(config, running)
 
-    provider: M5SearchProvider | None = None
+    provider: M5SearchProvider | M10SearchProvider | None = None
     backend: GraphBackend | None = None
     final_state: dict[str, Any]
     primary_error: Exception | None = None
@@ -1512,7 +1852,7 @@ def run_python_preview(
                 )
 
             report = run_sustained_search(
-                provider=provider,
+                provider=cast(M10SearchProvider, provider),
                 evaluator_factory=make_evaluator,
                 workspace=config.experiment_root,
                 panel=panel,
@@ -1565,7 +1905,9 @@ def run_python_preview(
     cleanup_errors: list[Exception] = []
     if provider is not None:
         try:
-            if isinstance(provider, CodexM5SearchProvider):
+            if isinstance(
+                provider, CodexM5SearchProvider | CodexM10SearchProvider
+            ):
                 provider.close(
                     cleanup_capsule=(
                         primary_error is None

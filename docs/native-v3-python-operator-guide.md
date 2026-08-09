@@ -6,9 +6,10 @@ Mutation Forge has two experiment routes:
 
 - Native v2 is the production default. A normal `experiment.toml` without a
   `protocol` field continues to run Native v2.
-- The ordinary-Python preview is an explicit, bounded two-generation route.
-  It is selected only by `protocol = "native-v3-python-v1"` in a separate
-  preview configuration.
+- The ordinary-Python route is explicitly selected by
+  `protocol = "native-v3-python-v1"` in a separate configuration. Its
+  `scientific_search` section selects the bounded concurrent search protocol;
+  without that section the original two-generation preview remains available.
 
 The preview asks Codex App Server for ordinary Python source implementing:
 
@@ -25,16 +26,18 @@ failure records. The serial scientific evaluator then uses the authoritative
 HEG score worker, exact rational interval comparisons, and the exact-verifier
 seam.
 
-The population contract is fixed:
+The population contract is fixed for every ordinary-Python search profile:
 
 ```text
 generation 0: 8 fresh roots
-generation 1: 4 exact-parent children + 4 fresh roots
+later generations: 4 exact-parent children + 4 fresh roots
 ```
 
 Invalid, duplicate, missing, provider-failed, and evaluation-infrastructure
 terminal slots consume their planned positions. Resume submits only pending
-slots.
+slots. M10 freezes all eight slot assignments, prompts, parent turns, Search
+Memory, seeds, panel, and budgets before a generation starts. Provider and
+evaluator completion order therefore cannot change selection or lineage.
 
 ## Security boundary
 
@@ -65,7 +68,7 @@ Set a unique `exp_id`, a durable absolute `workspace`, and the correct sibling
 HEG path. Acceptance runs require both repositories to be clean before App
 Server starts.
 
-Start the preview explicitly:
+Start the route explicitly in machine-readable mode:
 
 ```bash
 uv run mforge experiment run \
@@ -73,12 +76,21 @@ uv run mforge experiment run \
   --json
 ```
 
-The convenience launcher creates a fresh versioned configuration:
+The versioned sustained-search profile is
+`configs/scientific/native-v3-python-m10-v1.toml`. Copy it to create a new
+experiment rather than modifying it in place.
+
+Run the same experiment with the existing Rich dashboard:
 
 ```bash
-uv run python scripts/native_v3_python_m6_live_preview.py \
-  --output-root /home/user/DEV/mutation-forge-lab-evidence/my-preview
+uv run mforge experiment run \
+  --config /home/user/DEV/mutation-forge-lab-evidence/my-preview.toml \
+  --dashboard
 ```
+
+Rich and JSON are projections of the same canonical status. Dashboard polling
+does not schedule providers or evaluators and cannot affect manifests, seeds,
+selection, acceptance, resume, or scientific results.
 
 Do not use `/tmp` for acceptance evidence.
 
@@ -99,26 +111,49 @@ recovery state, exact-verifier activity, and terminal/scientific status. It
 does not expose source, provider thread identifiers, paths, credentials, or
 raw transport payloads.
 
-## Stop at a durable boundary and resume
+For an active M10 search it additionally reports configured and peak provider
+concurrency, provider-concurrency history, evaluator activity and queue depth,
+valid programs per provider minute, provider-wait share, repaired-valid
+programs, policy and scoring rates, time since improvement, and the dominant
+bottleneck. The Rich dashboard renders these same counters.
 
-While the foreground preview is running, request a resumable stop from another
-terminal:
+Render one static Rich snapshot without running or resuming the experiment:
 
 ```bash
-uv run python scripts/native_v3_python_m6_live_preview.py \
-  --request-stop \
-  --config /home/user/DEV/mutation-forge-lab-evidence/my-preview.toml
+uv run mforge experiment status \
+  --config /home/user/DEV/mutation-forge-lab-evidence/my-preview.toml \
+  --dashboard
 ```
 
-The running process stops before the next provider submission, after its
-current durable candidate boundary. Wait for it to exit and confirm
+An externally recorded budget pause can be applied to either read-only
+projection with `--pause-record <path>`. The record must match the experiment
+and its terminal/pending slot accounting or status fails closed. This option
+does not rewrite the workspace checkpoint; it only normalizes the displayed
+host state to `PAUSED_FOR_BUDGET`.
+
+## Stop at a durable boundary and resume
+
+While the foreground route is running, request a resumable stop from another
+terminal with the standard command:
+
+```bash
+uv run mforge experiment stop \
+  --config /home/user/DEV/mutation-forge-lab-evidence/my-preview.toml \
+  --final
+```
+
+The running process finishes the already-started generation and stops before
+the next generation. Wait for it to exit and confirm
 `state=blocked`, `terminal_reason=operator_stop`, and `resumable=true`.
+Archived M8 wrapper instructions called this `--request-stop`; that option is
+not part of the canonical public CLI and must not be used for current runs.
 
 Resume the exact workspace with the same configuration:
 
 ```bash
-uv run python scripts/native_v3_python_m6_live_preview.py \
-  --config /home/user/DEV/mutation-forge-lab-evidence/my-preview.toml
+uv run mforge experiment run \
+  --config /home/user/DEV/mutation-forge-lab-evidence/my-preview.toml \
+  --dashboard
 ```
 
 Resume verifies repository, HEG, configuration, prompt, schema, runtime,
@@ -138,6 +173,8 @@ root is `/evidence/preview/example`.
   `generations/generation-NNNN/slot-NN/evaluations/*.json.gz`
 - Immutable generation allocation:
   `generations/generation-NNNN/manifest.json.gz`
+- Immutable M10 generation/provider snapshot:
+  `generations/generation-NNNN/generation-snapshot.json.gz`
 - Host and source-free model Search Memory:
   `generations/generation-NNNN/search-memory.json.gz`
 - Provider lifecycle artifacts:
@@ -147,9 +184,9 @@ root is `/evidence/preview/example`.
 - Public state:
   `python-preview-state.json.gz`
 - Terminal search report:
-  `m5-report.json.gz`
+  `m10-report.json.gz` for M10, or `m5-report.json.gz` for the original preview
 - Resumable stop or infrastructure boundary:
-  `m5-stop.json.gz`
+  `m10-stop.json.gz` for M10, or `m5-stop.json.gz` for the original preview
 - Acceptance provenance:
   `acceptance-provenance.json.gz`
 

@@ -3,15 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
-from mutation_forge.native_v3_python import scientific_search as scientific_module
 from mutation_forge.native_v3_python import search_provider as provider_module
 from mutation_forge.native_v3_python.contracts import (
     PYTHON_EXPERIMENT_PROTOCOL_ID,
@@ -23,14 +23,15 @@ from mutation_forge.native_v3_python.preview import (
     run_python_preview,
 )
 from mutation_forge.native_v3_python.scientific_search import (
-    M9_REPORT_PROTOCOL_ID,
-    M9_SEARCH_PROTOCOL_ID,
-    M9_STOP_FILENAME,
-    ScientificSearchOptionsV1,
+    M10_REPORT_PROTOCOL_ID,
+    M10_SEARCH_PROTOCOL_ID,
+    M10_STOP_FILENAME,
+    ScientificSearchOptionsV2,
     run_sustained_search,
 )
 from mutation_forge.native_v3_python.search import (
     DevelopmentCaseV1,
+    M5InfrastructureError,
     M5OperatorStop,
     M5ProviderContextV1,
     M5ProviderResultV1,
@@ -38,11 +39,15 @@ from mutation_forge.native_v3_python.search import (
 from mutation_forge.native_v3_python.search_provider import (
     M5_PROVIDER_MAX_CAMPAIGNS,
     M5_PROVIDER_MAX_TURNS,
-    M9_PROVIDER_MAX_EVENTS,
-    M9_PROVIDER_STDOUT_BYTES,
-    M9_PROVIDER_TRANSCRIPT_BYTES,
+    M10_PROVIDER_MAX_EVENTS,
+    M10_PROVIDER_STDOUT_BYTES,
+    M10_PROVIDER_TRANSCRIPT_BYTES,
     CodexM5SearchProvider,
+    CodexM10SearchProvider,
     specification_ack_schema,
+)
+from mutation_forge.output.interactive_dashboard import (
+    dashboard_state_from_python_status,
 )
 
 _PANEL = (
@@ -158,6 +163,7 @@ def _usage() -> dict[str, JsonValue]:
 class _Provider:
     model = "fixture-model"
     effort = "medium"
+    provider_concurrency = 4
 
     def __init__(
         self,
@@ -165,12 +171,51 @@ class _Provider:
     ) -> None:
         self.durable = durable if durable is not None else {}
         self.calls: list[tuple[int, str]] = []
+        self.prompts: dict[tuple[int, str], str] = {}
         self.anchor = M5ProviderContextV1(
             "anchor-thread",
             "anchor-turn",
             None,
             ("anchor-turn",),
         )
+        self.snapshots: list[Mapping[str, Any]] = []
+        self.released: list[tuple[int, str]] = []
+        self.release_condition = threading.Condition()
+
+    def prepare_generation(
+        self,
+        *,
+        snapshot: Mapping[str, Any],
+        **_: Any,
+    ) -> None:
+        self.snapshots.append(snapshot)
+
+    def primary_lane(self, *, generation: int, slot: str) -> int:
+        del generation
+        return int(slot.removeprefix("slot-")) % self.provider_concurrency
+
+    def await_primary_slot(
+        self, *, generation: int, slot: str
+    ) -> None:
+        slot_index = int(slot.removeprefix("slot-"))
+        predecessor = (
+            generation,
+            f"slot-{slot_index - self.provider_concurrency:02d}",
+        )
+        if slot_index < self.provider_concurrency:
+            return
+        with self.release_condition:
+            assert self.release_condition.wait_for(
+                lambda: predecessor in self.released,
+                timeout=1,
+            )
+
+    def release_primary_slot(
+        self, *, generation: int, slot: str
+    ) -> None:
+        with self.release_condition:
+            self.released.append((generation, slot))
+            self.release_condition.notify_all()
 
     def ensure_specification_anchor(
         self,
@@ -198,9 +243,16 @@ class _Provider:
         generation: int,
         slot: str,
         idempotency_key: str,
+        artifact_dir: Path,
+        prompt: str,
     ) -> M5ProviderResultV1:
         if idempotency_key in self.durable:
-            return self.durable[idempotency_key]
+            result = self.durable[idempotency_key]
+            write_json(
+                artifact_dir / "m5-provider-result.json.gz",
+                result.as_dict(),
+            )
+            return result
         turn = f"turn-{generation}-{slot}"
         result = M5ProviderResultV1(
             response_text=json.dumps(
@@ -224,6 +276,11 @@ class _Provider:
         )
         self.durable[idempotency_key] = result
         self.calls.append((generation, slot))
+        self.prompts[(generation, slot)] = prompt
+        write_json(
+            artifact_dir / "m5-provider-result.json.gz",
+            result.as_dict(),
+        )
         return result
 
     def generate_root(
@@ -233,6 +290,8 @@ class _Provider:
         generation: int,
         slot: str,
         idempotency_key: str,
+        artifact_dir: Path,
+        prompt: str,
         **_: Any,
     ) -> M5ProviderResultV1:
         return self._program(
@@ -240,6 +299,8 @@ class _Provider:
             generation=generation,
             slot=slot,
             idempotency_key=idempotency_key,
+            artifact_dir=artifact_dir,
+            prompt=prompt,
         )
 
     def generate_child(
@@ -249,6 +310,8 @@ class _Provider:
         generation: int,
         slot: str,
         idempotency_key: str,
+        artifact_dir: Path,
+        prompt: str,
         **_: Any,
     ) -> M5ProviderResultV1:
         return self._program(
@@ -256,6 +319,8 @@ class _Provider:
             generation=generation,
             slot=slot,
             idempotency_key=idempotency_key,
+            artifact_dir=artifact_dir,
+            prompt=prompt,
         )
 
     def repair(self, **_: Any) -> M5ProviderResultV1:
@@ -319,16 +384,21 @@ class _Evaluator:
 
 def _options(
     *,
-    turns: int = 8,
     workers: int = 2,
     generations: int = 1,
-) -> ScientificSearchOptionsV1:
-    return ScientificSearchOptionsV1(
+    concurrency: int = 4,
+    repairs: int = 0,
+) -> ScientificSearchOptionsV2:
+    return ScientificSearchOptionsV2(
         generation_limit=generations,
         evaluator_workers=workers,
-        provider_concurrency=1,
+        provider_concurrency=concurrency,
         wall_seconds=60.0,
-        provider_program_turn_limit=turns,
+        primary_program_slots=generations * 8,
+        repair_turn_limit=repairs,
+        provider_total_turn_limit=generations * 8 + repairs,
+        validated_queue_target=workers * 2,
+        validated_queue_capacity=workers * 4,
         stop_on_verified=True,
         resume_enabled=True,
         replace_terminal_slots=False,
@@ -340,7 +410,7 @@ def _run(
     *,
     provider: _Provider,
     concurrency: _Concurrency,
-    options: ScientificSearchOptionsV1,
+    options: ScientificSearchOptionsV2,
     operator_stop: Any = None,
     boundary_hook: Any = None,
 ) -> dict[str, Any]:
@@ -365,7 +435,7 @@ def _scientific_config(
     *,
     exp_id: str,
     generations: int = 1,
-    turns: int = 8,
+    repairs: int = 0,
 ) -> Path:
     heg = tmp_path / "heg"
     (heg / "src" / "sglab").mkdir(parents=True, exist_ok=True)
@@ -385,9 +455,13 @@ heg_repo = "{heg.as_posix()}"
 [python_preview.scientific_search]
 generation_limit = {generations}
 evaluator_workers = 2
-provider_concurrency = 1
+provider_concurrency = 4
 wall_seconds = 60
-provider_program_turn_limit = {turns}
+primary_program_slots = {generations * 8}
+repair_turn_limit = {repairs}
+provider_total_turn_limit = {generations * 8 + repairs}
+validated_queue_target = 4
+validated_queue_capacity = 8
 stop_on_verified = true
 resume_enabled = true
 replace_terminal_slots = false
@@ -409,7 +483,7 @@ def test_sustained_search_overlaps_evaluations_and_commits_canonically(
         options=_options(),
     )
 
-    assert report["protocol_id"] == M9_REPORT_PROTOCOL_ID
+    assert report["protocol_id"] == M10_REPORT_PROTOCOL_ID
     assert report["candidate_count"] == 8
     assert report["candidate_program_turns"] == 8
     assert report["provider_order"] == [
@@ -422,66 +496,162 @@ def test_sustained_search_overlaps_evaluations_and_commits_canonically(
     ] is True
 
 
-def test_program_turn_budget_stops_without_replacement(
+def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
     tmp_path: Path,
 ) -> None:
-    provider = _Provider()
+    class ConcurrentProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.barrier = threading.Barrier(4, timeout=2)
+            self.lock = threading.Lock()
+            self.active = 0
+            self.peak = 0
+
+        def generate_root(self, **kwargs: Any) -> M5ProviderResultV1:
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            try:
+                self.barrier.wait()
+                if kwargs["slot"] == "slot-00":
+                    time.sleep(0.02)
+                return super().generate_root(**kwargs)
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    provider = ConcurrentProvider()
     report = _run(
         tmp_path,
         provider=provider,
         concurrency=_Concurrency(parties=1),
-        options=_options(turns=2, workers=1),
+        options=_options(workers=2),
     )
 
-    assert report["stop_reason"] == "provider_turn_budget"
-    assert report["candidate_count"] == 2
-    assert report["candidate_program_turns"] == 2
-    assert provider.calls == [(0, "slot-00"), (0, "slot-01")]
-    assert not (
+    assert provider.peak == 4
+    assert report["runtime"]["peak_active_provider_turns"] == 4
+    assert report["provider_order"] == [
+        f"g0000-slot-{index:02d}" for index in range(8)
+    ]
+    assert len(provider.snapshots) == 1
+    snapshot = provider.snapshots[0]
+    assert snapshot["generation"] == 0
+    assert len(snapshot["slots"]) == 8
+    assert len(set(provider.prompts.values())) == 1
+    assert "active_parent=null" in next(iter(provider.prompts.values()))
+    retained = read_json(
         tmp_path
-        / "generations/generation-0000/slot-02/candidate.json.gz"
-    ).exists()
-
-
-def test_atomic_provider_budget_exhaustion_is_terminal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original = scientific_module._RuntimeTelemetry.provider_turn_available
-
-    def stale_available(
-        telemetry: Any,
-        limit: int,
-        *,
-        key: str | None = None,
-    ) -> bool:
-        if len(telemetry.snapshot()["provider_turn_keys"]) >= limit:
-            return True
-        return original(
-            telemetry,
-            limit,
-            key=key,
-        )
-
-    monkeypatch.setattr(
-        scientific_module._RuntimeTelemetry,
-        "provider_turn_available",
-        stale_available,
+        / "generations"
+        / "generation-0000"
+        / "generation-snapshot.json.gz"
     )
-    provider = _Provider()
+    assert retained == snapshot
 
+
+def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
+    tmp_path: Path,
+) -> None:
+    class RepairProvider(_Provider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.repair_slots: list[str] = []
+            self.turn_order: list[str] = []
+            self.slot_zero_repaired = threading.Event()
+
+        def generate_root(self, **kwargs: Any) -> M5ProviderResultV1:
+            if kwargs["slot"] == "slot-04":
+                assert self.slot_zero_repaired.wait(timeout=1)
+            self.turn_order.append(f"primary-{kwargs['slot']}")
+            result = super().generate_root(**kwargs)
+            slot = str(kwargs["slot"])
+            if slot not in {"slot-00", "slot-01"}:
+                return result
+            invalid = M5ProviderResultV1(
+                response_text=json.dumps(
+                    {
+                        "schema_version": (
+                            "mforge.native.python_policy_response.v1"
+                        ),
+                        "source": "import os\n",
+                    },
+                    separators=(",", ":"),
+                ),
+                context=result.context,
+                usage=result.usage,
+                duration_ms=result.duration_ms,
+                warnings=result.warnings,
+            )
+            key = str(kwargs["idempotency_key"])
+            self.durable[key] = invalid
+            write_json(
+                Path(kwargs["artifact_dir"])
+                / "m5-provider-result.json.gz",
+                invalid.as_dict(),
+            )
+            return invalid
+
+        def repair(
+            self,
+            *,
+            previous: M5ProviderResultV1,
+            generation: int,
+            slot: str,
+            idempotency_key: str,
+            artifact_dir: Path,
+            **_: Any,
+        ) -> M5ProviderResultV1:
+            self.repair_slots.append(slot)
+            self.turn_order.append(f"repair-{slot}")
+            if slot == "slot-00":
+                self.slot_zero_repaired.set()
+            turn = f"repair-{generation}-{slot}"
+            result = M5ProviderResultV1(
+                response_text=json.dumps(
+                    {
+                        "schema_version": (
+                            "mforge.native.python_policy_response.v1"
+                        ),
+                        "source": _source(f"repair-{slot}"),
+                    },
+                    separators=(",", ":"),
+                ),
+                context=M5ProviderContextV1(
+                    previous.context.thread_id,
+                    turn,
+                    None,
+                    previous.context.included_turn_ids + (turn,),
+                ),
+                usage=_usage(),
+                duration_ms=1,
+                warnings=0,
+            )
+            self.durable[idempotency_key] = result
+            write_json(
+                artifact_dir / "m5-provider-result.json.gz",
+                result.as_dict(),
+            )
+            return result
+
+    provider = RepairProvider()
     report = _run(
         tmp_path,
         provider=provider,
         concurrency=_Concurrency(parties=1),
-        options=_options(turns=2, workers=1),
+        options=_options(workers=2, repairs=1),
     )
 
-    assert report["stop_reason"] == "provider_turn_budget"
-    assert report["candidate_program_turns"] == 2
-    assert report["candidate_count"] == 2
-    assert report["pending_candidate_count"] == 6
-    assert provider.calls == [(0, "slot-00"), (0, "slot-01")]
+    assert provider.repair_slots == ["slot-00"]
+    assert provider.turn_order.index("repair-slot-00") < (
+        provider.turn_order.index("primary-slot-04")
+    )
+    assert report["candidate_status_counts"] == {
+        "contract_invalid": 1,
+        "evaluated": 7,
+    }
+    assert report["repaired_valid_count"] == 1
+    assert report["provider_accounting"]["primary_turns_submitted"] == 8
+    assert report["provider_accounting"]["repair_turns_submitted"] == 1
+    assert report["candidate_program_turns"] == 9
 
 
 def test_all_later_generations_keep_four_children_and_four_roots(
@@ -491,7 +661,7 @@ def test_all_later_generations_keep_four_children_and_four_roots(
         tmp_path,
         provider=_Provider(),
         concurrency=_Concurrency(parties=1),
-        options=_options(turns=24, workers=2, generations=3),
+        options=_options(workers=2, generations=3),
     )
 
     assert report["candidate_count"] == 24
@@ -517,8 +687,8 @@ def test_operator_stop_resume_repeats_no_terminal_work(
             tmp_path,
             provider=first_provider,
             concurrency=first_concurrency,
-            options=_options(),
-            operator_stop=lambda: len(first_provider.calls) >= 2,
+            options=_options(generations=2),
+            operator_stop=lambda: len(first_provider.calls) >= 8,
         )
 
     retained = {
@@ -529,22 +699,22 @@ def test_operator_stop_resume_repeats_no_terminal_work(
             )
         )
     }
-    assert len(retained) == 2
+    assert len(retained) == 8
     resumed_provider = _Provider(durable)
     resumed_concurrency = _Concurrency(parties=1)
     report = _run(
         tmp_path,
         provider=resumed_provider,
         concurrency=resumed_concurrency,
-        options=_options(),
+        options=_options(generations=2),
     )
 
-    assert report["candidate_count"] == 8
-    assert resumed_provider.calls == [
-        (0, f"slot-{index:02d}") for index in range(2, 8)
+    assert report["candidate_count"] == 16
+    assert sorted(resumed_provider.calls) == [
+        (1, f"slot-{index:02d}") for index in range(8)
     ]
     assert all(path.read_bytes() == content for path, content in retained.items())
-    assert len(first_concurrency.calls) + len(resumed_concurrency.calls) == 16
+    assert len(first_concurrency.calls) + len(resumed_concurrency.calls) == 32
 
 
 def test_crash_after_prepared_boundary_repeats_no_provider_turn(
@@ -569,7 +739,9 @@ def test_crash_after_prepared_boundary_repeats_no_provider_turn(
             boundary_hook=crash,
         )
 
-    assert len(first_provider.calls) == 1
+    assert first_provider.calls == [
+        (0, f"slot-{index:02d}") for index in range(4)
+    ]
     resumed = _Provider(durable)
     report = _run(
         tmp_path,
@@ -579,8 +751,9 @@ def test_crash_after_prepared_boundary_repeats_no_provider_turn(
     )
     assert report["candidate_count"] == 8
     assert resumed.calls == [
-        (0, f"slot-{index:02d}") for index in range(1, 8)
+        (0, f"slot-{index:02d}") for index in range(4, 8)
     ]
+    assert len(durable) == 8
 
 
 def test_interrupted_provider_turn_is_consumed_without_external_repeat(
@@ -603,17 +776,17 @@ def test_interrupted_provider_turn_is_consumed_without_external_repeat(
         )
 
     resumed = _Provider()
-    report = _run(
-        tmp_path,
-        provider=resumed,
-        concurrency=_Concurrency(parties=1),
-        options=_options(),
-    )
-    assert report["candidate_status_counts"]["provider_failed"] == 1
-    assert report["candidate_count"] == 8
-    assert resumed.calls == [
-        (0, f"slot-{index:02d}") for index in range(1, 8)
-    ]
+    with pytest.raises(
+        M5InfrastructureError,
+        match="will not repeat",
+    ):
+        _run(
+            tmp_path,
+            provider=resumed,
+            concurrency=_Concurrency(parties=1),
+            options=_options(),
+        )
+    assert resumed.calls == []
 
 
 def test_one_provider_failure_consumes_its_slot_and_search_continues(
@@ -669,7 +842,7 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
     )
 
     assert status["state"] == "completed"
-    assert status["search_protocol"] == M9_SEARCH_PROTOCOL_ID
+    assert status["search_protocol"] == M10_SEARCH_PROTOCOL_ID
     assert status["safe_api_expanded"] is True
     assert status["counts"]["terminal"] == 8
     assert status["counts"]["pending"] == 0
@@ -687,6 +860,164 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
         "balanced",
     }
     assert status["exact_verification"]["authority"] == "exact_verifier_only"
+
+
+def test_rich_projection_uses_the_same_canonical_status_counters(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="rich-canonical-status",
+    )
+    status = run_python_preview(
+        config_path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(
+            _Concurrency(parties=1)
+        ),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    config = load_python_preview_config(config_path)
+    assert config.scientific_search is not None
+    rich = dashboard_state_from_python_status(
+        status,
+        run_id=config.exp_id,
+        model=config.model,
+        effort=config.effort,
+        generation_limit=config.scientific_search.generation_limit,
+        wall_seconds=config.scientific_search.wall_seconds,
+    )
+
+    assert rich.completed_slots == status["counts"]["terminal"]
+    assert rich.provider_turns_attempted == status["provider"][
+        "program_turns_reserved"
+    ]
+    assert rich.active_provider_turns == status["provider"]["active"]
+    assert rich.configured_provider_concurrency == status["provider"][
+        "configured_concurrency"
+    ]
+    assert rich.evaluations_completed == status["evaluators"]["completed"]
+    assert rich.evaluation_workers_active == status["evaluators"]["active"]
+    assert sum(len(group.slots) for group in rich.generations) == status[
+        "counts"
+    ]["planned"]
+
+
+def test_budget_pause_record_projects_read_only_rich_and_json_status(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="paused-budget-status",
+    )
+    status = run_python_preview(
+        config_path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(
+            _Concurrency(parties=1)
+        ),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    config = load_python_preview_config(config_path)
+    workspace = config.experiment_root
+    before = {
+        path.relative_to(workspace): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+    pause_record = tmp_path / "paused-for-budget.json"
+    pause_record.write_text(
+        json.dumps(
+            {
+                "schema_version": (
+                    "mforge.native.python_m10_emergency_stop_evidence.v1"
+                ),
+                "state": "PAUSED_FOR_BUDGET",
+                "experiment": config.exp_id,
+                "slots": {
+                    "terminal_total": 8,
+                    "in_flight_cancelled_at_stop": 0,
+                    "pending_total": 0,
+                    "in_flight_slots": [],
+                    "pending_unstarted_slots": [],
+                },
+                "provider_turns": {
+                    "started_reservations": 8,
+                    "completed_turns": 8,
+                    "in_flight_started_without_finished": 0,
+                    "primary_turns_submitted": 8,
+                    "repair_turns_submitted": 0,
+                    "persisted_usage_including_specification_anchor": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 10,
+                        "output_tokens": 20,
+                        "reasoning_output_tokens": 3,
+                        "total_tokens": 120,
+                    },
+                },
+                "best": {
+                    "candidate_id": "g0000-slot-00",
+                    "program_hash": "b" * 64,
+                    "fitness_interval": {
+                        "lower": {"numerator": 2, "denominator": 3},
+                        "upper": {"numerator": 2, "denominator": 3},
+                    },
+                },
+                "exact_verifier": {
+                    "candidate_submissions": 0,
+                    "candidate_results": 0,
+                    "all_candidate_exact_verified": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paused = python_preview_status(
+        config_path,
+        pause_record_path=pause_record,
+    )
+    after = {
+        path.relative_to(workspace): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+
+    assert status["counts"]["terminal"] == 8
+    assert paused["state"] == "PAUSED_FOR_BUDGET"
+    assert paused["resumable"] is True
+    assert paused["run_terminal"] is False
+    assert paused["counts"]["terminal"] == 8
+    assert paused["counts"]["pending"] == 0
+    assert paused["provider"]["active"] == 0
+    assert paused["provider"]["completed_turns"] == 8
+    assert paused["provider"]["usage"]["totalTokens"] == 120
+    assert paused["exact_verification"]["verified"] is False
+    assert before == after
+
+    assert config.scientific_search is not None
+    rich = dashboard_state_from_python_status(
+        paused,
+        run_id=config.exp_id,
+        model=config.model,
+        effort=config.effort,
+        generation_limit=config.scientific_search.generation_limit,
+        wall_seconds=config.scientific_search.wall_seconds,
+    )
+    assert rich.experiment_state == "PAUSED_FOR_BUDGET"
+    assert rich.paused is False
+    assert rich.completed_slots == paused["counts"]["terminal"]
+    assert rich.provider_turns_attempted == 8
+    assert rich.provider_turns_completed == 8
+    assert rich.cumulative_usage.total == 120
+    assert rich.best_candidate == "g0000-slot-00"
+    assert rich.best_program_hash == "b" * 64
+    assert rich.best_fitness == "2/3"
+    assert rich.best_objective == 2 / 3
 
 
 def test_status_counts_failed_provider_reservations(
@@ -752,7 +1083,7 @@ def test_evaluator_factory_failure_closes_every_owned_backend(
     assert all(backend.close_calls == 1 for backend in backends)
 
 
-def test_terminal_m9_report_wins_after_state_write_interruption(
+def test_terminal_m10_report_wins_after_state_write_interruption(
     tmp_path: Path,
 ) -> None:
     config_path = _scientific_config(
@@ -780,9 +1111,9 @@ def test_terminal_m9_report_wins_after_state_write_interruption(
     )
     write_json(state_path, retained_state)
     write_json(
-        root / M9_STOP_FILENAME,
+        root / M10_STOP_FILENAME,
         {
-            "protocol_id": M9_REPORT_PROTOCOL_ID,
+            "protocol_id": M10_REPORT_PROTOCOL_ID,
             "status": "operator_stop",
             "resumable": True,
         },
@@ -794,98 +1125,7 @@ def test_terminal_m9_report_wins_after_state_write_interruption(
     assert status["resumable"] is False
 
 
-def test_budget_workspace_finalizes_offline_without_provider_or_backend(
-    tmp_path: Path,
-) -> None:
-    config_path = _scientific_config(
-        tmp_path,
-        exp_id="offline-budget-finalization",
-        generations=2,
-        turns=8,
-    )
-    first = run_python_preview(
-        config_path,
-        provider_factory=lambda *_: _Provider(),
-        backend_factory=lambda _: _Backend(),
-        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
-        provenance_guard=lambda **_: {},
-        auth_available=lambda _: True,
-    )
-    assert first["terminal_reason"] == "provider_turn_budget"
-    root = load_python_preview_config(config_path).experiment_root
-    write_json(
-        root / "acceptance-provenance.json.gz",
-        {"status": "accepted"},
-    )
-    for candidate_path in sorted(
-        root.glob(
-            "generations/generation-*/slot-*/candidate.json.gz"
-        )
-    ):
-        candidate = read_json(candidate_path)
-        attempts = candidate["provider_attempts"]
-        assert len(attempts) == 1
-        write_json(
-            candidate_path.parent
-            / "provider-initial"
-            / "m5-provider-result.json.gz",
-            attempts[0],
-        )
-    (root / "m9-report.json.gz").unlink()
-    (
-        root
-        / "generations"
-        / "generation-0001"
-        / "search-memory.json.gz"
-    ).unlink()
-    runtime_path = root / "m9-runtime.json.gz"
-    runtime = read_json(runtime_path)
-    runtime["terminal_reason"] = None
-    write_json(runtime_path, runtime)
-    state_path = root / "python-preview-state.json.gz"
-    state = read_json(state_path)
-    state.update(
-        {
-            "state": "blocked",
-            "resumable": True,
-            "run_terminal": False,
-            "terminal_reason": None,
-        }
-    )
-    write_json(state_path, state)
-    unexpected = 0
-
-    def fail(*_: object, **__: object) -> Any:
-        nonlocal unexpected
-        unexpected += 1
-        raise AssertionError("offline finalization constructed a live service")
-
-    finalized = run_python_preview(
-        config_path,
-        provider_factory=fail,
-        backend_factory=fail,
-        evaluator_factory=fail,
-        provenance_guard=fail,
-        auth_available=lambda _: False,
-    )
-
-    assert unexpected == 0
-    assert finalized["state"] == "completed"
-    assert finalized["terminal_reason"] == "provider_turn_budget"
-    assert finalized["counts"]["terminal"] == 8
-    assert finalized["counts"]["pending"] == 8
-    report = read_json(root / "m9-report.json.gz")
-    assert report["planned_candidate_count"] == 16
-    assert report["candidate_count"] == 8
-    assert report["pending_candidate_count"] == 8
-    assert report["recovery"] == {
-        "offline_finalized": True,
-        "provider_or_backend_started": False,
-        "missing_search_memory_generations": [1],
-    }
-
-
-def test_sustained_provider_transport_is_bounded_for_sixty_four_turns(
+def test_sustained_provider_transport_is_bounded_for_one_hundred_twenty_turns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -915,15 +1155,15 @@ def test_sustained_provider_transport_is_bounded_for_sixty_four_turns(
         model="fixture",
         effort="medium",
         base_instructions="system",
-        program_turn_limit=64,
+        program_turn_limit=120,
     )
 
     limits = captured["limits"]
-    assert limits.max_turns == 65
-    assert limits.max_campaigns == 65
-    assert limits.max_events == M9_PROVIDER_MAX_EVENTS
-    assert limits.stdout_bytes == M9_PROVIDER_STDOUT_BYTES
-    assert limits.transcript_bytes == M9_PROVIDER_TRANSCRIPT_BYTES
+    assert limits.max_turns == 121
+    assert limits.max_campaigns == 121
+    assert limits.max_events == M10_PROVIDER_MAX_EVENTS
+    assert limits.stdout_bytes == M10_PROVIDER_STDOUT_BYTES
+    assert limits.transcript_bytes == M10_PROVIDER_TRANSCRIPT_BYTES
 
     captured.clear()
     CodexM5SearchProvider(
@@ -936,3 +1176,254 @@ def test_sustained_provider_transport_is_bounded_for_sixty_four_turns(
     assert m5_limits.max_turns == M5_PROVIDER_MAX_TURNS
     assert m5_limits.max_campaigns == M5_PROVIDER_MAX_CAMPAIGNS
     assert m5_limits.max_events == 10_000
+
+
+def test_m10_provider_releases_specification_process_before_worker_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    providers: list[object] = []
+
+    class FakeProvider:
+        capsule = object()
+
+        def __init__(self, *, coordinator: bool) -> None:
+            self.coordinator = coordinator
+
+        def fork_root_worker_from_active_anchor(
+            self,
+            *,
+            anchor: M5ProviderContextV1,
+            worker: int,
+            artifact_dir: Path,
+        ) -> M5ProviderContextV1:
+            assert self.coordinator
+            events.append(f"coordinator-fork-{worker}")
+            return M5ProviderContextV1(
+                f"worker-{worker}",
+                anchor.turn_id,
+                None,
+                anchor.included_turn_ids,
+            )
+
+        def ensure_anchor_context(
+            self, context: M5ProviderContextV1
+        ) -> None:
+            assert not self.coordinator
+            assert "coordinator-close-False" in events
+            events.append(
+                f"worker-{context.thread_id.removeprefix('worker-')}-resume"
+            )
+
+        def _increment_telemetry(
+            self, _: str, amount: int = 1
+        ) -> None:
+            assert amount == 1
+
+        def close(self, *, cleanup_capsule: bool = True) -> None:
+            kind = "coordinator" if self.coordinator else "worker"
+            events.append(f"{kind}-close-{cleanup_capsule}")
+
+    def provider_factory(**_: Any) -> FakeProvider:
+        provider = FakeProvider(coordinator=not providers)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        provider_module, "CodexM5SearchProvider", provider_factory
+    )
+    monkeypatch.setattr(
+        provider_module, "CodexAppServerAdapter", lambda **_: object()
+    )
+    provider = CodexM10SearchProvider(
+        workspace=tmp_path / "provider",
+        model="fixture",
+        effort="medium",
+        base_instructions="system",
+        auth_json=tmp_path / "auth.json",
+        turn_timeout_seconds=60,
+        provider_concurrency=4,
+        provider_total_turn_limit=16,
+    )
+    anchor = M5ProviderContextV1(
+        "anchor-thread", "anchor-turn", None, ("anchor-turn",)
+    )
+    provider._anchor = anchor
+    provider.prepare_generation(
+        snapshot={
+            "generation": 0,
+            "slots": [
+                {"slot": f"slot-{slot:02d}", "kind": "root"}
+                for slot in range(8)
+            ],
+        },
+        anchor=anchor,
+        artifact_dir=tmp_path / "generation-provider",
+    )
+    assert events[:9] == [
+        "coordinator-fork-0",
+        "coordinator-fork-1",
+        "coordinator-fork-2",
+        "coordinator-fork-3",
+        "coordinator-close-False",
+        "worker-0-resume",
+        "worker-1-resume",
+        "worker-2-resume",
+        "worker-3-resume",
+    ]
+    provider.close(cleanup_capsule=False)
+    assert events[-1] == "coordinator-close-False"
+
+
+def test_m10_provider_retries_only_transient_worker_resume_setup_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: dict[str, int] = {}
+    restarts: list[str] = []
+    providers: list[object] = []
+
+    class FakeProvider:
+        capsule = object()
+
+        def __init__(self, *, workspace: Path, coordinator: bool) -> None:
+            self.workspace = workspace
+            self.coordinator = coordinator
+
+        def fork_root_worker_from_active_anchor(
+            self,
+            *,
+            anchor: M5ProviderContextV1,
+            worker: int,
+            artifact_dir: Path,
+        ) -> M5ProviderContextV1:
+            assert self.coordinator
+            return M5ProviderContextV1(
+                f"thread-{worker}",
+                anchor.turn_id,
+                None,
+                anchor.included_turn_ids,
+            )
+
+        def ensure_anchor_context(
+            self, context: M5ProviderContextV1
+        ) -> None:
+            assert not self.coordinator
+            key = self.workspace.name
+            attempts[key] = attempts.get(key, 0) + 1
+            if key == "worker-00" and attempts[key] == 1:
+                raise provider_module.ProtocolError(
+                    "request thread/resume failed"
+                )
+
+        def _increment_telemetry(
+            self, field: str, amount: int = 1
+        ) -> None:
+            assert amount == 1
+            restarts.append(field)
+
+        def close(self, *, cleanup_capsule: bool = True) -> None:
+            return None
+
+    def provider_factory(**kwargs: Any) -> FakeProvider:
+        provider = FakeProvider(
+            workspace=Path(kwargs["workspace"]),
+            coordinator=not providers,
+        )
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        provider_module, "CodexM5SearchProvider", provider_factory
+    )
+    monkeypatch.setattr(
+        provider_module, "CodexAppServerAdapter", lambda **_: object()
+    )
+    provider = CodexM10SearchProvider(
+        workspace=tmp_path / "provider",
+        model="fixture",
+        effort="medium",
+        base_instructions="system",
+        auth_json=tmp_path / "auth.json",
+        turn_timeout_seconds=60,
+        provider_concurrency=4,
+        provider_total_turn_limit=16,
+    )
+    anchor = M5ProviderContextV1(
+        "anchor-thread", "anchor-turn", None, ("anchor-turn",)
+    )
+    provider._anchor = anchor
+    provider.prepare_generation(
+        snapshot={
+            "generation": 0,
+            "slots": [
+                {"slot": f"slot-{slot:02d}", "kind": "root"}
+                for slot in range(8)
+            ],
+        },
+        anchor=anchor,
+        artifact_dir=tmp_path / "generation-provider",
+    )
+    assert attempts["worker-00"] == 2
+    assert restarts == ["process_restarts"]
+
+
+def test_m10_root_repair_advances_the_persistent_lane_context(
+    tmp_path: Path,
+) -> None:
+    previous_context = M5ProviderContextV1(
+        "root-thread",
+        "primary-turn",
+        None,
+        ("anchor-turn", "primary-turn"),
+    )
+    repaired_context = M5ProviderContextV1(
+        "root-thread",
+        "repair-turn",
+        None,
+        ("anchor-turn", "primary-turn", "repair-turn"),
+    )
+    previous = M5ProviderResultV1(
+        response_text="{}",
+        context=previous_context,
+        usage=_usage(),
+        duration_ms=1,
+        warnings=0,
+    )
+    repaired = M5ProviderResultV1(
+        response_text="{}",
+        context=repaired_context,
+        usage=_usage(),
+        duration_ms=1,
+        warnings=0,
+    )
+
+    class Worker:
+        def repair(self, **_: Any) -> M5ProviderResultV1:
+            return repaired
+
+    provider = object.__new__(CodexM10SearchProvider)
+    provider.workspace = tmp_path
+    provider.model = "fixture"
+    provider.effort = "medium"
+    provider.provider_concurrency = 1
+    provider._state_path = tmp_path / "provider-pool-state.json.gz"
+    provider._state_lock = threading.RLock()
+    provider._root_workers = {0: previous_context}
+    provider._thread_owners = {"root-thread": 0}
+    provider._primary_slot_owners = {}
+    provider._completed_primary_slots = set()
+    provider._released_primary_slots = set()
+    provider._anchor = None
+    provider._worker_locks = [threading.Lock()]
+    provider._workers = [cast(Any, Worker())]
+
+    result = provider.repair(
+        previous=previous,
+        generation=0,
+        slot="slot-00",
+    )
+
+    assert result == repaired
+    assert provider._root_workers[0] == repaired_context

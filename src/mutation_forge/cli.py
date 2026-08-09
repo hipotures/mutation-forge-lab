@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from rich.console import Console
-from rich.live import Live
 from rich.table import Table
 
 from mutation_forge import __version__
@@ -38,13 +37,16 @@ from mutation_forge.native_v3_python.contracts import (
 )
 from mutation_forge.native_v3_python.preview import (
     experiment_protocol,
+    load_python_preview_config,
     python_preview_status,
+    request_python_preview_stop,
     run_python_preview,
 )
 from mutation_forge.output.interactive_dashboard import (
     DashboardCapabilities,
     DashboardState,
     InteractiveDashboardSink,
+    dashboard_state_from_python_status,
     load_persisted_dashboard_state,
 )
 from mutation_forge.output.rich_live import ProgressLineSink, RichLiveSink
@@ -284,101 +286,6 @@ def _emit_policy_result(result: object, *, json_output: bool) -> None:
         Console().print_json(canonical)
 
 
-def _python_preview_dashboard(status: Mapping[str, Any]) -> Table:
-    """Render the bounded live status already exposed by the Python route."""
-
-    counts = status.get("counts")
-    provider = status.get("provider")
-    evaluators = status.get("evaluators")
-    throughput = status.get("throughput")
-    activity = status.get("scientific_activity")
-    phase = status.get("phase_timings")
-    best = status.get("best")
-    exact = status.get("exact_verification")
-    counts = counts if isinstance(counts, Mapping) else {}
-    provider = provider if isinstance(provider, Mapping) else {}
-    evaluators = evaluators if isinstance(evaluators, Mapping) else {}
-    throughput = throughput if isinstance(throughput, Mapping) else {}
-    activity = activity if isinstance(activity, Mapping) else {}
-    phase = phase if isinstance(phase, Mapping) else {}
-    best = best if isinstance(best, Mapping) else {}
-    exact = exact if isinstance(exact, Mapping) else {}
-    usage = provider.get("usage")
-    total_tokens = (
-        usage.get("totalTokens", 0) if isinstance(usage, Mapping) else 0
-    )
-    recovery = status.get("recovery")
-    last_boundary = (
-        recovery.get("last_boundary")
-        if isinstance(recovery, Mapping)
-        else None
-    )
-    table = Table(
-        title="Native v3 ordinary-Python scientific search",
-        show_header=True,
-        header_style="bold",
-    )
-    table.add_column("Metric")
-    table.add_column("Value", overflow="fold")
-    rows = (
-        ("state", status.get("state")),
-        ("generation", status.get("generation_index")),
-        (
-            "slots",
-            f"{counts.get('terminal', 0)}/{counts.get('planned', 0)} "
-            f"terminal; {counts.get('pending', 0)} remaining",
-        ),
-        (
-            "candidates",
-            "valid={valid} invalid={invalid} duplicate={duplicate} "
-            "provider_failed={provider_failed} program_failed={program_failed}".format(
-                valid=counts.get("valid", 0),
-                invalid=counts.get("contract_invalid", 0),
-                duplicate=counts.get("duplicate", 0),
-                provider_failed=counts.get("provider_failed", 0),
-                program_failed=counts.get("program_failed", 0),
-            ),
-        ),
-        (
-            "provider",
-            f"turns={provider.get('program_turns_reserved', 0)} "
-            f"tokens={total_tokens}",
-        ),
-        (
-            "evaluators",
-            f"active={evaluators.get('active', 0)} "
-            f"idle={evaluators.get('idle', 0)} "
-            f"queued={evaluators.get('queued', 0)} "
-            f"peak={evaluators.get('peak_active', 0)} "
-            f"utilization={float(evaluators.get('utilization', 0.0)):.1%}",
-        ),
-        (
-            "throughput",
-            f"policy={float(throughput.get('policy_invocations_per_second', 0.0)):.3f}/s "
-            f"scores={float(throughput.get('graph_score_attempts_per_second', 0.0)):.3f}/s "
-            f"accepted={float(throughput.get('accepted_rewrites_per_second', 0.0)):.3f}/s",
-        ),
-        (
-            "outcomes",
-            f"NoPlan={float(activity.get('no_plan_rate', 0.0)):.1%} "
-            f"illegal-final={float(activity.get('illegal_final_state_rate', 0.0)):.1%}",
-        ),
-        ("best", f"{best.get('candidate_id')} {best.get('fitness_interval')}"),
-        (
-            "exact verifier",
-            f"queue={exact.get('queue', 0)} "
-            f"submissions={exact.get('submissions', 0)} "
-            f"records={exact.get('records', 0)} "
-            f"verified={exact.get('verified', False)}",
-        ),
-        ("bottleneck", phase.get("dominant_bottleneck", "unknown")),
-        ("last boundary", last_boundary),
-    )
-    for label, value in rows:
-        table.add_row(label, str(value))
-    return table
-
-
 def _experiment_run(
     config_path: Path,
     *,
@@ -399,30 +306,62 @@ def _experiment_run(
                 "ordinary-Python preview dashboard cannot be combined with JSON"
             )
         if dashboard:
-            console = Console(file=sys.stdout)
+            preview_config = load_python_preview_config(config_path)
+            scientific = preview_config.scientific_search
+            python_generation_limit = (
+                scientific.generation_limit if scientific is not None else 2
+            )
+            python_wall_seconds = (
+                scientific.wall_seconds if scientific is not None else 0.0
+            )
+
+            def project(status: Mapping[str, Any]) -> DashboardState:
+                return dashboard_state_from_python_status(
+                    status,
+                    run_id=preview_config.exp_id,
+                    model=preview_config.model,
+                    effort=preview_config.effort,
+                    generation_limit=python_generation_limit,
+                    wall_seconds=python_wall_seconds,
+                )
+
+            def request_stop() -> None:
+                request_python_preview_stop(config_path)
+
+            preview_sink = InteractiveDashboardSink(
+                console=Console(file=sys.stdout),
+                locked_config={
+                    "protocol": preview_config.protocol,
+                    "config_path": str(preview_config.source_path),
+                    "workspace": str(preview_config.experiment_root),
+                    "scientific_search": (
+                        scientific.as_dict()
+                        if scientific is not None
+                        else None
+                    ),
+                },
+                initial_state=project(python_preview_status(config_path)),
+                capabilities=DashboardCapabilities(
+                    quit=request_stop
+                ),
+            )
             with ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix="mforge-python-preview",
             ) as executor:
                 future = executor.submit(run_python_preview, config_path)
-                with Live(
-                    _python_preview_dashboard(
-                        python_preview_status(config_path)
-                    ),
-                    console=console,
-                    refresh_per_second=2,
-                ) as live:
+                try:
                     while True:
                         try:
                             result = future.result(timeout=0.5)
                             break
                         except FutureTimeoutError:
-                            live.update(
-                                _python_preview_dashboard(
-                                    python_preview_status(config_path)
-                                )
+                            preview_sink.update_canonical_state(
+                                project(python_preview_status(config_path))
                             )
-                    live.update(_python_preview_dashboard(result), refresh=True)
+                    preview_sink.update_canonical_state(project(result))
+                finally:
+                    preview_sink.close()
         else:
             result = run_python_preview(config_path)
         encoded = json.dumps(
@@ -545,10 +484,58 @@ def _experiment_run(
     return 0 if result.get("status") != "failed" else 1
 
 
-def _experiment_status(config_path: Path, *, json_output: bool) -> int:
+def _experiment_status(
+    config_path: Path,
+    *,
+    json_output: bool,
+    dashboard: bool = False,
+    pause_record_path: Path | None = None,
+) -> int:
+    if dashboard and json_output:
+        raise ValueError("experiment status dashboard cannot be combined with JSON")
     protocol = experiment_protocol(config_path)
     if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
-        result = python_preview_status(config_path)
+        result = (
+            python_preview_status(config_path)
+            if pause_record_path is None
+            else python_preview_status(
+                config_path,
+                pause_record_path=pause_record_path,
+            )
+        )
+        if dashboard:
+            config = load_python_preview_config(config_path)
+            scientific = config.scientific_search
+            generation_limit = (
+                scientific.generation_limit if scientific is not None else 2
+            )
+            wall_seconds = (
+                scientific.wall_seconds if scientific is not None else 0.0
+            )
+            console = Console(file=sys.stdout, width=160, height=50)
+            sink = InteractiveDashboardSink(
+                console=console,
+                locked_config={
+                    "protocol": config.protocol,
+                    "config_path": str(config.source_path),
+                    "workspace": str(config.experiment_root),
+                    "read_only": True,
+                },
+                initial_state=dashboard_state_from_python_status(
+                    result,
+                    run_id=config.exp_id,
+                    model=config.model,
+                    effort=config.effort,
+                    generation_limit=generation_limit,
+                    wall_seconds=wall_seconds,
+                ),
+                start_live=False,
+            )
+            try:
+                console.print(sink.render())
+            finally:
+                sink.close()
+            return 0 if result.get("state") != "failed" else 1
         encoded = json.dumps(
             result,
             ensure_ascii=False,
@@ -560,6 +547,10 @@ def _experiment_status(config_path: Path, *, json_output: bool) -> int:
         else:
             Console().print_json(encoded)
         return 0 if result.get("state") != "failed" else 1
+    if dashboard or pause_record_path is not None:
+        raise ValueError(
+            "read-only dashboard and pause records require ordinary-Python mode"
+        )
     result = experiment_status(config_path)
     print(render_status(result, json_output=json_output))
     return 0 if result.get("state") != "failed" else 1
@@ -568,6 +559,19 @@ def _experiment_status(config_path: Path, *, json_output: bool) -> int:
 def _experiment_stop(config_path: Path, *, final: bool, json_output: bool) -> int:
     if not final:
         raise ValueError("experiment stop requires --final")
+    if experiment_protocol(config_path) == PYTHON_EXPERIMENT_PROTOCOL_ID:
+        result = request_python_preview_stop(config_path)
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if json_output:
+            print(encoded)
+        else:
+            Console().print_json(encoded)
+        return 0
     result = final_stop_experiment(config_path)
     if json_output:
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
@@ -1023,6 +1027,16 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     )
     experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_status.add_argument("--json", action="store_true")
+    experiment_status.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="render one read-only Rich dashboard snapshot without scheduling work",
+    )
+    experiment_status.add_argument(
+        "--pause-record",
+        type=Path,
+        help="apply a matching offline budget-pause evidence record",
+    )
     experiment_stop = experiment_commands.add_parser(
         "stop",
         help="persist an explicit terminal operator decision",
@@ -1460,6 +1474,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment_status.add_argument("--config", type=Path, default=Path("experiment.toml"))
     experiment_status.add_argument("--json", action="store_true")
+    experiment_status.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="render one read-only Rich dashboard snapshot without scheduling work",
+    )
+    experiment_status.add_argument(
+        "--pause-record",
+        type=Path,
+        help="apply a matching offline budget-pause evidence record",
+    )
     experiment_stop = experiment_commands.add_parser(
         "stop",
         help="persist an explicit terminal operator decision",
@@ -1492,7 +1516,12 @@ def legacy_main(argv: list[str] | None = None) -> int:
                 until_complete=getattr(args, "until_complete", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
-            return _experiment_status(args.config, json_output=args.json)
+            return _experiment_status(
+                args.config,
+                json_output=args.json,
+                dashboard=getattr(args, "dashboard", False),
+                pause_record_path=getattr(args, "pause_record", None),
+            )
         if args.command == "experiment" and args.experiment_command == "stop":
             return _experiment_stop(
                 args.config,
@@ -1592,7 +1621,12 @@ def main(argv: list[str] | None = None) -> int:
                 until_complete=getattr(args, "until_complete", False),
             )
         if args.command == "experiment" and args.experiment_command == "status":
-            return _experiment_status(args.config, json_output=args.json)
+            return _experiment_status(
+                args.config,
+                json_output=args.json,
+                dashboard=getattr(args, "dashboard", False),
+                pause_record_path=getattr(args, "pause_record", None),
+            )
         if args.command == "experiment" and args.experiment_command == "stop":
             return _experiment_stop(
                 args.config,
