@@ -845,6 +845,7 @@ class CodexM10SearchProvider:
         self._thread_owners: dict[str, int] = {}
         self._primary_slot_owners: dict[str, int] = {}
         self._completed_primary_slots: set[str] = set()
+        self._coordinator_released = False
         self._load_state()
 
     def _load_state(self) -> None:
@@ -974,6 +975,12 @@ class CodexM10SearchProvider:
         _write_or_verify(artifact_dir / "provider-snapshot.json.gz", snapshot)
         if self._anchor != anchor:
             raise M5InfrastructureError("generation uses a foreign anchor")
+        if not self._coordinator_released:
+            # A durable thread may be resumed by a replacement app-server
+            # process only after the process that created it has released it.
+            # The coordinator is specification-only after the anchor exists.
+            self._coordinator.close(cleanup_capsule=False)
+            self._coordinator_released = True
         self._ensure_workers()
         for worker, provider in enumerate(self._workers):
             context = self._root_workers.get(worker)
@@ -1193,7 +1200,7 @@ class CodexM10SearchProvider:
             self._record_owner(worker=worker, context=result.context)
             return result
 
-    def close(self) -> None:
+    def close(self, *, cleanup_capsule: bool = True) -> None:
         primary_error: Exception | None = None
         for worker in self._workers:
             try:
@@ -1201,7 +1208,7 @@ class CodexM10SearchProvider:
             except Exception as error:
                 primary_error = primary_error or error
         try:
-            self._coordinator.close()
+            self._coordinator.close(cleanup_capsule=cleanup_capsule)
         except Exception as error:
             primary_error = primary_error or error
         if primary_error is not None:

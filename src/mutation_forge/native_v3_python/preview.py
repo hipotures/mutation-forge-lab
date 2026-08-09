@@ -1702,7 +1702,9 @@ def run_python_preview(
     cleanup_errors: list[Exception] = []
     if provider is not None:
         try:
-            if isinstance(provider, CodexM5SearchProvider):
+            if isinstance(
+                provider, CodexM5SearchProvider | CodexM10SearchProvider
+            ):
                 provider.close(
                     cleanup_capsule=(
                         primary_error is None

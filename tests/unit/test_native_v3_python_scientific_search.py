@@ -43,6 +43,7 @@ from mutation_forge.native_v3_python.search_provider import (
     M10_PROVIDER_STDOUT_BYTES,
     M10_PROVIDER_TRANSCRIPT_BYTES,
     CodexM5SearchProvider,
+    CodexM10SearchProvider,
     specification_ack_schema,
 )
 from mutation_forge.output.interactive_dashboard import (
@@ -1019,3 +1020,86 @@ def test_sustained_provider_transport_is_bounded_for_one_hundred_twenty_turns(
     assert m5_limits.max_turns == M5_PROVIDER_MAX_TURNS
     assert m5_limits.max_campaigns == M5_PROVIDER_MAX_CAMPAIGNS
     assert m5_limits.max_events == 10_000
+
+
+def test_m10_provider_releases_specification_process_before_worker_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    providers: list[object] = []
+
+    class FakeProvider:
+        capsule = object()
+
+        def __init__(self, *, coordinator: bool) -> None:
+            self.coordinator = coordinator
+
+        def prepare_root_worker(
+            self,
+            *,
+            anchor: M5ProviderContextV1,
+            worker: int,
+            artifact_dir: Path,
+        ) -> M5ProviderContextV1:
+            assert "coordinator-close-False" in events
+            events.append(f"worker-{worker}-resume")
+            return M5ProviderContextV1(
+                f"worker-{worker}",
+                anchor.turn_id,
+                None,
+                anchor.included_turn_ids,
+            )
+
+        def ensure_context(self, _: M5ProviderContextV1) -> None:
+            return None
+
+        def close(self, *, cleanup_capsule: bool = True) -> None:
+            kind = "coordinator" if self.coordinator else "worker"
+            events.append(f"{kind}-close-{cleanup_capsule}")
+
+    def provider_factory(**_: Any) -> FakeProvider:
+        provider = FakeProvider(coordinator=not providers)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        provider_module, "CodexM5SearchProvider", provider_factory
+    )
+    monkeypatch.setattr(
+        provider_module, "CodexAppServerAdapter", lambda **_: object()
+    )
+    provider = CodexM10SearchProvider(
+        workspace=tmp_path / "provider",
+        model="fixture",
+        effort="medium",
+        base_instructions="system",
+        auth_json=tmp_path / "auth.json",
+        turn_timeout_seconds=60,
+        provider_concurrency=4,
+        provider_total_turn_limit=16,
+    )
+    anchor = M5ProviderContextV1(
+        "anchor-thread", "anchor-turn", None, ("anchor-turn",)
+    )
+    provider._anchor = anchor
+    provider.prepare_generation(
+        snapshot={
+            "generation": 0,
+            "slots": [
+                {"slot": f"slot-{slot:02d}", "kind": "root"}
+                for slot in range(8)
+            ],
+        },
+        anchor=anchor,
+        artifact_dir=tmp_path / "generation-provider",
+    )
+    assert events[:5] == [
+        "coordinator-close-False",
+        "worker-0-resume",
+        "worker-1-resume",
+        "worker-2-resume",
+        "worker-3-resume",
+    ]
+    provider.close(cleanup_capsule=False)
+    assert events[-1] == "coordinator-close-False"
