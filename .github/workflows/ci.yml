@@ -41,6 +41,26 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      - name: Harden Python runtime permissions
+        run: |
+          python - <<'PY'
+          import stat
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.base_prefix).resolve()
+          executable = root / "bin" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+          if not root.is_dir() or not executable.is_file():
+              raise SystemExit("setup-python runtime is incomplete")
+          root.chmod(0o755)
+          executable.chmod(0o755)
+          if (
+              root.stat().st_mode & stat.S_IWOTH
+              or executable.stat().st_mode & stat.S_IWOTH
+          ):
+              raise SystemExit("setup-python runtime remains writable by other")
+          PY
+
       - name: Install dependencies
         run: uv sync --locked
 
