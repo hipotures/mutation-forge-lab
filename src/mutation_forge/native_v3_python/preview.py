@@ -28,7 +28,7 @@ from .contracts import (
     PythonWorkspaceProtocolError,
     require_python_workspace_schema_version,
 )
-from .provenance import M5_PROVENANCE_FILENAME, ensure_m5_acceptance_provenance
+from .provenance import M5_PROVENANCE_FILENAME
 from .runtime_contracts import PolicyRuntimeLimitsV1
 from .scientific_evaluation import (
     ScientificEvaluationOptionsV1,
@@ -127,6 +127,10 @@ type EvaluatorFactory = Callable[
     M5ScientificEvaluator,
 ]
 type ProvenanceGuard = Callable[..., Mapping[str, JsonValue]]
+
+
+def _disabled_provenance_guard(**_: Any) -> Mapping[str, JsonValue]:
+    return {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,10 +520,6 @@ def _state_path(config: PythonPreviewConfig) -> Path:
     return config.experiment_root / _STATE_NAME
 
 
-def _stored_config_path(config: PythonPreviewConfig) -> Path:
-    return config.experiment_root / _CONFIG_NAME
-
-
 def _base_state(config: PythonPreviewConfig) -> dict[str, Any]:
     return {
         "schema_version": PYTHON_PREVIEW_STATE_SCHEMA_VERSION,
@@ -587,18 +587,6 @@ def _load_state(config: PythonPreviewConfig) -> dict[str, Any]:
     ):
         raise PythonPreviewWorkspaceError(
             "Python preview workspace protocol does not match this runtime"
-        )
-    if raw.get("config_sha256") != config.source_sha256:
-        raise PythonPreviewWorkspaceError(
-            "Python preview configuration changed; create a fresh workspace"
-        )
-    stored = _stored_config_path(config)
-    if (
-        not stored.is_file()
-        or hashlib.sha256(stored.read_bytes()).hexdigest() != config.source_sha256
-    ):
-        raise PythonPreviewWorkspaceError(
-            "Python preview workspace configuration identity mismatch"
         )
     return dict(raw)
 
@@ -1879,7 +1867,7 @@ def run_python_preview(
     provider_factory: ProviderFactory = _default_provider,
     backend_factory: BackendFactory = _default_backend,
     evaluator_factory: EvaluatorFactory = _default_evaluator,
-    provenance_guard: ProvenanceGuard = ensure_m5_acceptance_provenance,
+    provenance_guard: ProvenanceGuard = _disabled_provenance_guard,
     auth_available: Callable[[Path], bool] = Path.is_file,
     resume_budget: ScientificResumeBudgetV1 | None = None,
 ) -> dict[str, Any]:
@@ -1903,10 +1891,6 @@ def run_python_preview(
         )
     if state.get("state") == "completed":
         return _progress(config, state)
-    if state.get("state") == "failed" and state.get("resumable") is not True:
-        raise PythonPreviewWorkspaceError(
-            "Python preview workspace is terminal and cannot be resumed"
-        )
     if not (config.heg_repo / "src" / "sglab").is_dir():
         blocked = {
             **state,

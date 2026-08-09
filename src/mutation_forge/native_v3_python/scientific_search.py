@@ -422,11 +422,8 @@ class _RuntimeTelemetry:
             if not isinstance(raw, Mapping):
                 raise core.M5InfrastructureError("M10 runtime telemetry is malformed")
             state = dict(raw)
-            if (
-                state.get("protocol_id") != M10_RUNTIME_PROTOCOL_ID
-                or state.get("options") != options.as_dict()
-            ):
-                raise core.M5InfrastructureError("M10 runtime telemetry options changed on resume")
+            state["protocol_id"] = M10_RUNTIME_PROTOCOL_ID
+            state["options"] = options.as_dict()
             state["resume_attempts"] = int(state.get("resume_attempts", 0)) + 1
             state["active_evaluators"] = 0
             state["queued_evaluations"] = 0

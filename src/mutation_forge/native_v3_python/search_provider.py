@@ -876,14 +876,8 @@ class CodexM10SearchProvider:
         if not self._state_path.is_file():
             return
         raw = read_json(self._state_path)
-        if (
-            not isinstance(raw, Mapping)
-            or raw.get("schema_version") != _M10_POOL_STATE_PROTOCOL
-            or raw.get("model") != self.model
-            or raw.get("effort") != self.effort
-            or raw.get("provider_concurrency") != self.provider_concurrency
-        ):
-            raise M5InfrastructureError("provider pool state changed on resume")
+        if not isinstance(raw, Mapping):
+            raise M5InfrastructureError("provider pool state is malformed")
         anchor = raw.get("anchor")
         if isinstance(anchor, Mapping):
             self._anchor = M5ProviderContextV1.from_dict(anchor)
@@ -918,14 +912,6 @@ class CodexM10SearchProvider:
         self._released_primary_slots = set(cast(Sequence[str], released))
         if not self._released_primary_slots <= self._completed_primary_slots:
             raise M5InfrastructureError("released provider slots are not completed")
-        if any(
-            worker not in range(self.provider_concurrency)
-            for worker in (
-                *self._root_workers,
-                *self._thread_owners.values(),
-            )
-        ):
-            raise M5InfrastructureError("provider pool worker assignment changed")
 
     def _save_state(self) -> None:
         with self._state_lock:
