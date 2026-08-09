@@ -1,7 +1,7 @@
 schema_version = "mforge.experiment.native_python_scientific_search_config.v2"
 protocol = "native-v3-python-v1"
-exp_id = "native-v3-python-default-v1"
-workspace = "./workspace"
+exp_id = "exp_007"
+workspace = "./workspace-python"
 
 [python_preview]
 model = "gpt-5.6-luna"
