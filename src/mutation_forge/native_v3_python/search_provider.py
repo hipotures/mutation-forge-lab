@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,9 +43,11 @@ M5_PROVIDER_MAX_TURNS = 40
 M5_PROVIDER_MAX_CAMPAIGNS = 40
 M5_PROVIDER_TRANSCRIPT_BYTES = 16 * 1024 * 1024
 M5_PROVIDER_STDOUT_BYTES = 16 * 1024 * 1024
-M9_PROVIDER_MAX_EVENTS = 100_000
-M9_PROVIDER_TRANSCRIPT_BYTES = 64 * 1024 * 1024
-M9_PROVIDER_STDOUT_BYTES = 64 * 1024 * 1024
+M10_PROVIDER_MAX_EVENTS = 100_000
+M10_PROVIDER_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+M10_PROVIDER_STDOUT_BYTES = 64 * 1024 * 1024
+M10_PROVIDER_MAX_PROGRAM_TURNS = 120
+_M10_POOL_STATE_PROTOCOL = "mforge.native.python_provider_pool.v1"
 
 
 def _write_or_verify(path: Path, value: Mapping[str, Any]) -> None:
@@ -72,6 +75,44 @@ def specification_ack_schema() -> dict[str, Any]:
             "ack": {"type": "string", "const": _ANCHOR_ACK["ack"]},
         },
     }
+
+
+def _app_server_limits(
+    *,
+    program_turn_limit: int | None,
+    turn_timeout_seconds: float,
+) -> AppServerLimits:
+    max_turns = (
+        M5_PROVIDER_MAX_TURNS
+        if program_turn_limit is None
+        else program_turn_limit + 1
+    )
+    return AppServerLimits(
+        max_turns=max_turns,
+        max_campaigns=(
+            M5_PROVIDER_MAX_CAMPAIGNS
+            if program_turn_limit is None
+            else max_turns
+        ),
+        max_events=(
+            10_000
+            if program_turn_limit is None
+            else M10_PROVIDER_MAX_EVENTS
+        ),
+        response_bytes=64 * 1024,
+        transcript_bytes=(
+            M5_PROVIDER_TRANSCRIPT_BYTES
+            if program_turn_limit is None
+            else M10_PROVIDER_TRANSCRIPT_BYTES
+        ),
+        stdout_bytes=(
+            M5_PROVIDER_STDOUT_BYTES
+            if program_turn_limit is None
+            else M10_PROVIDER_STDOUT_BYTES
+        ),
+        turn_timeout=turn_timeout_seconds,
+        resource_cpu_seconds=600,
+    )
 
 
 class PythonPanelScientificEvaluator:
@@ -138,6 +179,7 @@ class CodexM5SearchProvider:
         base_instructions: str,
         auth_json: str | Path | None = None,
         adapter: CodexAppServerAdapter | None = None,
+        capsule: IsolatedCapsule | None = None,
         turn_timeout_seconds: float = 300.0,
         cleanup_capsule: bool = True,
         program_turn_limit: int | None = None,
@@ -149,11 +191,14 @@ class CodexM5SearchProvider:
         self.profile = ModelProfile("codex", model, effort)
         self._state_path = self.workspace / "provider-state.json.gz"
         self._cleanup_capsule = cleanup_capsule
-        self._capsule: IsolatedCapsule | None = None
+        self._capsule: IsolatedCapsule | None = capsule
         self._owns_adapter = adapter is None
+        self._resumed_thread_ids: set[str] = set()
         self._anchor_can_activate = False
-        if program_turn_limit is not None and not 1 <= program_turn_limit <= 64:
-            raise ValueError("program_turn_limit must be between 1 and 64")
+        if program_turn_limit is not None and not (
+            1 <= program_turn_limit <= M10_PROVIDER_MAX_PROGRAM_TURNS
+        ):
+            raise ValueError("program_turn_limit must be between 1 and 120")
         if adapter is not None:
             self.adapter = adapter
             if self._state_path.exists():
@@ -166,46 +211,25 @@ class CodexM5SearchProvider:
                 raw.get("capsule_root"), str
             ):
                 raise M5InfrastructureError("retained provider state is malformed")
-            self._capsule = IsolatedCapsule.reopen(str(raw["capsule_root"]))
+            retained_root = str(raw["capsule_root"])
+            if self._capsule is None:
+                self._capsule = IsolatedCapsule.reopen(retained_root)
+            elif self._capsule.root.resolve() != Path(retained_root).resolve():
+                raise M5InfrastructureError(
+                    "shared provider capsule changed on resume"
+                )
         else:
-            self._capsule = IsolatedCapsule.create(
+            self._capsule = self._capsule or IsolatedCapsule.create(
                 secure_capsule_parent(),
                 auth_json=auth_json,
                 sandbox_mode="read-only",
                 approval_policy="never",
             )
-        max_turns = (
-            M5_PROVIDER_MAX_TURNS
-            if program_turn_limit is None
-            else program_turn_limit + 1
-        )
         self.adapter = CodexAppServerAdapter(
             capsule=self._capsule,
-            limits=AppServerLimits(
-                max_turns=max_turns,
-                max_campaigns=(
-                    M5_PROVIDER_MAX_CAMPAIGNS
-                    if program_turn_limit is None
-                    else max_turns
-                ),
-                max_events=(
-                    10_000
-                    if program_turn_limit is None
-                    else M9_PROVIDER_MAX_EVENTS
-                ),
-                response_bytes=64 * 1024,
-                transcript_bytes=(
-                    M5_PROVIDER_TRANSCRIPT_BYTES
-                    if program_turn_limit is None
-                    else M9_PROVIDER_TRANSCRIPT_BYTES
-                ),
-                stdout_bytes=(
-                    M5_PROVIDER_STDOUT_BYTES
-                    if program_turn_limit is None
-                    else M9_PROVIDER_STDOUT_BYTES
-                ),
-                turn_timeout=turn_timeout_seconds,
-                resource_cpu_seconds=600,
+            limits=_app_server_limits(
+                program_turn_limit=program_turn_limit,
+                turn_timeout_seconds=turn_timeout_seconds,
             ),
             base_instructions=base_instructions,
             sandbox_mode="read-only",
@@ -216,6 +240,12 @@ class CodexM5SearchProvider:
         if self._state_path.exists():
             self._resume_state()
             self._anchor_can_activate = True
+
+    @property
+    def capsule(self) -> IsolatedCapsule:
+        if self._capsule is None:
+            raise M5InfrastructureError("provider capsule is unavailable")
+        return self._capsule
 
     def _state(self) -> dict[str, Any]:
         if not self._state_path.exists():
@@ -276,6 +306,7 @@ class CodexM5SearchProvider:
             thread_id=anchor.thread_id,
             thread_path=anchor.thread_path,
         )
+        self._resumed_thread_ids.add(anchor.thread_id)
         threads = state.get("threads", {})
         if not isinstance(threads, Mapping):
             raise M5InfrastructureError("provider threads are malformed")
@@ -291,6 +322,33 @@ class CodexM5SearchProvider:
                 thread_id=context.thread_id,
                 thread_path=context.thread_path,
             )
+            self._resumed_thread_ids.add(context.thread_id)
+
+    def ensure_context(self, context: M5ProviderContextV1) -> None:
+        """Register one exact durable thread on this provider process."""
+
+        if context.thread_id in self._resumed_thread_ids:
+            return
+        self.adapter.resume_forked_thread(
+            self.profile,
+            thread_id=context.thread_id,
+            thread_path=context.thread_path,
+        )
+        self._resumed_thread_ids.add(context.thread_id)
+        self._save_context(context=context)
+
+    def ensure_anchor_context(self, context: M5ProviderContextV1) -> None:
+        """Register the one specification thread on this provider process."""
+
+        if context.thread_id in self._resumed_thread_ids:
+            return
+        self.adapter.resume_thread(
+            self.profile,
+            thread_id=context.thread_id,
+            thread_path=context.thread_path,
+        )
+        self._resumed_thread_ids.add(context.thread_id)
+        self._save_context(anchor=context, context=context)
 
     @staticmethod
     def _usage(result: GenerationResult) -> dict[str, JsonValue]:
@@ -608,6 +666,64 @@ class CodexM5SearchProvider:
             history=fork.included_turn_ids,
         )
 
+    def prepare_root_worker(
+        self,
+        *,
+        anchor: M5ProviderContextV1,
+        worker: int,
+        artifact_dir: Path,
+    ) -> M5ProviderContextV1:
+        """Fork one persistent root worker from the exact specification turn."""
+
+        self.ensure_anchor_context(anchor)
+        self.adapter.activate_forked_thread(
+            anchor.thread_id,
+            completed_turn_ids=anchor.included_turn_ids,
+        )
+        fork = self._fork(
+            last_turn_id=anchor.turn_id,
+            expected_history=anchor.included_turn_ids,
+            artifact_dir=artifact_dir,
+            prefix=f"root-worker-{worker:02d}-fork",
+        )
+        context = M5ProviderContextV1(
+            thread_id=fork.child_thread_id,
+            turn_id=fork.last_turn_id,
+            thread_path=fork.thread_path,
+            included_turn_ids=fork.included_turn_ids,
+        )
+        self._resumed_thread_ids.add(context.thread_id)
+        return context
+
+    def generate_root_on_worker(
+        self,
+        *,
+        worker_context: M5ProviderContextV1,
+        generation: int,
+        slot: str,
+        prompt: str,
+        system_prompt: str,
+        output_schema: Mapping[str, Any],
+        idempotency_key: str,
+        artifact_dir: Path,
+    ) -> M5ProviderResultV1:
+        """Run one fresh-root request on a persistent root-worker thread."""
+
+        self.ensure_context(worker_context)
+        self.adapter.activate_forked_thread(
+            worker_context.thread_id,
+            completed_turn_ids=worker_context.included_turn_ids,
+        )
+        return self._turn(
+            artifact_dir=artifact_dir,
+            prefix=f"g{generation:04d}-{slot}-root",
+            prompt=prompt,
+            system_prompt=system_prompt,
+            output_schema=output_schema,
+            idempotency_key=idempotency_key,
+            history=worker_context.included_turn_ids,
+        )
+
     def generate_child(
         self,
         *,
@@ -620,6 +736,7 @@ class CodexM5SearchProvider:
         idempotency_key: str,
         artifact_dir: Path,
     ) -> M5ProviderResultV1:
+        self.ensure_context(parent)
         self.adapter.activate_forked_thread(
             parent.thread_id,
             completed_turn_ids=parent.included_turn_ids,
@@ -653,6 +770,7 @@ class CodexM5SearchProvider:
         idempotency_key: str,
         artifact_dir: Path,
     ) -> M5ProviderResultV1:
+        self.ensure_context(previous.context)
         self.adapter.activate_forked_thread(
             previous.context.thread_id,
             completed_turn_ids=previous.context.included_turn_ids,
@@ -678,8 +796,424 @@ class CodexM5SearchProvider:
             self._capsule.cleanup()
 
 
+class CodexM10SearchProvider:
+    """Four bounded app-server workers sharing one durable specification anchor."""
+
+    def __init__(
+        self,
+        *,
+        workspace: str | Path,
+        model: str,
+        effort: str,
+        base_instructions: str,
+        auth_json: str | Path,
+        turn_timeout_seconds: float,
+        provider_concurrency: int,
+        provider_total_turn_limit: int,
+    ) -> None:
+        if not 1 <= provider_concurrency <= 4:
+            raise ValueError("provider_concurrency must be between 1 and 4")
+        if not 1 <= provider_total_turn_limit <= M10_PROVIDER_MAX_PROGRAM_TURNS:
+            raise ValueError("provider_total_turn_limit must be between 1 and 120")
+        self.workspace = Path(workspace)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.model = model
+        self.effort = effort
+        self.provider_concurrency = provider_concurrency
+        self._base_instructions = base_instructions
+        self._turn_timeout_seconds = turn_timeout_seconds
+        self._provider_total_turn_limit = provider_total_turn_limit
+        self._state_path = self.workspace / "provider-pool-state.json.gz"
+        self._state_lock = threading.RLock()
+        self._turn_condition = threading.Condition(self._state_lock)
+        self._coordinator = CodexM5SearchProvider(
+            workspace=self.workspace / "coordinator",
+            model=model,
+            effort=effort,
+            base_instructions=base_instructions,
+            auth_json=auth_json,
+            turn_timeout_seconds=turn_timeout_seconds,
+            cleanup_capsule=True,
+            program_turn_limit=provider_total_turn_limit,
+        )
+        self._workers: list[CodexM5SearchProvider] = []
+        self._worker_locks = [
+            threading.Lock() for _ in range(provider_concurrency)
+        ]
+        self._anchor: M5ProviderContextV1 | None = None
+        self._root_workers: dict[int, M5ProviderContextV1] = {}
+        self._thread_owners: dict[str, int] = {}
+        self._primary_slot_owners: dict[str, int] = {}
+        self._completed_primary_slots: set[str] = set()
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if not self._state_path.is_file():
+            return
+        raw = read_json(self._state_path)
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("schema_version") != _M10_POOL_STATE_PROTOCOL
+            or raw.get("model") != self.model
+            or raw.get("effort") != self.effort
+            or raw.get("provider_concurrency") != self.provider_concurrency
+        ):
+            raise M5InfrastructureError("provider pool state changed on resume")
+        anchor = raw.get("anchor")
+        if isinstance(anchor, Mapping):
+            self._anchor = M5ProviderContextV1.from_dict(anchor)
+        root_workers = raw.get("root_workers", {})
+        owners = raw.get("thread_owners", {})
+        completed = raw.get("completed_primary_slots", [])
+        if (
+            not isinstance(root_workers, Mapping)
+            or not isinstance(owners, Mapping)
+            or not isinstance(completed, Sequence)
+            or isinstance(completed, str | bytes)
+            or not all(isinstance(item, str) and item for item in completed)
+        ):
+            raise M5InfrastructureError("provider pool topology is malformed")
+        self._root_workers = {
+            int(worker): M5ProviderContextV1.from_dict(cast(Mapping[str, Any], value))
+            for worker, value in root_workers.items()
+            if isinstance(value, Mapping)
+        }
+        self._thread_owners = {
+            str(thread_id): int(worker)
+            for thread_id, worker in owners.items()
+            if isinstance(thread_id, str)
+            and isinstance(worker, int)
+            and not isinstance(worker, bool)
+        }
+        self._completed_primary_slots = set(cast(Sequence[str], completed))
+        if any(
+            worker not in range(self.provider_concurrency)
+            for worker in (
+                *self._root_workers,
+                *self._thread_owners.values(),
+            )
+        ):
+            raise M5InfrastructureError("provider pool worker assignment changed")
+
+    def _save_state(self) -> None:
+        with self._state_lock:
+            write_json(
+                self._state_path,
+                {
+                    "schema_version": _M10_POOL_STATE_PROTOCOL,
+                    "model": self.model,
+                    "effort": self.effort,
+                    "provider_concurrency": self.provider_concurrency,
+                    "anchor": (
+                        self._anchor.as_dict()
+                        if self._anchor is not None
+                        else None
+                    ),
+                    "root_workers": {
+                        str(worker): context.as_dict()
+                        for worker, context in sorted(
+                            self._root_workers.items()
+                        )
+                    },
+                    "thread_owners": dict(sorted(self._thread_owners.items())),
+                    "completed_primary_slots": sorted(
+                        self._completed_primary_slots
+                    ),
+                },
+            )
+
+    def _ensure_workers(self) -> None:
+        if self._workers:
+            return
+        capsule = self._coordinator.capsule
+        for worker in range(self.provider_concurrency):
+            adapter = CodexAppServerAdapter(
+                capsule=capsule,
+                limits=_app_server_limits(
+                    program_turn_limit=self._provider_total_turn_limit,
+                    turn_timeout_seconds=self._turn_timeout_seconds,
+                ),
+                base_instructions=self._base_instructions,
+                sandbox_mode="read-only",
+                approval_policy="never",
+                compress_json_artifacts=True,
+                copy_rollout_artifact=True,
+            )
+            self._workers.append(
+                CodexM5SearchProvider(
+                    workspace=self.workspace / "workers" / f"worker-{worker:02d}",
+                    model=self.model,
+                    effort=self.effort,
+                    base_instructions=self._base_instructions,
+                    adapter=adapter,
+                    capsule=capsule,
+                    cleanup_capsule=False,
+                )
+            )
+
+    def ensure_specification_anchor(
+        self,
+        **kwargs: Any,
+    ) -> M5ProviderResultV1:
+        result = self._coordinator.ensure_specification_anchor(**kwargs)
+        if self._anchor is not None and self._anchor != result.context:
+            raise M5InfrastructureError("provider pool anchor changed")
+        self._anchor = result.context
+        self._save_state()
+        return result
+
+    def prepare_generation(
+        self,
+        *,
+        snapshot: Mapping[str, Any],
+        anchor: M5ProviderContextV1,
+        artifact_dir: Path,
+    ) -> None:
+        """Start workers sequentially and freeze their exact root forks."""
+
+        _write_or_verify(artifact_dir / "provider-snapshot.json.gz", snapshot)
+        if self._anchor != anchor:
+            raise M5InfrastructureError("generation uses a foreign anchor")
+        self._ensure_workers()
+        for worker, provider in enumerate(self._workers):
+            context = self._root_workers.get(worker)
+            if context is None:
+                context = provider.prepare_root_worker(
+                    anchor=anchor,
+                    worker=worker,
+                    artifact_dir=(
+                        self.workspace
+                        / "root-workers"
+                        / f"worker-{worker:02d}"
+                        / "fork"
+                    ),
+                )
+                self._root_workers[worker] = context
+                self._thread_owners[context.thread_id] = worker
+            else:
+                provider.ensure_context(context)
+        slots = snapshot.get("slots")
+        generation = snapshot.get("generation")
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or not isinstance(slots, Sequence)
+            or isinstance(slots, str | bytes)
+        ):
+            raise M5InfrastructureError("generation provider snapshot is malformed")
+        slot_owners: dict[str, int] = {}
+        for raw_slot in slots:
+            if not isinstance(raw_slot, Mapping):
+                raise M5InfrastructureError(
+                    "generation provider slot is malformed"
+                )
+            slot = raw_slot.get("slot")
+            kind = raw_slot.get("kind")
+            parent_thread_id = raw_slot.get("parent_thread_id")
+            if not isinstance(slot, str) or kind not in {"root", "child"}:
+                raise M5InfrastructureError(
+                    "generation provider slot identity changed"
+                )
+            candidate_id = f"g{generation:04d}-{slot}"
+            if kind == "root":
+                owner = self._slot_index(slot) % self.provider_concurrency
+            else:
+                if (
+                    not isinstance(parent_thread_id, str)
+                    or parent_thread_id not in self._thread_owners
+                ):
+                    raise M5InfrastructureError(
+                        "child provider owner is unavailable"
+                    )
+                owner = self._thread_owners[parent_thread_id]
+            slot_owners[candidate_id] = owner
+        self._primary_slot_owners.update(slot_owners)
+        self._save_state()
+
+    @staticmethod
+    def _slot_index(slot: str) -> int:
+        try:
+            value = int(slot.removeprefix("slot-"))
+        except ValueError as error:
+            raise M5InfrastructureError("invalid provider slot identity") from error
+        if not 0 <= value < 8:
+            raise M5InfrastructureError("invalid provider slot identity")
+        return value
+
+    def _owner_for_context(
+        self,
+        context: M5ProviderContextV1,
+        *,
+        slot: str,
+    ) -> int:
+        return self._thread_owners.get(
+            context.thread_id,
+            self._slot_index(slot) % self.provider_concurrency,
+        )
+
+    def _record_owner(
+        self,
+        *,
+        worker: int,
+        context: M5ProviderContextV1,
+        root_worker: bool = False,
+    ) -> None:
+        with self._state_lock:
+            self._thread_owners[context.thread_id] = worker
+            if root_worker:
+                self._root_workers[worker] = context
+            self._save_state()
+
+    def _run_primary_turn(
+        self,
+        *,
+        generation: int,
+        slot: str,
+        worker: int,
+        operation: Callable[[], M5ProviderResultV1],
+    ) -> M5ProviderResultV1:
+        candidate_id = f"g{generation:04d}-{slot}"
+        with self._turn_condition:
+            if self._primary_slot_owners.get(candidate_id) != worker:
+                raise M5InfrastructureError(
+                    "provider worker assignment changed"
+                )
+            preceding = sorted(
+                item
+                for item, owner in self._primary_slot_owners.items()
+                if owner == worker
+                and item.startswith(f"g{generation:04d}-")
+                and item < candidate_id
+            )
+            self._turn_condition.wait_for(
+                lambda: all(
+                    item in self._completed_primary_slots
+                    for item in preceding
+                )
+            )
+        try:
+            return operation()
+        finally:
+            with self._turn_condition:
+                self._completed_primary_slots.add(candidate_id)
+                self._save_state()
+                self._turn_condition.notify_all()
+
+    def primary_lane(self, *, generation: int, slot: str) -> int:
+        candidate_id = f"g{generation:04d}-{slot}"
+        try:
+            return self._primary_slot_owners[candidate_id]
+        except KeyError as error:
+            raise M5InfrastructureError(
+                "provider generation was not prepared"
+            ) from error
+
+    def generate_root(
+        self,
+        *,
+        anchor: M5ProviderContextV1,
+        generation: int,
+        slot: str,
+        **kwargs: Any,
+    ) -> M5ProviderResultV1:
+        self._ensure_workers()
+        if self._anchor != anchor:
+            raise M5InfrastructureError("fresh root uses a foreign anchor")
+        worker = self._slot_index(slot) % self.provider_concurrency
+
+        def operation() -> M5ProviderResultV1:
+            with self._worker_locks[worker]:
+                context = self._root_workers[worker]
+                result = self._workers[worker].generate_root_on_worker(
+                    worker_context=context,
+                    generation=generation,
+                    slot=slot,
+                    **kwargs,
+                )
+                self._record_owner(
+                    worker=worker,
+                    context=result.context,
+                    root_worker=True,
+                )
+                return result
+
+        return self._run_primary_turn(
+            generation=generation,
+            slot=slot,
+            worker=worker,
+            operation=operation,
+        )
+
+    def generate_child(
+        self,
+        *,
+        parent: M5ProviderContextV1,
+        generation: int,
+        slot: str,
+        **kwargs: Any,
+    ) -> M5ProviderResultV1:
+        self._ensure_workers()
+        worker = self._owner_for_context(parent, slot=slot)
+
+        def operation() -> M5ProviderResultV1:
+            with self._worker_locks[worker]:
+                result = self._workers[worker].generate_child(
+                    parent=parent,
+                    generation=generation,
+                    slot=slot,
+                    **kwargs,
+                )
+                self._record_owner(worker=worker, context=result.context)
+                return result
+
+        return self._run_primary_turn(
+            generation=generation,
+            slot=slot,
+            worker=worker,
+            operation=operation,
+        )
+
+    def repair(
+        self,
+        *,
+        previous: M5ProviderResultV1,
+        generation: int,
+        slot: str,
+        **kwargs: Any,
+    ) -> M5ProviderResultV1:
+        self._ensure_workers()
+        worker = self._owner_for_context(previous.context, slot=slot)
+        with self._worker_locks[worker]:
+            result = self._workers[worker].repair(
+                previous=previous,
+                generation=generation,
+                slot=slot,
+                **kwargs,
+            )
+            self._record_owner(worker=worker, context=result.context)
+            return result
+
+    def close(self) -> None:
+        primary_error: Exception | None = None
+        for worker in self._workers:
+            try:
+                worker.close(cleanup_capsule=False)
+            except Exception as error:
+                primary_error = primary_error or error
+        try:
+            self._coordinator.close()
+        except Exception as error:
+            primary_error = primary_error or error
+        if primary_error is not None:
+            raise primary_error
+
+
 __all__ = [
     "CodexM5SearchProvider",
+    "CodexM10SearchProvider",
+    "M10_PROVIDER_MAX_EVENTS",
+    "M10_PROVIDER_STDOUT_BYTES",
+    "M10_PROVIDER_TRANSCRIPT_BYTES",
     "PythonPanelScientificEvaluator",
     "specification_ack_schema",
 ]

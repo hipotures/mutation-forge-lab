@@ -31,13 +31,12 @@ from .contracts import (
 from .provenance import M5_PROVENANCE_FILENAME, ensure_m5_acceptance_provenance
 from .runtime_contracts import PolicyRuntimeLimitsV1
 from .scientific_search import (
-    M9_REPORT_FILENAME,
-    M9_REPORT_PROTOCOL_ID,
-    M9_RUNTIME_FILENAME,
-    M9_SEARCH_PROTOCOL_ID,
-    M9_STOP_FILENAME,
-    ScientificSearchOptionsV1,
-    finalize_budget_limited_search,
+    M10_REPORT_FILENAME,
+    M10_REPORT_PROTOCOL_ID,
+    M10_RUNTIME_FILENAME,
+    M10_SEARCH_PROTOCOL_ID,
+    M10_STOP_FILENAME,
+    ScientificSearchOptionsV2,
     run_sustained_search,
 )
 from .search import (
@@ -47,10 +46,12 @@ from .search import (
     M5OperatorStop,
     M5ScientificEvaluator,
     M5SearchProvider,
+    M10SearchProvider,
     run_m5_search,
 )
 from .search_provider import (
     CodexM5SearchProvider,
+    CodexM10SearchProvider,
     PythonPanelScientificEvaluator,
     specification_ack_schema,
 )
@@ -59,7 +60,7 @@ PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION = (
     "mforge.experiment.native_python_preview_config.v1"
 )
 PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION = (
-    "mforge.experiment.native_python_scientific_search_config.v1"
+    "mforge.experiment.native_python_scientific_search_config.v2"
 )
 PYTHON_PREVIEW_STATE_SCHEMA_VERSION = (
     "mforge.experiment.status.native_python_preview.v1"
@@ -111,7 +112,7 @@ _PUBLIC_STATE_FIELDS = frozenset(
 
 type ProviderFactory = Callable[
     ["PythonPreviewConfig", str],
-    M5SearchProvider,
+    M5SearchProvider | M10SearchProvider,
 ]
 type BackendFactory = Callable[["PythonPreviewConfig"], GraphBackend]
 type EvaluatorFactory = Callable[
@@ -133,7 +134,7 @@ class PythonPreviewConfig:
     effort: str
     timeout_seconds: float
     heg_repo: Path
-    scientific_search: ScientificSearchOptionsV1 | None
+    scientific_search: ScientificSearchOptionsV2 | None
     source_path: Path
     source_bytes: bytes = field(repr=False, compare=False)
 
@@ -191,6 +192,12 @@ def _positive_number(value: object, name: str) -> float:
 def _positive_integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _nonnegative_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
     return value
 
 
@@ -274,7 +281,7 @@ def load_python_preview_config(
         source_path.parent,
     )
     scientific_value = preview.get("scientific_search")
-    scientific_search: ScientificSearchOptionsV1 | None = None
+    scientific_search: ScientificSearchOptionsV2 | None = None
     if scientific_value is not None:
         if schema_version != PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION:
             raise ValueError(
@@ -291,7 +298,11 @@ def load_python_preview_config(
             "evaluator_workers",
             "provider_concurrency",
             "wall_seconds",
-            "provider_program_turn_limit",
+            "primary_program_slots",
+            "repair_turn_limit",
+            "provider_total_turn_limit",
+            "validated_queue_target",
+            "validated_queue_capacity",
             "stop_on_verified",
             "resume_enabled",
             "replace_terminal_slots",
@@ -310,7 +321,7 @@ def load_python_preview_config(
                 "missing [python_preview.scientific_search] fields: "
                 f"{missing}"
             )
-        scientific_search = ScientificSearchOptionsV1(
+        scientific_search = ScientificSearchOptionsV2(
             generation_limit=_positive_integer(
                 scientific["generation_limit"],
                 "python_preview.scientific_search.generation_limit",
@@ -327,9 +338,25 @@ def load_python_preview_config(
                 scientific["wall_seconds"],
                 "python_preview.scientific_search.wall_seconds",
             ),
-            provider_program_turn_limit=_positive_integer(
-                scientific["provider_program_turn_limit"],
-                "python_preview.scientific_search.provider_program_turn_limit",
+            primary_program_slots=_positive_integer(
+                scientific["primary_program_slots"],
+                "python_preview.scientific_search.primary_program_slots",
+            ),
+            repair_turn_limit=_nonnegative_integer(
+                scientific["repair_turn_limit"],
+                "python_preview.scientific_search.repair_turn_limit",
+            ),
+            provider_total_turn_limit=_positive_integer(
+                scientific["provider_total_turn_limit"],
+                "python_preview.scientific_search.provider_total_turn_limit",
+            ),
+            validated_queue_target=_positive_integer(
+                scientific["validated_queue_target"],
+                "python_preview.scientific_search.validated_queue_target",
+            ),
+            validated_queue_capacity=_positive_integer(
+                scientific["validated_queue_capacity"],
+                "python_preview.scientific_search.validated_queue_capacity",
             ),
             stop_on_verified=_boolean(
                 scientific["stop_on_verified"],
@@ -782,13 +809,13 @@ def _progress(
         for slot in cast(Sequence[Mapping[str, Any]], manifest.get("slots", ()))
         if isinstance(slot, Mapping)
     )
-    report = _load_mapping(root / M9_REPORT_FILENAME) or _load_mapping(
+    report = _load_mapping(root / M10_REPORT_FILENAME) or _load_mapping(
         root / "m5-report.json.gz"
     )
-    stop = _load_mapping(root / M9_STOP_FILENAME) or _load_mapping(
+    stop = _load_mapping(root / M10_STOP_FILENAME) or _load_mapping(
         root / "m5-stop.json.gz"
     )
-    runtime = _load_mapping(root / M9_RUNTIME_FILENAME) or {}
+    runtime = _load_mapping(root / M10_RUNTIME_FILENAME) or {}
     state = str(retained_state.get("state", "ready"))
     resumable = bool(retained_state.get("resumable", True))
     run_terminal = retained_state.get("run_terminal") is True
@@ -803,7 +830,7 @@ def _progress(
     exact = retained_state.get("scientific_success") is True
     report_protocol = report.get("protocol_id") if report is not None else None
     if report is not None and (
-        report_protocol == M9_REPORT_PROTOCOL_ID
+        report_protocol == M10_REPORT_PROTOCOL_ID
         or (
             report_protocol == M5_REPORT_PROTOCOL_ID
             and retained_state.get("state") == "completed"
@@ -819,7 +846,7 @@ def _progress(
             if exact
             else "DEVELOPMENT_SEARCH_EVIDENCE"
         )
-    elif stop is not None:
+    elif stop is not None and state != "running":
         state = "blocked"
         resumable = stop.get("resumable") is True
         result_kind = "NO_SCIENTIFIC_RESULT"
@@ -885,6 +912,15 @@ def _progress(
         float(runtime.get("provider_wait_seconds", 0.0))
         if isinstance(runtime.get("provider_wait_seconds"), int | float)
         and not isinstance(runtime.get("provider_wait_seconds"), bool)
+        else 0.0,
+    )
+    provider_active_wall = max(
+        0.0,
+        float(runtime.get("provider_active_wall_seconds", 0.0))
+        if isinstance(
+            runtime.get("provider_active_wall_seconds"), int | float
+        )
+        and not isinstance(runtime.get("provider_active_wall_seconds"), bool)
         else 0.0,
     )
     evaluator_busy = max(
@@ -997,6 +1033,81 @@ def _progress(
             provider_projection["turns"] = reserved_turns + int(
                 (root / "anchor.json.gz").is_file()
             )
+    candidates_by_id = {
+        str(item["candidate_id"]): item
+        for item in candidates
+        if isinstance(item.get("candidate_id"), str)
+    }
+    slot_projection: list[dict[str, JsonValue]] = []
+    for manifest in manifests:
+        generation = _nonnegative_int(manifest.get("generation"))
+        raw_slots = manifest.get("slots", ())
+        if not isinstance(raw_slots, Sequence) or isinstance(
+            raw_slots, str | bytes
+        ):
+            continue
+        for raw_slot in raw_slots:
+            if not isinstance(raw_slot, Mapping):
+                continue
+            slot = raw_slot.get("slot")
+            if not isinstance(slot, str):
+                continue
+            candidate_id = f"g{generation:04d}-{slot}"
+            candidate = candidates_by_id.get(candidate_id)
+            candidate_status = (
+                str(candidate.get("status"))
+                if candidate is not None
+                else "queued"
+            )
+            slot_projection.append(
+                {
+                    "candidate_id": candidate_id,
+                    "generation": generation,
+                    "slot": slot,
+                    "kind": str(raw_slot.get("kind", "root")),
+                    "parent_candidate_id": (
+                        str(raw_slot["parent_candidate_id"])
+                        if raw_slot.get("parent_candidate_id") is not None
+                        else None
+                    ),
+                    "state": candidate_status,
+                    "phase": (
+                        "archived"
+                        if candidate_status
+                        in _TERMINAL_CANDIDATE_STATUSES
+                        else "evaluation"
+                        if (
+                            root
+                            / "generations"
+                            / f"generation-{generation:04d}"
+                            / slot
+                            / "prepared-candidate.json.gz"
+                        ).is_file()
+                        else "provider"
+                    ),
+                    "repairs": (
+                        _nonnegative_int(candidate.get("repairs"))
+                        if candidate is not None
+                        else 0
+                    ),
+                    "usage": cast(
+                        JsonValue,
+                        (
+                            dict(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    candidate.get("usage", {}),
+                                )
+                            )
+                            if candidate is not None
+                            and isinstance(
+                                candidate.get("usage"), Mapping
+                            )
+                            else {}
+                        ),
+                    ),
+                }
+            )
     return {
         **_public(retained_state),
         "state": state,
@@ -1006,7 +1117,7 @@ def _progress(
         "scientific_result_kind": result_kind,
         "scientific_success": exact,
         "search_protocol": (
-            M9_SEARCH_PROTOCOL_ID
+            M10_SEARCH_PROTOCOL_ID
             if config.scientific_search is not None
             else M5_SEARCH_PROTOCOL_ID
         ),
@@ -1031,7 +1142,14 @@ def _progress(
             "roots": allocations["root"],
             "children": allocations["child"],
             **(
-                {"program_failed": program_failed_candidates}
+                {
+                    "program_failed": program_failed_candidates,
+                    "repaired_valid": sum(
+                        _nonnegative_int(item.get("repairs")) > 0
+                        and item.get("status") in {"evaluated", "duplicate"}
+                        for item in candidates
+                    ),
+                }
                 if config.scientific_search is not None
                 else {}
             ),
@@ -1041,6 +1159,30 @@ def _progress(
             **provider_projection,
             "program_turns_reserved": _nonnegative_int(
                 runtime.get("provider_turns_submitted")
+            ),
+            "primary_turns": _nonnegative_int(
+                runtime.get("primary_turns_submitted")
+            ),
+            "repair_turns": _nonnegative_int(
+                runtime.get("repair_turns_submitted")
+            ),
+            "active": _nonnegative_int(
+                runtime.get("active_provider_turns")
+            ),
+            "peak_active": _nonnegative_int(
+                runtime.get("peak_active_provider_turns")
+            ),
+            "configured_concurrency": (
+                config.scientific_search.provider_concurrency
+                if config.scientific_search is not None
+                else 1
+            ),
+            "active_wall_seconds": max(
+                0.0, provider_active_wall
+            ),
+            "concurrency_timeline": cast(
+                JsonValue,
+                runtime.get("provider_concurrency_timeline", []),
             ),
             "wait_seconds": provider_wait,
         },
@@ -1067,6 +1209,9 @@ def _progress(
                 runtime.get("peak_active_evaluators")
             ),
             "queued": _nonnegative_int(runtime.get("queued_evaluations")),
+            "peak_queued": _nonnegative_int(
+                runtime.get("peak_queued_evaluations")
+            ),
             "completed": _nonnegative_int(
                 runtime.get("completed_evaluations")
             ),
@@ -1089,6 +1234,15 @@ def _progress(
             ),
             "accepted_rewrites_per_second": (
                 accepted_rewrites / elapsed if elapsed > 0 else 0.0
+            ),
+            "valid_unique_programs_per_provider_minute": (
+                statuses["evaluated"]
+                / (provider_active_wall / 60.0)
+                if provider_active_wall > 0
+                else 0.0
+            ),
+            "provider_wait_share": (
+                provider_active_wall / elapsed if elapsed > 0 else 0.0
             ),
             "elapsed_seconds": elapsed,
         },
@@ -1129,6 +1283,7 @@ def _progress(
             "seconds_since_scientific_improvement": time_since_improvement,
         },
         "programs": profiles,
+        "slots": slot_projection,
         "recovery": {
             "state": (
                 "terminal"
@@ -1291,7 +1446,22 @@ def _panel(backend: GraphBackend) -> tuple[DevelopmentCaseV1, ...]:
 def _default_provider(
     config: PythonPreviewConfig,
     system_prompt: str,
-) -> M5SearchProvider:
+) -> M5SearchProvider | M10SearchProvider:
+    if config.scientific_search is not None:
+        return CodexM10SearchProvider(
+            workspace=config.experiment_root / "provider-runtime",
+            model=config.model,
+            effort=config.effort,
+            base_instructions=system_prompt,
+            auth_json=Path.home() / ".codex" / "auth.json",
+            turn_timeout_seconds=config.timeout_seconds,
+            provider_concurrency=(
+                config.scientific_search.provider_concurrency
+            ),
+            provider_total_turn_limit=(
+                config.scientific_search.provider_total_turn_limit
+            ),
+        )
     return CodexM5SearchProvider(
         workspace=config.experiment_root / "provider-runtime",
         model=config.model,
@@ -1299,11 +1469,7 @@ def _default_provider(
         base_instructions=system_prompt,
         auth_json=Path.home() / ".codex" / "auth.json",
         turn_timeout_seconds=config.timeout_seconds,
-        program_turn_limit=(
-            config.scientific_search.provider_program_turn_limit
-            if config.scientific_search is not None
-            else None
-        ),
+        program_turn_limit=None,
     )
 
 
@@ -1367,35 +1533,6 @@ def run_python_preview(
     state = _load_state(config) if existed else _initialize_workspace(config)
     if state.get("state") == "completed":
         return _progress(config, state)
-    if config.scientific_search is not None:
-        finalized = finalize_budget_limited_search(
-            workspace=config.experiment_root,
-            options=config.scientific_search,
-        )
-        if finalized is not None:
-            completed = {
-                **state,
-                "state": "completed",
-                "resumable": False,
-                "run_terminal": True,
-                "terminal_reason": str(
-                    finalized.get(
-                        "stop_reason", "provider_turn_budget"
-                    )
-                ),
-                "scientific_result_kind": (
-                    "VERIFIED_COUNTEREXAMPLE"
-                    if finalized.get("exact_verified") is True
-                    else "DEVELOPMENT_SEARCH_EVIDENCE"
-                ),
-                "scientific_success": (
-                    finalized.get("exact_verified") is True
-                ),
-                "last_boundary": "report_persisted",
-                "last_error": None,
-            }
-            _write_state(config, completed)
-            return _progress(config, completed)
     if state.get("state") == "failed" and state.get("resumable") is not True:
         raise PythonPreviewWorkspaceError(
             "Python preview workspace is terminal and cannot be resumed"
@@ -1472,7 +1609,7 @@ def run_python_preview(
         running["last_boundary"] = boundary
         _write_state(config, running)
 
-    provider: M5SearchProvider | None = None
+    provider: M5SearchProvider | M10SearchProvider | None = None
     backend: GraphBackend | None = None
     final_state: dict[str, Any]
     primary_error: Exception | None = None
@@ -1512,7 +1649,7 @@ def run_python_preview(
                 )
 
             report = run_sustained_search(
-                provider=provider,
+                provider=cast(M10SearchProvider, provider),
                 evaluator_factory=make_evaluator,
                 workspace=config.experiment_root,
                 panel=panel,

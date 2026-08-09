@@ -1,12 +1,14 @@
-"""Bounded sustained ordinary-Python search with concurrent evaluation."""
+"""Bounded sustained ordinary-Python search with concurrent supply and evaluation."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import partial
@@ -15,52 +17,74 @@ from typing import Any, cast
 
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
+from mutation_forge.native_v3.canonical import canonical_json_bytes
 
 from . import search as core
 from .validation import normalize_source_newlines, validate_python_policy_response
 
-M9_SEARCH_PROTOCOL_ID = "mforge.native.python_scientific_search.v1"
-M9_PREPARED_CANDIDATE_PROTOCOL_ID = (
-    "mforge.native.python_scientific_search_prepared_candidate.v1"
+M10_SEARCH_PROTOCOL_ID = "mforge.native.python_scientific_search.v2"
+M10_PREPARED_CANDIDATE_PROTOCOL_ID = (
+    "mforge.native.python_scientific_search_prepared_candidate.v2"
 )
-M9_RUNTIME_PROTOCOL_ID = "mforge.native.python_scientific_search_runtime.v1"
-M9_REPORT_PROTOCOL_ID = "mforge.native.python_scientific_search_report.v1"
-M9_RUNTIME_FILENAME = "m9-runtime.json.gz"
-M9_REPORT_FILENAME = "m9-report.json.gz"
-M9_STOP_FILENAME = "m9-stop.json.gz"
-M9_PREPARED_FILENAME = "prepared-candidate.json.gz"
-M9_MAX_CONSECUTIVE_PROVIDER_FAILURES = 3
+M10_RUNTIME_PROTOCOL_ID = "mforge.native.python_scientific_search_runtime.v2"
+M10_REPORT_PROTOCOL_ID = "mforge.native.python_scientific_search_report.v2"
+M10_RUNTIME_FILENAME = "m10-runtime.json.gz"
+M10_REPORT_FILENAME = "m10-report.json.gz"
+M10_STOP_FILENAME = "m10-stop.json.gz"
+M10_PREPARED_FILENAME = "prepared-candidate.json.gz"
 
 
 class _ProviderTurnBudgetExhausted(core.M5SearchError):
-    """The durable M9 provider reservation budget is terminally exhausted."""
+    """The durable M10 provider reservation budget is terminally exhausted."""
 
 
 @dataclass(frozen=True, slots=True)
-class ScientificSearchOptionsV1:
+class ScientificSearchOptionsV2:
     """Immutable host-owned controls for one sustained campaign."""
 
     generation_limit: int
     evaluator_workers: int
     provider_concurrency: int
     wall_seconds: float
-    provider_program_turn_limit: int
+    primary_program_slots: int
+    repair_turn_limit: int
+    provider_total_turn_limit: int
+    validated_queue_target: int
+    validated_queue_capacity: int
     stop_on_verified: bool
     resume_enabled: bool
     replace_terminal_slots: bool
 
     def __post_init__(self) -> None:
-        if not 1 <= self.generation_limit <= 64:
-            raise ValueError("generation_limit must be between 1 and 64")
+        if not 1 <= self.generation_limit <= 12:
+            raise ValueError("generation_limit must be between 1 and 12")
         if not 1 <= self.evaluator_workers <= 12:
             raise ValueError("evaluator_workers must be between 1 and 12")
-        if self.provider_concurrency != 1:
-            raise ValueError("provider_concurrency must remain exactly one")
-        if not 1 <= self.wall_seconds <= 8 * 60 * 60:
-            raise ValueError("wall_seconds must be between 1 and 28,800")
-        if not 1 <= self.provider_program_turn_limit <= 64:
+        if not 1 <= self.provider_concurrency <= 4:
+            raise ValueError("provider_concurrency must be between 1 and 4")
+        if not 1 <= self.wall_seconds <= 10 * 60 * 60:
+            raise ValueError("wall_seconds must be between 1 and 36,000")
+        if self.primary_program_slots != self.generation_limit * 8:
             raise ValueError(
-                "provider_program_turn_limit must be between 1 and 64"
+                "primary_program_slots must provide exactly eight slots per "
+                "generation"
+            )
+        if not 0 <= self.repair_turn_limit <= 24:
+            raise ValueError("repair_turn_limit must be between 0 and 24")
+        if (
+            self.provider_total_turn_limit
+            != self.primary_program_slots + self.repair_turn_limit
+        ):
+            raise ValueError(
+                "provider_total_turn_limit must equal primary slots plus repairs"
+            )
+        if self.validated_queue_target != 2 * self.evaluator_workers:
+            raise ValueError(
+                "validated_queue_target must equal twice evaluator_workers"
+            )
+        if self.validated_queue_capacity != 4 * self.evaluator_workers:
+            raise ValueError(
+                "validated_queue_capacity must equal four times evaluator_workers"
             )
         if not self.stop_on_verified:
             raise ValueError("stop_on_verified must remain enabled")
@@ -75,11 +99,236 @@ class ScientificSearchOptionsV1:
             "evaluator_workers": self.evaluator_workers,
             "provider_concurrency": self.provider_concurrency,
             "wall_seconds": self.wall_seconds,
-            "provider_program_turn_limit": self.provider_program_turn_limit,
+            "primary_program_slots": self.primary_program_slots,
+            "repair_turn_limit": self.repair_turn_limit,
+            "provider_total_turn_limit": self.provider_total_turn_limit,
+            "validated_queue_target": self.validated_queue_target,
+            "validated_queue_capacity": self.validated_queue_capacity,
             "stop_on_verified": self.stop_on_verified,
             "resume_enabled": self.resume_enabled,
             "replace_terminal_slots": self.replace_terminal_slots,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationSnapshotV1:
+    """Immutable model-facing and host scheduling identity for one generation."""
+
+    generation: int
+    slots: tuple[Mapping[str, JsonValue], ...]
+    search_memory_projection: Mapping[str, JsonValue]
+    model: str
+    effort: str
+    prompt_versions: Mapping[str, JsonValue]
+    output_schema: Mapping[str, JsonValue]
+    panel: tuple[Mapping[str, JsonValue], ...]
+    budgets: Mapping[str, JsonValue]
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        payload: dict[str, JsonValue] = {
+            "schema_version": "mforge.native.python_generation_snapshot.v1",
+            "generation": self.generation,
+            "slots": cast(JsonValue, [dict(slot) for slot in self.slots]),
+            "search_memory_projection": cast(
+                JsonValue, dict(self.search_memory_projection)
+            ),
+            "model": self.model,
+            "effort": self.effort,
+            "prompt_versions": cast(JsonValue, dict(self.prompt_versions)),
+            "output_schema": cast(JsonValue, dict(self.output_schema)),
+            "panel": cast(JsonValue, [dict(case) for case in self.panel]),
+            "budgets": cast(JsonValue, dict(self.budgets)),
+        }
+        payload["sha256"] = hashlib.sha256(
+            canonical_json_bytes(payload)
+        ).hexdigest()
+        return payload
+
+
+def _generation_snapshot(
+    *,
+    generation: int,
+    manifest: core.GenerationManifestV1,
+    memory: Mapping[str, Any],
+    candidates_by_id: Mapping[str, Mapping[str, Any]],
+    anchor: core.M5ProviderContextV1,
+    model: str,
+    effort: str,
+    system_prompt: str,
+    policy_schema: Mapping[str, Any],
+    panel: tuple[core.DevelopmentCaseV1, ...],
+    options: ScientificSearchOptionsV2,
+    provider_turn_timeout_seconds: float,
+) -> dict[str, JsonValue]:
+    model_projection = memory.get("model_projection")
+    if not isinstance(model_projection, Mapping):
+        raise core.M5InfrastructureError(
+            "generation Search Memory has no model projection"
+        )
+    slots: list[Mapping[str, JsonValue]] = []
+    for slot_plan in manifest.slots:
+        parent_turn_id: str | None = anchor.turn_id
+        parent_thread_id: str | None = anchor.thread_id
+        parent_turn_ids: list[str] = list(anchor.included_turn_ids)
+        if slot_plan.parent_candidate_id is not None:
+            parent = candidates_by_id.get(slot_plan.parent_candidate_id)
+            if parent is None:
+                raise core.M5InfrastructureError(
+                    "generation snapshot parent is unavailable"
+                )
+            context = core._provider_context(parent)
+            parent_turn_id = context.turn_id
+            parent_thread_id = context.thread_id
+            parent_turn_ids = list(context.included_turn_ids)
+        slots.append(
+            {
+                "candidate_id": core._candidate_id(
+                    generation, slot_plan.slot
+                ),
+                "slot": slot_plan.slot,
+                "kind": slot_plan.kind,
+                "parent_candidate_id": slot_plan.parent_candidate_id,
+                "parent_thread_id": parent_thread_id,
+                "parent_turn_id": parent_turn_id,
+                "parent_included_turn_ids": cast(
+                    JsonValue, parent_turn_ids
+                ),
+                "request_key": slot_plan.request_key,
+            }
+        )
+    snapshot = GenerationSnapshotV1(
+        generation=generation,
+        slots=tuple(slots),
+        search_memory_projection=cast(
+            Mapping[str, JsonValue], model_projection
+        ),
+        model=model,
+        effort=effort,
+        prompt_versions={
+            "system_prompt_sha256": hashlib.sha256(
+                system_prompt.encode("utf-8")
+            ).hexdigest(),
+            "root": "mforge.native.python_root_prompt.v2",
+            "child": "mforge.native.python_child_prompt.v2",
+            "repair": "mforge.native.python_repair_prompt.v2",
+        },
+        output_schema=cast(Mapping[str, JsonValue], policy_schema),
+        panel=tuple(case.as_dict() for case in panel),
+        budgets={
+            "generation_limit": options.generation_limit,
+            "evaluator_workers": options.evaluator_workers,
+            "provider_concurrency": options.provider_concurrency,
+            "wall_seconds_milliseconds": round(
+                options.wall_seconds * 1000
+            ),
+            "primary_program_slots": options.primary_program_slots,
+            "repair_turn_limit": options.repair_turn_limit,
+            "provider_total_turn_limit": options.provider_total_turn_limit,
+            "validated_queue_target": options.validated_queue_target,
+            "validated_queue_capacity": options.validated_queue_capacity,
+            "stop_on_verified": options.stop_on_verified,
+            "resume_enabled": options.resume_enabled,
+            "replace_terminal_slots": options.replace_terminal_slots,
+            "provider_turn_timeout_milliseconds": round(
+                provider_turn_timeout_seconds * 1000
+            ),
+        },
+    ).as_dict()
+    core._assert_model_prompt_hygiene(
+        json.dumps(
+            snapshot["search_memory_projection"],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return snapshot
+
+
+def _snapshot_patterns(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    projection = snapshot.get("search_memory_projection")
+    if not isinstance(projection, Mapping):
+        raise core.M5SearchError("generation snapshot memory is malformed")
+    return {
+        "successful_patterns": projection.get("successful_patterns", []),
+        "tested_patterns": projection.get("tested_patterns", []),
+    }
+
+
+def _root_prompt(snapshot: Mapping[str, Any]) -> str:
+    return (
+        "Generate one complete fresh ordinary-Python policy for generation "
+        f"{snapshot['generation']} with active_parent=null. Return only the "
+        "retained two-field response "
+        "envelope. Do not describe or predict fitness.\n\n"
+        "Bounded host-derived patterns:\n"
+        + json.dumps(
+            _snapshot_patterns(snapshot),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _child_prompt(
+    *,
+    snapshot: Mapping[str, Any],
+    parent_source: str,
+    parent_profile: Mapping[str, Any],
+) -> str:
+    return (
+        "Return one complete replacement ordinary-Python policy, not a patch. "
+        "Mutate the exact parent using the compact host-derived feedback and "
+        "bounded patterns below.\n\nExact parent source:\n```python\n"
+        + parent_source
+        + "\n```\n\nCompact evaluation feedback:\n"
+        + json.dumps(
+            core._feedback(parent_profile),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n\nBounded host-derived patterns:\n"
+        + json.dumps(
+            _snapshot_patterns(snapshot),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _repair_prompt(
+    *,
+    snapshot: Mapping[str, Any],
+    diagnostics: Sequence[Mapping[str, Any]],
+) -> str:
+    bounded = [
+        {
+            "code": str(item.get("code", "INVALID"))[:128],
+            "path": str(item.get("path", "/"))[:512],
+            "message": str(item.get("message", "invalid response"))[:512],
+            "line": item.get("line") if isinstance(item.get("line"), int) else None,
+            "column": (
+                item.get("column")
+                if isinstance(item.get("column"), int)
+                else None
+            ),
+        }
+        for item in diagnostics[:16]
+    ]
+    return (
+        "Return one complete replacement ordinary-Python source in the retained "
+        "two-field envelope, not a patch. Repair only these concise host "
+        f"validator diagnostics for generation {snapshot['generation']}:\n"
+        + json.dumps(
+            bounded,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 class _RuntimeTelemetry:
@@ -88,42 +337,52 @@ class _RuntimeTelemetry:
     def __init__(
         self,
         root: Path,
-        options: ScientificSearchOptionsV1,
+        options: ScientificSearchOptionsV2,
     ) -> None:
-        self._path = root / M9_RUNTIME_FILENAME
+        self._path = root / M10_RUNTIME_FILENAME
         self._lock = threading.Lock()
         self._resume_started = time.monotonic()
         if self._path.is_file():
             raw = read_json(self._path)
             if not isinstance(raw, Mapping):
-                raise core.M5InfrastructureError("M9 runtime telemetry is malformed")
+                raise core.M5InfrastructureError("M10 runtime telemetry is malformed")
             state = dict(raw)
             if (
-                state.get("protocol_id") != M9_RUNTIME_PROTOCOL_ID
+                state.get("protocol_id") != M10_RUNTIME_PROTOCOL_ID
                 or state.get("options") != options.as_dict()
             ):
                 raise core.M5InfrastructureError(
-                    "M9 runtime telemetry options changed on resume"
+                    "M10 runtime telemetry options changed on resume"
                 )
             state["resume_attempts"] = int(state.get("resume_attempts", 0)) + 1
             state["active_evaluators"] = 0
             state["queued_evaluations"] = 0
+            state["active_provider_turns"] = 0
         else:
             state = {
-                "protocol_id": M9_RUNTIME_PROTOCOL_ID,
+                "protocol_id": M10_RUNTIME_PROTOCOL_ID,
                 "options": options.as_dict(),
                 "campaign_started_epoch_seconds": time.time(),
                 "active_elapsed_seconds": 0.0,
                 "resume_attempts": 0,
+                "primary_slot_keys": [],
+                "repair_turn_keys": [],
+                "provider_started_keys": [],
                 "provider_turns_submitted": 0,
-                "provider_turn_keys": [],
+                "primary_turns_submitted": 0,
+                "repair_turns_submitted": 0,
                 "provider_wait_seconds": 0.0,
+                "provider_active_wall_seconds": 0.0,
+                "active_provider_turns": 0,
+                "peak_active_provider_turns": 0,
+                "provider_concurrency_timeline": [],
                 "persistence_seconds": 0.0,
                 "evaluator_busy_seconds": 0.0,
                 "evaluator_queue_wait_seconds": 0.0,
                 "active_evaluators": 0,
                 "peak_active_evaluators": 0,
                 "queued_evaluations": 0,
+                "peak_queued_evaluations": 0,
                 "completed_evaluations": 0,
                 "failed_evaluations": 0,
                 "evaluator_instances": 0,
@@ -135,6 +394,7 @@ class _RuntimeTelemetry:
                 "terminal_reason": None,
             }
         self._state = state
+        self._provider_active_started: float | None = None
         self._persist_locked()
 
     def _elapsed_locked(self) -> float:
@@ -169,41 +429,133 @@ class _RuntimeTelemetry:
         with self._lock:
             return max(0.0, limit - self._elapsed_locked())
 
-    def provider_turn_available(self, limit: int, *, key: str | None = None) -> bool:
-        with self._lock:
-            keys = self._provider_turn_keys_locked()
-            return (key is not None and key in keys) or len(keys) < limit
-
-    def _provider_turn_keys_locked(self) -> list[str]:
-        value = self._state.get("provider_turn_keys", [])
+    def _string_keys_locked(self, field: str) -> list[str]:
+        value = self._state.get(field, [])
         if not isinstance(value, list) or not all(
             isinstance(item, str) and item for item in value
         ):
             raise core.M5InfrastructureError(
-                "M9 provider turn reservations are malformed"
+                f"M10 {field} reservations are malformed"
             )
         return cast(list[str], value)
 
-    def provider_started(self, key: str, limit: int) -> bool:
+    def reserve_primary_generation(
+        self,
+        keys: Sequence[str],
+        *,
+        limit: int,
+    ) -> None:
+        if len(keys) != core.POPULATION_SIZE or len(set(keys)) != len(keys):
+            raise core.M5InfrastructureError(
+                "a generation must reserve eight unique primary slots"
+            )
         with self._lock:
-            keys = self._provider_turn_keys_locked()
-            if key in keys:
-                return False
-            if len(keys) >= limit:
+            retained = self._string_keys_locked("primary_slot_keys")
+            new = [key for key in keys if key not in retained]
+            if len(retained) + len(new) > limit:
                 raise _ProviderTurnBudgetExhausted(
-                    "provider program-turn budget exhausted"
+                    "fewer than eight primary program slots remain"
                 )
-            keys.append(key)
-            self._state["provider_turn_keys"] = keys
-            self._state["provider_turns_submitted"] = len(keys)
+            retained.extend(new)
+            self._state["primary_slot_keys"] = retained
+            self._persist_locked()
+
+    def reserve_repair(self, key: str, *, limit: int) -> bool:
+        with self._lock:
+            repairs = self._string_keys_locked("repair_turn_keys")
+            if key in repairs:
+                return True
+            if len(repairs) >= limit:
+                return False
+            repairs.append(key)
+            self._state["repair_turn_keys"] = repairs
             self._persist_locked()
             return True
 
-    def provider_finished(self, elapsed: float) -> None:
+    def provider_started(self, key: str, *, kind: str) -> bool:
+        with self._lock:
+            if kind not in {"primary", "repair"}:
+                raise ValueError("provider turn kind is invalid")
+            admitted = self._string_keys_locked(
+                "primary_slot_keys"
+                if kind == "primary"
+                else "repair_turn_keys"
+            )
+            if key not in admitted:
+                raise core.M5InfrastructureError(
+                    "provider turn was not admitted by its frozen budget"
+                )
+            started = self._string_keys_locked("provider_started_keys")
+            if key in started:
+                return False
+            started.append(key)
+            self._state["provider_started_keys"] = started
+            self._state["provider_turns_submitted"] = len(started)
+            count_field = (
+                "primary_turns_submitted"
+                if kind == "primary"
+                else "repair_turns_submitted"
+            )
+            self._state[count_field] = int(self._state[count_field]) + 1
+            active = int(self._state["active_provider_turns"]) + 1
+            if active == 1:
+                self._provider_active_started = time.monotonic()
+            self._state["active_provider_turns"] = active
+            self._state["peak_active_provider_turns"] = max(
+                active,
+                int(self._state["peak_active_provider_turns"]),
+            )
+            timeline = cast(
+                list[JsonValue],
+                self._state["provider_concurrency_timeline"],
+            )
+            timeline.append(
+                cast(
+                    JsonValue,
+                    {
+                        "key": key,
+                        "kind": kind,
+                        "started_epoch_seconds": time.time(),
+                    },
+                )
+            )
+            self._persist_locked()
+            return True
+
+    def provider_finished(
+        self,
+        elapsed: float,
+        *,
+        key: str,
+        failed: bool,
+    ) -> None:
         with self._lock:
             self._state["provider_wait_seconds"] = (
                 float(self._state["provider_wait_seconds"]) + elapsed
             )
+            active = max(0, int(self._state["active_provider_turns"]) - 1)
+            self._state["active_provider_turns"] = active
+            if active == 0 and self._provider_active_started is not None:
+                self._state["provider_active_wall_seconds"] = (
+                    float(self._state["provider_active_wall_seconds"])
+                    + time.monotonic()
+                    - self._provider_active_started
+                )
+                self._provider_active_started = None
+            timeline = cast(
+                list[JsonValue],
+                self._state["provider_concurrency_timeline"],
+            )
+            for item in reversed(timeline):
+                if (
+                    isinstance(item, dict)
+                    and item.get("key") == key
+                    and "finished_epoch_seconds" not in item
+                ):
+                    item["finished_epoch_seconds"] = time.time()
+                    item["duration_seconds"] = elapsed
+                    item["failed"] = failed
+                    break
             self._persist_locked()
 
     def timed_persist(self, operation: Callable[[], None]) -> None:
@@ -231,8 +583,11 @@ class _RuntimeTelemetry:
 
     def evaluator_queued(self) -> None:
         with self._lock:
-            self._state["queued_evaluations"] = (
-                int(self._state["queued_evaluations"]) + 1
+            queued = int(self._state["queued_evaluations"]) + 1
+            self._state["queued_evaluations"] = queued
+            self._state["peak_queued_evaluations"] = max(
+                queued,
+                int(self._state["peak_queued_evaluations"]),
             )
             self._persist_locked()
 
@@ -285,6 +640,7 @@ class _RuntimeTelemetry:
             self._resume_started = time.monotonic()
             self._state["active_evaluators"] = 0
             self._state["queued_evaluations"] = 0
+            self._state["active_provider_turns"] = 0
             self._state["terminal_reason"] = reason
             self._persist_locked()
 
@@ -309,6 +665,7 @@ class _ConcurrentEvaluatorPool:
         self,
         *,
         workers: int,
+        queue_capacity: int,
         evaluator_factory: Callable[[], core.M5ScientificEvaluator],
         telemetry: _RuntimeTelemetry,
     ) -> None:
@@ -317,9 +674,10 @@ class _ConcurrentEvaluatorPool:
         self._local = threading.local()
         self._owned: list[core.M5ScientificEvaluator] = []
         self._owned_lock = threading.Lock()
+        self._capacity = threading.BoundedSemaphore(queue_capacity)
         self._executor = ThreadPoolExecutor(
             max_workers=workers,
-            thread_name_prefix="mforge-m9-evaluator",
+            thread_name_prefix="mforge-m10-evaluator",
         )
 
     def _evaluator(self) -> core.M5ScientificEvaluator:
@@ -340,6 +698,7 @@ class _ConcurrentEvaluatorPool:
         candidate_id: str,
         slot_dir: Path,
     ) -> Future[_EvaluationOutcome]:
+        self._capacity.acquire()
         self._telemetry.evaluator_queued()
         queued_at = time.monotonic()
 
@@ -391,7 +750,13 @@ class _ConcurrentEvaluatorPool:
                     failed=failed,
                 )
 
-        return self._executor.submit(evaluate)
+        try:
+            future = self._executor.submit(evaluate)
+        except BaseException:
+            self._capacity.release()
+            raise
+        future.add_done_callback(lambda _: self._capacity.release())
+        return future
 
     def close(self) -> Exception | None:
         errors: list[Exception] = []
@@ -414,14 +779,14 @@ def _write_or_verify(path: Path, value: Mapping[str, Any]) -> None:
         retained = read_json(path)
         if retained != dict(value):
             raise core.M5InfrastructureError(
-                f"immutable M9 metadata changed: {path}"
+                f"immutable M10 metadata changed: {path}"
             )
         return
     write_json(path, value, exclusive=True)
 
 
 def _prepared_path(slot_dir: Path) -> Path:
-    return slot_dir / M9_PREPARED_FILENAME
+    return slot_dir / M10_PREPARED_FILENAME
 
 
 def _verify_prepared(
@@ -436,7 +801,7 @@ def _verify_prepared(
     expected_generation = int(path.parent.parent.name.removeprefix("generation-"))
     expected_id = core._candidate_id(expected_generation, slot_plan.slot)
     if (
-        value.get("protocol_id") != M9_PREPARED_CANDIDATE_PROTOCOL_ID
+        value.get("protocol_id") != M10_PREPARED_CANDIDATE_PROTOCOL_ID
         or value.get("status") != "evaluation_pending"
         or value.get("candidate_id") != expected_id
         or value.get("generation") != expected_generation
@@ -554,27 +919,106 @@ class _PendingCommit:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _ProviderTask:
+    pending: _PendingCommit
+    slot_plan: core.SlotPlanV1
+    parent: Mapping[str, Any] | None
+    prompt: str
+    expected_history: tuple[str, ...]
+    key: str
+    operation: Callable[[], core.M5ProviderResultV1]
+
+
 def _provider_call(
     *,
     telemetry: _RuntimeTelemetry,
-    options: ScientificSearchOptionsV1,
     key: str,
+    kind: str,
     durable_result_path: Path,
     operation: Callable[[], core.M5ProviderResultV1],
 ) -> core.M5ProviderResultV1:
     newly_reserved = telemetry.provider_started(
         key,
-        options.provider_program_turn_limit,
+        kind=kind,
     )
     if not newly_reserved and not durable_result_path.is_file():
-        raise core.M5SearchError(
+        raise core.M5InfrastructureError(
             "interrupted provider turn has no durable result and will not repeat"
         )
-    started = time.monotonic()
-    try:
+    if not newly_reserved:
         return operation()
+    started = time.monotonic()
+    failed = True
+    try:
+        result = operation()
+        failed = False
+        return result
     finally:
-        telemetry.provider_finished(time.monotonic() - started)
+        telemetry.provider_finished(
+            time.monotonic() - started,
+            key=key,
+            failed=failed,
+        )
+
+
+def _queue_valid_candidate(
+    *,
+    pending: _PendingCommit,
+    root: Path,
+    panel: tuple[core.DevelopmentCaseV1, ...],
+    telemetry: _RuntimeTelemetry,
+    pool: _ConcurrentEvaluatorPool,
+    base: Mapping[str, Any],
+    validation: Any,
+    boundary_hook: Callable[[str], None] | None,
+) -> bool:
+    """Persist one validated source and enqueue its evaluation immediately."""
+
+    if (
+        not validation.valid
+        or validation.response is None
+        or validation.identity is None
+        or validation.identity.program_hash is None
+    ):
+        return False
+    source = normalize_source_newlines(validation.response.source)
+    program_hash = validation.identity.program_hash
+    source_path = root / "sources" / f"{program_hash}.py"
+    telemetry.timed_persist(
+        partial(core._write_source_exclusive_or_verify, source_path, source)
+    )
+    if boundary_hook is not None:
+        boundary_hook(f"{pending.candidate_id}_source_persisted")
+    canonical_ast_sha256 = validation.identity.canonical_ast_sha256
+    if not isinstance(canonical_ast_sha256, str):
+        raise core.M5InfrastructureError(
+            "validated program omitted canonical AST identity"
+        )
+    prepared = _prepared_candidate(
+        base=base,
+        validation=validation.as_dict(),
+        source=source,
+        source_path=source_path,
+        root=root,
+        program_hash=program_hash,
+        source_sha256=validation.identity.source_sha256,
+        canonical_ast_sha256=canonical_ast_sha256,
+    )
+    telemetry.timed_persist(
+        partial(_write_or_verify, _prepared_path(pending.slot_dir), prepared)
+    )
+    telemetry.first_valid_program()
+    pending.prepared = prepared
+    pending.future = pool.submit(
+        source=source,
+        panel=panel,
+        candidate_id=pending.candidate_id,
+        slot_dir=pending.slot_dir,
+    )
+    if boundary_hook is not None:
+        boundary_hook(f"{pending.candidate_id}_evaluation_queued")
+    return True
 
 
 def _candidate_base(
@@ -686,7 +1130,7 @@ def _prepared_candidate(
 ) -> dict[str, Any]:
     return {
         **base,
-        "protocol_id": M9_PREPARED_CANDIDATE_PROTOCOL_ID,
+        "protocol_id": M10_PREPARED_CANDIDATE_PROTOCOL_ID,
         "status": "evaluation_pending",
         "validation": dict(validation),
         "source": source,
@@ -753,7 +1197,7 @@ def _commit_pending(
         pending.terminal_payload = None
         return False, None
     if pending.future is None or pending.prepared is None:
-        raise core.M5InfrastructureError("M9 pending candidate is incomplete")
+        raise core.M5InfrastructureError("M10 pending candidate is incomplete")
     if not block and not pending.future.done():
         return None
     outcome = pending.future.result()
@@ -809,7 +1253,7 @@ def _commit_pending(
         )
     if len(outcome.payloads) != len(panel):
         raise core.M5InfrastructureError(
-            "M9 evaluator returned an incomplete development panel"
+            "M10 evaluator returned an incomplete development panel"
         )
     behavior_profile = core.aggregate_behavior(outcome.payloads)
     behavior_signature = str(behavior_profile["behavior_signature"])
@@ -892,7 +1336,7 @@ def _report(
     provider_model: str,
     provider_effort: str,
     anchor_result: core.M5ProviderResultV1,
-    options: ScientificSearchOptionsV1,
+    options: ScientificSearchOptionsV2,
     runtime: Mapping[str, Any],
     stop_reason: str,
 ) -> dict[str, Any]:
@@ -922,8 +1366,8 @@ def _report(
         profile.get("exact_verified") is True for profile in profiles
     )
     report: dict[str, Any] = {
-        "protocol_id": M9_REPORT_PROTOCOL_ID,
-        "search_protocol_id": M9_SEARCH_PROTOCOL_ID,
+        "protocol_id": M10_REPORT_PROTOCOL_ID,
+        "search_protocol_id": M10_SEARCH_PROTOCOL_ID,
         "status": "completed",
         "stop_reason": stop_reason,
         "generation_count": len(generations),
@@ -935,6 +1379,11 @@ def _report(
             0, planned_candidate_count - len(candidates)
         ),
         "candidate_status_counts": dict(sorted(statuses.items())),
+        "repaired_valid_count": sum(
+            int(item.get("repairs", 0)) > 0
+            and item.get("status") in {"evaluated", "duplicate"}
+            for item in candidates
+        ),
         "generation_status_counts": {
             str(generation): dict(
                 sorted(
@@ -1052,7 +1501,15 @@ def _report(
             + sum(int(item.get("warnings", 0)) for item in candidates),
             "duration_ms": anchor_result.duration_ms
             + sum(int(item.get("duration_ms", 0)) for item in candidates),
-            "program_turn_limit": options.provider_program_turn_limit,
+            "primary_program_slots": options.primary_program_slots,
+            "repair_turn_limit": options.repair_turn_limit,
+            "total_turn_limit": options.provider_total_turn_limit,
+            "primary_turns_submitted": int(
+                runtime_payload.get("primary_turns_submitted", 0)
+            ),
+            "repair_turns_submitted": int(
+                runtime_payload.get("repair_turns_submitted", 0)
+            ),
         },
         "exact_verified": exact_verified,
         "exact_verification": {
@@ -1134,271 +1591,15 @@ def _report(
             "provider_program_turn_budget_respected": int(
                 runtime_payload.get("provider_turns_submitted", 0)
             )
-            <= options.provider_program_turn_limit,
+            <= options.provider_total_turn_limit,
         },
     }
     return report
 
 
-def _panel_from_protocol(
-    protocol: Mapping[str, Any],
-) -> tuple[core.DevelopmentCaseV1, ...]:
-    raw_panel = protocol.get("panel")
-    if not isinstance(raw_panel, Sequence) or isinstance(
-        raw_panel, str | bytes
-    ):
-        raise core.M5InfrastructureError("M9 protocol panel is malformed")
-    panel: list[core.DevelopmentCaseV1] = []
-    for raw_case in raw_panel:
-        if not isinstance(raw_case, Mapping):
-            raise core.M5InfrastructureError(
-                "M9 protocol panel case is malformed"
-            )
-        required_ints = (
-            "order",
-            "graph_seed",
-            "policy_seed",
-            "horizon",
-            "witness_cap",
-        )
-        if (
-            not isinstance(raw_case.get("case_id"), str)
-            or any(
-                not isinstance(raw_case.get(key), int)
-                or isinstance(raw_case.get(key), bool)
-                for key in required_ints
-            )
-        ):
-            raise core.M5InfrastructureError(
-                "M9 protocol panel case fields changed"
-            )
-        raw_lengths = raw_case.get("forbidden_lengths")
-        if (
-            not isinstance(raw_lengths, Sequence)
-            or isinstance(raw_lengths, str | bytes)
-            or not all(
-                isinstance(item, int) and not isinstance(item, bool)
-                for item in raw_lengths
-            )
-        ):
-            raise core.M5InfrastructureError(
-                "M9 protocol forbidden lengths changed"
-            )
-        panel.append(
-            core.DevelopmentCaseV1(
-                case_id=str(raw_case["case_id"]),
-                order=int(raw_case["order"]),
-                graph_seed=int(raw_case["graph_seed"]),
-                policy_seed=int(raw_case["policy_seed"]),
-                horizon=int(raw_case["horizon"]),
-                witness_cap=int(raw_case["witness_cap"]),
-                forbidden_lengths=tuple(cast(Sequence[int], raw_lengths)),
-            )
-        )
-    result = tuple(panel)
-    if (
-        not result
-        or protocol.get("panel_hash") != core.panel_hash(result)
-    ):
-        raise core.M5InfrastructureError("M9 protocol panel identity changed")
-    return result
-
-
-def finalize_budget_limited_search(
-    *,
-    workspace: str | Path,
-    options: ScientificSearchOptionsV1,
-) -> dict[str, Any] | None:
-    """Finalize retained M9 evidence after the provider budget is exhausted."""
-
-    root = Path(workspace)
-    report_path = root / M9_REPORT_FILENAME
-    if report_path.is_file():
-        report = core._load_mapping(report_path)
-        if report.get("protocol_id") != M9_REPORT_PROTOCOL_ID:
-            raise core.M5InfrastructureError("M9 report identity changed")
-        return report
-    runtime_path = root / M9_RUNTIME_FILENAME
-    if not runtime_path.is_file():
-        return None
-    runtime = core._load_mapping(runtime_path)
-    submitted = runtime.get("provider_turns_submitted")
-    if (
-        not isinstance(submitted, int)
-        or isinstance(submitted, bool)
-        or submitted < options.provider_program_turn_limit
-    ):
-        return None
-    if submitted != options.provider_program_turn_limit:
-        raise core.M5InfrastructureError(
-            "M9 provider turn accounting exceeded its budget"
-        )
-    keys = runtime.get("provider_turn_keys")
-    if (
-        not isinstance(keys, Sequence)
-        or isinstance(keys, str | bytes)
-        or len(keys) != submitted
-        or not all(isinstance(item, str) and item for item in keys)
-        or len(set(cast(Sequence[str], keys))) != submitted
-    ):
-        raise core.M5InfrastructureError(
-            "M9 provider reservation evidence changed"
-        )
-    protocol = core._load_mapping(root / "protocol.json.gz")
-    expected_protocol = {
-        "protocol_id": M9_SEARCH_PROTOCOL_ID,
-        "generation_limit": options.generation_limit,
-        "provider_concurrency": options.provider_concurrency,
-        "evaluator_workers": options.evaluator_workers,
-        "wall_seconds": options.wall_seconds,
-        "provider_program_turn_limit": options.provider_program_turn_limit,
-        "replace_terminal_slots": options.replace_terminal_slots,
-        "resume_enabled": options.resume_enabled,
-        "stop_on_verified": options.stop_on_verified,
-        "native_v2_default": True,
-        "dsl_runtime_used": False,
-    }
-    if any(
-        protocol.get(key) != value
-        for key, value in expected_protocol.items()
-    ):
-        raise core.M5InfrastructureError("M9 protocol options changed")
-    provider_model = protocol.get("model")
-    provider_effort = protocol.get("effort")
-    if not isinstance(provider_model, str) or not isinstance(
-        provider_effort, str
-    ):
-        raise core.M5InfrastructureError(
-            "M9 provider accounting identity changed"
-        )
-    provenance = core._load_mapping(
-        root / "acceptance-provenance.json.gz"
-    )
-    if not provenance:
-        raise core.M5InfrastructureError(
-            "M9 acceptance provenance is unavailable"
-        )
-    anchor = core.M5ProviderResultV1.from_dict(
-        core._load_mapping(root / "anchor.json.gz")
-    )
-    panel = _panel_from_protocol(protocol)
-    manifest_paths = sorted(
-        root.glob("generations/generation-*/manifest.json.gz")
-    )
-    generations = [
-        int(path.parent.name.removeprefix("generation-"))
-        for path in manifest_paths
-    ]
-    if not generations or generations != list(range(len(generations))):
-        raise core.M5InfrastructureError(
-            "M9 retained generations are not contiguous"
-        )
-    missing_memory_generations: list[int] = []
-    for generation, manifest_path in zip(
-        generations, manifest_paths, strict=True
-    ):
-        previous = (
-            core._generation_candidates(root, generation - 1)
-            if generation > 0
-            else []
-        )
-        manifest = core.build_generation_manifest(
-            generation=generation,
-            panel=panel,
-            previous_candidates=previous,
-        )
-        if core._load_mapping(manifest_path) != manifest.as_dict():
-            raise core.M5InfrastructureError(
-                "M9 retained generation manifest changed"
-            )
-        generation_dir = manifest_path.parent
-        memory_path = generation_dir / "search-memory.json.gz"
-        if memory_path.is_file():
-            memory_candidates = [
-                item
-                for item in core._all_candidates(root)
-                if int(item.get("generation", -1)) < generation
-            ]
-            memory = core.build_search_memory(memory_candidates)
-            if core._load_mapping(memory_path) != memory:
-                raise core.M5InfrastructureError(
-                    "M9 retained Search Memory changed"
-                )
-            memory_sha256 = str(memory["sha256"])
-        else:
-            missing_memory_generations.append(generation)
-            if generation != generations[-1]:
-                raise core.M5InfrastructureError(
-                    "M9 retained Search Memory is missing"
-                )
-            memory_sha256 = ""
-        for slot_plan in manifest.slots:
-            slot_dir = generation_dir / slot_plan.slot
-            candidate_path = slot_dir / "candidate.json.gz"
-            prepared_path = slot_dir / M9_PREPARED_FILENAME
-            if candidate_path.is_file():
-                if not memory_sha256:
-                    raise core.M5InfrastructureError(
-                        "M9 candidate has no retained Search Memory"
-                    )
-                core._verify_retained_candidate(
-                    root=root,
-                    path=candidate_path,
-                    panel=panel,
-                    slot_plan=slot_plan,
-                    search_memory_sha256=memory_sha256,
-                )
-            elif prepared_path.is_file():
-                raise core.M5InfrastructureError(
-                    "M9 budget finalization found a prepared candidate"
-                )
-    candidates = core._all_candidates(root)
-    attempts = sum(
-        len(cast(Sequence[object], item.get("provider_attempts", ())))
-        for item in candidates
-    )
-    provider_results = list(
-        root.glob(
-            "generations/generation-*/slot-*/provider-*/"
-            "m5-provider-result.json.gz"
-        )
-    )
-    if attempts != submitted or len(provider_results) != submitted:
-        raise core.M5InfrastructureError(
-            "M9 retained provider evidence is incomplete"
-        )
-    runtime_payload = {
-        **runtime,
-        "active_evaluators": 0,
-        "queued_evaluations": 0,
-        "terminal_reason": "provider_turn_budget",
-        "updated_epoch_seconds": time.time(),
-    }
-    write_json(runtime_path, runtime_payload)
-    report = _report(
-        root=root,
-        panel=panel,
-        provider_model=provider_model,
-        provider_effort=provider_effort,
-        anchor_result=anchor,
-        options=options,
-        runtime=runtime_payload,
-        stop_reason="provider_turn_budget",
-    )
-    report["recovery"] = {
-        "offline_finalized": True,
-        "provider_or_backend_started": False,
-        "missing_search_memory_generations": (
-            missing_memory_generations
-        ),
-    }
-    _write_or_verify(report_path, report)
-    return report
-
-
 def run_sustained_search(
     *,
-    provider: core.M5SearchProvider,
+    provider: core.M10SearchProvider,
     evaluator_factory: Callable[[], core.M5ScientificEvaluator],
     workspace: str | Path,
     panel: tuple[core.DevelopmentCaseV1, ...],
@@ -1406,12 +1607,12 @@ def run_sustained_search(
     specification_prompt: str,
     specification_ack_schema: Mapping[str, Any],
     policy_schema: Mapping[str, Any],
-    options: ScientificSearchOptionsV1,
+    options: ScientificSearchOptionsV2,
     provider_turn_timeout_seconds: float,
     operator_stop: Callable[[], bool] | None = None,
     boundary_hook: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Run or resume one bounded, provider-overlapped scientific campaign."""
+    """Run or resume one bounded, completion-order-independent campaign."""
 
     if not panel:
         raise ValueError("development panel must not be empty")
@@ -1419,12 +1620,14 @@ def run_sustained_search(
         raise ValueError(
             "provider turn timeout must be positive and below the wall budget"
         )
+    if provider.provider_concurrency != options.provider_concurrency:
+        raise ValueError("provider concurrency differs from the frozen options")
     core._assert_model_prompt_hygiene(system_prompt)
     core._assert_model_prompt_hygiene(specification_prompt)
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     protocol = {
-        "protocol_id": M9_SEARCH_PROTOCOL_ID,
+        "protocol_id": M10_SEARCH_PROTOCOL_ID,
         "population_size": core.POPULATION_SIZE,
         "generation_limit": options.generation_limit,
         "generation_zero_roots": core.POPULATION_SIZE,
@@ -1434,17 +1637,9 @@ def run_sustained_search(
         "panel": [item.as_dict() for item in panel],
         "model": provider.model,
         "effort": provider.effort,
-        "provider_concurrency": options.provider_concurrency,
-        "evaluator_workers": options.evaluator_workers,
-        "wall_seconds": options.wall_seconds,
-        "provider_program_turn_limit": options.provider_program_turn_limit,
+        **options.as_dict(),
         "provider_turn_timeout_seconds": provider_turn_timeout_seconds,
-        "max_consecutive_provider_failures": (
-            M9_MAX_CONSECUTIVE_PROVIDER_FAILURES
-        ),
-        "replace_terminal_slots": options.replace_terminal_slots,
-        "resume_enabled": options.resume_enabled,
-        "stop_on_verified": options.stop_on_verified,
+        "replace_terminal_slots": False,
         "safe_api_expanded": True,
         "preview_active": True,
         "native_v2_default": True,
@@ -1457,12 +1652,30 @@ def run_sustained_search(
     telemetry.clear_terminal_reason()
     pool = _ConcurrentEvaluatorPool(
         workers=options.evaluator_workers,
+        queue_capacity=options.validated_queue_capacity,
         evaluator_factory=evaluator_factory,
         telemetry=telemetry,
     )
+    provider_executor = ThreadPoolExecutor(
+        max_workers=options.provider_concurrency,
+        thread_name_prefix="mforge-m10-provider",
+    )
     stop_reason = "generation_budget"
     anchor_result: core.M5ProviderResultV1 | None = None
+    exact_verified = False
     close_error: Exception | None = None
+
+    def stop_payload(reason: str, error: Exception) -> dict[str, Any]:
+        return {
+            "protocol_id": M10_REPORT_PROTOCOL_ID,
+            "status": reason,
+            "error_type": type(error).__name__,
+            "error": str(error)[:2048],
+            "candidate_count": len(core._all_candidates(root)),
+            "panel_hash": core.panel_hash(panel),
+            "resumable": True,
+        }
+
     try:
         anchor_result = provider.ensure_specification_anchor(
             prompt=specification_prompt,
@@ -1473,15 +1686,22 @@ def run_sustained_search(
         core._assert_provider_turn_boundary(anchor_result, expected_history=())
         anchor = anchor_result.context
         core._write_exclusive_or_verify(
-            root / "anchor.json.gz",
-            anchor_result.as_dict(),
+            root / "anchor.json.gz", anchor_result.as_dict()
         )
         if boundary_hook is not None:
             boundary_hook("anchor_persisted")
-        halt = False
-        exact_verified = False
-        consecutive_provider_failures = 0
+
         for generation in range(options.generation_limit):
+            if operator_stop is not None and operator_stop():
+                raise core.M5OperatorStop("operator stop requested")
+            if (
+                telemetry.wall_expired(options.wall_seconds)
+                or telemetry.wall_remaining(options.wall_seconds)
+                < provider_turn_timeout_seconds
+            ):
+                stop_reason = "wall_clock_budget"
+                break
+
             previous = (
                 core._generation_candidates(root, generation - 1)
                 if generation > 0
@@ -1492,12 +1712,22 @@ def run_sustained_search(
                 panel=panel,
                 previous_candidates=previous,
             )
+            if generation > 0 and manifest.all_root_fallback:
+                stop_reason = "insufficient_valid_parents"
+                break
+            primary_keys = [
+                f"{slot.request_key}-initial" for slot in manifest.slots
+            ]
+            telemetry.reserve_primary_generation(
+                primary_keys,
+                limit=options.primary_program_slots,
+            )
+
             generation_dir = (
                 root / "generations" / f"generation-{generation:04d}"
             )
             core._write_exclusive_or_verify(
-                generation_dir / "manifest.json.gz",
-                manifest.as_dict(),
+                generation_dir / "manifest.json.gz", manifest.as_dict()
             )
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_manifest")
@@ -1508,8 +1738,7 @@ def run_sustained_search(
             ]
             memory = core.build_search_memory(memory_candidates)
             core._write_exclusive_or_verify(
-                generation_dir / "search-memory.json.gz",
-                memory,
+                generation_dir / "search-memory.json.gz", memory
             )
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_search_memory")
@@ -1517,17 +1746,39 @@ def run_sustained_search(
             by_id = {
                 str(item["candidate_id"]): item for item in prior_candidates
             }
+            snapshot = _generation_snapshot(
+                generation=generation,
+                manifest=manifest,
+                memory=memory,
+                candidates_by_id=by_id,
+                anchor=anchor,
+                model=provider.model,
+                effort=provider.effort,
+                system_prompt=system_prompt,
+                policy_schema=policy_schema,
+                panel=panel,
+                options=options,
+                provider_turn_timeout_seconds=provider_turn_timeout_seconds,
+            )
+            _write_or_verify(
+                generation_dir / "generation-snapshot.json.gz", snapshot
+            )
+            provider.prepare_generation(
+                snapshot=snapshot,
+                anchor=anchor,
+                artifact_dir=generation_dir / "provider",
+            )
+            if boundary_hook is not None:
+                boundary_hook(f"generation_{generation}_snapshot")
+
             entries = [
                 _PendingCommit(
                     slot_plan=slot_plan,
                     candidate_id=core._candidate_id(
-                        generation,
-                        slot_plan.slot,
+                        generation, slot_plan.slot
                     ),
                     slot_dir=core._candidate_path(
-                        root,
-                        generation,
-                        slot_plan.slot,
+                        root, generation, slot_plan.slot
                     ),
                 )
                 for slot_plan in manifest.slots
@@ -1557,28 +1808,27 @@ def run_sustained_search(
                     if infrastructure_error is not None:
                         raise infrastructure_error
 
-            for index, (slot_plan, pending) in enumerate(
-                zip(manifest.slots, entries, strict=True)
+            provider_tasks: dict[
+                Future[core.M5ProviderResultV1], _ProviderTask
+            ] = {}
+            provider_task_list: list[_ProviderTask] = []
+            supply: dict[str, dict[str, Any]] = {}
+            for slot_plan, pending, initial_key in zip(
+                manifest.slots, entries, primary_keys, strict=True
             ):
                 candidate_path = pending.slot_dir / "candidate.json.gz"
                 prepared_path = _prepared_path(pending.slot_dir)
                 if candidate_path.is_file():
-                    retained_candidate = core._verify_retained_candidate(
+                    retained = core._verify_retained_candidate(
                         root=root,
                         path=candidate_path,
                         panel=panel,
                         slot_plan=slot_plan,
                         search_memory_sha256=str(memory["sha256"]),
                     )
-                    exact_verified |= (
-                        retained_candidate.get("exact_verified") is True
-                    )
+                    exact_verified |= retained.get("exact_verified") is True
                     pending.retained_terminal = True
                     commit_ready(block=False)
-                    if exact_verified:
-                        stop_reason = "exact_verified_counterexample"
-                        halt = True
-                        break
                     continue
                 if prepared_path.is_file():
                     prepared = _verify_prepared(
@@ -1597,338 +1847,353 @@ def run_sustained_search(
                     )
                     commit_ready(block=False)
                     continue
-                if operator_stop is not None and operator_stop():
-                    commit_ready(block=True)
-                    stop_reason = "operator_stop"
-                    raise core.M5OperatorStop("operator stop requested")
-                if telemetry.wall_expired(options.wall_seconds):
-                    stop_reason = "wall_clock_budget"
-                    halt = True
-                    break
-                if (
-                    telemetry.wall_remaining(options.wall_seconds)
-                    < provider_turn_timeout_seconds
-                ):
-                    stop_reason = "wall_clock_budget"
-                    halt = True
-                    break
-                initial_key = f"{slot_plan.request_key}-initial"
-                if not telemetry.provider_turn_available(
-                    options.provider_program_turn_limit,
-                    key=initial_key,
-                ):
-                    stop_reason = "provider_turn_budget"
-                    halt = True
-                    break
+
                 parent: Mapping[str, Any] | None = None
-                prompt: str
-                provider_result: core.M5ProviderResultV1 | None = None
-                attempts: list[Mapping[str, JsonValue]] = []
-                prompt = ""
+                if slot_plan.kind == "root":
+                    prompt = _root_prompt(snapshot)
+                    operation = partial(
+                        provider.generate_root,
+                        anchor=anchor,
+                        generation=generation,
+                        slot=slot_plan.slot,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        output_schema=policy_schema,
+                        idempotency_key=slot_plan.request_key,
+                        artifact_dir=pending.slot_dir / "provider-initial",
+                    )
+                    expected_history: tuple[str, ...] = ()
+                else:
+                    parent_id = slot_plan.parent_candidate_id
+                    if parent_id is None or parent_id not in by_id:
+                        raise core.M5InfrastructureError(
+                            "frozen child parent is unavailable"
+                        )
+                    parent = by_id[parent_id]
+                    parent_source = parent.get("source")
+                    parent_profile = parent.get("behavior_profile")
+                    if not isinstance(parent_source, str) or not isinstance(
+                        parent_profile, Mapping
+                    ):
+                        raise core.M5InfrastructureError(
+                            "selected parent evidence is incomplete"
+                        )
+                    prompt = _child_prompt(
+                        snapshot=snapshot,
+                        parent_source=parent_source,
+                        parent_profile=parent_profile,
+                    )
+                    parent_context = core._provider_context(parent)
+                    expected_history = parent_context.included_turn_ids
+                    operation = partial(
+                        provider.generate_child,
+                        parent=parent_context,
+                        generation=generation,
+                        slot=slot_plan.slot,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        output_schema=policy_schema,
+                        idempotency_key=slot_plan.request_key,
+                        artifact_dir=pending.slot_dir / "provider-initial",
+                    )
+                core._assert_model_prompt_hygiene(prompt)
+                task = _ProviderTask(
+                    pending=pending,
+                    slot_plan=slot_plan,
+                    parent=parent,
+                    prompt=prompt,
+                    expected_history=expected_history,
+                    key=initial_key,
+                    operation=operation,
+                )
+                provider_task_list.append(task)
+
+            lane_tasks: dict[int, list[_ProviderTask]] = {
+                lane: [] for lane in range(options.provider_concurrency)
+            }
+            for task in provider_task_list:
+                lane = provider.primary_lane(
+                    generation=generation,
+                    slot=task.slot_plan.slot,
+                )
+                if lane not in lane_tasks:
+                    raise core.M5InfrastructureError(
+                        "provider returned an invalid frozen lane"
+                    )
+                lane_tasks[lane].append(task)
+            for offset in range(core.POPULATION_SIZE):
+                submitted = False
+                for lane in range(options.provider_concurrency):
+                    if offset >= len(lane_tasks[lane]):
+                        continue
+                    task = lane_tasks[lane][offset]
+                    future = provider_executor.submit(
+                        _provider_call,
+                        telemetry=telemetry,
+                        key=task.key,
+                        kind="primary",
+                        durable_result_path=(
+                            task.pending.slot_dir
+                            / "provider-initial"
+                            / "m5-provider-result.json.gz"
+                        ),
+                        operation=task.operation,
+                    )
+                    provider_tasks[future] = task
+                    submitted = True
+                if not submitted:
+                    break
+
+            for future in as_completed(provider_tasks):
+                task = provider_tasks[future]
+                pending = task.pending
                 try:
-                    if slot_plan.kind == "root":
-                        prompt = core.build_root_prompt(memory)
-                        core._assert_model_prompt_hygiene(prompt)
-                        provider_result = _provider_call(
-                            telemetry=telemetry,
-                            options=options,
-                            key=initial_key,
-                            durable_result_path=(
-                                pending.slot_dir
-                                / "provider-initial"
-                                / "m5-provider-result.json.gz"
-                            ),
-                            operation=partial(
-                                provider.generate_root,
-                                anchor=anchor,
-                                generation=generation,
-                                slot=slot_plan.slot,
-                                prompt=prompt,
-                                system_prompt=system_prompt,
-                                output_schema=policy_schema,
-                                idempotency_key=slot_plan.request_key,
-                                artifact_dir=(
-                                    pending.slot_dir / "provider-initial"
-                                ),
-                            ),
-                        )
+                    provider_result = future.result()
+                    if task.slot_plan.kind == "child":
                         core._assert_provider_turn_boundary(
                             provider_result,
-                            expected_history=anchor.included_turn_ids,
+                            expected_history=task.expected_history,
                         )
-                    else:
-                        parent_id = slot_plan.parent_candidate_id
-                        if parent_id is None or parent_id not in by_id:
-                            raise core.M5InfrastructureError(
-                                "frozen child parent is unavailable"
-                            )
-                        parent = by_id[parent_id]
-                        parent_source = parent.get("source")
-                        parent_profile = parent.get("behavior_profile")
-                        if not isinstance(parent_source, str) or not isinstance(
-                            parent_profile,
-                            Mapping,
-                        ):
-                            raise core.M5InfrastructureError(
-                                "selected parent evidence is incomplete"
-                            )
-                        prompt = core.build_child_prompt(
-                            parent_source=parent_source,
-                            parent_profile=parent_profile,
+                    elif anchor.turn_id not in (
+                        provider_result.context.included_turn_ids
+                    ):
+                        raise core.M5InfrastructureError(
+                            "fresh root lost the specification anchor"
                         )
-                        core._assert_model_prompt_hygiene(prompt)
-                        parent_context = core._provider_context(parent)
-                        provider_result = _provider_call(
-                            telemetry=telemetry,
-                            options=options,
-                            key=initial_key,
-                            durable_result_path=(
-                                pending.slot_dir
-                                / "provider-initial"
-                                / "m5-provider-result.json.gz"
-                            ),
-                            operation=partial(
-                                provider.generate_child,
-                                parent=parent_context,
-                                generation=generation,
-                                slot=slot_plan.slot,
-                                prompt=prompt,
-                                system_prompt=system_prompt,
-                                output_schema=policy_schema,
-                                idempotency_key=slot_plan.request_key,
-                                artifact_dir=(
-                                    pending.slot_dir / "provider-initial"
-                                ),
-                            ),
-                        )
-                        core._assert_provider_turn_boundary(
-                            provider_result,
-                            expected_history=parent_context.included_turn_ids,
-                        )
+                except core.M5InfrastructureError:
+                    raise
                 except Exception as error:
-                    if isinstance(error, _ProviderTurnBudgetExhausted):
-                        commit_ready(block=True)
-                        raise
-                    if isinstance(error, core.M5InfrastructureError):
-                        raise
                     base = _candidate_base(
                         candidate_id=pending.candidate_id,
                         generation=generation,
-                        slot_plan=slot_plan,
-                        parent=parent,
+                        slot_plan=task.slot_plan,
+                        parent=task.parent,
                         panel=panel,
                         memory=memory,
                         provider_result=None,
                         attempts=(),
                         repairs=0,
-                        prompt=prompt,
+                        prompt=task.prompt,
                     )
                     pending.terminal_payload = _provider_failure(
-                        base=base,
-                        error=error,
+                        base=base, error=error
                     )
                     commit_ready(block=False)
-                    consecutive_provider_failures += 1
-                    if (
-                        consecutive_provider_failures
-                        >= M9_MAX_CONSECUTIVE_PROVIDER_FAILURES
-                    ):
-                        commit_ready(block=True)
-                        raise core.M5InfrastructureError(
-                            "provider unavailable after three consecutive "
-                            "terminal slot failures"
-                        ) from error
                     continue
                 if boundary_hook is not None:
                     boundary_hook(f"{pending.candidate_id}_provider")
-                attempts.append(provider_result.as_dict())
+                attempts: list[Mapping[str, JsonValue]] = [
+                    provider_result.as_dict()
+                ]
                 validation = validate_python_policy_response(
                     provider_result.response_text
                 )
-                repairs = 0
-                if not validation.valid:
-                    repair_key = f"{slot_plan.request_key}-repair-01"
-                    if telemetry.provider_turn_available(
-                        options.provider_program_turn_limit,
-                        key=repair_key,
-                    ) and (
-                        telemetry.wall_remaining(options.wall_seconds)
-                        >= provider_turn_timeout_seconds
-                    ):
-                        previous_result = provider_result
-                        repair_prompt = core.build_repair_prompt(
-                            [
-                                item.as_dict()
-                                for item in validation.diagnostics[:32]
-                            ]
-                        )
-                        core._assert_model_prompt_hygiene(repair_prompt)
-                        try:
-                            provider_result = _provider_call(
-                                telemetry=telemetry,
-                                options=options,
-                                key=repair_key,
-                                durable_result_path=(
-                                    pending.slot_dir
-                                    / "provider-repair-01"
-                                    / "m5-provider-result.json.gz"
-                                ),
-                                operation=partial(
-                                    provider.repair,
-                                    previous=previous_result,
-                                    generation=generation,
-                                    slot=slot_plan.slot,
-                                    prompt=repair_prompt,
-                                    system_prompt=system_prompt,
-                                    output_schema=policy_schema,
-                                    idempotency_key=(
-                                        slot_plan.request_key + "-repair-01"
-                                    ),
-                                    artifact_dir=(
-                                        pending.slot_dir
-                                        / "provider-repair-01"
-                                    ),
-                                ),
-                            )
-                            core._assert_provider_turn_boundary(
-                                provider_result,
-                                expected_history=(
-                                    previous_result.context.included_turn_ids
-                                ),
-                                expected_thread_id=(
-                                    previous_result.context.thread_id
-                                ),
-                            )
-                        except Exception as error:
-                            if isinstance(
-                                error, _ProviderTurnBudgetExhausted
-                            ):
-                                commit_ready(block=True)
-                                raise
-                            if isinstance(error, core.M5InfrastructureError):
-                                raise
-                            base = _candidate_base(
-                                candidate_id=pending.candidate_id,
-                                generation=generation,
-                                slot_plan=slot_plan,
-                                parent=parent,
-                                panel=panel,
-                                memory=memory,
-                                provider_result=previous_result,
-                                attempts=attempts,
-                                repairs=1,
-                                prompt=prompt,
-                            )
-                            pending.terminal_payload = _provider_failure(
-                                base=base,
-                                error=error,
-                            )
-                            commit_ready(block=False)
-                            consecutive_provider_failures += 1
-                            if (
-                                consecutive_provider_failures
-                                >= M9_MAX_CONSECUTIVE_PROVIDER_FAILURES
-                            ):
-                                commit_ready(block=True)
-                                raise core.M5InfrastructureError(
-                                    "provider unavailable after three "
-                                    "consecutive terminal slot failures"
-                                ) from error
-                            continue
-                        attempts.append(provider_result.as_dict())
-                        validation = validate_python_policy_response(
-                            provider_result.response_text
-                        )
-                        repairs = 1
                 base = _candidate_base(
                     candidate_id=pending.candidate_id,
                     generation=generation,
-                    slot_plan=slot_plan,
-                    parent=parent,
+                    slot_plan=task.slot_plan,
+                    parent=task.parent,
                     panel=panel,
                     memory=memory,
                     provider_result=provider_result,
                     attempts=attempts,
-                    repairs=repairs,
-                    prompt=prompt,
+                    repairs=0,
+                    prompt=task.prompt,
                 )
-                consecutive_provider_failures = 0
-                if (
-                    not validation.valid
-                    or validation.response is None
-                    or validation.identity is None
-                    or validation.identity.program_hash is None
+                supply[pending.candidate_id] = {
+                    "task": task,
+                    "result": provider_result,
+                    "attempts": attempts,
+                    "validation": validation,
+                }
+                if _queue_valid_candidate(
+                    pending=pending,
+                    root=root,
+                    panel=panel,
+                    telemetry=telemetry,
+                    pool=pool,
+                    base=base,
+                    validation=validation,
+                    boundary_hook=boundary_hook,
                 ):
-                    skipped = None
-                    if repairs == 0:
-                        skipped = (
-                            "wall_clock_budget"
-                            if telemetry.wall_expired(options.wall_seconds)
-                            else "provider_turn_budget"
-                        )
+                    commit_ready(block=False)
+
+            repair_tasks: dict[
+                Future[core.M5ProviderResultV1], tuple[_ProviderTask, dict[str, Any]]
+            ] = {}
+            for pending in entries:
+                supply_record = supply.get(pending.candidate_id)
+                if supply_record is None or pending.future is not None:
+                    continue
+                task = cast(_ProviderTask, supply_record["task"])
+                validation = supply_record["validation"]
+                repair_key = f"{task.slot_plan.request_key}-repair-01"
+                if not telemetry.reserve_repair(
+                    repair_key, limit=options.repair_turn_limit
+                ):
+                    base = _candidate_base(
+                        candidate_id=pending.candidate_id,
+                        generation=generation,
+                        slot_plan=task.slot_plan,
+                        parent=task.parent,
+                        panel=panel,
+                        memory=memory,
+                        provider_result=supply_record["result"],
+                        attempts=supply_record["attempts"],
+                        repairs=0,
+                        prompt=task.prompt,
+                    )
                     pending.terminal_payload = _contract_invalid(
                         base=base,
                         validation=validation.as_dict(),
-                        repair_skipped=skipped,
+                        repair_skipped="repair_turn_budget",
                     )
                     commit_ready(block=False)
                     continue
-                source = normalize_source_newlines(
-                    validation.response.source
+                repair_prompt = _repair_prompt(
+                    snapshot=snapshot,
+                    diagnostics=[
+                        item.as_dict() for item in validation.diagnostics
+                    ],
                 )
-                program_hash = validation.identity.program_hash
-                source_path = root / "sources" / f"{program_hash}.py"
-                telemetry.timed_persist(
-                    partial(
-                        core._write_source_exclusive_or_verify,
-                        source_path,
-                        source,
+                core._assert_model_prompt_hygiene(repair_prompt)
+                previous_result = cast(
+                    core.M5ProviderResultV1, supply_record["result"]
+                )
+                operation = partial(
+                    provider.repair,
+                    previous=previous_result,
+                    generation=generation,
+                    slot=task.slot_plan.slot,
+                    prompt=repair_prompt,
+                    system_prompt=system_prompt,
+                    output_schema=policy_schema,
+                    idempotency_key=task.slot_plan.request_key + "-repair-01",
+                    artifact_dir=pending.slot_dir / "provider-repair-01",
+                )
+                future = provider_executor.submit(
+                    _provider_call,
+                    telemetry=telemetry,
+                    key=repair_key,
+                    kind="repair",
+                    durable_result_path=(
+                        pending.slot_dir
+                        / "provider-repair-01"
+                        / "m5-provider-result.json.gz"
+                    ),
+                    operation=operation,
+                )
+                repair_tasks[future] = (task, supply_record)
+
+            for future in as_completed(repair_tasks):
+                task, repair_record = repair_tasks[future]
+                pending = task.pending
+                previous_result = cast(
+                    core.M5ProviderResultV1, repair_record["result"]
+                )
+                try:
+                    repaired_result = future.result()
+                    core._assert_provider_turn_boundary(
+                        repaired_result,
+                        expected_history=(
+                            previous_result.context.included_turn_ids
+                        ),
+                        expected_thread_id=previous_result.context.thread_id,
                     )
-                )
-                if boundary_hook is not None:
-                    boundary_hook(f"{pending.candidate_id}_source_persisted")
-                canonical_ast_sha256 = (
-                    validation.identity.canonical_ast_sha256
-                )
-                if not isinstance(canonical_ast_sha256, str):
-                    raise core.M5InfrastructureError(
-                        "validated program omitted canonical AST identity"
+                except core.M5InfrastructureError:
+                    raise
+                except Exception as error:
+                    base = _candidate_base(
+                        candidate_id=pending.candidate_id,
+                        generation=generation,
+                        slot_plan=task.slot_plan,
+                        parent=task.parent,
+                        panel=panel,
+                        memory=memory,
+                        provider_result=previous_result,
+                        attempts=repair_record["attempts"],
+                        repairs=1,
+                        prompt=task.prompt,
                     )
-                prepared = _prepared_candidate(
+                    pending.terminal_payload = _provider_failure(
+                        base=base, error=error
+                    )
+                    commit_ready(block=False)
+                    continue
+                attempts = [
+                    *cast(
+                        Sequence[Mapping[str, JsonValue]],
+                        repair_record["attempts"],
+                    ),
+                    repaired_result.as_dict(),
+                ]
+                validation = validate_python_policy_response(
+                    repaired_result.response_text
+                )
+                base = _candidate_base(
+                    candidate_id=pending.candidate_id,
+                    generation=generation,
+                    slot_plan=task.slot_plan,
+                    parent=task.parent,
+                    panel=panel,
+                    memory=memory,
+                    provider_result=repaired_result,
+                    attempts=attempts,
+                    repairs=1,
+                    prompt=task.prompt,
+                )
+                if not _queue_valid_candidate(
+                    pending=pending,
+                    root=root,
+                    panel=panel,
+                    telemetry=telemetry,
+                    pool=pool,
+                    base=base,
+                    validation=validation,
+                    boundary_hook=boundary_hook,
+                ):
+                    pending.terminal_payload = _contract_invalid(
+                        base=base,
+                        validation=validation.as_dict(),
+                    )
+                commit_ready(block=False)
+
+            for pending in entries:
+                supply_record = supply.get(pending.candidate_id)
+                if (
+                    supply_record is None
+                    or pending.future is not None
+                    or pending.terminal_payload is not None
+                    or pending.retained_terminal
+                ):
+                    continue
+                task = cast(_ProviderTask, supply_record["task"])
+                validation = supply_record["validation"]
+                base = _candidate_base(
+                    candidate_id=pending.candidate_id,
+                    generation=generation,
+                    slot_plan=task.slot_plan,
+                    parent=task.parent,
+                    panel=panel,
+                    memory=memory,
+                    provider_result=supply_record["result"],
+                    attempts=supply_record["attempts"],
+                    repairs=0,
+                    prompt=task.prompt,
+                )
+                pending.terminal_payload = _contract_invalid(
                     base=base,
                     validation=validation.as_dict(),
-                    source=source,
-                    source_path=source_path,
-                    root=root,
-                    program_hash=program_hash,
-                    source_sha256=validation.identity.source_sha256,
-                    canonical_ast_sha256=canonical_ast_sha256,
+                    repair_skipped="repair_turn_budget",
                 )
-                telemetry.timed_persist(
-                    partial(_write_or_verify, prepared_path, prepared)
-                )
-                telemetry.first_valid_program()
-                pending.prepared = prepared
-                pending.future = pool.submit(
-                    source=source,
-                    panel=panel,
-                    candidate_id=pending.candidate_id,
-                    slot_dir=pending.slot_dir,
-                )
-                if boundary_hook is not None:
-                    boundary_hook(f"{pending.candidate_id}_evaluation_queued")
-                commit_ready(block=False)
-                if exact_verified:
-                    stop_reason = "exact_verified_counterexample"
-                    halt = True
-                    break
-                if index == len(entries) - 1:
-                    commit_ready(block=True)
             commit_ready(block=True)
+            if commit_cursor != core.POPULATION_SIZE:
+                raise core.M5InfrastructureError(
+                    "generation did not reach eight terminal slots"
+                )
+            telemetry.boundary(f"generation_{generation}_committed")
             if exact_verified:
                 stop_reason = "exact_verified_counterexample"
-                halt = True
-            if halt:
                 break
         telemetry.boundary("report_pending")
     except _ProviderTurnBudgetExhausted:
@@ -1941,20 +2206,10 @@ def run_sustained_search(
             else "infrastructure_failure"
         )
         telemetry.finish(reason)
-        write_json(
-            root / M9_STOP_FILENAME,
-            {
-                "protocol_id": M9_REPORT_PROTOCOL_ID,
-                "status": reason,
-                "error_type": type(error).__name__,
-                "error": str(error)[:2048],
-                "candidate_count": len(core._all_candidates(root)),
-                "panel_hash": core.panel_hash(panel),
-                "resumable": True,
-            },
-        )
+        write_json(root / M10_STOP_FILENAME, stop_payload(reason, error))
         raise
     finally:
+        provider_executor.shutdown(wait=True, cancel_futures=False)
         close_error = pool.close()
     if close_error is not None:
         telemetry.finish("infrastructure_failure")
@@ -1962,20 +2217,12 @@ def run_sustained_search(
             f"evaluator cleanup failed: {type(close_error).__name__}"
         )
         write_json(
-            root / M9_STOP_FILENAME,
-            {
-                "protocol_id": M9_REPORT_PROTOCOL_ID,
-                "status": "infrastructure_failure",
-                "error_type": type(cleanup_failure).__name__,
-                "error": str(cleanup_failure),
-                "candidate_count": len(core._all_candidates(root)),
-                "panel_hash": core.panel_hash(panel),
-                "resumable": True,
-            },
+            root / M10_STOP_FILENAME,
+            stop_payload("infrastructure_failure", cleanup_failure),
         )
         raise cleanup_failure from close_error
     if anchor_result is None:
-        raise core.M5InfrastructureError("M9 specification anchor is missing")
+        raise core.M5InfrastructureError("M10 specification anchor is missing")
     telemetry.finish(stop_reason)
     report = _report(
         root=root,
@@ -1987,19 +2234,18 @@ def run_sustained_search(
         runtime=telemetry.snapshot(),
         stop_reason=stop_reason,
     )
-    write_json(root / M9_REPORT_FILENAME, report)
+    write_json(root / M10_REPORT_FILENAME, report)
     if boundary_hook is not None:
         boundary_hook("report_persisted")
     return report
 
 
 __all__ = [
-    "M9_REPORT_FILENAME",
-    "M9_REPORT_PROTOCOL_ID",
-    "M9_RUNTIME_FILENAME",
-    "M9_SEARCH_PROTOCOL_ID",
-    "M9_STOP_FILENAME",
-    "ScientificSearchOptionsV1",
-    "finalize_budget_limited_search",
+    "M10_REPORT_FILENAME",
+    "M10_REPORT_PROTOCOL_ID",
+    "M10_RUNTIME_FILENAME",
+    "M10_SEARCH_PROTOCOL_ID",
+    "M10_STOP_FILENAME",
+    "ScientificSearchOptionsV2",
     "run_sustained_search",
 ]

@@ -276,6 +276,22 @@ class M5SearchProvider(Protocol):
     def close(self) -> None: ...
 
 
+class M10SearchProvider(M5SearchProvider, Protocol):
+    """Concurrent provider pool for one frozen complete generation."""
+
+    provider_concurrency: int
+
+    def prepare_generation(
+        self,
+        *,
+        snapshot: Mapping[str, Any],
+        anchor: M5ProviderContextV1,
+        artifact_dir: Path,
+    ) -> None: ...
+
+    def primary_lane(self, *, generation: int, slot: str) -> int: ...
+
+
 class M5ScientificEvaluator(Protocol):
     """Evaluate one source on exactly one immutable development case."""
 
@@ -2248,6 +2264,7 @@ __all__ = [
     "M5SearchError",
     "M5_TERMINAL_CANDIDATE_STATUSES",
     "M5SearchProvider",
+    "M10SearchProvider",
     "M5_REPORT_PROTOCOL_ID",
     "M5_SEARCH_PROTOCOL_ID",
     "POPULATION_SIZE",

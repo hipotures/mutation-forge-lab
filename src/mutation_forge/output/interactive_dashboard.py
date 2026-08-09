@@ -316,6 +316,252 @@ class DashboardCapabilities:
     quit: Callable[[], None] | None = None
 
 
+def dashboard_state_from_python_status(
+    status: Mapping[str, Any],
+    *,
+    run_id: str,
+    model: str,
+    effort: str,
+    generation_limit: int,
+    wall_seconds: float,
+) -> DashboardState:
+    """Project the canonical ordinary-Python JSON status into Rich state."""
+
+    def mapping(name: str) -> Mapping[str, Any]:
+        value = status.get(name)
+        return value if isinstance(value, Mapping) else {}
+
+    def integer(value: object) -> int:
+        return (
+            value
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            else 0
+        )
+
+    def number(value: object) -> float:
+        return (
+            float(value)
+            if isinstance(value, int | float)
+            and not isinstance(value, bool)
+            else 0.0
+        )
+
+    counts = mapping("counts")
+    provider = mapping("provider")
+    evaluators = mapping("evaluators")
+    throughput = mapping("throughput")
+    activity = mapping("scientific_activity")
+    phase = mapping("phase_timings")
+    best = mapping("best")
+    exact = mapping("exact_verification")
+    usage = provider.get("usage")
+    usage = usage if isinstance(usage, Mapping) else {}
+    token_usage = TokenUsage(
+        input=integer(usage.get("inputTokens")),
+        cached=integer(usage.get("cachedInputTokens")),
+        cache_write=integer(usage.get("cacheWriteInputTokens")),
+        output=integer(usage.get("outputTokens")),
+        reasoning=integer(usage.get("reasoningOutputTokens")),
+        total=integer(usage.get("totalTokens")),
+        quality="exact",
+    )
+    groups: dict[int, list[DashboardSlot]] = {}
+    raw_slots = status.get("slots")
+    if isinstance(raw_slots, Sequence) and not isinstance(
+        raw_slots, str | bytes
+    ):
+        for raw in raw_slots:
+            if not isinstance(raw, Mapping):
+                continue
+            generation = integer(raw.get("generation"))
+            candidate_id = str(raw.get("candidate_id", raw.get("slot", "—")))
+            raw_state = str(raw.get("state", "queued"))
+            state = {
+                "evaluated": "accepted",
+                "contract_invalid": "invalid",
+                "provider_failed": "failed",
+                "evaluation_infrastructure_failure": "failed",
+                "duplicate": "duplicate",
+            }.get(raw_state, raw_state)
+            raw_usage = raw.get("usage")
+            raw_usage = raw_usage if isinstance(raw_usage, Mapping) else {}
+            groups.setdefault(generation, []).append(
+                DashboardSlot(
+                    slot=candidate_id,
+                    generation=generation,
+                    parent=(
+                        str(raw["parent_candidate_id"])
+                        if raw.get("parent_candidate_id") is not None
+                        else "root"
+                    ),
+                    phase=str(raw.get("phase", "queued")),
+                    state=state,
+                    repairs=integer(raw.get("repairs")),
+                    usage=TokenUsage(
+                        input=integer(raw_usage.get("inputTokens")),
+                        cached=integer(raw_usage.get("cachedInputTokens")),
+                        cache_write=integer(
+                            raw_usage.get("cacheWriteInputTokens")
+                        ),
+                        output=integer(raw_usage.get("outputTokens")),
+                        reasoning=integer(
+                            raw_usage.get("reasoningOutputTokens")
+                        ),
+                        total=integer(raw_usage.get("totalTokens")),
+                        quality="exact",
+                    ),
+                    validation=(
+                        "pass"
+                        if state in {"accepted", "duplicate"}
+                        else "fail"
+                        if state == "invalid"
+                        else "—"
+                    ),
+                    candidate=candidate_id,
+                    error=raw_state if state == "failed" else "",
+                )
+            )
+    generation_groups = tuple(
+        GenerationSlots(
+            generation=generation,
+            slots=tuple(
+                sorted(slots, key=lambda item: item.slot)
+            ),
+        )
+        for generation, slots in sorted(groups.items())
+    )
+    elapsed = number(throughput.get("elapsed_seconds"))
+    generation = integer(status.get("generation_index"))
+    best_interval = best.get("fitness_interval")
+    best_value: float | None = None
+    if isinstance(best_interval, Mapping):
+        lower = best_interval.get("lower")
+        if isinstance(lower, Mapping):
+            numerator = lower.get("numerator")
+            denominator = lower.get("denominator")
+            if (
+                isinstance(numerator, int)
+                and not isinstance(numerator, bool)
+                and isinstance(denominator, int)
+                and not isinstance(denominator, bool)
+                and denominator
+            ):
+                best_value = numerator / denominator
+    scientific_activity = (
+        f"NoPlan={integer(activity.get('no_plan_count'))} · "
+        f"illegal-final={integer(activity.get('illegal_final_state_count'))} · "
+        f"bottleneck={phase.get('dominant_bottleneck', 'unknown')}"
+    )
+    exact_activity = (
+        f"exact queue={integer(exact.get('queue'))} · "
+        f"submitted={integer(exact.get('submissions'))} · "
+        f"records={integer(exact.get('records'))} · "
+        f"verified={bool(exact.get('verified'))}"
+    )
+    return DashboardState(
+        run_id=run_id,
+        session_id="ordinary-python",
+        experiment_state=str(status.get("state", "starting")),
+        run_mode="ordinary-python",
+        model=model,
+        effort=effort,
+        phase=str(
+            mapping("recovery").get("last_boundary")
+            or phase.get("dominant_bottleneck")
+            or "provider"
+        ),
+        graph_mode="minimum-degree-3",
+        started_at="durable workspace",
+        started_monotonic=time.monotonic() - elapsed,
+        elapsed_seconds=elapsed,
+        wall_seconds=wall_seconds,
+        generation=generation,
+        generation_limit=generation_limit,
+        displayed_generation=generation,
+        population_size=8,
+        completed_slots=integer(counts.get("terminal")),
+        provider_turns_attempted=integer(
+            provider.get("program_turns_reserved")
+        ),
+        provider_turns_completed=max(
+            0,
+            integer(provider.get("program_turns_reserved"))
+            - integer(provider.get("active")),
+        ),
+        max_model_turns=None,
+        active_provider_turns=integer(provider.get("active")),
+        configured_provider_concurrency=integer(
+            provider.get("configured_concurrency")
+        ),
+        evaluations_completed=integer(evaluators.get("completed")),
+        evaluation_workers_active=integer(evaluators.get("active")),
+        evaluation_workers_configured=integer(
+            evaluators.get("configured")
+        ),
+        archive_size=integer(counts.get("valid")),
+        accepted_candidates=integer(counts.get("evaluated")),
+        invalid_candidates=integer(counts.get("contract_invalid")),
+        failed_candidates=integer(counts.get("provider_failed"))
+        + integer(counts.get("evaluation_infrastructure_failure")),
+        duplicate_candidates=integer(counts.get("duplicate")),
+        current_objective=best_value,
+        best_objective=best_value,
+        best_candidate=str(best.get("candidate_id") or "—"),
+        improvement_rate=number(
+            throughput.get("accepted_rewrites_per_second")
+        ),
+        evaluation_rate=number(
+            throughput.get("policy_invocations_per_second")
+        ),
+        profiling_enabled=True,
+        timing_profile={
+            "phase_seconds": {
+                "provider": number(phase.get("provider_wait_seconds")),
+                "evaluator/scorer": number(
+                    phase.get("evaluator_busy_seconds")
+                ),
+                "sandbox": number(phase.get("sandbox_seconds")),
+                "HEG scoring": number(phase.get("heg_scoring_seconds")),
+                "persistence": number(phase.get("persistence_seconds")),
+            },
+            "phase_calls": {
+                "provider": integer(
+                    provider.get("program_turns_reserved")
+                ),
+                "evaluator/scorer": integer(evaluators.get("completed")),
+            },
+            "unattributed_fraction": 0.0,
+        },
+        cumulative_usage=token_usage,
+        session_usage=token_usage,
+        generations=generation_groups,
+        activity=(
+            ActivityEntry(
+                timestamp="live",
+                component="science",
+                severity="info",
+                message=scientific_activity,
+            ),
+            ActivityEntry(
+                timestamp="live",
+                component="verification",
+                severity="info",
+                message=exact_activity,
+            ),
+        ),
+        counterexample_state=(
+            "verified" if exact.get("verified") is True else "none"
+        ),
+        counterexample_candidate=(
+            str(best.get("candidate_id"))
+            if exact.get("verified") is True
+            else "—"
+        ),
+    )
+
+
 def load_persisted_dashboard_state(
     experiment_root: str | Path,
     *,
@@ -2154,6 +2400,14 @@ class InteractiveDashboardSink:
     def write(self, event: Event) -> None:
         with self._lock:
             self.state, _ = reduce_dashboard(self.state, event)
+            self._rendered.clear()
+            self._dirty.set()
+
+    def update_canonical_state(self, state: DashboardState) -> None:
+        """Replace the read-only projection without creating dashboard logic."""
+
+        with self._lock:
+            self.state = state
             self._rendered.clear()
             self._dirty.set()
 

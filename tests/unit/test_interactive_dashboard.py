@@ -2088,6 +2088,94 @@ def test_dashboard_switch_is_opt_in_and_old_rich_sink_stays_default(
     new_sink.close.assert_called_once()
 
 
+def test_standard_dashboard_routes_explicit_python_through_existing_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scientific = SimpleNamespace(
+        generation_limit=12,
+        wall_seconds=36000.0,
+        as_dict=lambda: {"provider_concurrency": 4},
+    )
+    config = SimpleNamespace(
+        protocol="native-v3-python-v1",
+        source_path=Path("m10.toml"),
+        experiment_root=Path("/durable/m10"),
+        exp_id="m10-dashboard",
+        model="gpt-fixture",
+        effort="medium",
+        scientific_search=scientific,
+    )
+    status = {
+        "state": "completed",
+        "generation_index": 0,
+        "counts": {
+            "planned": 8,
+            "terminal": 8,
+            "valid": 1,
+            "evaluated": 1,
+            "contract_invalid": 7,
+            "provider_failed": 0,
+            "evaluation_infrastructure_failure": 0,
+            "duplicate": 0,
+        },
+        "provider": {
+            "program_turns_reserved": 8,
+            "active": 0,
+            "configured_concurrency": 4,
+            "usage": {"totalTokens": 10},
+        },
+        "evaluators": {
+            "completed": 1,
+            "active": 0,
+            "configured": 12,
+        },
+        "throughput": {"elapsed_seconds": 1.0},
+        "scientific_activity": {},
+        "phase_timings": {},
+        "best": {},
+        "exact_verification": {},
+        "slots": [],
+        "recovery": {},
+    }
+    sink = Mock()
+    dashboard_factory = Mock(return_value=sink)
+    monkeypatch.setattr(
+        cli,
+        "experiment_protocol",
+        lambda _path: "native-v3-python-v1",
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_python_preview_config",
+        lambda _path: config,
+    )
+    monkeypatch.setattr(cli, "python_preview_status", lambda _path: status)
+    run = Mock(return_value=status)
+    monkeypatch.setattr(cli, "run_python_preview", run)
+    monkeypatch.setattr(
+        cli,
+        "InteractiveDashboardSink",
+        dashboard_factory,
+    )
+
+    assert (
+        cli._experiment_run(
+            Path("m10.toml"),
+            json_output=False,
+            dashboard=True,
+        )
+        == 0
+    )
+    run.assert_called_once_with(Path("m10.toml"))
+    dashboard_factory.assert_called_once()
+    initial = dashboard_factory.call_args.kwargs["initial_state"]
+    assert initial.completed_slots == 8
+    assert initial.provider_turns_attempted == 8
+    assert initial.evaluations_completed == 1
+    sink.update_canonical_state.assert_called_once()
+    sink.close.assert_called_once()
+
+
 def test_dashboard_q_stops_gracefully_then_interrupts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
