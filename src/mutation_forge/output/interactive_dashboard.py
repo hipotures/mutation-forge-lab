@@ -1480,6 +1480,10 @@ def reduce_dashboard_event(
                 slot_state = "retrying"
                 error = ""
                 retryable = False
+                validation = "—"
+                validation_message = ""
+                probe = "—"
+                probe_message = ""
             elif payload.get("recovered") is True:
                 slot_state = _text(payload.get("recovered_status")) or slot_state
                 validation = _restored_gate_status(payload.get("validation_status"))
@@ -1491,6 +1495,12 @@ def reduce_dashboard_event(
             lifecycle_phase = "provider"
             started = now if started is None else started
             phase_started = now
+            error = ""
+            retryable = False
+            validation = "—"
+            validation_message = ""
+            probe = "—"
+            probe_message = ""
         elif event_type == "provider_turn_completed":
             slot_state = "validating" if payload.get("accepted") is True else "failed"
             lifecycle_phase = "response"
@@ -1564,6 +1574,8 @@ def reduce_dashboard_event(
             started = now if started is None else started
             phase_started = now
         elif event_type == "validation_completed":
+            if started is None:
+                return state
             valid = payload.get("valid") is True
             slot_state = "probing" if valid else "invalid"
             lifecycle_phase = "schema"

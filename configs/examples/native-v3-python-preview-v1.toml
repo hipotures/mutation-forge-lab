@@ -1,0 +1,10 @@
+schema_version = "mforge.experiment.native_python_preview_config.v1"
+protocol = "native-v3-python-v1"
+exp_id = "native-v3-python-preview-example"
+workspace = "../../runs/native-v3-python-preview"
+
+[python_preview]
+model = "gpt-5.6-luna"
+effort = "medium"
+timeout_seconds = 300
+heg_repo = "../../../heg"

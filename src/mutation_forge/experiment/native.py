@@ -325,6 +325,85 @@ def _load_slot_briefs() -> dict[str, str]:
     return briefs
 
 
+def _prompt_evaluation_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the small, rounded evaluation view useful to the model."""
+
+    result: dict[str, Any] = {}
+    for name in ("mean_auc", "best_auc"):
+        value = summary.get(name)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            result[name] = round(float(value), 4)
+    baseline = summary.get("baseline_auc")
+    if isinstance(baseline, Mapping):
+        rounded_baseline = {
+            str(name): round(float(value), 4)
+            for name, value in baseline.items()
+            if isinstance(value, int | float) and not isinstance(value, bool)
+        }
+        if rounded_baseline:
+            result["baseline_auc"] = rounded_baseline
+    return result
+
+
+_MODEL_HIDDEN_CONTEXT_FIELDS = frozenset({"remaining_steps", "schema_version", "step"})
+_MODEL_HIDDEN_PROPOSAL_FIELDS = frozenset(
+    {"anchor_forbidden_length", "proposal_id", "schema_version", "selector_tags"}
+)
+
+
+def _prompt_contract_schema(
+    schema: Mapping[str, Any],
+    hidden_fields: frozenset[str],
+) -> dict[str, Any]:
+    """Remove host-only fields from the schema shown to the model."""
+
+    result = dict(schema)
+    properties = schema.get("properties")
+    if isinstance(properties, Mapping):
+        result["properties"] = {
+            str(name): value for name, value in properties.items() if name not in hidden_fields
+        }
+    required = schema.get("required")
+    if isinstance(required, list):
+        result["required"] = [
+            name for name in required if isinstance(name, str) and name not in hidden_fields
+        ]
+    return result
+
+
+def _prompt_field_semantics(semantics: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove integrity metadata and fields forbidden to generated policies."""
+
+    result = {
+        str(name): value
+        for name, value in semantics.items()
+        if not str(name).endswith("_sha256")
+    }
+    fields = semantics.get("fields")
+    if isinstance(fields, Mapping):
+        filtered_fields: dict[str, Any] = {}
+        for scope, hidden in (
+            ("ctx", _MODEL_HIDDEN_CONTEXT_FIELDS),
+            ("proposal", _MODEL_HIDDEN_PROPOSAL_FIELDS),
+        ):
+            scoped = fields.get(scope)
+            if isinstance(scoped, Mapping):
+                filtered_fields[scope] = {
+                    str(name): value for name, value in scoped.items() if name not in hidden
+                }
+        result["fields"] = filtered_fields
+    decision_problem = semantics.get("decision_problem")
+    if isinstance(decision_problem, Mapping):
+        result["decision_problem"] = {
+            **dict(decision_problem),
+            "selection_rule": (
+                "Larger finite priorities are preferred; the host resolves equal numeric "
+                "priorities deterministically."
+            ),
+        }
+    return result
+
+
 def _native_behavior(
     source: str, limits: SandboxLimits
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
@@ -1486,6 +1565,13 @@ class NativeExperimentAdapter:
         )
         archive = _NativeArchive(layout.archive)
         parent_sources, parent_records = self._parent_data(state, layout)
+        prompt_context_schema = _prompt_contract_schema(
+            context_schema, _MODEL_HIDDEN_CONTEXT_FIELDS
+        )
+        prompt_proposal_schema = _prompt_contract_schema(
+            proposal_schema, _MODEL_HIDDEN_PROPOSAL_FIELDS
+        )
+        prompt_semantic_descriptions = _prompt_field_semantics(semantic_descriptions)
         unfinished_program_ids = _unfinished_generation_program_ids(
             layout.artifacts / "native-generation-checkpoint.json.gz"
         )
@@ -1537,18 +1623,7 @@ class NativeExperimentAdapter:
                     "the policy only ranks the supplied objects."
                 )
             parent_source = str(values.get("parent_source", "")).strip()
-            parent_metadata = values.get("parent_metadata", {})
-            parent_metadata_view = (
-                {
-                    str(key): item
-                    for key, item in parent_metadata.items()
-                    if key not in {"source", "parent_id", "program_id", "candidate_id"}
-                }
-                if isinstance(parent_metadata, Mapping)
-                else {}
-            )
             feedback = str(values.get("search_feedback", "")).strip()
-            archive_context = str(values.get("archive_context", "")).strip()
             evaluation_schedule: dict[str, Any] = {
                 "order_schedule": config.evaluation.order_schedule,
                 "orders": list(generation_orders),
@@ -1665,6 +1740,8 @@ class NativeExperimentAdapter:
                     "operation_budget_by_order": local_risk_budgets_by_order,
                 },
             }
+            for field_name in ("ctx.remaining_steps", "ctx.step"):
+                numeric_scales.pop(field_name, None)
             sections = [
                 "# Mutation Forge native ranker task",
                 "",
@@ -1699,21 +1776,9 @@ class NativeExperimentAdapter:
                     else "This is root generation; no parent policy is available."
                 ),
                 "",
-                "## Parent evaluation metadata",
-                "",
-                (
-                    fenced(parent_metadata_view)
-                    if parent_metadata_view
-                    else "No parent evaluation metadata is available."
-                ),
-                "",
                 "## Search feedback",
                 "",
                 feedback or "No prior search feedback is available.",
-                "",
-                "## Archive context",
-                "",
-                archive_context or "No prior archive context is available.",
                 "",
                 "## Experiment configuration",
                 "",
@@ -1721,20 +1786,21 @@ class NativeExperimentAdapter:
                 "",
                 "## Context contract",
                 "",
-                "The host context follows this schema:",
+                "The model-visible host context fields follow this schema. "
+                "Host-only fields are omitted and must not be read:",
                 "",
-                fenced(context_schema),
+                fenced(prompt_context_schema),
                 "",
                 "## Proposal contract",
                 "",
-                "The host proposal follows this schema; all proposals reaching the ranker are "
-                "legal:",
+                "The model-visible proposal fields follow this schema; all proposals reaching "
+                "the ranker are legal. Host-only fields are omitted and must not be read:",
                 "",
-                fenced(proposal_schema),
+                fenced(prompt_proposal_schema),
                 "",
                 "## Field semantics",
                 "",
-                fenced(semantic_descriptions),
+                fenced(prompt_semantic_descriptions),
                 "",
                 "## Numeric scales and bounds",
                 "",
@@ -1913,10 +1979,7 @@ class NativeExperimentAdapter:
                 return ""
             return pretty(
                 {
-                    "parent_id": parent_id,
-                    "mean_auc": summary.get("mean_auc"),
-                    "best_auc": summary.get("best_auc"),
-                    "baseline_auc": summary.get("baseline_auc", {}),
+                    **_prompt_evaluation_metrics(summary),
                     "instruction": (
                         "Keep evidence-backed strengths, change the assigned brief's "
                         "mechanism, and avoid repeating recorded failure modes."

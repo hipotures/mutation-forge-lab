@@ -1,0 +1,1754 @@
+{
+  "raw_sha256": {
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/behavior.json.gz": "7ade0005438301852ba25c6016bad81c5af8193d76307391079576ff6100c922",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/canonical_response.json.gz": "ac609b25bf1624d9736b9be869ca7f74247a3843516ec11f03365ff832458d1e",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/identity.json.gz": "7747527a8c7d01037210114a9d627034d4fe31bdb118859287fe2d73ee29f99d",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/metadata-validation.json.gz": "8e59b47e7a7961bdc90b8f0e5583c349c80f16f79054a871e24b17a3774c909c",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/provenance.json.gz": "7757551e357894c2c2e8896e5b94b4f203f7f7d5db6b43d983520bd4e61f822d",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-profile.json.gz": "3fbed18f2c2ca6020ad7ac62ddc24582f307dbf1b2740406b9d478b8e6a4959c",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-rpc.jsonl": "2a7c33189bc9884598b7262f85237d3342f83b8ed05ca42b2b4151ef8d1c8617",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.events.jsonl": "07891375fdb8bb50ae0ac4c078845646c9643a5377fba0e5f990525ce9a53454",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.output-schema.json.gz": "f1c5c59f7e3b9ff6fc99be83cfc339d09aea34b0b7a606947956b51c2edf8af8",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.provider-raw.json.gz": "7b864e3d23d337d8e6a3ccb34fe8e6e54d1bdb952693554c56086c3a2f33854a",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.json.gz": "c6ee7326e0b5a2fb661ac5a605e04080b557dd93e14d1e272ed239ce4888f0fe",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.md": "3902b3c6a2580acfc65546870edb032a78aadcf914544ff5539f80786934bafc",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.response.json.gz": "ac609b25bf1624d9736b9be869ca7f74247a3843516ec11f03365ff832458d1e",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.response.md": "8d92176e69b47344027cebab053c63a0116de032e793b6b56b513d2c89315464",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.response.raw.txt": "aa53dddfaaabacad34e3a504e75c4a37bfcda09910a66aa19bc3d402f3d4fd63",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.stdout.jsonl": "38209f159a0c54f121ba2613898d4744e51b7df0196dadea8cf7a8d06eb3230e",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.system-prompt.md": "a16c8535c58bb936e494e15ded24ccb26469526a4c47749cf63335a910ebdcf9",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.transcript.sha256": "df13a181b2e17d8f7cddc5d9a6a5d3f800253012326d413932b6e25d93304199",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.transport-diagnostics.json.gz": "27d7bfe46e28153a3e3e6a008593e9b585fa0ca03343d09eecc33e03297ca1b5",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.usage.json.gz": "82aa403cc9d0532d94bd1ef9b1749433ec35167fe22868dde99bda7672a2bc31",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.wire.jsonl": "35fe029396fdc7a0f8fb71f58405c7356b673ab37c5337fb80a72c271ce98eb2",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/source.py": "e4f673d381d5bac285d85cef36591bcaea3304cd1accbf0b2731c18b6524981e",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/turn-manifest.json.gz": "753f4b136652a153fbee603a92e86fb52b3a91c368e0aa1c8fc2c4af74572047",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/validation.json.gz": "5a22d2642c063d7fede6056aff93e807a4fdf5eb373dfe5847c930cb05d08e9c",
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial/worker_telemetry.json.gz": "0a7da0dc21fd57290ca6e1a6c2d51b8951759922a78b2ad878401c7e6cb0e83c",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/canonical_response.json.gz": "17718cd36a9c67b2dcc62ebef134a97140e104bdb76af3de998443615d06c5e1",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/identity.json.gz": "7747527a8c7d01037210114a9d627034d4fe31bdb118859287fe2d73ee29f99d",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/provenance.json.gz": "7757551e357894c2c2e8896e5b94b4f203f7f7d5db6b43d983520bd4e61f822d",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-profile.json.gz": "3fbed18f2c2ca6020ad7ac62ddc24582f307dbf1b2740406b9d478b8e6a4959c",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-rpc.jsonl": "2a7c33189bc9884598b7262f85237d3342f83b8ed05ca42b2b4151ef8d1c8617",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.events.jsonl": "07891375fdb8bb50ae0ac4c078845646c9643a5377fba0e5f990525ce9a53454",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.output-schema.json.gz": "f1c5c59f7e3b9ff6fc99be83cfc339d09aea34b0b7a606947956b51c2edf8af8",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.provider-raw.json.gz": "9aa51de5044a850f09c90f702d91a925250a0fb5266f763ec275747b472e0227",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.json.gz": "c6ee7326e0b5a2fb661ac5a605e04080b557dd93e14d1e272ed239ce4888f0fe",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.md": "3902b3c6a2580acfc65546870edb032a78aadcf914544ff5539f80786934bafc",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.response.json.gz": "17718cd36a9c67b2dcc62ebef134a97140e104bdb76af3de998443615d06c5e1",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.response.md": "12a892d9e31986397f48383b1efd2e8a5ddae1ea768dbc44cfc558ce99bba6eb",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.response.raw.txt": "26dbd7e230d89a20b65cc949bd1b3cf7c094d870f51c5e55e309699c6c14a555",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.stdout.jsonl": "38209f159a0c54f121ba2613898d4744e51b7df0196dadea8cf7a8d06eb3230e",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.system-prompt.md": "a16c8535c58bb936e494e15ded24ccb26469526a4c47749cf63335a910ebdcf9",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.transcript.sha256": "df13a181b2e17d8f7cddc5d9a6a5d3f800253012326d413932b6e25d93304199",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.transport-diagnostics.json.gz": "27d7bfe46e28153a3e3e6a008593e9b585fa0ca03343d09eecc33e03297ca1b5",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.usage.json.gz": "82aa403cc9d0532d94bd1ef9b1749433ec35167fe22868dde99bda7672a2bc31",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.wire.jsonl": "35fe029396fdc7a0f8fb71f58405c7356b673ab37c5337fb80a72c271ce98eb2",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/source.py": "a0a2cd52673b6c17af0035f2f949ee91dbbca7156566727c445506a6b315a3cf",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/turn-manifest.json.gz": "8daed6c084ca05a81a8eaf9bc00d87cc16c8947f80a78c82e22f46ff5a504a17",
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial/validation.json.gz": "f42052c52a72a40934d01aae997a377c8cc489abaf63f3ad8fe9e2ec1a7842f1",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/behavior.json.gz": "7ade0005438301852ba25c6016bad81c5af8193d76307391079576ff6100c922",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/canonical_response.json.gz": "ac609b25bf1624d9736b9be869ca7f74247a3843516ec11f03365ff832458d1e",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/identity.json.gz": "7747527a8c7d01037210114a9d627034d4fe31bdb118859287fe2d73ee29f99d",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/metadata-validation.json.gz": "8e59b47e7a7961bdc90b8f0e5583c349c80f16f79054a871e24b17a3774c909c",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/provenance.json.gz": "7757551e357894c2c2e8896e5b94b4f203f7f7d5db6b43d983520bd4e61f822d",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.codex-profile.json.gz": "3fbed18f2c2ca6020ad7ac62ddc24582f307dbf1b2740406b9d478b8e6a4959c",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.codex-rpc.jsonl": "2a7c33189bc9884598b7262f85237d3342f83b8ed05ca42b2b4151ef8d1c8617",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.events.jsonl": "07891375fdb8bb50ae0ac4c078845646c9643a5377fba0e5f990525ce9a53454",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.output-schema.json.gz": "f1c5c59f7e3b9ff6fc99be83cfc339d09aea34b0b7a606947956b51c2edf8af8",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.provider-raw.json.gz": "7b864e3d23d337d8e6a3ccb34fe8e6e54d1bdb952693554c56086c3a2f33854a",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.request.json.gz": "56cc6c0c42e9faae88988f084009ff1d569538059fc32a2f5337de2bbaede364",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.request.md": "3902b3c6a2580acfc65546870edb032a78aadcf914544ff5539f80786934bafc",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.response.json.gz": "ac609b25bf1624d9736b9be869ca7f74247a3843516ec11f03365ff832458d1e",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.response.md": "8d92176e69b47344027cebab053c63a0116de032e793b6b56b513d2c89315464",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.response.raw.txt": "aa53dddfaaabacad34e3a504e75c4a37bfcda09910a66aa19bc3d402f3d4fd63",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.stdout.jsonl": "38209f159a0c54f121ba2613898d4744e51b7df0196dadea8cf7a8d06eb3230e",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.system-prompt.md": "a16c8535c58bb936e494e15ded24ccb26469526a4c47749cf63335a910ebdcf9",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.transcript.sha256": "df13a181b2e17d8f7cddc5d9a6a5d3f800253012326d413932b6e25d93304199",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.transport-diagnostics.json.gz": "27d7bfe46e28153a3e3e6a008593e9b585fa0ca03343d09eecc33e03297ca1b5",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.usage.json.gz": "82aa403cc9d0532d94bd1ef9b1749433ec35167fe22868dde99bda7672a2bc31",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/slot-00.wire.jsonl": "35fe029396fdc7a0f8fb71f58405c7356b673ab37c5337fb80a72c271ce98eb2",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/source.py": "e4f673d381d5bac285d85cef36591bcaea3304cd1accbf0b2731c18b6524981e",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/turn-manifest.json.gz": "1e0f134cb3904410a896d99986ff1eff41318f25e2baccccdad492a0ecc47fd3",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/validation.json.gz": "5a22d2642c063d7fede6056aff93e807a4fdf5eb373dfe5847c930cb05d08e9c",
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01/worker_telemetry.json.gz": "0a7da0dc21fd57290ca6e1a6c2d51b8951759922a78b2ad878401c7e6cb0e83c",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/behavior.json.gz": "7ade0005438301852ba25c6016bad81c5af8193d76307391079576ff6100c922",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/canonical_response.json.gz": "ac609b25bf1624d9736b9be869ca7f74247a3843516ec11f03365ff832458d1e",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/identity.json.gz": "7747527a8c7d01037210114a9d627034d4fe31bdb118859287fe2d73ee29f99d",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/metadata-validation.json.gz": "8e59b47e7a7961bdc90b8f0e5583c349c80f16f79054a871e24b17a3774c909c",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/provenance.json.gz": "7757551e357894c2c2e8896e5b94b4f203f7f7d5db6b43d983520bd4e61f822d",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-profile.json.gz": "3fbed18f2c2ca6020ad7ac62ddc24582f307dbf1b2740406b9d478b8e6a4959c",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-rpc.jsonl": "096229a2cf4574ddb3e1d0222fefee1d849f45f51cac6ab869ba94a693b99f6b",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.events.jsonl": "cdfecef2750fe0f18e56bd8b694cf6f602de68360ccf63faecaebf9f1673d240",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.output-schema.json.gz": "f1c5c59f7e3b9ff6fc99be83cfc339d09aea34b0b7a606947956b51c2edf8af8",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.provider-raw.json.gz": "3e690d7d0b2dfb6dfd91ba4945344a2a7a7e65200fcab56a60772d40dd12f641",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.json.gz": "c6ee7326e0b5a2fb661ac5a605e04080b557dd93e14d1e272ed239ce4888f0fe",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.md": "3902b3c6a2580acfc65546870edb032a78aadcf914544ff5539f80786934bafc",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.codex-profile.json.gz": "d2ad2eb7fcef72c2d9cfe95f5d16d5bee536e72e517e7b838ea2435b091a22f6",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.codex-rpc.jsonl": "2a7c33189bc9884598b7262f85237d3342f83b8ed05ca42b2b4151ef8d1c8617",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.events.jsonl": "07891375fdb8bb50ae0ac4c078845646c9643a5377fba0e5f990525ce9a53454",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.output-schema.json.gz": "f1c5c59f7e3b9ff6fc99be83cfc339d09aea34b0b7a606947956b51c2edf8af8",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.provider-raw.json.gz": "7b864e3d23d337d8e6a3ccb34fe8e6e54d1bdb952693554c56086c3a2f33854a",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.request.json.gz": "04ef6a87be97446aa958c4f3add2e19e57d33432b4c5397f61c14ffd6ef2ebc0",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.request.md": "3902b3c6a2580acfc65546870edb032a78aadcf914544ff5539f80786934bafc",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.response.json.gz": "ac609b25bf1624d9736b9be869ca7f74247a3843516ec11f03365ff832458d1e",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.response.md": "8d92176e69b47344027cebab053c63a0116de032e793b6b56b513d2c89315464",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.response.raw.txt": "aa53dddfaaabacad34e3a504e75c4a37bfcda09910a66aa19bc3d402f3d4fd63",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.stdout.jsonl": "38209f159a0c54f121ba2613898d4744e51b7df0196dadea8cf7a8d06eb3230e",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.system-prompt.md": "a16c8535c58bb936e494e15ded24ccb26469526a4c47749cf63335a910ebdcf9",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.transcript.sha256": "df13a181b2e17d8f7cddc5d9a6a5d3f800253012326d413932b6e25d93304199",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.transport-diagnostics.json.gz": "27d7bfe46e28153a3e3e6a008593e9b585fa0ca03343d09eecc33e03297ca1b5",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.usage.json.gz": "82aa403cc9d0532d94bd1ef9b1749433ec35167fe22868dde99bda7672a2bc31",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.retry-01.wire.jsonl": "35fe029396fdc7a0f8fb71f58405c7356b673ab37c5337fb80a72c271ce98eb2",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.stdout.jsonl": "928771e8ad7ea76227ee81abd0e14e6696d39ab749e1d0de093db15a07d996e5",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.system-prompt.md": "a16c8535c58bb936e494e15ded24ccb26469526a4c47749cf63335a910ebdcf9",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.transcript.sha256": "6cfcabd6d00a5b66cb03eb596427a3d2edf39555ab59cb5844633fc7812e6afd",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.transport-diagnostics.json.gz": "27d7bfe46e28153a3e3e6a008593e9b585fa0ca03343d09eecc33e03297ca1b5",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.usage.json.gz": "82aa403cc9d0532d94bd1ef9b1749433ec35167fe22868dde99bda7672a2bc31",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/slot-00.wire.jsonl": "35fe029396fdc7a0f8fb71f58405c7356b673ab37c5337fb80a72c271ce98eb2",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/source.py": "e4f673d381d5bac285d85cef36591bcaea3304cd1accbf0b2731c18b6524981e",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/turn-manifest.attempt-01.json.gz": "3cc7f6b0cd71dde850323c0b7f82debd43989e3c84c716a0cc4bbdf690b0d5d2",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/turn-manifest.json.gz": "2d5c308f0dedc247e6083cfaebd98ba69c126dff6ae65ca2c99d84c2fa1678eb",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/validation.json.gz": "5a22d2642c063d7fede6056aff93e807a4fdf5eb373dfe5847c930cb05d08e9c",
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial/worker_telemetry.json.gz": "0a7da0dc21fd57290ca6e1a6c2d51b8951759922a78b2ad878401c7e6cb0e83c",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-profile.json.gz": "3fbed18f2c2ca6020ad7ac62ddc24582f307dbf1b2740406b9d478b8e6a4959c",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.codex-rpc.jsonl": "096229a2cf4574ddb3e1d0222fefee1d849f45f51cac6ab869ba94a693b99f6b",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.events.jsonl": "cdfecef2750fe0f18e56bd8b694cf6f602de68360ccf63faecaebf9f1673d240",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.output-schema.json.gz": "f1c5c59f7e3b9ff6fc99be83cfc339d09aea34b0b7a606947956b51c2edf8af8",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.provider-raw.json.gz": "80408f1219fcbbd26f4dd81bda9f5332cea84693b8795c8a5b086763032a4001",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.json.gz": "c6ee7326e0b5a2fb661ac5a605e04080b557dd93e14d1e272ed239ce4888f0fe",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.request.md": "3902b3c6a2580acfc65546870edb032a78aadcf914544ff5539f80786934bafc",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.stdout.jsonl": "928771e8ad7ea76227ee81abd0e14e6696d39ab749e1d0de093db15a07d996e5",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.system-prompt.md": "a16c8535c58bb936e494e15ded24ccb26469526a4c47749cf63335a910ebdcf9",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.transcript.sha256": "6cfcabd6d00a5b66cb03eb596427a3d2edf39555ab59cb5844633fc7812e6afd",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.transport-diagnostics.json.gz": "27d7bfe46e28153a3e3e6a008593e9b585fa0ca03343d09eecc33e03297ca1b5",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.usage.json.gz": "ada2e2ef5e67d1927b38ba1b77f051cce9af749151dbfdec88ec08e542bcddcf",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/slot-00.wire.jsonl": "35fe029396fdc7a0f8fb71f58405c7356b673ab37c5337fb80a72c271ce98eb2",
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial/turn-manifest.json.gz": "96ec3f5c0a835d8a67951a0f94cee4de22033588d86b4fc33f62b233f75efadb"
+  },
+  "schema_version": "mforge.native-v2-appserver-artifact-contract.v1",
+  "structural_profiles": {
+    "initial-success/artifacts/generations/generation-0000/slot-00/initial": {
+      "behavior.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "identity",
+            "input_contract",
+            "probes",
+            "schema_version",
+            "signature_sha256",
+            "terminal_status"
+          ],
+          "schema_version": "mforge.native.behavior.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "canonical_response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "identity.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "ast_node_count",
+            "normalized_ast_sha256",
+            "source_sha256",
+            "validator_version"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "metadata-validation.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "declared_used_fields",
+            "errors",
+            "extracted_used_fields",
+            "schema_version",
+            "status"
+          ],
+          "schema_version": "mforge.native.metadata-validation.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "provenance.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "effort",
+            "model",
+            "provider_request_id",
+            "provider_thread_id",
+            "provider_turn_id",
+            "transport_sha256"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "source.py": {
+        "kind": "python-utf8"
+      },
+      "turn-manifest.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "artifact_complete",
+            "charged",
+            "content_received",
+            "files",
+            "generation",
+            "missing_files",
+            "phase",
+            "provider_thread_id",
+            "provider_turn_id",
+            "request_accepted",
+            "request_idempotency_key",
+            "response_projection_valid",
+            "schema_version",
+            "slot",
+            "source_extraction",
+            "terminal_status",
+            "uncharged",
+            "usage_final_exact",
+            "usage_quality",
+            "validation_completed"
+          ],
+          "schema_version": "mforge.experiment.turn-manifest.v2",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "validation.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "errors",
+            "identity",
+            "valid"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "worker_telemetry.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "calls",
+            "captured_stderr_bytes",
+            "controls",
+            "failures",
+            "max_policy_elapsed_ns",
+            "pid",
+            "protocol_version",
+            "total_call_wall_seconds",
+            "total_policy_elapsed_ns",
+            "usable"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-profile.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "approvalPolicy",
+            "artifactPrefix",
+            "effort",
+            "ephemeral",
+            "model",
+            "protocolAuditSha256",
+            "sandbox"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-rpc.jsonl": {
+        "item_keys": [
+          "id",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.events.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "method",
+          "params"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.output-schema.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "$id",
+            "$schema",
+            "additionalProperties",
+            "properties",
+            "required",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.provider-raw.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "request_id",
+            "response_projection_valid",
+            "response_text",
+            "thread_id",
+            "transport_diagnostics",
+            "turn_id",
+            "usage"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "archive_context",
+            "artifact_dir",
+            "artifact_prefix",
+            "artifact_root",
+            "brief_id",
+            "campaign_id",
+            "effort",
+            "generation",
+            "idempotency_key",
+            "max_repairs",
+            "model",
+            "output_schema",
+            "parent_id",
+            "parent_metadata",
+            "parent_source",
+            "phase",
+            "prompt",
+            "prompt_hash",
+            "reasoning_effort",
+            "remaining_repairs",
+            "repair_attempt",
+            "repair_prompt",
+            "request_idempotency_key",
+            "search_feedback",
+            "slot",
+            "system_prompt"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.response.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.response.raw.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stderr.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stdout.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "id",
+          "method",
+          "params",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.system-prompt.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.transcript.sha256": {
+        "kind": "sha256-text"
+      },
+      "{prefix}.transport-diagnostics.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "item_keys": [
+            "bytes",
+            "event",
+            "method",
+            "request"
+          ],
+          "type": "array"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.usage.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "cacheWriteInputTokens",
+            "cachedInputTokens",
+            "final",
+            "inputTokens",
+            "outputTokens",
+            "partial",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.wire.jsonl": {
+        "item_keys": [
+          "direction",
+          "message"
+        ],
+        "kind": "jsonl"
+      }
+    },
+    "repair-success/artifacts/generations/generation-0000/slot-00/initial": {
+      "canonical_response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "identity.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "ast_node_count",
+            "normalized_ast_sha256",
+            "source_sha256",
+            "validator_version"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "provenance.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "effort",
+            "model",
+            "provider_request_id",
+            "provider_thread_id",
+            "provider_turn_id",
+            "transport_sha256"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "source.py": {
+        "kind": "python-utf8"
+      },
+      "turn-manifest.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "artifact_complete",
+            "charged",
+            "content_received",
+            "files",
+            "generation",
+            "missing_files",
+            "phase",
+            "provider_thread_id",
+            "provider_turn_id",
+            "request_accepted",
+            "request_idempotency_key",
+            "response_projection_valid",
+            "schema_version",
+            "slot",
+            "source_extraction",
+            "terminal_status",
+            "uncharged",
+            "usage_final_exact",
+            "usage_quality",
+            "validation_completed"
+          ],
+          "schema_version": "mforge.experiment.turn-manifest.v2",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "validation.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "errors",
+            "identity",
+            "valid"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-profile.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "approvalPolicy",
+            "artifactPrefix",
+            "effort",
+            "ephemeral",
+            "model",
+            "protocolAuditSha256",
+            "sandbox"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-rpc.jsonl": {
+        "item_keys": [
+          "id",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.events.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "method",
+          "params"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.output-schema.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "$id",
+            "$schema",
+            "additionalProperties",
+            "properties",
+            "required",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.provider-raw.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "request_id",
+            "response_projection_valid",
+            "response_text",
+            "thread_id",
+            "transport_diagnostics",
+            "turn_id",
+            "usage"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "archive_context",
+            "artifact_dir",
+            "artifact_prefix",
+            "artifact_root",
+            "brief_id",
+            "campaign_id",
+            "effort",
+            "generation",
+            "idempotency_key",
+            "max_repairs",
+            "model",
+            "output_schema",
+            "parent_id",
+            "parent_metadata",
+            "parent_source",
+            "phase",
+            "prompt",
+            "prompt_hash",
+            "reasoning_effort",
+            "remaining_repairs",
+            "repair_attempt",
+            "repair_prompt",
+            "request_idempotency_key",
+            "search_feedback",
+            "slot",
+            "system_prompt"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.response.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.response.raw.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stderr.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stdout.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "id",
+          "method",
+          "params",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.system-prompt.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.transcript.sha256": {
+        "kind": "sha256-text"
+      },
+      "{prefix}.transport-diagnostics.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "item_keys": [
+            "bytes",
+            "event",
+            "method",
+            "request"
+          ],
+          "type": "array"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.usage.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "cacheWriteInputTokens",
+            "cachedInputTokens",
+            "final",
+            "inputTokens",
+            "outputTokens",
+            "partial",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.wire.jsonl": {
+        "item_keys": [
+          "direction",
+          "message"
+        ],
+        "kind": "jsonl"
+      }
+    },
+    "repair-success/artifacts/generations/generation-0000/slot-00/repair-01": {
+      "behavior.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "identity",
+            "input_contract",
+            "probes",
+            "schema_version",
+            "signature_sha256",
+            "terminal_status"
+          ],
+          "schema_version": "mforge.native.behavior.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "canonical_response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "identity.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "ast_node_count",
+            "normalized_ast_sha256",
+            "source_sha256",
+            "validator_version"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "metadata-validation.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "declared_used_fields",
+            "errors",
+            "extracted_used_fields",
+            "schema_version",
+            "status"
+          ],
+          "schema_version": "mforge.native.metadata-validation.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "provenance.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "effort",
+            "model",
+            "provider_request_id",
+            "provider_thread_id",
+            "provider_turn_id",
+            "transport_sha256"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "source.py": {
+        "kind": "python-utf8"
+      },
+      "turn-manifest.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "artifact_complete",
+            "charged",
+            "content_received",
+            "files",
+            "generation",
+            "missing_files",
+            "phase",
+            "provider_thread_id",
+            "provider_turn_id",
+            "request_accepted",
+            "request_idempotency_key",
+            "response_projection_valid",
+            "schema_version",
+            "slot",
+            "source_extraction",
+            "terminal_status",
+            "uncharged",
+            "usage_final_exact",
+            "usage_quality",
+            "validation_completed"
+          ],
+          "schema_version": "mforge.experiment.turn-manifest.v2",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "validation.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "errors",
+            "identity",
+            "valid"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "worker_telemetry.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "calls",
+            "captured_stderr_bytes",
+            "controls",
+            "failures",
+            "max_policy_elapsed_ns",
+            "pid",
+            "protocol_version",
+            "total_call_wall_seconds",
+            "total_policy_elapsed_ns",
+            "usable"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-profile.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "approvalPolicy",
+            "artifactPrefix",
+            "effort",
+            "ephemeral",
+            "model",
+            "protocolAuditSha256",
+            "sandbox"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-rpc.jsonl": {
+        "item_keys": [
+          "id",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.events.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "method",
+          "params"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.output-schema.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "$id",
+            "$schema",
+            "additionalProperties",
+            "properties",
+            "required",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.provider-raw.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "request_id",
+            "response_projection_valid",
+            "response_text",
+            "thread_id",
+            "transport_diagnostics",
+            "turn_id",
+            "usage"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "archive_context",
+            "artifact_dir",
+            "artifact_prefix",
+            "artifact_root",
+            "brief_id",
+            "campaign_id",
+            "effort",
+            "generation",
+            "idempotency_key",
+            "max_repairs",
+            "model",
+            "output_schema",
+            "parent_id",
+            "parent_metadata",
+            "parent_source",
+            "phase",
+            "prompt",
+            "prompt_hash",
+            "reasoning_effort",
+            "remaining_repairs",
+            "repair_attempt",
+            "repair_prompt",
+            "request_idempotency_key",
+            "search_feedback",
+            "slot",
+            "system_prompt"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.response.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.response.raw.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stderr.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stdout.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "id",
+          "method",
+          "params",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.system-prompt.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.transcript.sha256": {
+        "kind": "sha256-text"
+      },
+      "{prefix}.transport-diagnostics.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "item_keys": [
+            "bytes",
+            "event",
+            "method",
+            "request"
+          ],
+          "type": "array"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.usage.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "cacheWriteInputTokens",
+            "cachedInputTokens",
+            "final",
+            "inputTokens",
+            "outputTokens",
+            "partial",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.wire.jsonl": {
+        "item_keys": [
+          "direction",
+          "message"
+        ],
+        "kind": "jsonl"
+      }
+    },
+    "retry-success/artifacts/generations/generation-0000/slot-00/initial": {
+      "behavior.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "identity",
+            "input_contract",
+            "probes",
+            "schema_version",
+            "signature_sha256",
+            "terminal_status"
+          ],
+          "schema_version": "mforge.native.behavior.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "canonical_response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "identity.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "ast_node_count",
+            "normalized_ast_sha256",
+            "source_sha256",
+            "validator_version"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "metadata-validation.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "declared_used_fields",
+            "errors",
+            "extracted_used_fields",
+            "schema_version",
+            "status"
+          ],
+          "schema_version": "mforge.native.metadata-validation.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "provenance.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "effort",
+            "model",
+            "provider_request_id",
+            "provider_thread_id",
+            "provider_turn_id",
+            "transport_sha256"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "source.py": {
+        "kind": "python-utf8"
+      },
+      "turn-manifest.attempt-01.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "artifact_complete",
+            "charged",
+            "content_received",
+            "error",
+            "files",
+            "generation",
+            "missing_files",
+            "phase",
+            "provider_thread_id",
+            "provider_turn_id",
+            "request_accepted",
+            "request_idempotency_key",
+            "response_projection_valid",
+            "schema_version",
+            "slot",
+            "source_extraction",
+            "terminal_status",
+            "uncharged",
+            "usage_final_exact",
+            "usage_quality",
+            "validation_completed"
+          ],
+          "schema_version": "mforge.experiment.turn-manifest.v2",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "turn-manifest.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "artifact_complete",
+            "charged",
+            "content_received",
+            "files",
+            "generation",
+            "missing_files",
+            "phase",
+            "provider_thread_id",
+            "provider_turn_id",
+            "request_accepted",
+            "request_idempotency_key",
+            "response_projection_valid",
+            "schema_version",
+            "slot",
+            "source_extraction",
+            "terminal_status",
+            "uncharged",
+            "usage_final_exact",
+            "usage_quality",
+            "validation_completed"
+          ],
+          "schema_version": "mforge.experiment.turn-manifest.v2",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "validation.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "errors",
+            "identity",
+            "valid"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "worker_telemetry.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "calls",
+            "captured_stderr_bytes",
+            "controls",
+            "failures",
+            "max_policy_elapsed_ns",
+            "pid",
+            "protocol_version",
+            "total_call_wall_seconds",
+            "total_policy_elapsed_ns",
+            "usable"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-profile.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "approvalPolicy",
+            "artifactPrefix",
+            "effort",
+            "ephemeral",
+            "model",
+            "protocolAuditSha256",
+            "sandbox"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-rpc.jsonl": {
+        "item_keys": [
+          "id",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.events.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "method",
+          "params"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.output-schema.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "$id",
+            "$schema",
+            "additionalProperties",
+            "properties",
+            "required",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.provider-raw.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "request_id",
+            "response_projection_valid",
+            "response_text",
+            "thread_id",
+            "transport_diagnostics",
+            "turn_id",
+            "usage"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "archive_context",
+            "artifact_dir",
+            "artifact_prefix",
+            "artifact_root",
+            "brief_id",
+            "campaign_id",
+            "effort",
+            "generation",
+            "idempotency_key",
+            "max_repairs",
+            "model",
+            "output_schema",
+            "parent_id",
+            "parent_metadata",
+            "parent_source",
+            "phase",
+            "prompt",
+            "prompt_hash",
+            "reasoning_effort",
+            "remaining_repairs",
+            "repair_attempt",
+            "repair_prompt",
+            "request_idempotency_key",
+            "search_feedback",
+            "slot",
+            "system_prompt"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.retry-01.codex-profile.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "approvalPolicy",
+            "artifactPrefix",
+            "effort",
+            "ephemeral",
+            "model",
+            "protocolAuditSha256",
+            "sandbox"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.retry-01.codex-rpc.jsonl": {
+        "item_keys": [
+          "id",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.retry-01.events.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "method",
+          "params"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.retry-01.output-schema.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "$id",
+            "$schema",
+            "additionalProperties",
+            "properties",
+            "required",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.retry-01.provider-raw.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "request_id",
+            "response_projection_valid",
+            "response_text",
+            "thread_id",
+            "transport_diagnostics",
+            "turn_id",
+            "usage"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.retry-01.request.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "archive_context",
+            "artifact_dir",
+            "artifact_prefix",
+            "artifact_root",
+            "brief_id",
+            "campaign_id",
+            "effort",
+            "generation",
+            "idempotency_key",
+            "max_repairs",
+            "model",
+            "output_schema",
+            "parent_id",
+            "parent_metadata",
+            "parent_source",
+            "phase",
+            "prompt",
+            "prompt_hash",
+            "reasoning_effort",
+            "remaining_repairs",
+            "repair_attempt",
+            "repair_prompt",
+            "request_idempotency_key",
+            "search_feedback",
+            "slot",
+            "system_prompt"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.retry-01.request.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.retry-01.response.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "assumptions",
+            "design_summary",
+            "expected_failure_modes",
+            "hypothesis",
+            "schema_version",
+            "source",
+            "used_fields"
+          ],
+          "schema_version": "mforge.native.generated_policy.v1",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.retry-01.response.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.retry-01.response.raw.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.retry-01.stderr.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.retry-01.stdout.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "id",
+          "method",
+          "params",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.retry-01.system-prompt.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.retry-01.transcript.sha256": {
+        "kind": "sha256-text"
+      },
+      "{prefix}.retry-01.transport-diagnostics.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "item_keys": [
+            "bytes",
+            "event",
+            "method",
+            "request"
+          ],
+          "type": "array"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.retry-01.usage.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "cacheWriteInputTokens",
+            "cachedInputTokens",
+            "final",
+            "inputTokens",
+            "outputTokens",
+            "partial",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.retry-01.wire.jsonl": {
+        "item_keys": [
+          "direction",
+          "message"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.stderr.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stdout.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "id",
+          "method",
+          "params",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.system-prompt.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.transcript.sha256": {
+        "kind": "sha256-text"
+      },
+      "{prefix}.transport-diagnostics.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "item_keys": [
+            "bytes",
+            "event",
+            "method",
+            "request"
+          ],
+          "type": "array"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.usage.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "cacheWriteInputTokens",
+            "cachedInputTokens",
+            "final",
+            "inputTokens",
+            "outputTokens",
+            "partial",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.wire.jsonl": {
+        "item_keys": [
+          "direction",
+          "message"
+        ],
+        "kind": "jsonl"
+      }
+    },
+    "terminal-failure/artifacts/generations/generation-0000/slot-00/initial": {
+      "turn-manifest.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "artifact_complete",
+            "charged",
+            "content_received",
+            "error",
+            "files",
+            "generation",
+            "missing_files",
+            "phase",
+            "provider_thread_id",
+            "provider_turn_id",
+            "request_accepted",
+            "request_idempotency_key",
+            "response_projection_valid",
+            "schema_version",
+            "slot",
+            "source_extraction",
+            "terminal_status",
+            "uncharged",
+            "usage_final_exact",
+            "usage_quality",
+            "validation_completed"
+          ],
+          "schema_version": "mforge.experiment.turn-manifest.v2",
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-profile.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "approvalPolicy",
+            "artifactPrefix",
+            "effort",
+            "ephemeral",
+            "model",
+            "protocolAuditSha256",
+            "sandbox"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.codex-rpc.jsonl": {
+        "item_keys": [
+          "id",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.events.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "method",
+          "params"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.output-schema.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "$id",
+            "$schema",
+            "additionalProperties",
+            "properties",
+            "required",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.provider-raw.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "request_id",
+            "response_projection_valid",
+            "response_text",
+            "thread_id",
+            "transport_diagnostics",
+            "turn_id",
+            "usage"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "archive_context",
+            "artifact_dir",
+            "artifact_prefix",
+            "artifact_root",
+            "brief_id",
+            "campaign_id",
+            "effort",
+            "generation",
+            "idempotency_key",
+            "max_repairs",
+            "model",
+            "output_schema",
+            "parent_id",
+            "parent_metadata",
+            "parent_source",
+            "phase",
+            "prompt",
+            "prompt_hash",
+            "reasoning_effort",
+            "remaining_repairs",
+            "repair_attempt",
+            "repair_prompt",
+            "request_idempotency_key",
+            "search_feedback",
+            "slot",
+            "system_prompt"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.request.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stderr.txt": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.stdout.jsonl": {
+        "item_keys": [
+          "emittedAtMs",
+          "id",
+          "method",
+          "params",
+          "result"
+        ],
+        "kind": "jsonl"
+      },
+      "{prefix}.system-prompt.md": {
+        "kind": "utf8-text"
+      },
+      "{prefix}.transcript.sha256": {
+        "kind": "sha256-text"
+      },
+      "{prefix}.transport-diagnostics.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "item_keys": [
+            "bytes",
+            "event",
+            "method",
+            "request"
+          ],
+          "type": "array"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.usage.json.gz": {
+        "gzip_mtime": 0,
+        "json": {
+          "keys": [
+            "cacheWriteInputTokens",
+            "cachedInputTokens",
+            "final",
+            "inputTokens",
+            "outputTokens",
+            "partial",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ],
+          "type": "object"
+        },
+        "kind": "gzip-json"
+      },
+      "{prefix}.wire.jsonl": {
+        "item_keys": [
+          "direction",
+          "message"
+        ],
+        "kind": "jsonl"
+      }
+    }
+  }
+}

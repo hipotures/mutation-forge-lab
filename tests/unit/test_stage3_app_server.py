@@ -38,6 +38,7 @@ sys.modules[_SPEC.name] = _FIXTURE
 _SPEC.loader.exec_module(_FIXTURE)
 FakeProcess = _FIXTURE.FakeProcess
 FakeScenario = _FIXTURE.FakeScenario
+FORK_PROFILE = ModelProfile("codex", "gpt-5.6-luna", "high")
 
 
 def _capsule(tmp_path: Path) -> IsolatedCapsule:
@@ -87,6 +88,102 @@ def _fixed_process_factory(process: Any) -> Any:
         return process
 
     return factory
+
+
+def test_switching_back_to_completed_parent_allows_exact_child_fork(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(),
+        limits=AppServerLimits(max_turns=8, max_campaigns=4),
+    )
+    try:
+        anchor = adapter.generate_persistent("anchor", FORK_PROFILE)
+        parent_branch = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        parent = adapter.generate_persistent("parent", FORK_PROFILE)
+        sibling_branch = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        adapter.generate_persistent("sibling", FORK_PROFILE)
+        adapter.activate_forked_thread(
+            parent_branch.child_thread_id,
+            completed_turn_ids=(anchor.turn_id, parent.turn_id),
+        )
+        child = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=parent.turn_id,
+        )
+    finally:
+        adapter.close()
+
+    assert child.source_thread_id == parent_branch.child_thread_id
+    assert child.included_turn_ids == (anchor.turn_id, parent.turn_id)
+    assert sibling_branch.child_thread_id != child.source_thread_id
+
+
+def test_switching_back_to_original_anchor_allows_another_root_fork(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(),
+        limits=AppServerLimits(max_turns=8, max_campaigns=3),
+    )
+    try:
+        anchor = adapter.generate_persistent("anchor", FORK_PROFILE)
+        first_root = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        adapter.activate_forked_thread(
+            anchor.thread_id,
+            completed_turn_ids=(anchor.turn_id,),
+        )
+        second_root = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+        )
+    finally:
+        adapter.close()
+
+    assert first_root.source_thread_id == anchor.thread_id
+    assert second_root.source_thread_id == anchor.thread_id
+    assert second_root.included_turn_ids == (anchor.turn_id,)
+
+
+def test_switching_parent_rejects_changed_completed_history(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(),
+        limits=AppServerLimits(max_turns=8, max_campaigns=3),
+    )
+    try:
+        anchor = adapter.generate_persistent("anchor", FORK_PROFILE)
+        branch = adapter.fork_persistent_thread(
+            FORK_PROFILE,
+            last_turn_id=anchor.turn_id,
+            activate=True,
+        )
+        parent = adapter.generate_persistent("parent", FORK_PROFILE)
+        with pytest.raises(ProtocolError, match="history changed"):
+            adapter.activate_forked_thread(
+                branch.child_thread_id,
+                completed_turn_ids=(anchor.turn_id, "different-turn"),
+            )
+    finally:
+        adapter.close()
+
+    assert parent.turn_id != "different-turn"
 
 
 @pytest.mark.parametrize("sandbox_mode", ["read-only", "danger-full-access"])
@@ -159,9 +256,7 @@ def test_json_transport_text_is_retained_without_markdown_wrapper(tmp_path: Path
     )
     with adapter:
         adapter.generate("prompt", "codex/gpt-5.6-luna:high")
-    response_markdown = (tmp_path / "logs" / "slot-00.response.md").read_text(
-        encoding="utf-8"
-    )
+    response_markdown = (tmp_path / "logs" / "slot-00.response.md").read_text(encoding="utf-8")
     assert response_markdown == '{"z":1,"a":{"b":2}}'
 
 
@@ -210,9 +305,7 @@ def test_matching_id_server_request_is_rejected_before_response_handling(tmp_pat
     def receive(line: bytes) -> None:
         value = json.loads(line)
         if value.get("method") == "turn/start":
-            process.stdout.put(
-                {"id": value["id"], "method": "item/toolCall", "params": {}}
-            )
+            process.stdout.put({"id": value["id"], "method": "item/toolCall", "params": {}})
         original_receive(line)
 
     process.receive = receive  # type: ignore[method-assign]
@@ -338,6 +431,90 @@ def test_protocol_abuse_fails_only_the_adapter(
         adapter.start()
 
 
+def test_legal_warning_with_completed_turn_preserves_success_requirements(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(warning_message="fixture legal warning"),
+        artifacts=True,
+    )
+    with adapter:
+        result = adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert result.text == "fixture answer"
+    assert result.usage.final is True
+    assert metadata["status"] == "completed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is True
+    stdout = (tmp_path / "logs" / "slot-00.stdout.jsonl").read_text(encoding="utf-8")
+    assert '"method":"warning"' in stdout
+    assert "fixture legal warning" in stdout
+
+
+def test_legal_warning_with_interrupted_turn_fails_closed(tmp_path: Path) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(
+            warning_message="fixture legal warning",
+            terminal_status="interrupted",
+        ),
+    )
+    with adapter, pytest.raises(TurnError, match="interrupted"):
+        adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert metadata["status"] == "failed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is False
+
+
+def test_legal_warning_with_system_error_fails_closed(tmp_path: Path) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        FakeScenario(
+            warning_message="fixture legal warning",
+            thread_status_after_warning="systemError",
+        ),
+    )
+    with adapter, pytest.raises(TurnError, match="systemError"):
+        adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert metadata["status"] == "failed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is False
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    [
+        (
+            FakeScenario(warning_message="fixture legal warning", final_text=None),
+            "no final_answer",
+        ),
+        (
+            FakeScenario(warning_message="fixture legal warning", usage=None),
+            "exact tokenUsage",
+        ),
+    ],
+)
+def test_legal_warning_does_not_relax_final_response_or_usage(
+    tmp_path: Path,
+    scenario: Any,
+    message: str,
+) -> None:
+    adapter, _ = _adapter(tmp_path, scenario)
+    with adapter, pytest.raises(TurnError, match=message):
+        adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+
+    metadata = adapter.inspect_metadata()
+    assert metadata["status"] == "failed"
+    assert metadata["serverWarnings"] == 1
+    assert metadata["usage_final"] is False
+
+
 def test_system_error_and_oversized_message_are_rejected(tmp_path: Path) -> None:
     adapter, _ = _adapter(tmp_path)
     with adapter:
@@ -419,7 +596,7 @@ def test_timeout_interrupts_and_failed_adapter_is_not_reused(tmp_path: Path) -> 
         auth_checker=lambda _: True,
         limits=AppServerLimits(turn_timeout=0.02, usage_grace=0.01),
     )
-    with adapter, pytest.raises(TurnError, match="EOF before turn completion|timed out"):
+    with adapter, pytest.raises(TurnError, match="turn timed out"):
         adapter.generate("prompt", "codex/gpt-5.6-luna:high")
     assert process.returncode in {-15, -9}
     with pytest.raises(AppServerError, match="failed adapter cannot be reused"):
@@ -510,9 +687,9 @@ def test_rollout_outside_capsule_is_never_copied_and_rollout_text_is_redacted(
     assert not (tmp_path / "logs" / "slot-00.rollout.jsonl").exists()
     assert adapter.logger is not None
     adapter.logger.text("rollout.jsonl", "Bearer private-rollout-token")
-    assert "private-rollout-token" not in (
-        tmp_path / "logs" / "slot-00.rollout.jsonl"
-    ).read_text(encoding="utf-8")
+    assert "private-rollout-token" not in (tmp_path / "logs" / "slot-00.rollout.jsonl").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_provider_persists_theml_style_initial_and_repair_artifacts(tmp_path: Path) -> None:
@@ -576,9 +753,7 @@ def test_exact_v8_bundle_completes_nested_thread_started_structured_path(
         semantics_glossary=config.semantic_glossary_path,
         output_schema=config.output_schema_path,
     )
-    brief = json.loads(
-        (config.slot_briefs_dir / "slot-00.json").read_text(encoding="utf-8")
-    )
+    brief = json.loads((config.slot_briefs_dir / "slot-00.json").read_text(encoding="utf-8"))
     prompt = bundle.render_slot_request(
         brief["slot_id"],
         brief["brief"],
@@ -589,9 +764,7 @@ def test_exact_v8_bundle_completes_nested_thread_started_structured_path(
     envelope = {
         "schema_version": "stage3.generated_policy.v1",
         "source": "def priority(ctx, proposal):\n    return 0.0\n",
-        "design_summary": (
-            "Hypothesis: a constant ranker matches an unstructured selection rule."
-        ),
+        "design_summary": ("Hypothesis: a constant ranker matches an unstructured selection rule."),
         "used_fields": [],
         "assumptions": [],
     }

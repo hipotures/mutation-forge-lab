@@ -9,7 +9,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
@@ -130,6 +130,26 @@ class GenerationResult:
     duration_ms: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CompactionResult:
+    thread_id: str
+    turn_id: str
+    item_id: str
+    request_id: int
+    usage: TokenUsage | None
+    duration_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class ForkResult:
+    source_thread_id: str
+    child_thread_id: str
+    session_id: str
+    thread_path: str | None
+    last_turn_id: str
+    included_turn_ids: tuple[str, ...]
+
+
 ProcessFactory = Callable[..., Any]
 AuthChecker = Callable[[IsolatedCapsule], bool]
 
@@ -178,7 +198,11 @@ _DELTAS = {
     "item/reasoning/textDelta",
 }
 _SETUP_NOTIFICATIONS = {"initialized"}
-_WAITING_NOTIFICATIONS = _GLOBAL | {"thread/started"}
+_WAITING_NOTIFICATIONS = _GLOBAL | {
+    "thread/started",
+    "thread/status/changed",
+    "thread/tokenUsage/updated",
+}
 
 
 class CodexAppServerAdapter:
@@ -204,6 +228,7 @@ class CodexAppServerAdapter:
         protocol_audit_sha256: str | None = None,
         sandbox_mode: str = "danger-full-access",
         approval_policy: str = "never",
+        copy_rollout_artifact: bool = True,
     ):
         if not base_instructions.strip():
             raise ValueError("base_instructions must be non-empty")
@@ -233,9 +258,12 @@ class CodexAppServerAdapter:
         self.protocol_audit_sha256 = protocol_audit_sha256
         self.sandbox_mode = sandbox_mode
         self.approval_policy = approval_policy
+        self.copy_rollout_artifact = copy_rollout_artifact
         self._process: _Proc | None = None
         self._next_id = 0
         self._thread: Json | None = None
+        self._forked_threads: dict[str, Json] = {}
+        self._completed_turn_ids: dict[str, list[str]] = {}
         self._turns = 0
         self._campaigns = 0
         self._failed = False
@@ -256,6 +284,8 @@ class CodexAppServerAdapter:
         self._active: dict[str, str] = {}
         self._completed: set[str] = set()
         self._diag: list[Mapping[str, Any]] = []
+        self._server_retries = 0
+        self._server_warnings = 0
         self._last_status = "new"
         self.logger = (
             TransportLogger(
@@ -545,9 +575,8 @@ class CodexAppServerAdapter:
             thread = result.get("thread")
             if not isinstance(thread, Mapping) or not isinstance(thread.get("id"), str):
                 raise ProtocolError("thread/start returned no thread id")
-            if (
-                thread.get("ephemeral") is not ephemeral
-                or thread.get("cwd") != str(self.capsule.workdir)
+            if thread.get("ephemeral") is not ephemeral or thread.get("cwd") != str(
+                self.capsule.workdir
             ):
                 raise IsolationError("thread identity violates capsule persistence settings")
             thread_path = thread.get("path")
@@ -569,10 +598,7 @@ class CodexAppServerAdapter:
             if (
                 not isinstance(sandbox, Mapping)
                 or sandbox.get("type") != expected_sandbox_type
-                or (
-                    self.sandbox_mode == "read-only"
-                    and sandbox.get("networkAccess") is not False
-                )
+                or (self.sandbox_mode == "read-only" and sandbox.get("networkAccess") is not False)
             ):
                 raise IsolationError("thread capabilities do not match configured sandbox mode")
             for key, expected in (
@@ -598,6 +624,111 @@ class CodexAppServerAdapter:
             self.close(force=True)
             raise
 
+    def resume_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        thread_id: str,
+        thread_path: str | None = None,
+    ) -> Json:
+        """Resume one durable thread in an experimental replacement process."""
+
+        if self._thread is not None:
+            raise TurnError("a durable thread is already active")
+        thread = self._resume_thread(
+            profile,
+            thread_id=thread_id,
+            thread_path=thread_path,
+        )
+        self._thread = dict(thread)
+        return dict(thread)
+
+    def resume_forked_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        thread_id: str,
+        thread_path: str | None = None,
+    ) -> Json:
+        """Load another durable worker into the same replacement process."""
+
+        if self._thread is None:
+            raise TurnError("additional resume requires an active durable thread")
+        if thread_id in self._forked_threads:
+            raise ValueError("durable thread is already loaded")
+        return self._resume_thread(
+            profile,
+            thread_id=thread_id,
+            thread_path=thread_path,
+        )
+
+    def _resume_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        thread_id: str,
+        thread_path: str | None,
+    ) -> Json:
+        if self._campaigns >= self.limits.max_campaigns:
+            raise TurnError("campaign limit exceeded")
+        selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
+        if selected.provider != "codex":
+            raise ValueError("only the installed Codex provider is supported")
+        if not self.auth_checker(self.capsule):
+            raise IsolationError("isolated Codex home is not authenticated")
+        self.start()
+        params: Json = {
+            "threadId": thread_id,
+            "model": selected.model,
+            "cwd": str(self.capsule.workdir),
+            "sandbox": self.sandbox_mode,
+            "approvalPolicy": self.approval_policy,
+            "baseInstructions": self.base_instructions,
+            "developerInstructions": "",
+            "runtimeWorkspaceRoots": [],
+            "config": {"model_reasoning_effort": selected.effort},
+        }
+        if thread_path is not None:
+            params["path"] = thread_path
+        result = self._request("thread/resume", params, timeout=self.limits.startup_timeout)
+        thread = result.get("thread")
+        if (
+            not isinstance(thread, Mapping)
+            or thread.get("id") != thread_id
+            or thread.get("ephemeral") is not False
+        ):
+            raise IsolationError("thread/resume returned a different or ephemeral thread")
+        self._forked_threads[thread_id] = dict(thread)
+        self._campaigns += 1
+        self._drain_resume_notifications(thread_id)
+        return dict(thread)
+
+    def rotate_logger(
+        self,
+        artifact_dir: str | Path,
+        artifact_prefix: str,
+        *,
+        compress_json: bool = True,
+    ) -> None:
+        """Start an isolated artifact prefix for the next experimental turn."""
+
+        if self._current_turn_id is not None and self._last_status not in {
+            "completed",
+            "initialized",
+            "new",
+        }:
+            raise TurnError("cannot rotate artifacts during an active turn")
+        self._stdout_lines.clear()
+        self._stderr_lines.clear()
+        self.logger = TransportLogger(
+            Path(artifact_dir),
+            artifact_prefix,
+            max_bytes=self.limits.transcript_limit,
+            max_events=self.limits.max_events,
+            max_line_bytes=self.limits.message_limit,
+            compress_json=compress_json,
+        )
+
     def generate(
         self,
         prompt: str,
@@ -605,12 +736,257 @@ class CodexAppServerAdapter:
         *,
         output_schema: Mapping[str, Any] | None = None,
     ) -> GenerationResult:
+        return self._generate_on_thread(
+            prompt,
+            profile,
+            output_schema=output_schema,
+            persistent=False,
+            allow_completed_reasoning=False,
+            allow_server_retry=False,
+        )
+
+    def generate_ephemeral_experiment(
+        self,
+        prompt: str,
+        profile: ModelProfile | str,
+        *,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> GenerationResult:
+        """Run one isolated experimental turn against current CLI event ordering."""
+
+        return self._generate_on_thread(
+            prompt,
+            profile,
+            output_schema=output_schema,
+            persistent=False,
+            allow_completed_reasoning=True,
+            allow_server_retry=False,
+        )
+
+    def generate_persistent(
+        self,
+        prompt: str,
+        profile: ModelProfile | str,
+        *,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> GenerationResult:
+        """Run one turn on a durable experimental thread."""
+
+        return self._generate_on_thread(
+            prompt,
+            profile,
+            output_schema=output_schema,
+            persistent=True,
+            allow_completed_reasoning=True,
+            allow_server_retry=True,
+        )
+
+    def compact_persistent_thread(self) -> CompactionResult:
+        """Run one explicit compaction turn on an experimental durable thread."""
+
+        if self._thread is None or self._thread.get("ephemeral") is not False:
+            raise IsolationError("compaction requires a durable thread")
+        if self._turns >= self.limits.max_turns:
+            raise TurnError("turn limit exceeded")
+        thread_id = cast(str, self._thread["id"])
+        self._turns += 1
+        try:
+            result = self._run_compaction(thread_id)
+            self._last_status = "completed"
+            return result
+        except Exception:
+            self._last_status = "failed"
+            self._failed = True
+            if self._current_thread_id and self._current_turn_id and self._process is not None:
+                with suppress(Exception):
+                    self._request(
+                        "turn/interrupt",
+                        {
+                            "threadId": self._current_thread_id,
+                            "turnId": self._current_turn_id,
+                        },
+                        timeout=min(1.0, self.limits.usage_grace),
+                    )
+            self._drain_evidence()
+            self.close(force=True)
+            raise
+
+    def fork_persistent_thread(
+        self,
+        profile: ModelProfile | str,
+        *,
+        last_turn_id: str,
+        activate: bool = False,
+    ) -> ForkResult:
+        """Fork an experimental durable thread at one completed inclusive turn."""
+
+        if (
+            self._thread is None
+            or self._thread.get("ephemeral") is not False
+            or self._last_status != "completed"
+        ):
+            raise IsolationError("fork requires an idle durable thread")
+        if not isinstance(last_turn_id, str) or not last_turn_id:
+            raise ValueError("last_turn_id must be non-empty")
+        if self._campaigns >= self.limits.max_campaigns:
+            raise TurnError("campaign limit exceeded")
+        selected = resolve_model_profile(profile) if isinstance(profile, str) else profile
+        if selected.provider != "codex":
+            raise ValueError("only the installed Codex provider is supported")
+        source = self._thread
+        source_thread_id = cast(str, source["id"])
+        result = self._request(
+            "thread/fork",
+            {
+                "threadId": source_thread_id,
+                "lastTurnId": last_turn_id,
+                "model": selected.model,
+                "cwd": str(self.capsule.workdir),
+                "sandbox": self.sandbox_mode,
+                "approvalPolicy": self.approval_policy,
+                "baseInstructions": self.base_instructions,
+                "developerInstructions": "",
+                "runtimeWorkspaceRoots": [],
+                "ephemeral": False,
+                "excludeTurns": False,
+                "config": {"model_reasoning_effort": selected.effort},
+            },
+            timeout=self.limits.startup_timeout,
+        )
+        thread = result.get("thread")
+        if not isinstance(thread, Mapping):
+            raise ProtocolError("thread/fork returned no child thread")
+        child_thread_id = thread.get("id")
+        session_id = thread.get("sessionId")
+        turns = thread.get("turns")
+        if (
+            not isinstance(child_thread_id, str)
+            or not child_thread_id
+            or child_thread_id == source_thread_id
+            or thread.get("forkedFromId") != source_thread_id
+            or thread.get("ephemeral") is not False
+            or not isinstance(session_id, str)
+            or not session_id
+            or not isinstance(turns, list)
+        ):
+            raise ProtocolError("thread/fork returned invalid child identity")
+        included_turn_ids: list[str] = []
+        for raw_turn in turns:
+            if not isinstance(raw_turn, Mapping):
+                raise ProtocolError("thread/fork returned malformed history")
+            turn, _ = self._validated_turn(
+                {"turn": raw_turn},
+                source="thread/fork",
+            )
+            if turn.get("status") != "completed":
+                raise ProtocolError("thread/fork returned non-completed history")
+            included_turn_ids.append(cast(str, turn["id"]))
+        if not included_turn_ids or included_turn_ids[-1] != last_turn_id:
+            raise ProtocolError("thread/fork did not honor lastTurnId")
+        for key, expected in (
+            ("approvalPolicy", self.approval_policy),
+            ("approvalsReviewer", "user"),
+            ("cwd", str(self.capsule.workdir)),
+            ("model", selected.model),
+        ):
+            if result.get(key) != expected:
+                raise IsolationError(f"thread/fork returned invalid {key}")
+        if (
+            result.get("instructionSources", []) != []
+            or result.get("runtimeWorkspaceRoots", []) != []
+        ):
+            raise IsolationError("forked thread returned non-empty context")
+        sandbox = result.get("sandbox")
+        expected_sandbox_type = (
+            "readOnly" if self.sandbox_mode == "read-only" else "dangerFullAccess"
+        )
+        if (
+            not isinstance(sandbox, Mapping)
+            or sandbox.get("type") != expected_sandbox_type
+            or (self.sandbox_mode == "read-only" and sandbox.get("networkAccess") is not False)
+        ):
+            raise IsolationError("forked thread capabilities do not match")
+        thread_path = thread.get("path")
+        if (
+            not isinstance(thread_path, str)
+            or not Path(thread_path).is_absolute()
+            or thread.get("cwd") != str(self.capsule.workdir)
+        ):
+            raise ProtocolError("forked thread returned invalid path or cwd")
+        try:
+            Path(thread_path).resolve(strict=False).relative_to(
+                self.capsule.root.resolve(strict=True)
+            )
+        except ValueError as exc:
+            raise IsolationError("forked rollout path escapes capsule") from exc
+        fork = ForkResult(
+            source_thread_id=source_thread_id,
+            child_thread_id=child_thread_id,
+            session_id=session_id,
+            thread_path=thread_path,
+            last_turn_id=last_turn_id,
+            included_turn_ids=tuple(included_turn_ids),
+        )
+        # Keep the source selectable after activating its child. Fresh-root
+        # campaigns repeatedly fork the same completed specification anchor.
+        self._forked_threads[source_thread_id] = dict(source)
+        self._forked_threads[child_thread_id] = dict(thread)
+        self._completed_turn_ids[child_thread_id] = list(included_turn_ids)
+        self._drain_fork_notifications(source_thread_id)
+        self._campaigns += 1
+        if activate:
+            self.activate_forked_thread(child_thread_id)
+        return fork
+
+    def activate_forked_thread(
+        self,
+        child_thread_id: str,
+        *,
+        completed_turn_ids: Sequence[str] | None = None,
+    ) -> None:
+        """Select one idle child and restore its exact completed history."""
+
+        thread = self._forked_threads.get(child_thread_id)
+        if thread is None:
+            raise ValueError("unknown forked thread")
+        known_turns = self._completed_turn_ids.get(child_thread_id, [])
+        if completed_turn_ids is not None:
+            restored_turns = list(completed_turn_ids)
+            if (
+                not restored_turns
+                or any(not isinstance(turn_id, str) or not turn_id for turn_id in restored_turns)
+                or len(set(restored_turns)) != len(restored_turns)
+            ):
+                raise ValueError("completed turn history must be non-empty and unique")
+            if known_turns and known_turns != restored_turns:
+                raise ProtocolError("completed turn history changed during activation")
+            self._completed_turn_ids[child_thread_id] = restored_turns
+            known_turns = restored_turns
+        self._thread = dict(thread)
+        self._current_thread_id = child_thread_id
+        self._current_turn_id = None
+        self._last_usage_raw = None
+        self._active.clear()
+        self._completed.clear()
+        self._last_status = "completed" if known_turns else "initialized"
+
+    def _generate_on_thread(
+        self,
+        prompt: str,
+        profile: ModelProfile | str,
+        *,
+        output_schema: Mapping[str, Any] | None,
+        persistent: bool,
+        allow_completed_reasoning: bool,
+        allow_server_retry: bool,
+    ) -> GenerationResult:
         if not isinstance(prompt, str) or not prompt:
             raise ValueError("prompt must be non-empty")
         if self._thread is None:
-            self.start_thread(profile)
-        elif self._thread.get("ephemeral") is not True:
-            raise IsolationError("generation requires an ephemeral thread")
+            self.start_thread(profile, ephemeral=not persistent)
+        elif self._thread.get("ephemeral") is persistent:
+            expected = "durable" if persistent else "ephemeral"
+            raise IsolationError(f"generation requires an {expected} thread")
         if self._turns >= self.limits.max_turns:
             raise TurnError("turn limit exceeded")
         thread = cast(Json, self._thread)
@@ -628,7 +1004,12 @@ class CodexAppServerAdapter:
             params["outputSchema"] = dict(output_schema)
         self._turns += 1
         try:
-            r = self._run_turn(params, cast(str, thread["id"]))
+            r = self._run_turn(
+                params,
+                cast(str, thread["id"]),
+                allow_completed_reasoning=allow_completed_reasoning,
+                allow_server_retry=allow_server_retry,
+            )
             self._last_status = "completed"
             return r
         except Exception:
@@ -671,7 +1052,14 @@ class CodexAppServerAdapter:
             except (ValueError, TypeError, UnicodeDecodeError):
                 continue
 
-    def _run_turn(self, params: Json, thread_id: str) -> GenerationResult:
+    def _run_turn(
+        self,
+        params: Json,
+        thread_id: str,
+        *,
+        allow_completed_reasoning: bool = False,
+        allow_server_retry: bool = False,
+    ) -> GenerationResult:
         self._current_thread_id = thread_id
         request_id = self._send("turn/start", params)
         turn_id = None
@@ -691,6 +1079,12 @@ class CodexAppServerAdapter:
                     raise ProtocolError("incoming message exceeds limit")
                 if self._stderr_exceeded:
                     raise ProtocolError("output limit exceeded")
+                if (
+                    time.monotonic() >= deadline
+                    and self._process is not None
+                    and self._process.poll() is None
+                ):
+                    raise TurnError("turn timed out")
                 raise TurnError("app-server EOF before turn completion")
             if "id" in msg and "method" in msg:
                 self._deny_server_request(msg)
@@ -716,13 +1110,26 @@ class CodexAppServerAdapter:
                 raise ProtocolError("malformed notification")
             if self._consume_global_notification(method, ev):
                 continue
+            # WarningNotification is a legal ServerNotification in the installed
+            # app-server protocol. Recording one does not relax any final response,
+            # usage, or terminal-status requirement below.
+            if method == "warning":
+                if (
+                    not isinstance(ev.get("message"), str)
+                    or not ev["message"]
+                    or ev.get("threadId") != thread_id
+                ):
+                    raise ProtocolError("malformed app-server warning")
+                self._server_warnings += 1
+                continue
             if method == "thread/started":
                 if turn_id is not None:
                     raise ProtocolError("thread/started arrived after turn/start response")
                 self._correlate_thread_started(ev, thread_id)
                 continue
             if (
-                method not in {
+                method
+                not in {
                     "turn/started",
                     "item/started",
                     "item/completed",
@@ -733,8 +1140,7 @@ class CodexAppServerAdapter:
                     "model/rerouted",
                     "error",
                 }
-                and
-                ev.get("threadId", ev.get("thread_id")) is None
+                and ev.get("threadId", ev.get("thread_id")) is None
                 and ev.get("turnId", ev.get("turn_id")) is None
                 and not isinstance(ev.get("turn"), Mapping)
             ):
@@ -790,8 +1196,13 @@ class CodexAppServerAdapter:
                 ):
                     raise ProtocolError("turn/completed returned invalid durationMs")
                 turn_duration_ms = duration_ms
-                if self._active:
+                if self._active and not (
+                    allow_completed_reasoning
+                    and final is not None
+                    and set(self._active.values()) == {"reasoning"}
+                ):
                     raise ProtocolError("turn completed with active items")
+                self._active.clear()
                 if (
                     t.get("itemsView") != "notLoaded"
                     and final_item is not None
@@ -807,6 +1218,9 @@ class CodexAppServerAdapter:
                 ):
                     raise ProtocolError("malformed app-server error")
                 if ev["willRetry"]:
+                    if allow_server_retry:
+                        self._server_retries += 1
+                        continue
                     raise IsolationError("server retry is forbidden")
                 raise TurnError("terminal app-server error")
             else:
@@ -851,6 +1265,10 @@ class CodexAppServerAdapter:
         if len(final.encode("utf-8")) > self.limits.response_limit:
             raise ProtocolError("structured response exceeds limit")
         usage = self._usage(usage_raw)
+        completed_turns = self._completed_turn_ids.setdefault(thread_id, [])
+        if turn_id in completed_turns:
+            raise ProtocolError("duplicate completed turn identity")
+        completed_turns.append(turn_id)
         return GenerationResult(
             final,
             usage,
@@ -861,6 +1279,189 @@ class CodexAppServerAdapter:
             cast(str | None, cast(Json, self._thread).get("path")),
             tuple(self._diag),
             turn_duration_ms,
+        )
+
+    def _run_compaction(self, thread_id: str) -> CompactionResult:
+        self._current_thread_id = thread_id
+        self._current_turn_id = None
+        self._last_usage_raw = None
+        request_id = self._send("thread/compact/start", {"threadId": thread_id})
+        response_received = False
+        turn_id = None
+        pending = None
+        item_id = None
+        item_completed = False
+        terminal = False
+        usage_raw = None
+        duration_ms = None
+        started = time.monotonic()
+        deadline = started + self.limits.turn_timeout
+        self._active.clear()
+        self._completed.clear()
+        while time.monotonic() < deadline:
+            msg = self._read_message(deadline)
+            if msg is None:
+                if self._stdout_overflow:
+                    raise ProtocolError("incoming message exceeds limit")
+                if self._stderr_exceeded:
+                    raise ProtocolError("output limit exceeded")
+                if (
+                    time.monotonic() >= deadline
+                    and self._process is not None
+                    and self._process.poll() is None
+                ):
+                    raise TurnError("compaction timed out")
+                raise TurnError("app-server EOF before compaction completion")
+            if "id" in msg and "method" in msg:
+                self._deny_server_request(msg)
+            if "id" in msg:
+                if msg.get("id") != request_id:
+                    self._deny_server_request(msg)
+                elif "error" in msg:
+                    raise TurnError("thread/compact/start failed")
+                elif msg.get("result") != {}:
+                    raise ProtocolError("thread/compact/start returned malformed response")
+                else:
+                    response_received = True
+                    if terminal:
+                        break
+                continue
+            method = msg.get("method")
+            event = msg.get("params")
+            if not isinstance(method, str) or not isinstance(event, Mapping):
+                raise ProtocolError("malformed compaction notification")
+            if self._consume_global_notification(method, event):
+                continue
+            if method == "warning":
+                if (
+                    not isinstance(event.get("message"), str)
+                    or not event["message"]
+                    or event.get("threadId") != thread_id
+                ):
+                    raise ProtocolError("malformed app-server warning")
+                continue
+            if method == "thread/compacted":
+                self._correlate_thread_started(event, thread_id)
+                continue
+            if method not in {
+                "turn/started",
+                "item/started",
+                "item/completed",
+                "thread/tokenUsage/updated",
+                "thread/status/changed",
+                "turn/completed",
+                "error",
+            }:
+                raise ProtocolError(f"unknown compaction notification: {method}")
+            observed = self._correlate_event(method, event, thread_id, turn_id)
+            if turn_id is None and observed is not None:
+                if pending is not None and observed != pending:
+                    raise ProtocolError("foreign compaction event before response")
+                pending = observed
+            if method == "turn/started":
+                turn, _ = self._validated_turn(event, source="turn/started")
+                if turn.get("status") != "inProgress":
+                    raise ProtocolError("compaction turn started non-running")
+                turn_id = cast(str, turn["id"])
+                self._current_turn_id = turn_id
+            elif method == "item/started":
+                current_id, item_type, _ = self._item_payload(event)
+                if item_type != "contextCompaction":
+                    raise IsolationError(f"unsupported compaction item type: {item_type}")
+                if item_id is not None or current_id in self._completed:
+                    raise ProtocolError("duplicate compaction item")
+                item_id = current_id
+                self._active[current_id] = item_type
+            elif method == "item/completed":
+                item = self._complete_item(event)
+                if item.get("type") != "contextCompaction" or item.get("id") != item_id:
+                    raise ProtocolError("completed a different compaction item")
+                item_completed = True
+            elif method == "thread/tokenUsage/updated":
+                token = event.get("tokenUsage")
+                last = token.get("last") if isinstance(token, Mapping) else None
+                if isinstance(last, Mapping):
+                    usage_raw = dict(last)
+                    self._last_usage_raw = usage_raw
+            elif method == "thread/status/changed":
+                status = event.get("status")
+                status_type = status.get("type") if isinstance(status, Mapping) else status
+                if status_type in {
+                    "systemError",
+                    "failed",
+                    "interrupted",
+                    "cancelled",
+                }:
+                    raise TurnError(f"terminal compaction status: {status_type}")
+            elif method == "turn/completed":
+                turn, ids = self._validated_turn(event, source="turn/completed")
+                if turn.get("status") != "completed":
+                    raise TurnError(f"compaction ended with status {turn.get('status')!r}")
+                if not item_completed or item_id is None or self._active:
+                    raise ProtocolError("compaction item did not complete")
+                if turn.get("itemsView") != "notLoaded" and item_id not in ids:
+                    raise ProtocolError("contextCompaction item absent from completed turn")
+                reported_duration = turn.get("durationMs")
+                if reported_duration is not None and (
+                    not isinstance(reported_duration, int)
+                    or isinstance(reported_duration, bool)
+                    or reported_duration < 0
+                ):
+                    raise ProtocolError("compaction turn returned invalid durationMs")
+                duration_ms = (
+                    reported_duration
+                    if reported_duration is not None
+                    else round((time.monotonic() - started) * 1000)
+                )
+                turn_id = cast(str, turn["id"])
+                self._current_turn_id = turn_id
+                terminal = True
+                if response_received:
+                    break
+            elif method == "error":
+                if not isinstance(event.get("error"), Mapping) or not isinstance(
+                    event.get("willRetry"), bool
+                ):
+                    raise ProtocolError("malformed app-server error")
+                if event["willRetry"]:
+                    continue
+                raise TurnError("terminal compaction error")
+        if not terminal or not response_received:
+            raise TurnError("compaction timed out")
+        if turn_id is None or item_id is None:
+            raise ProtocolError("compaction completion lacked correlated identity")
+        end = time.monotonic() + self.limits.usage_grace
+        while time.monotonic() < end:
+            msg = self._read_message(end)
+            if msg is None:
+                break
+            if "id" in msg:
+                self._deny_server_request(msg)
+            method = msg.get("method")
+            event = msg.get("params")
+            if method in _GLOBAL and isinstance(event, Mapping):
+                self._consume_global_notification(method, event)
+                continue
+            if method == "thread/tokenUsage/updated" and isinstance(event, Mapping):
+                self._correlate_event(method, event, thread_id, turn_id)
+                token = event.get("tokenUsage")
+                last = token.get("last") if isinstance(token, Mapping) else None
+                if isinstance(last, Mapping):
+                    usage_raw = dict(last)
+                    self._last_usage_raw = usage_raw
+            elif method == "thread/status/changed" and isinstance(event, Mapping):
+                self._correlate_event(method, event, thread_id, turn_id)
+            elif method == "thread/compacted" and isinstance(event, Mapping):
+                self._correlate_thread_started(event, thread_id)
+            else:
+                raise ProtocolError("unexpected notification after compaction")
+        return CompactionResult(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_id=item_id,
+            request_id=request_id,
+            usage=self._usage(usage_raw) if usage_raw is not None else None,
+            duration_ms=cast(int, duration_ms),
         )
 
     def _usage(self, raw: Mapping[str, Any] | None) -> TokenUsage:
@@ -1021,23 +1622,13 @@ class CodexAppServerAdapter:
                         raise ProtocolError("malformed config warning notification")
                     for coordinate in ("line", "column"):
                         value = position.get(coordinate)
-                        if (
-                            not isinstance(value, int)
-                            or isinstance(value, bool)
-                            or value < 0
-                        ):
+                        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                             raise ProtocolError("malformed config warning notification")
-        if (
-            m == "remoteControl/status/changed"
-            and (
-                p.get("status") not in {"disabled", "connecting", "connected", "errored"}
-                or not isinstance(p.get("serverName"), str)
-                or not isinstance(p.get("installationId"), str)
-                or (
-                    p.get("environmentId") is not None
-                    and not isinstance(p.get("environmentId"), str)
-                )
-            )
+        if m == "remoteControl/status/changed" and (
+            p.get("status") not in {"disabled", "connecting", "connected", "errored"}
+            or not isinstance(p.get("serverName"), str)
+            or not isinstance(p.get("installationId"), str)
+            or (p.get("environmentId") is not None and not isinstance(p.get("environmentId"), str))
         ):
             raise ProtocolError("malformed remote-control status notification")
         return True
@@ -1104,6 +1695,21 @@ class CodexAppServerAdapter:
                 raise ProtocolError(f"unsupported notification while waiting for {m}")
             if method in _GLOBAL:
                 self._consume_global_notification(method, params)
+            elif m == "thread/fork" and method in {
+                "thread/started",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_fork_waiting_notification(method, params, p)
+            elif m == "thread/resume" and method in {
+                "thread/status/changed",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_resume_waiting_notification(method, params, p)
+            elif method in {
+                "thread/status/changed",
+                "thread/tokenUsage/updated",
+            }:
+                raise ProtocolError(f"unsupported notification while waiting for {m}")
             if m == "thread/start" and method == "thread/started":
                 raise ProtocolError("thread/started arrived before thread/start response")
             # The installed app-server may emit config, remote-control, account,
@@ -1114,6 +1720,153 @@ class CodexAppServerAdapter:
             self._record("notification_while_waiting", request=m, method=method)
             continue
         raise ProtocolError(f"timeout waiting for {m}")
+
+    def _validate_resume_waiting_notification(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> None:
+        expected_thread_id = request.get("threadId")
+        thread_id = params.get("threadId")
+        if (
+            not isinstance(expected_thread_id, str)
+            or not expected_thread_id
+            or thread_id != expected_thread_id
+        ):
+            raise ProtocolError("missing or foreign thread/resume notification")
+        if method == "thread/status/changed":
+            status = params.get("status")
+            status_type = status.get("type") if isinstance(status, Mapping) else None
+            if not isinstance(status_type, str) or not status_type:
+                raise ProtocolError("malformed thread status during thread/resume")
+            if status_type in {
+                "systemError",
+                "failed",
+                "interrupted",
+                "cancelled",
+            }:
+                raise TurnError(f"terminal thread/resume status: {status_type}")
+            return
+        token_usage = params.get("tokenUsage")
+        turn_id = params.get("turnId")
+        last = token_usage.get("last") if isinstance(token_usage, Mapping) else None
+        total = token_usage.get("total") if isinstance(token_usage, Mapping) else None
+        if (
+            not isinstance(turn_id, str)
+            or not turn_id
+            or not isinstance(last, Mapping)
+            or not isinstance(total, Mapping)
+        ):
+            raise ProtocolError("malformed token usage during thread/resume")
+        self._usage(last)
+        self._usage(total)
+
+    def _validate_fork_waiting_notification(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> None:
+        source_thread_id = request.get("threadId")
+        if not isinstance(source_thread_id, str) or not source_thread_id:
+            raise ProtocolError("fork notification has no source thread")
+        if method == "thread/tokenUsage/updated":
+            thread_id = params.get("threadId")
+            turn_id = params.get("turnId")
+            token_usage = params.get("tokenUsage")
+            last = token_usage.get("last") if isinstance(token_usage, Mapping) else None
+            total = token_usage.get("total") if isinstance(token_usage, Mapping) else None
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id
+                or not isinstance(turn_id, str)
+                or not turn_id
+                or not isinstance(last, Mapping)
+                or not isinstance(total, Mapping)
+            ):
+                raise ProtocolError("malformed token usage while waiting for fork")
+            self._usage(last)
+            self._usage(total)
+            known_turns = set(self._completed_turn_ids.get(source_thread_id, []))
+            known_turns.update(self._completed_turn_ids.get(thread_id, []))
+            if turn_id not in known_turns:
+                raise ProtocolError("foreign token usage while waiting for fork")
+            return
+        thread = params.get("thread")
+        if (
+            not isinstance(thread, Mapping)
+            or not isinstance(thread.get("id"), str)
+            or not thread["id"]
+            or thread.get("forkedFromId") != source_thread_id
+            or thread.get("ephemeral") is not False
+            or thread.get("cwd") != str(self.capsule.workdir)
+        ):
+            raise ProtocolError("malformed thread/started while waiting for fork")
+        raw_path = thread.get("path")
+        if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+            raise ProtocolError("fork thread/started has no absolute path")
+        try:
+            Path(raw_path).resolve(strict=False).relative_to(self.capsule.root.resolve(strict=True))
+        except ValueError as exc:
+            raise IsolationError("fork thread/started path escapes capsule") from exc
+        known = self._forked_threads.get(cast(str, thread["id"]))
+        if known is not None and any(
+            thread.get(key) != known.get(key) for key in ("forkedFromId", "id", "path", "sessionId")
+        ):
+            raise ProtocolError("late fork thread/started changed child identity")
+
+    def _drain_fork_notifications(self, source_thread_id: str) -> None:
+        """Consume bounded notifications emitted just after a fork response."""
+
+        end = time.monotonic() + min(1.0, self.limits.usage_grace)
+        request = {"threadId": source_thread_id}
+        while time.monotonic() < end:
+            msg = self._read_message(end)
+            if msg is None:
+                return
+            if "id" in msg:
+                raise ProtocolError("unexpected response after thread/fork")
+            method = msg.get("method")
+            params = msg.get("params")
+            if not isinstance(method, str) or not isinstance(params, Mapping):
+                raise ProtocolError("malformed notification after thread/fork")
+            if method in _GLOBAL:
+                self._consume_global_notification(method, params)
+            elif method in {
+                "thread/started",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_fork_waiting_notification(method, params, request)
+            else:
+                raise ProtocolError(f"unsupported notification after thread/fork: {method}")
+            self._record("notification_after_fork", method=method)
+
+    def _drain_resume_notifications(self, thread_id: str) -> None:
+        """Consume bounded history notifications emitted after a resume response."""
+
+        end = time.monotonic() + min(1.0, self.limits.usage_grace)
+        request = {"threadId": thread_id}
+        while time.monotonic() < end:
+            msg = self._read_message(end)
+            if msg is None:
+                return
+            if "id" in msg:
+                raise ProtocolError("unexpected response after thread/resume")
+            method = msg.get("method")
+            params = msg.get("params")
+            if not isinstance(method, str) or not isinstance(params, Mapping):
+                raise ProtocolError("malformed notification after thread/resume")
+            if method in _GLOBAL:
+                self._consume_global_notification(method, params)
+            elif method in {
+                "thread/status/changed",
+                "thread/tokenUsage/updated",
+            }:
+                self._validate_resume_waiting_notification(method, params, request)
+            else:
+                raise ProtocolError(f"unsupported notification after thread/resume: {method}")
+            self._record("notification_after_resume", method=method)
 
     def _read_message(self, end: float) -> Json | None:
         if self._stderr_exceeded or self._stdout_overflow:
@@ -1187,6 +1940,8 @@ class CodexAppServerAdapter:
             "threadPath": self._thread.get("path") if self._thread else None,
             "status": self._last_status,
             "turns": self._turns,
+            "serverRetries": self._server_retries,
+            "serverWarnings": self._server_warnings,
             "usage_final": self._last_status == "completed" and self._last_usage_raw is not None,
             "usage_partial": self._last_status != "completed" and self._last_usage_raw is not None,
         }
@@ -1197,6 +1952,11 @@ class CodexAppServerAdapter:
             "partial": self._last_status != "completed" and self._last_usage_raw is not None,
             "raw": dict(self._last_usage_raw) if self._last_usage_raw is not None else None,
         }
+
+    def experimental_turn_identity(self) -> tuple[str | None, str | None]:
+        """Expose the correlated identity needed by an opt-in experiment report."""
+
+        return self._current_thread_id, self._current_turn_id
 
     def flush(self) -> None:
         if self._process and self._process.stdin:
@@ -1229,7 +1989,8 @@ class CodexAppServerAdapter:
         self._reader_thread = None
         self._stderr_thread = None
         self._drain_evidence()
-        self._copy_rollout()
+        if self.copy_rollout_artifact:
+            self._copy_rollout()
         if self.logger:
             self.logger.cleanup_temporary_files()
         if self._owns_capsule:
@@ -1411,9 +2172,7 @@ class AppServerGenerationProvider:
                         "request_id": r.request_id,
                         "thread_path": r.thread_path,
                         "usage": self._usage(r.usage),
-                        "transport_sha256": (
-                            ad.logger.transcript_sha256 if ad.logger else None
-                        ),
+                        "transport_sha256": (ad.logger.transcript_sha256 if ad.logger else None),
                         "appserver_doctor_sha256": protocol_audit_sha256,
                     },
                 )
@@ -1431,9 +2190,7 @@ class AppServerGenerationProvider:
                         "metadata": dict(ad.inspect_metadata()),
                         "usage": dict(ad.inspect_usage()),
                         "diagnostics": list(ad.diagnostics),
-                        "transport_sha256": (
-                            ad.logger.transcript_sha256 if ad.logger else None
-                        ),
+                        "transport_sha256": (ad.logger.transcript_sha256 if ad.logger else None),
                         "appserver_doctor_sha256": protocol_audit_sha256,
                     },
                 )

@@ -122,6 +122,7 @@ _GENERATED_POLICY_FIELDS = (
     "assumptions",
     "expected_failure_modes",
 )
+NATIVE_V3_PYTHON_POLICY_PROJECTION = "native-v3-python-policy"
 _USED_FIELD_NAME = re.compile(r"^(?:ctx|proposal)\.[A-Za-z][A-Za-z0-9_]*$")
 
 
@@ -288,6 +289,32 @@ def render_generated_policy_markdown(value: Mapping[str, Any]) -> bytes:
     ).encode()
 
 
+def render_native_v3_python_policy_markdown(value: Mapping[str, Any]) -> bytes:
+    """Render the two-field ordinary-Python response without changing source."""
+
+    source = value.get("source", "")
+    indented = "\n".join(f"    {line}" for line in str(source).splitlines())
+    return (
+        "# Native v3 ordinary-Python policy\n\n"
+        f"Schema: `{value.get('schema_version', '')}`\n\n"
+        "## Source\n\n"
+        f"{indented}\n"
+    ).encode()
+
+
+def _source_artifact_name(request: object | None) -> str:
+    if not isinstance(request, Mapping):
+        return "source.py"
+    projection = request.get("response_projection")
+    if projection is None:
+        return "source.py"
+    if projection == NATIVE_V3_PYTHON_POLICY_PROJECTION:
+        return "source.py"
+    raise ArtifactIncompleteError(
+        f"unsupported response projection: {projection!r}"
+    )
+
+
 def usage_complete(value: Mapping[str, Any] | None) -> bool:
     """Return whether provider usage is final, non-partial, and exact."""
 
@@ -400,6 +427,7 @@ class TurnArtifactStore:
         blocking_missing: set[str] = set()
         complete = True
         slot_text = str(slot) if str(slot).startswith("slot-") else f"slot-{int(slot):02d}"
+        source_artifact_name = _source_artifact_name(request)
 
         def put(name: str, data: bytes, *, required: bool = False) -> None:
             nonlocal complete
@@ -412,14 +440,22 @@ class TurnArtifactStore:
             _atomic_write(path, data, exclusive=True)
             written.append(path)
 
-        def put_json(name: str, value: object, *, required: bool = False) -> None:
+        def put_json(
+            name: str,
+            value: object,
+            *,
+            required: bool = False,
+            redact_value: bool = True,
+        ) -> None:
             if value is None:
                 if required:
                     missing[name] = "not supplied"
                 return
             put(
                 name,
-                compress_json_bytes(_canonical(redact(value)) + b"\n"),
+                compress_json_bytes(
+                    _canonical(redact(value) if redact_value else value) + b"\n"
+                ),
                 required=required,
             )
 
@@ -466,9 +502,19 @@ class TurnArtifactStore:
             # parsed, redacted, fenced, or otherwise rewritten.
             put(f"{slot_text}.response.raw.txt", _text(response_text, redact_value=False))
         if response_projection_valid and decoded_response is not None:
+            if (
+                isinstance(request, Mapping)
+                and request.get("response_projection")
+                == NATIVE_V3_PYTHON_POLICY_PROJECTION
+            ):
+                response_markdown = render_native_v3_python_policy_markdown(
+                    decoded_response
+                )
+            else:
+                response_markdown = render_generated_policy_markdown(decoded_response)
             put(
                 f"{slot_text}.response.md",
-                render_generated_policy_markdown(decoded_response),
+                response_markdown,
                 required=True,
             )
         elif effective_content:
@@ -490,18 +536,28 @@ class TurnArtifactStore:
         # schema validation failed.  Malformed/non-object text lives only in
         # response.raw.txt plus diagnostics, never in a misleading JSON view.
         put_json(f"{slot_text}.response.json.gz", decoded_response)
-        put_json("canonical_response.json.gz", canonical_response)
+        put_json(
+            "canonical_response.json.gz",
+            canonical_response,
+            redact_value=False,
+        )
         put_json("usage.json.gz", usage)
         put_json("identity.json.gz", identity)
         put_json("behavior.json.gz", behavior)
         put_json("provenance.json.gz", provenance)
-        put_json("validation.json.gz", validation)
+        put_json("validation.json.gz", validation, redact_value=False)
         put_json("metadata-validation.json.gz", metadata_validation)
         put_json("worker_telemetry.json.gz", worker_telemetry)
         put_json(f"{slot_text}.provider-raw.json.gz", provider_raw)
         put_json(f"{slot_text}.codex-profile.json.gz", codex_profile)
         if source is not None:
-            put("source.py", _text(source), required=True)
+            # Generated source is a byte-faithful scientific input.  Redaction
+            # belongs on provider metadata, never on the evolved artifact.
+            put(
+                source_artifact_name,
+                _text(source, redact_value=False),
+                required=True,
+            )
         if rpc is not None:
             put(f"{slot_text}.codex-rpc.jsonl", _json_lines(rpc))
         if events is not None:
@@ -603,6 +659,8 @@ class TurnArtifactStore:
             # is determined by missing/bounded artifacts above, not by the
             # terminal status itself.
             manifest["error"] = error
+        if source_extracted and source_artifact_name != "source.py":
+            manifest["source_artifact"] = source_artifact_name
         _atomic_write(
             directory / ARTIFACT_MANIFEST,
             compress_json_bytes(_canonical(manifest) + b"\n"),
@@ -665,22 +723,28 @@ class TurnArtifactStore:
         # the provider's original response bytes remain untouched.
         response_value = result.get("response")
         source_value = response_value.get("source") if isinstance(response_value, Mapping) else None
-        source_path = root / "source.py"
-        if isinstance(source_value, str) and not source_path.exists():
+        source_artifact_name = _source_artifact_name(request)
+        source_path = root / source_artifact_name
+        if isinstance(source_value, str):
             source_bytes = source_value.encode("utf-8")
             if len(source_bytes) > self.max_bytes:
-                missing["source.py"] = (
+                missing[source_artifact_name] = (
                     f"artifact bound exceeded ({len(source_bytes)} > {self.max_bytes} bytes)"
                 )
-                blocking.add("source.py")
-            else:
+                blocking.add(source_artifact_name)
+            elif source_path.exists() and source_path.read_bytes() != source_bytes:
+                missing[source_artifact_name] = (
+                    "existing source artifact does not match the validated response"
+                )
+                blocking.add(source_artifact_name)
+            elif not source_path.exists():
                 _atomic_write(source_path, source_bytes, exclusive=True)
         validation_value = result.get("validation")
         validation_path = root / "validation.json.gz"
         if isinstance(validation_value, Mapping) and not validation_path.exists():
             _atomic_write(
                 validation_path,
-                compress_json_bytes(_canonical(redact(validation_value)) + b"\n"),
+                compress_json_bytes(_canonical(validation_value) + b"\n"),
                 exclusive=True,
             )
         for name, key in (
@@ -694,9 +758,12 @@ class TurnArtifactStore:
             value = result.get(key)
             path = root / name
             if isinstance(value, Mapping) and not path.exists():
+                exact = key == "canonical_response"
                 _atomic_write(
                     path,
-                    compress_json_bytes(_canonical(redact(value)) + b"\n"),
+                    compress_json_bytes(
+                        _canonical(value if exact else redact(value)) + b"\n"
+                    ),
                     exclusive=True,
                 )
         files = sorted(
@@ -818,7 +885,7 @@ class TurnArtifactStore:
             ),
             "content_received": content_received,
             "response_projection_valid": bool(projection_valid),
-            "source_extraction": (root / "source.py").is_file(),
+            "source_extraction": source_path.is_file(),
             "validation_completed": bool(result.get("validation_completed"))
             and (root / "validation.json.gz").is_file(),
             "artifact_complete": not blocking,
@@ -834,6 +901,8 @@ class TurnArtifactStore:
         }
         if result.get("error"):
             manifest["error"] = str(result["error"])
+        if source_path.is_file() and source_artifact_name != "source.py":
+            manifest["source_artifact"] = source_artifact_name
         _atomic_write(
             manifest_path,
             compress_json_bytes(_canonical(manifest) + b"\n"),
@@ -959,11 +1028,13 @@ __all__ = [
     "ArtifactIncompleteError",
     "ArtifactStore",
     "MAX_ARTIFACT_BYTES",
+    "NATIVE_V3_PYTHON_POLICY_PROJECTION",
     "TurnArtifactStore",
     "copy_canonical_source",
     "generated_policy_diagnostics",
     "is_generated_policy",
     "redact",
     "render_generated_policy_markdown",
+    "render_native_v3_python_policy_markdown",
     "usage_complete",
 ]

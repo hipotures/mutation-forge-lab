@@ -30,6 +30,14 @@ from mutation_forge.experiment.control import ExperimentControl
 from mutation_forge.experiment.service import final_stop_experiment, run_experiment
 from mutation_forge.experiment.status import experiment_status, render_status
 from mutation_forge.models import JsonValue
+from mutation_forge.native_v3_python.contracts import (
+    PYTHON_EXPERIMENT_PROTOCOL_ID,
+)
+from mutation_forge.native_v3_python.preview import (
+    experiment_protocol,
+    python_preview_status,
+    run_python_preview,
+)
 from mutation_forge.output.interactive_dashboard import (
     DashboardCapabilities,
     DashboardState,
@@ -281,6 +289,25 @@ def _experiment_run(
     dashboard: bool = False,
     until_complete: bool = False,
 ) -> int:
+    protocol = experiment_protocol(config_path)
+    if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
+        if dashboard or until_complete or profiling is not None:
+            raise ValueError(
+                "ordinary-Python preview does not accept Native v2 dashboard, "
+                "until-complete, or profiling options"
+            )
+        result = run_python_preview(config_path)
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if json_output:
+            print(encoded)
+        else:
+            Console().print_json(encoded)
+        return 0 if result.get("state") == "completed" else 1
     config = load_experiment_config(config_path)
     control = ExperimentControl()
     machine_output = json_output or config.run.output == "json"
@@ -391,6 +418,20 @@ def _experiment_run(
 
 
 def _experiment_status(config_path: Path, *, json_output: bool) -> int:
+    protocol = experiment_protocol(config_path)
+    if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
+        result = python_preview_status(config_path)
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if json_output:
+            print(encoded)
+        else:
+            Console().print_json(encoded)
+        return 0 if result.get("state") != "failed" else 1
     result = experiment_status(config_path)
     print(render_status(result, json_output=json_output))
     return 0 if result.get("state") != "failed" else 1

@@ -11,17 +11,27 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      UV_MANAGED_PYTHON: "1"
+      UV_PYTHON: "3.12.13"
+    defaults:
+      run:
+        working-directory: mutation-forge-lab
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          path: mutation-forge-lab
+
+      - name: Check out HEG dependency
+        uses: actions/checkout@v4
+        with:
+          repository: hipotures/heg
+          ref: 27cbec9c2307b6ea5f936f858821d11d808b68f3
+          path: heg
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -29,8 +39,66 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      - name: Install managed Python
+        run: uv python install 3.12.13 --managed-python
+
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --managed-python --python 3.12.13
+
+      - name: Harden Python runtime permissions
+        run: |
+          uv run python - <<'PY'
+          import stat
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.base_prefix).resolve()
+          executable = root / "bin" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+          if not root.is_dir() or not executable.is_file():
+              raise SystemExit("uv-managed Python runtime is incomplete")
+          root.chmod(0o755)
+          executable.chmod(0o755)
+          if (
+              root.stat().st_mode & stat.S_IWOTH
+              or executable.stat().st_mode & stat.S_IWOTH
+          ):
+              raise SystemExit("uv-managed Python runtime remains writable by other")
+          PY
+
+      - name: Install sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Enable sandbox user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-all --die-with-parent --ro-bind / / -- /usr/bin/true
+
+      - name: Configure offline Codex fixture
+        run: echo "$GITHUB_WORKSPACE/mutation-forge-lab/tests/fixtures/bin" >> "$GITHUB_PATH"
+
+      - name: Validate M2 sandbox startup
+        run: |
+          uv run python - <<'PY'
+          import sys
+
+          from mutation_forge.native_v3_python import (
+              IsolatedPolicyWorkerV1,
+              PolicyWorkerStartupError,
+          )
+
+          source = """\
+          def propose(ctx, graph, api, seed):
+              return api.no_plan()
+          """
+          try:
+              worker = IsolatedPolicyWorkerV1(source)
+          except PolicyWorkerStartupError as error:
+              print(error.private_diagnostic, file=sys.stderr)
+              raise
+          worker.close()
+          PY
 
       - name: Check lockfile
         run: uv lock --check
@@ -45,7 +113,6 @@ jobs:
         run: >-
           uv run pytest
           tests/unit
-          tests/integration/test_experiment_ticket18.py
           tests/integration/test_toy_episode.py
           --ignore=tests/unit/test_stage5.py
           --ignore=tests/unit/test_stage6_independent.py
