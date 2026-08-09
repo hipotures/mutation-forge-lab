@@ -2002,7 +2002,15 @@ def run_python_preview(
             options=config.scientific_search,
             budget=resume_budget,
         )
-    if state.get("state") == "completed":
+    resumable_terminal_reasons = {
+        "resume_generation_complete",
+        "hourly_token_limit",
+        "wall_clock_budget",
+    }
+    if (
+        state.get("state") == "completed"
+        and state.get("terminal_reason") not in resumable_terminal_reasons
+    ):
         return _progress(config, state)
     if not (config.heg_repo / "src" / "sglab").is_dir():
         blocked = {

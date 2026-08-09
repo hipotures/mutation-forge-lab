@@ -541,6 +541,53 @@ def test_provider_failure_is_not_scientific_success_and_resume_skips_it(
     assert result["recovery"]["resume_attempts"] == 1
 
 
+def test_wall_clock_budget_state_is_resumed_after_legacy_completed_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _config(tmp_path)
+    run_python_preview(
+        path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+    config = load_python_preview_config(path)
+    state_path = config.experiment_root / "python-preview-state.json.gz"
+    state = read_json(state_path)
+    assert isinstance(state, dict)
+    state.update(
+        {
+            "state": "completed",
+            "run_terminal": True,
+            "terminal_reason": "wall_clock_budget",
+        }
+    )
+    write_json(state_path, state)
+
+    calls = {"provider": 0}
+
+    def resume_probe(**_: Any) -> Mapping[str, JsonValue]:
+        raise RuntimeError("resume entered")
+
+    monkeypatch.setattr(preview_module, "run_m5_search", resume_probe)
+    result = run_python_preview(
+        path,
+        provider_factory=lambda *_: calls.__setitem__("provider", calls["provider"] + 1)
+        or _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(),
+        provenance_guard=_no_provenance,
+        auth_available=lambda _: True,
+    )
+
+    assert calls["provider"] == 1
+    assert result["state"] == "blocked"
+    assert result["last_error"] == "RuntimeError"
+
+
 def test_resumable_operator_stop_is_consumed_and_can_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
