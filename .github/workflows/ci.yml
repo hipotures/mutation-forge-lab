@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -68,6 +68,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
+
+      - name: Enable sandbox user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-all --die-with-parent --ro-bind / / -- /usr/bin/true
 
       - name: Configure offline Codex fixture
         run: echo "$GITHUB_WORKSPACE/mutation-forge-lab/tests/fixtures/bin" >> "$GITHUB_PATH"
