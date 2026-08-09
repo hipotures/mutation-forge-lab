@@ -116,6 +116,9 @@ PHASE_ICONS: dict[str, str] = {
     "repair": "↻",
     "development": "⋆",
     "replay": "↺",
+    "provider": "P",
+    "evaluation": "E",
+    "archived": "A",
 }
 LIFECYCLE_PHASES = (
     "queued",
