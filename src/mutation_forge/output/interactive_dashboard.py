@@ -137,8 +137,9 @@ PANEL_COPY_KEYS = {
     "4": "performance",
     "5": "tokens",
     "6": "objective",
-    "7": "activity",
-    "8": "quick-view",
+    "7": "profiling",
+    "8": "activity",
+    "9": "quick-view",
 }
 PANEL_COPY_WIDTHS = {
     "header": 150,
@@ -147,6 +148,7 @@ PANEL_COPY_WIDTHS = {
     "performance": 60,
     "tokens": 60,
     "objective": 60,
+    "profiling": 60,
     "activity": 100,
     "quick-view": 80,
 }
@@ -2711,6 +2713,8 @@ class InteractiveDashboardSink:
             return "Token Accounting", self._tokens_panel()
         if panel_name == "objective":
             return "Objective / Archive", self._objective_panel()
+        if panel_name == "profiling":
+            return "Profiling · top-N", self._profiling_panel()
         if panel_name == "activity":
             return "Recent Activity", self._activity_panel("copy")
         if panel_name == "quick-view":
@@ -2787,7 +2791,9 @@ class InteractiveDashboardSink:
                 Layout(_numbered_panel(self._objective_panel(), "6"), ratio=1),
             ]
             if self.state.profiling_enabled and self.state.timing_profile is not None:
-                panels.append(Layout(self._profiling_panel(), ratio=1))
+                panels.append(
+                    Layout(_numbered_panel(self._profiling_panel(), "7"), ratio=1)
+                )
             root["metrics"].split_row(*panels)
         else:
             root["metrics"].split_row(
@@ -2824,14 +2830,14 @@ class InteractiveDashboardSink:
             )
         quick_view_content_width = max(1, width - width // 2 - 4)
         root["bottom"].split_row(
-            Layout(_numbered_panel(self._activity_panel(mode), "7"), ratio=1),
+            Layout(_numbered_panel(self._activity_panel(mode), "8"), ratio=1),
             Layout(
                 _numbered_panel(
                     self._quick_view_panel(
                         mode,
                         content_width=quick_view_content_width,
                     ),
-                    "8",
+                    "9",
                 ),
                 ratio=1,
             ),
@@ -2847,7 +2853,7 @@ class InteractiveDashboardSink:
                 size=7,
             ),
             Layout(_numbered_panel(self._minimal_slot(), "3"), size=5),
-            Layout(_numbered_panel(self._activity_panel("minimal"), "7")),
+            Layout(_numbered_panel(self._activity_panel("minimal"), "8")),
             Layout(self._footer(width), size=1),
         )
         return root
@@ -3481,12 +3487,20 @@ class InteractiveDashboardSink:
             (
                 (str(name), float(seconds))
                 for name, seconds in phases.items()
-                if isinstance(seconds, int | float) and not isinstance(seconds, bool)
+                if isinstance(seconds, int | float)
+                and not isinstance(seconds, bool)
+                and float(seconds) > 0
             ),
             key=lambda item: item[1],
             reverse=True,
         )[:6]
-        measured = sum(value for _, value in rows) or 1.0
+        if not rows:
+            return Panel(
+                Text("Waiting for profile data", style="dim"),
+                title="Profiling · top-N",
+                border_style="cyan",
+            )
+        measured = sum(value for _, value in rows)
         table = Table.grid(expand=True)
         table.add_column(overflow="ellipsis")
         table.add_column(justify="right")
@@ -3495,7 +3509,7 @@ class InteractiveDashboardSink:
             count = calls.get(name) if isinstance(calls, Mapping) else None
             table.add_row(name, f"{seconds / measured:5.1%}", _show(count))
         unattributed = _number(profile.get("unattributed_fraction"))
-        if unattributed is not None:
+        if unattributed is not None and unattributed > 0:
             table.add_row("unattributed", f"{unattributed:5.1%}", "—")
         return Panel(table, title="Profiling · top-N", border_style="cyan")
 
@@ -3684,7 +3698,7 @@ class InteractiveDashboardSink:
                 "  r confirmed retryable slot\n"
                 "  i phase/state icons  c config  l logs  t top  / search  h help\n\n"
                 "Panel copy\n"
-                "  1–8 copy the numbered panel to OSC 52 and /tmp\n\n"
+                "  1–9 copy the numbered panel to OSC 52 and /tmp\n\n"
                 "Metrics\n"
                 "  IR uses completed authoritative evaluations only.\n"
                 "  Unknown values are —, never inferred as zero.\n"
@@ -3717,7 +3731,7 @@ class InteractiveDashboardSink:
         compact_pause_label = "[p]resume" if self.state.paused else "[p]pause"
         labels = (
             (
-                "[1–8] copy",
+                "[1–9] copy",
                 quit_label,
                 pause_label,
                 "[←/→] gen",
@@ -3731,7 +3745,7 @@ class InteractiveDashboardSink:
             )
             if width >= 110
             else (
-                "[1–8] copy",
+                "[1–9] copy",
                 compact_quit_label,
                 compact_pause_label,
                 "[←/→]gen",

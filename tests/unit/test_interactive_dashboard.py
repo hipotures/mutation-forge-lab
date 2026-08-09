@@ -1469,6 +1469,65 @@ def test_number_keys_request_stable_panel_copies_but_remain_search_text() -> Non
     assert state.search_query == "5"
 
 
+def test_profiling_panel_is_numbered_and_copyable() -> None:
+    state = replace(
+        _running_state(),
+        timing_profile={
+            "phase_seconds": {"provider.generate": 2.0},
+            "phase_calls": {"provider.generate": 1},
+            "unattributed_fraction": 0.0,
+        },
+    )
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, height=55, force_terminal=False),
+        start_live=False,
+    )
+    sink.state = state
+
+    output = io.StringIO()
+    Console(file=output, width=150, height=55, force_terminal=False).print(sink.render())
+    profile_title = next(
+        line for line in output.getvalue().splitlines() if "Profiling · top-N" in line
+    )
+    assert profile_title.endswith(" 7 ─╮")
+
+    title, renderable = sink._panel_copy_source("profiling")
+    copied = dashboard.render_panel_copy_text(
+        title,
+        renderable,
+        width=dashboard.PANEL_COPY_WIDTHS["profiling"],
+    )
+    assert title == "Profiling · top-N"
+    assert "provider.generate" in copied
+    sink.close()
+
+
+def test_profiling_panel_hides_zero_value_rows_until_data_arrives() -> None:
+    state = replace(
+        _running_state(),
+        timing_profile={
+            "phase_seconds": {
+                "provider": 0.0,
+                "evaluator/scorer": 0.0,
+                "sandbox": 0.0,
+            },
+            "phase_calls": {"provider": 2},
+            "unattributed_fraction": 0.0,
+        },
+    )
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        start_live=False,
+    )
+    sink.state = state
+    output = io.StringIO()
+    Console(file=output, width=60, force_terminal=False).print(sink._profiling_panel())
+    rendered = output.getvalue()
+    assert "Waiting for profile data" in rendered
+    assert "0.0%" not in rendered
+    sink.close()
+
+
 def test_numbered_panel_keeps_centered_title_and_number_in_top_right_corner() -> None:
     output = io.StringIO()
     Console(
@@ -1692,10 +1751,10 @@ def test_dashboard_render_fits_viewport_and_exposes_mode_sections(
         assert "experiment" in rendered
         assert "session" in rendered
         assert "usage" in rendered
-        assert "[1–8] copy" in rendered
+        assert "[1–9] copy" in rendered
     elif width >= 110:
         assert "session" in rendered
-        assert "[1–8] copy" in rendered
+        assert "[1–9] copy" in rendered
     sink.close()
 
 
