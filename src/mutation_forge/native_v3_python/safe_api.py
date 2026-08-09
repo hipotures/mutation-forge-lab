@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -198,6 +199,8 @@ class SafeGraphSessionV1:
     _action_calls: int = field(default=0, init=False)
     _random_draws: int = field(default=0, init=False)
     _gross_actions: int = field(default=0, init=False)
+    _selector_wall_ns: int = field(default=0, init=False)
+    _action_wall_ns: int = field(default=0, init=False)
     _terminal_token: str | None = field(default=None, init=False)
     _witness_cache: dict[
         tuple[Edge, ...],
@@ -232,6 +235,15 @@ class SafeGraphSessionV1:
             "action_calls": self._action_calls,
             "random_draws": self._random_draws,
             "gross_actions": self._gross_actions,
+        }
+
+    @property
+    def timing(self) -> dict[str, float]:
+        """Return timing-only host API telemetry outside the semantic trace."""
+
+        return {
+            "selector_wall_seconds": self._selector_wall_ns / 1_000_000_000,
+            "action_wall_seconds": self._action_wall_ns / 1_000_000_000,
         }
 
     def _consume(self, counter_name: str, maximum: int, code: str) -> None:
@@ -951,6 +963,14 @@ class SafeGraphSessionV1:
     def handle_call(self, method: str, arguments: Mapping[str, object]) -> JsonValue:
         """Validate and execute one worker-originated safe-API request."""
 
+        started_ns = time.perf_counter_ns()
+        timing_kind = (
+            "selector"
+            if method in SELECTOR_METHODS or method == "pick"
+            else "action"
+            if method in ACTION_METHODS
+            else None
+        )
         self._consume("_api_calls", self.limits.total_api_calls, "API_CALL_BUDGET_EXCEEDED")
         if self._terminal_token is not None:
             raise SafeAPIProgramError(
@@ -1004,5 +1024,11 @@ class SafeGraphSessionV1:
         except SafeAPIProgramError as error:
             self._record(method, arguments, {"failure": error.code})
             raise
+        finally:
+            elapsed_ns = time.perf_counter_ns() - started_ns
+            if timing_kind == "selector":
+                self._selector_wall_ns += elapsed_ns
+            elif timing_kind == "action":
+                self._action_wall_ns += elapsed_ns
         self._record(method, arguments, result)
         return result

@@ -353,6 +353,10 @@ def test_fixture_replay_preserves_science_trace_and_separate_behavior_identity()
         second.scientific_result.as_dict(include_telemetry=False)
     )
     assert first.behavior_identity == second.behavior_identity
+    assert first.runtime_profile["sandbox_wall_seconds"] > 0
+    assert first.runtime_profile["selector_wall_seconds"] > 0
+    assert first.runtime_profile["action_wall_seconds"] > 0
+    assert "runtime_profile" in first.as_dict()
     assert first.scientific_result.protocol_id == PYTHON_SERIAL_EVALUATOR_PROTOCOL_ID
     assert (
         first.scientific_result.execution_trace_protocol_id

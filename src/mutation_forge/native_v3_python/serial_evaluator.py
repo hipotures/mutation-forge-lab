@@ -118,6 +118,7 @@ class PythonSerialEpisodeResultV1:
     config: PythonSerialEpisodeConfigV1
     scientific_result: SerialEpisodeResult
     worker_telemetry: dict[str, JsonValue]
+    runtime_profile: dict[str, JsonValue]
     protocol_id: str = PYTHON_SERIAL_RESULT_PROTOCOL_ID
 
     def as_dict(
@@ -149,6 +150,7 @@ class PythonSerialEpisodeResultV1:
             }
         if include_telemetry:
             result["worker_telemetry"] = self.worker_telemetry
+            result["runtime_profile"] = self.runtime_profile
         return result
 
 
@@ -254,6 +256,9 @@ def evaluate_serial_python_policy(
         )
 
     worker = IsolatedPolicyWorkerV1(source, limits=runtime_limits)
+    invocation_wall_seconds = 0.0
+    selector_wall_seconds = 0.0
+    action_wall_seconds = 0.0
     try:
 
         def invoke_step(
@@ -261,6 +266,9 @@ def evaluate_serial_python_policy(
             step_index: int,
             accepted_rewrites: int,
         ) -> _SerialInvocation:
+            nonlocal action_wall_seconds
+            nonlocal invocation_wall_seconds
+            nonlocal selector_wall_seconds
             host = _PythonRewriteHost(backend)
             invocation = worker.invoke(
                 context=PolicyContextV1(
@@ -281,6 +289,9 @@ def evaluate_serial_python_policy(
                 seed=config.policy_seed,
                 features=features,
             )
+            invocation_wall_seconds += invocation.wall_seconds
+            selector_wall_seconds += invocation.selector_wall_seconds
+            action_wall_seconds += invocation.action_wall_seconds
             failure = (
                 ProgramFailure(
                     code=invocation.failure.code,
@@ -332,4 +343,9 @@ def evaluate_serial_python_policy(
         config=config,
         scientific_result=result,
         worker_telemetry=telemetry,
+        runtime_profile={
+            "sandbox_wall_seconds": invocation_wall_seconds,
+            "selector_wall_seconds": selector_wall_seconds,
+            "action_wall_seconds": action_wall_seconds,
+        },
     )
