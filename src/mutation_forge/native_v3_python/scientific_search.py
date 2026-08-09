@@ -552,11 +552,11 @@ class _RuntimeTelemetry:
 
     def wall_expired(self, limit: float) -> bool:
         with self._lock:
-            return self._elapsed_locked() >= limit
+            return (time.monotonic() - self._resume_started) >= limit
 
     def wall_remaining(self, limit: float) -> float:
         with self._lock:
-            return max(0.0, limit - self._elapsed_locked())
+            return max(0.0, limit - (time.monotonic() - self._resume_started))
 
     def _string_keys_locked(self, field: str) -> list[str]:
         value = self._state.get(field, [])

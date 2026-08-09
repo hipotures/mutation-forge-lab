@@ -909,7 +909,10 @@ def _progress(
         generation_budget_extended = terminal_reason == "generation_budget" and (
             configured_generation_limit is None or configured_generation_limit > generation_count
         )
-        report_resumable = generation_budget_extended or terminal_reason == "hourly_token_limit"
+        report_resumable = generation_budget_extended or terminal_reason in {
+            "hourly_token_limit",
+            "wall_clock_budget",
+        }
         state = "blocked" if report_resumable else "completed"
         resumable = report_resumable
         run_terminal = not report_resumable
@@ -2156,6 +2159,7 @@ def run_python_preview(
         resumable_stop = report.get("stop_reason") in {
             "resume_generation_complete",
             "hourly_token_limit",
+            "wall_clock_budget",
         }
         final_state = {
             **running,
