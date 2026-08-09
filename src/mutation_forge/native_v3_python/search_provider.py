@@ -1140,10 +1140,30 @@ class CodexM10SearchProvider:
         operation: Callable[[], M5ProviderResultV1],
     ) -> M5ProviderResultV1:
         candidate_id = f"g{generation:04d}-{slot}"
+        if self._primary_slot_owners.get(candidate_id) != worker:
+            raise M5InfrastructureError(
+                "provider worker assignment changed"
+            )
+        self.await_primary_slot(generation=generation, slot=slot)
+        try:
+            return operation()
+        finally:
+            with self._turn_condition:
+                self._completed_primary_slots.add(candidate_id)
+                self._save_state()
+                self._turn_condition.notify_all()
+
+    def await_primary_slot(
+        self, *, generation: int, slot: str
+    ) -> None:
+        """Wait outside provider telemetry until the lane is admissible."""
+
+        candidate_id = f"g{generation:04d}-{slot}"
         with self._turn_condition:
-            if self._primary_slot_owners.get(candidate_id) != worker:
+            worker = self._primary_slot_owners.get(candidate_id)
+            if worker is None:
                 raise M5InfrastructureError(
-                    "provider worker assignment changed"
+                    "provider generation was not prepared"
                 )
             preceding = sorted(
                 item
@@ -1158,13 +1178,6 @@ class CodexM10SearchProvider:
                     for item in preceding
                 )
             )
-        try:
-            return operation()
-        finally:
-            with self._turn_condition:
-                self._completed_primary_slots.add(candidate_id)
-                self._save_state()
-                self._turn_condition.notify_all()
 
     def release_primary_slot(
         self, *, generation: int, slot: str

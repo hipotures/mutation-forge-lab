@@ -180,6 +180,7 @@ class _Provider:
         )
         self.snapshots: list[Mapping[str, Any]] = []
         self.released: list[tuple[int, str]] = []
+        self.release_condition = threading.Condition()
 
     def prepare_generation(
         self,
@@ -193,10 +194,28 @@ class _Provider:
         del generation
         return int(slot.removeprefix("slot-")) % self.provider_concurrency
 
+    def await_primary_slot(
+        self, *, generation: int, slot: str
+    ) -> None:
+        slot_index = int(slot.removeprefix("slot-"))
+        predecessor = (
+            generation,
+            f"slot-{slot_index - self.provider_concurrency:02d}",
+        )
+        if slot_index < self.provider_concurrency:
+            return
+        with self.release_condition:
+            assert self.release_condition.wait_for(
+                lambda: predecessor in self.released,
+                timeout=1,
+            )
+
     def release_primary_slot(
         self, *, generation: int, slot: str
     ) -> None:
-        self.released.append((generation, slot))
+        with self.release_condition:
+            self.released.append((generation, slot))
+            self.release_condition.notify_all()
 
     def ensure_specification_anchor(
         self,
@@ -720,7 +739,9 @@ def test_crash_after_prepared_boundary_repeats_no_provider_turn(
             boundary_hook=crash,
         )
 
-    assert len(first_provider.calls) == 8
+    assert first_provider.calls == [
+        (0, f"slot-{index:02d}") for index in range(4)
+    ]
     resumed = _Provider(durable)
     report = _run(
         tmp_path,
@@ -729,7 +750,10 @@ def test_crash_after_prepared_boundary_repeats_no_provider_turn(
         options=_options(),
     )
     assert report["candidate_count"] == 8
-    assert resumed.calls == []
+    assert resumed.calls == [
+        (0, f"slot-{index:02d}") for index in range(4, 8)
+    ]
+    assert len(durable) == 8
 
 
 def test_interrupted_provider_turn_is_consumed_without_external_repeat(

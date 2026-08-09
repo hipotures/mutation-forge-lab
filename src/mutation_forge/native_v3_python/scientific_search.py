@@ -961,6 +961,25 @@ def _provider_call(
             failed=failed,
         )
 
+def _primary_provider_call(
+    *,
+    provider: core.M10SearchProvider,
+    generation: int,
+    slot: str,
+    telemetry: _RuntimeTelemetry,
+    key: str,
+    durable_result_path: Path,
+    operation: Callable[[], core.M5ProviderResultV1],
+) -> core.M5ProviderResultV1:
+    provider.await_primary_slot(generation=generation, slot=slot)
+    return _provider_call(
+        telemetry=telemetry,
+        key=key,
+        kind="primary",
+        durable_result_path=durable_result_path,
+        operation=operation,
+    )
+
 
 def _queue_valid_candidate(
     *,
@@ -1657,7 +1676,7 @@ def run_sustained_search(
         telemetry=telemetry,
     )
     provider_executor = ThreadPoolExecutor(
-        max_workers=options.provider_concurrency,
+        max_workers=options.provider_concurrency * 2,
         thread_name_prefix="mforge-m10-provider",
     )
     stop_reason = "generation_budget"
@@ -1935,10 +1954,12 @@ def run_sustained_search(
                         continue
                     task = lane_tasks[lane][offset]
                     future = provider_executor.submit(
-                        _provider_call,
+                        _primary_provider_call,
+                        provider=provider,
+                        generation=generation,
+                        slot=task.slot_plan.slot,
                         telemetry=telemetry,
                         key=task.key,
-                        kind="primary",
                         durable_result_path=(
                             task.pending.slot_dir
                             / "provider-initial"
