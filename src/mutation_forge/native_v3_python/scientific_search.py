@@ -173,6 +173,19 @@ def hourly_token_usage(
         else current.astimezone(UTC)
     )
     cutoff = current - timedelta(hours=1)
+    runtime_path = root / M10_RUNTIME_FILENAME
+    if runtime_path.is_file():
+        runtime = read_json(runtime_path)
+        started = (
+            runtime.get("campaign_started_epoch_seconds")
+            if isinstance(runtime, Mapping)
+            else None
+        )
+        if isinstance(started, int | float) and not isinstance(started, bool):
+            cutoff = max(
+                cutoff,
+                datetime.fromtimestamp(float(started), UTC),
+            )
     charges: list[tuple[datetime, int]] = []
     for path in root.glob("**/m5-provider-result.json.gz"):
         charged_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
