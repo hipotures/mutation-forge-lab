@@ -22,6 +22,7 @@ _SECRET_VALUE = re.compile(
 )
 _PRIVATE = re.compile(r"(?:/home/[^/]+|/Users/[^/]+|[A-Za-z]:\\Users\\[^\\]+)")
 _ARTIFACT_LOCK = threading.Lock()
+_AGGREGATE_SIZES: dict[Path, int] = {}
 DEFAULT_MAX_RUN_BYTES = 32 * 1024 * 1024
 
 
@@ -159,7 +160,7 @@ class GenerationArtifacts:
 
 
 class TransportLogger:
-    """Incrementally persisted bounded logs; each parsed message flushes atomically."""
+    """Bounded transport logs with append-only streaming files."""
 
     def __init__(
         self,
@@ -183,7 +184,9 @@ class TransportLogger:
         self.max_bytes = max_bytes
         self.max_events = max_events
         self.max_line_bytes = max_line_bytes
-        self.aggregate_root = Path(aggregate_root) if aggregate_root is not None else self.directory
+        self.aggregate_root = (
+            Path(aggregate_root).resolve() if aggregate_root is not None else self.directory
+        )
         self.max_aggregate_bytes = max_aggregate_bytes
         self.compress_json = compress_json
         self.events = 0
@@ -192,6 +195,8 @@ class TransportLogger:
         self.notifications: list[str] = []
         self.wire: list[str] = []
         self.transcript: list[str] = []
+        self._transcript_hash = hashlib.sha256()
+        self._finalized = False
         self.telemetry: dict[str, int] = {
             "events": 0,
             "bytes": 0,
@@ -206,10 +211,7 @@ class TransportLogger:
             "stderr.txt",
         ):
             self._write_lines(name, [])
-        self._write_lines(
-            "transcript.sha256",
-            [hashlib.sha256(b"").hexdigest() + "\n"],
-        )
+        self.finalize()
 
     def _name(self, name: str) -> str:
         if self.compress_json and name.endswith(".json"):
@@ -227,10 +229,9 @@ class TransportLogger:
         ) else payload
         with _ARTIFACT_LOCK:
             current_size = target.stat().st_size if target.is_file() else 0
-            stored_size = sum(
-                path.stat().st_size for path in self.aggregate_root.rglob("*") if path.is_file()
-            )
-            if stored_size - current_size + len(stored) > self.max_aggregate_bytes:
+            aggregate_size = self._aggregate_size_locked()
+            updated_size = aggregate_size - current_size + len(stored)
+            if updated_size > self.max_aggregate_bytes:
                 self.telemetry["write_failures"] += 1
                 raise ValueError("transport run exceeds aggregate byte limit")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -246,6 +247,7 @@ class TransportLogger:
                         f.flush()
                         os.fsync(f.fileno())
                     os.replace(tmp, target)
+                    _AGGREGATE_SIZES[self.aggregate_root] = updated_size
                     break
                 except FileNotFoundError:
                     if attempt == 1:
@@ -253,6 +255,35 @@ class TransportLogger:
                 finally:
                     if os.path.exists(tmp):
                         os.unlink(tmp)
+
+    def _aggregate_size_locked(self) -> int:
+        retained = _AGGREGATE_SIZES.get(self.aggregate_root)
+        if retained is not None:
+            return retained
+        retained = sum(
+            path.stat().st_size
+            for path in self.aggregate_root.rglob("*")
+            if path.is_file()
+        )
+        _AGGREGATE_SIZES[self.aggregate_root] = retained
+        return retained
+
+    def _append(self, name: str, value: str) -> None:
+        payload = value.encode()
+        target = _contained_path(self.directory, self._name(name))
+        with _ARTIFACT_LOCK:
+            current_size = target.stat().st_size if target.is_file() else 0
+            if current_size + len(payload) > self.max_bytes:
+                self.telemetry["write_failures"] += 1
+                raise ValueError("transport log exceeds byte limit")
+            aggregate_size = self._aggregate_size_locked()
+            if aggregate_size + len(payload) > self.max_aggregate_bytes:
+                self.telemetry["write_failures"] += 1
+                raise ValueError("transport run exceeds aggregate byte limit")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("ab") as stream:
+                stream.write(payload)
+            _AGGREGATE_SIZES[self.aggregate_root] = aggregate_size + len(payload)
 
     def cleanup_temporary_files(self) -> None:
         """Remove interrupted atomic-write leftovers after logger shutdown."""
@@ -284,11 +315,10 @@ class TransportLogger:
         wire_line = canonical_json({"direction": direction, "message": safe}) + "\n"
         self.wire.append(wire_line)
         self.transcript.append(wire_line)
-        self._write_lines("wire.jsonl", self.wire)
-        self._write_lines(
-            "transcript.sha256",
-            [hashlib.sha256("".join(self.transcript).encode()).hexdigest() + "\n"],
-        )
+        encoded_wire = wire_line.encode()
+        self._transcript_hash.update(encoded_wire)
+        self._finalized = False
+        self._append("wire.jsonl", wire_line)
         return safe, line
 
     def sent(self, value: Mapping[str, Any], raw: bytes | str | None = None) -> None:
@@ -298,10 +328,15 @@ class TransportLogger:
         _, line = self._record_wire("server_to_client", value, raw)
         if "id" in value:
             self.rpc.append(line)
+            self._append("codex-rpc.jsonl", line)
         else:
             self.notifications.append(line)
-        self._write_lines("codex-rpc.jsonl", self.rpc)
-        self._write_lines("events.jsonl", self.notifications)
+            self._append("events.jsonl", line)
+
+    def append_text(self, name: str, value: str) -> None:
+        """Append one redacted streaming text chunk without rewriting prior chunks."""
+
+        self._append(name, cast(str, safe_value(value)))
 
     def text(self, name: str, value: str) -> None:
         # Markdown artifacts are text projections, not a second JSON
@@ -342,7 +377,12 @@ class TransportLogger:
 
         target = _contained_path(self.directory, self._name(name))
         with _ARTIFACT_LOCK:
+            current_size = target.stat().st_size if target.is_file() else 0
             target.unlink(missing_ok=True)
+            _AGGREGATE_SIZES[self.aggregate_root] = max(
+                0,
+                self._aggregate_size_locked() - current_size,
+            )
 
     def profile(self, value: Mapping[str, Any]) -> None:
         self._write_lines("codex-profile.json", [canonical_json(safe_value(value)) + "\n"])
@@ -350,9 +390,17 @@ class TransportLogger:
     def document(self, name: str, value: object) -> None:
         self._write_lines(name, [canonical_json(safe_value(value)) + "\n"])
 
+    def finalize(self) -> None:
+        """Persist the transcript digest once at a meaningful turn boundary."""
+
+        if self._finalized:
+            return
+        self._write_lines("transcript.sha256", [self.transcript_sha256 + "\n"])
+        self._finalized = True
+
     @property
     def transcript_sha256(self) -> str:
-        return hashlib.sha256("".join(self.transcript).encode()).hexdigest()
+        return self._transcript_hash.copy().hexdigest()
 
 
 def replay_generation(root: Path) -> dict[str, Any]:

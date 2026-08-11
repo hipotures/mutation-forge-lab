@@ -271,7 +271,6 @@ class CodexAppServerAdapter:
         self._transcript_size = 0
         self._stdout_size = 0
         self._stderr_size = 0
-        self._stdout_lines: list[bytes] = []
         self._stderr_lines: list[bytes] = []
         self._stderr_exceeded = False
         self._stdout_overflow = False
@@ -724,8 +723,9 @@ class CodexAppServerAdapter:
             "new",
         }:
             raise TurnError("cannot rotate artifacts during an active turn")
-        self._stdout_lines.clear()
         self._stderr_lines.clear()
+        if self.logger is not None:
+            self.logger.finalize()
         self.logger = TransportLogger(
             Path(artifact_dir),
             artifact_prefix,
@@ -1901,7 +1901,6 @@ class CodexAppServerAdapter:
                 raise ProtocolError("incoming message exceeds limit")
             return None
         raw = v.encode() if isinstance(v, str) else bytes(v)
-        self._stdout_lines.append(raw)
         self._stdout_size += len(raw)
         if len(raw) > self.limits.message_limit or self._stdout_size > self.limits.stdout_limit:
             raise ProtocolError("incoming message exceeds limit")
@@ -1920,9 +1919,7 @@ class CodexAppServerAdapter:
         if self.logger:
             try:
                 self.logger.message(msg, raw)
-                self.logger.text(
-                    "stdout.jsonl", b"".join(self._stdout_lines).decode("utf-8", "replace")
-                )
+                self.logger.append_text("stdout.jsonl", raw.decode("utf-8", "replace"))
             except ValueError as exc:
                 raise ProtocolError(str(exc)) from exc
         return cast(Json, msg)
@@ -1979,6 +1976,8 @@ class CodexAppServerAdapter:
                 self._process.stdin.flush()
 
     def close(self, *, force: bool = False) -> None:
+        if self.logger is not None:
+            self.logger.finalize()
         p, self._process = self._process, None
         if p is None:
             if self._owns_capsule:

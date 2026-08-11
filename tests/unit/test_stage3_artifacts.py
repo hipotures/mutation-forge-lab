@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -56,6 +58,93 @@ def test_transport_loggers_share_an_aggregate_run_byte_cap(tmp_path: Path) -> No
     first.text("request.md", "x" * 100)
     with pytest.raises(ValueError, match="aggregate"):
         second.text("request.md", "y" * 100)
+
+
+def test_transport_streaming_appends_without_rewrites_scans_or_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[str] = []
+    scans = 0
+    fsyncs = 0
+    sha256_calls: list[bytes] = []
+    sha256_updates: list[bytes] = []
+    original_write_lines = TransportLogger._write_lines
+    original_rglob = Path.rglob
+    original_fsync = os.fsync
+    original_sha256 = __import__("hashlib").sha256
+
+    def counted_write_lines(
+        self: TransportLogger,
+        name: str,
+        lines: list[str],
+    ) -> None:
+        writes.append(name)
+        original_write_lines(self, name, lines)
+
+    def counted_rglob(path: Path, pattern: str) -> Any:
+        nonlocal scans
+        scans += 1
+        return original_rglob(path, pattern)
+
+    def counted_fsync(fd: int) -> None:
+        nonlocal fsyncs
+        fsyncs += 1
+        original_fsync(fd)
+
+    class CountedHash:
+        def __init__(self, value: bytes = b"") -> None:
+            sha256_calls.append(value)
+            self._hash = original_sha256(value)
+
+        def update(self, value: bytes) -> None:
+            sha256_updates.append(value)
+            self._hash.update(value)
+
+        def copy(self) -> CountedHash:
+            copied = object.__new__(CountedHash)
+            copied._hash = self._hash.copy()
+            return copied
+
+        def hexdigest(self) -> str:
+            return self._hash.hexdigest()
+
+    monkeypatch.setattr(TransportLogger, "_write_lines", counted_write_lines)
+    monkeypatch.setattr(Path, "rglob", counted_rglob)
+    monkeypatch.setattr(os, "fsync", counted_fsync)
+    monkeypatch.setattr("mutation_forge.stage3.artifacts.hashlib.sha256", CountedHash)
+
+    logger = TransportLogger(
+        tmp_path,
+        max_bytes=4 * 1024 * 1024,
+        max_events=2_000,
+        max_line_bytes=4_096,
+    )
+    initialization_writes = len(writes)
+    initialization_scans = scans
+    initialization_fsyncs = fsyncs
+    for index in range(1_000):
+        logger.message(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"index": index, "delta": f"part-{index}"},
+            },
+            b"{}\n",
+        )
+        logger.append_text("stdout.jsonl", f'{{"index":{index}}}\n')
+
+    assert len(writes) == initialization_writes
+    assert scans == initialization_scans == 1
+    assert fsyncs == initialization_fsyncs
+    assert sha256_calls == [b""]
+    assert len(sha256_updates) == 1_000
+    assert len((tmp_path / "wire.jsonl").read_text().splitlines()) == 1_000
+    assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 1_000
+    assert len((tmp_path / "stdout.jsonl").read_text().splitlines()) == 1_000
+
+    logger.finalize()
+    assert writes[-1] == "transcript.sha256"
+    assert (tmp_path / "transcript.sha256").read_text().strip() == logger.transcript_sha256
 
 
 def test_generation_artifacts_are_bounded_redacted_and_canonically_finished(tmp_path: Path) -> None:
