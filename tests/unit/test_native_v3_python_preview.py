@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -13,7 +14,7 @@ from typing import Any
 import pytest
 
 from mutation_forge import cli
-from mutation_forge.experiment.json_io import read_json, write_json
+from mutation_forge.experiment.json_io import compress_json_bytes, read_json, write_json
 from mutation_forge.models import JsonValue
 from mutation_forge.native_v3_python import preview as preview_module
 from mutation_forge.native_v3_python import scientific_search as search_module
@@ -22,6 +23,7 @@ from mutation_forge.native_v3_python.contracts import (
 )
 from mutation_forge.native_v3_python.preview import (
     PYTHON_PREVIEW_CONFIG_SCHEMA_VERSION,
+    PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION,
     PythonPreviewWorkspaceError,
     experiment_protocol,
     load_python_preview_config,
@@ -54,6 +56,54 @@ model = "fixture-model"
 effort = "high"
 timeout_seconds = 30
 heg_repo = "{heg.as_posix()}"
+''',
+        encoding="utf-8",
+    )
+    return path
+
+
+def _scientific_status_config(tmp_path: Path, *, exp_id: str) -> Path:
+    heg = tmp_path / "heg"
+    (heg / "src" / "sglab").mkdir(parents=True, exist_ok=True)
+    path = tmp_path / f"{exp_id}.toml"
+    path.write_text(
+        f'''schema_version = "{PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION}"
+protocol = "{PYTHON_EXPERIMENT_PROTOCOL_ID}"
+exp_id = "{exp_id}"
+workspace = "{(tmp_path / "workspaces").as_posix()}"
+
+[python_preview]
+model = "fixture-model"
+effort = "medium"
+timeout_seconds = 30
+heg_repo = "{heg.as_posix()}"
+
+[python_preview.scientific_search]
+generation_limit = 2
+evaluator_workers = 2
+provider_concurrency = 2
+wall_seconds = 60
+primary_program_slots = 16
+repair_turn_limit = 0
+provider_total_turn_limit = 16
+validated_queue_target = 4
+validated_queue_capacity = 8
+stop_on_verified = true
+resume_enabled = true
+replace_terminal_slots = false
+
+[python_preview.scientific_search.evaluation]
+graph_mode = "unrestricted_min_degree_3"
+order_schedule = "adaptive"
+min_order = 8
+max_order = 8
+orders_per_generation = 1
+graph_seeds = [101]
+policy_seeds = [17, 19, 23, 29]
+horizon = 1
+witness_cap = 64
+baselines = ["random", "structural"]
+replay = false
 ''',
         encoding="utf-8",
     )
@@ -996,6 +1046,410 @@ def test_owned_provider_can_preserve_durable_capsule_for_resume() -> None:
 
     assert adapter.close_calls == 1
     assert capsule.cleanup_calls == 0
+
+
+def _evaluation_payload(
+    multiplier: int,
+    *,
+    timeout: bool = False,
+) -> dict[str, Any]:
+    return {
+        "runtime_profile": {
+            "sandbox_wall_seconds": multiplier * 0.5,
+            "selector_wall_seconds": multiplier * 0.25,
+            "action_wall_seconds": multiplier * 0.125,
+        },
+        "worker_telemetry": {
+            "rotations": multiplier,
+            "failures": multiplier,
+            "worker_rss_kib": multiplier * 100,
+        },
+        "scientific_result": {
+            "steps": [{} for _ in range(multiplier)],
+            "score_attempts": multiplier * 2,
+            "unique_graph_scores": multiplier,
+            "terminal_evidence": {
+                "components": [
+                    {
+                        "forbidden_length": 4,
+                        "wall_time_ns": multiplier * 1_000_000_000,
+                    }
+                ]
+            },
+            "failure": {"code": "PROPOSE_TIMEOUT"} if timeout else None,
+        },
+    }
+
+
+def _clear_evaluation_telemetry_indexes() -> None:
+    with preview_module._EVALUATION_TELEMETRY_INDEX_LOCK:
+        preview_module._EVALUATION_TELEMETRY_INDEXES.clear()
+
+
+def _evaluation_artifact_paths(root: Path) -> tuple[Path, Path]:
+    return (
+        root
+        / "generations"
+        / "generation-0000"
+        / "slot-00"
+        / "evaluations"
+        / "case-candidate.json.gz",
+        root
+        / "generations"
+        / "generation-0000"
+        / "baselines"
+        / "random"
+        / "evaluations"
+        / "case-baseline.json.gz",
+    )
+
+
+def _evaluation_load_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[Path]:
+    loaded: list[Path] = []
+    original = preview_module._load_mapping
+
+    def tracked(path: Path) -> dict[str, Any] | None:
+        if path.parent.name == "evaluations" and path.name.endswith(".json.gz"):
+            loaded.append(path)
+        return original(path)
+
+    monkeypatch.setattr(preview_module, "_load_mapping", tracked)
+    return loaded
+
+
+def test_evaluation_telemetry_index_initial_rebuild_is_exact(
+    tmp_path: Path,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    root = tmp_path / "experiment"
+    candidate_path, baseline_path = _evaluation_artifact_paths(root)
+    second_candidate_path = candidate_path.with_name("case-candidate-2.json.gz")
+    write_json(candidate_path, _evaluation_payload(1, timeout=True))
+    write_json(second_candidate_path, _evaluation_payload(2))
+    write_json(baseline_path, _evaluation_payload(3))
+
+    telemetry, candidate_count, baseline_count = (
+        preview_module._evaluation_telemetry_snapshot(root)
+    )
+
+    assert telemetry == {
+        "starts": 3,
+        "rotations": 6,
+        "failures": 6,
+        "timeouts": 1,
+        "maximum_rss_kib": 300,
+        "policy_invocations": 6,
+        "graph_score_attempts": 12,
+        "unique_graph_scores": 6,
+        "sandbox_wall_seconds": 3.0,
+        "selector_wall_seconds": 1.5,
+        "action_wall_seconds": 0.75,
+        "scoring_wall_seconds": 6.0,
+    }
+    assert candidate_count == 2
+    assert baseline_count == 1
+
+
+def test_unchanged_status_refresh_does_not_reload_evaluation_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    config_path = _config(tmp_path, exp_id="incremental-status")
+    config = load_python_preview_config(config_path)
+    preview_module._initialize_workspace(config)
+    candidate_path, baseline_path = _evaluation_artifact_paths(config.experiment_root)
+    write_json(candidate_path, _evaluation_payload(1))
+    write_json(baseline_path, _evaluation_payload(2))
+    loaded = _evaluation_load_counter(monkeypatch)
+
+    python_preview_status(config_path)
+    assert loaded == [candidate_path, baseline_path]
+
+    loaded.clear()
+    python_preview_status(config_path)
+
+    assert loaded == []
+
+
+def test_one_new_evaluation_artifact_loads_and_accumulates_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    root = tmp_path / "experiment"
+    candidate_path, _ = _evaluation_artifact_paths(root)
+    write_json(candidate_path, _evaluation_payload(1))
+    initial, _, _ = preview_module._evaluation_telemetry_snapshot(root)
+    loaded = _evaluation_load_counter(monkeypatch)
+    new_path = candidate_path.with_name("case-candidate-2.json.gz")
+
+    write_json(new_path, _evaluation_payload(2, timeout=True))
+    updated, candidate_count, _ = preview_module._evaluation_telemetry_snapshot(root)
+
+    assert loaded == [new_path]
+    assert candidate_count == 2
+    assert updated == {
+        "starts": initial["starts"] + 1,
+        "rotations": initial["rotations"] + 2,
+        "failures": initial["failures"] + 2,
+        "timeouts": initial["timeouts"] + 1,
+        "maximum_rss_kib": 200,
+        "policy_invocations": initial["policy_invocations"] + 2,
+        "graph_score_attempts": initial["graph_score_attempts"] + 4,
+        "unique_graph_scores": initial["unique_graph_scores"] + 2,
+        "sandbox_wall_seconds": initial["sandbox_wall_seconds"] + 1.0,
+        "selector_wall_seconds": initial["selector_wall_seconds"] + 0.5,
+        "action_wall_seconds": initial["action_wall_seconds"] + 0.25,
+        "scoring_wall_seconds": initial["scoring_wall_seconds"] + 2.0,
+    }
+
+
+def test_changed_evaluation_directory_does_not_reload_known_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    root = tmp_path / "experiment"
+    candidate_path, _ = _evaluation_artifact_paths(root)
+    write_json(candidate_path, _evaluation_payload(1))
+    preview_module._evaluation_telemetry_snapshot(root)
+    loaded = _evaluation_load_counter(monkeypatch)
+    directory = candidate_path.parent
+    directory_stat = directory.stat()
+
+    os.utime(
+        directory,
+        ns=(directory_stat.st_atime_ns, directory_stat.st_mtime_ns + 1_000_000),
+    )
+    telemetry, candidate_count, _ = preview_module._evaluation_telemetry_snapshot(root)
+
+    assert loaded == []
+    assert telemetry["starts"] == 1
+    assert candidate_count == 1
+
+
+def test_evaluation_telemetry_index_invalidates_on_workspace_replacement(
+    tmp_path: Path,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    root = tmp_path / "experiment"
+    candidate_path, _ = _evaluation_artifact_paths(root)
+    write_json(candidate_path, _evaluation_payload(1))
+    initial, _, _ = preview_module._evaluation_telemetry_snapshot(root)
+    old_identity = preview_module._filesystem_identity(root.stat())
+
+    shutil.rmtree(root)
+    (tmp_path / "inode-consumer").mkdir()
+    replacement_path, _ = _evaluation_artifact_paths(root)
+    write_json(replacement_path, _evaluation_payload(3))
+
+    assert preview_module._filesystem_identity(root.stat()) != old_identity
+    replaced, candidate_count, baseline_count = (
+        preview_module._evaluation_telemetry_snapshot(root)
+    )
+    assert initial["rotations"] == 1
+    assert replaced["rotations"] == 3
+    assert candidate_count == 1
+    assert baseline_count == 0
+
+
+def test_historical_evaluation_artifact_mutation_forces_exact_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    root = tmp_path / "experiment"
+    candidate_path, baseline_path = _evaluation_artifact_paths(root)
+    write_json(candidate_path, _evaluation_payload(1))
+    write_json(baseline_path, _evaluation_payload(2))
+    preview_module._evaluation_telemetry_snapshot(root)
+    loaded = _evaluation_load_counter(monkeypatch)
+
+    write_json(candidate_path, _evaluation_payload(4, timeout=True))
+    rebuilt, candidate_count, baseline_count = (
+        preview_module._evaluation_telemetry_snapshot(root)
+    )
+
+    assert loaded == [candidate_path, baseline_path]
+    assert rebuilt["starts"] == 2
+    assert rebuilt["rotations"] == 6
+    assert rebuilt["timeouts"] == 1
+    assert rebuilt["maximum_rss_kib"] == 400
+    assert candidate_count == baseline_count == 1
+
+
+def test_evaluation_telemetry_warm_refresh_operation_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    root = tmp_path / "experiment"
+    evaluation_dir = (
+        root
+        / "generations"
+        / "generation-0000"
+        / "slot-00"
+        / "evaluations"
+    )
+    evaluation_dir.mkdir(parents=True)
+    compressed = compress_json_bytes(
+        json.dumps(_evaluation_payload(1), sort_keys=True).encode("utf-8")
+    )
+    for index in range(1_000):
+        (evaluation_dir / f"case-{index:04d}.json.gz").write_bytes(compressed)
+    preview_module._evaluation_telemetry_snapshot(root)
+    loaded = _evaluation_load_counter(monkeypatch)
+
+    for _ in range(20):
+        preview_module._evaluation_telemetry_snapshot(root)
+    assert loaded == []
+
+    new_paths = [
+        evaluation_dir / f"case-{index:04d}.json.gz"
+        for index in range(1_000, 1_010)
+    ]
+    for path in new_paths:
+        path.write_bytes(compressed)
+    _, candidate_count, _ = preview_module._evaluation_telemetry_snapshot(root)
+
+    assert loaded == new_paths
+    assert candidate_count == 1_010
+
+
+def test_status_reconstructs_cumulative_evaluation_progress_after_resume(
+    tmp_path: Path,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    config_path = _scientific_status_config(tmp_path, exp_id="cumulative-progress")
+    config = load_python_preview_config(config_path)
+    preview_module._initialize_workspace(config)
+    root = config.experiment_root
+    panel = [
+        DevelopmentCaseV1(
+            case_id=f"case-{index}",
+            order=8,
+            graph_seed=101,
+            policy_seed=17 + index,
+            horizon=1,
+            witness_cap=64,
+            forbidden_lengths=(4,),
+        ).as_dict()
+        for index in range(4)
+    ]
+    generation_zero = root / "generations" / "generation-0000"
+    generation_one = root / "generations" / "generation-0001"
+    write_json(
+        generation_zero / "manifest.json.gz",
+        {
+            "generation": 0,
+            "panel": panel,
+            "slots": [
+                {"slot": "slot-00", "kind": "root"},
+                {"slot": "slot-01", "kind": "root"},
+            ],
+        },
+    )
+    for slot in ("slot-00", "slot-01"):
+        write_json(
+            generation_zero / slot / "prepared-candidate.json.gz",
+            {"candidate_id": f"g0000-{slot}"},
+        )
+    for index in range(8):
+        baseline = "random" if index % 2 == 0 else "structural"
+        write_json(
+            generation_zero
+            / "baselines"
+            / baseline
+            / "evaluations"
+            / f"case-{index:02d}.json.gz",
+            _evaluation_payload(1),
+        )
+    for index in range(8):
+        slot = "slot-00" if index < 4 else "slot-01"
+        write_json(
+            generation_zero
+            / slot
+            / "evaluations"
+            / f"case-{index:02d}.json.gz",
+            _evaluation_payload(1),
+        )
+
+    before_resume = python_preview_status(config_path)["evaluation_cases"]
+    assert before_resume["baseline"]["completed"] == 8
+    assert before_resume["baseline"]["total"] == 8
+    assert before_resume["candidate"]["completed"] == 8
+    assert before_resume["candidate"]["total"] == 8
+
+    write_json(
+        root / search_module.M10_RUNTIME_FILENAME,
+        {
+            "evaluation_cases_completed": 0,
+            "evaluation_cases_total": 0,
+            "baseline_evaluation_cases_completed": 0,
+            "baseline_evaluation_cases_total": 0,
+            "candidate_evaluation_cases_completed": 0,
+            "candidate_evaluation_cases_total": 0,
+            "evaluation_progress": {},
+        },
+    )
+    write_json(
+        generation_one / "manifest.json.gz",
+        {
+            "generation": 1,
+            "panel": panel,
+            "slots": [{"slot": "slot-00", "kind": "root"}],
+        },
+    )
+    for index in range(3):
+        baseline = "random" if index % 2 == 0 else "structural"
+        write_json(
+            generation_one
+            / "baselines"
+            / baseline
+            / "evaluations"
+            / f"case-{index:02d}.json.gz",
+            _evaluation_payload(1),
+        )
+
+    baseline_snapshot = python_preview_status(config_path)["evaluation_cases"]
+    assert baseline_snapshot["baseline"]["completed"] == 11
+    assert baseline_snapshot["baseline"]["total"] == 16
+    assert baseline_snapshot["candidate"]["completed"] == 8
+    assert baseline_snapshot["candidate"]["total"] == 8
+
+    write_json(
+        generation_one / "slot-00" / "prepared-candidate.json.gz",
+        {"candidate_id": "g0001-slot-00"},
+    )
+    prepared_snapshot = python_preview_status(config_path)["evaluation_cases"]
+    assert prepared_snapshot["candidate"]["completed"] == 8
+    assert prepared_snapshot["candidate"]["total"] == 12
+
+    for index in range(2):
+        write_json(
+            generation_one
+            / "slot-00"
+            / "evaluations"
+            / f"case-{index:02d}.json.gz",
+            _evaluation_payload(1),
+        )
+    completed_snapshot = python_preview_status(config_path)["evaluation_cases"]
+    assert completed_snapshot["candidate"]["completed"] == 10
+    assert completed_snapshot["candidate"]["total"] == 12
+    assert completed_snapshot["completed"] == 21
+    assert completed_snapshot["total"] == 28
+    for snapshot in (
+        before_resume,
+        baseline_snapshot,
+        prepared_snapshot,
+        completed_snapshot,
+    ):
+        assert snapshot["baseline"]["completed"] <= snapshot["baseline"]["total"]
+        assert snapshot["candidate"]["completed"] <= snapshot["candidate"]["total"]
+        assert snapshot["completed"] <= snapshot["total"]
 
 
 def test_blocked_preview_preserves_owned_capsule_for_resume(
