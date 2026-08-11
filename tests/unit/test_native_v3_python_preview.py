@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from mutation_forge import cli
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
 from mutation_forge.native_v3_python import preview as preview_module
+from mutation_forge.native_v3_python import scientific_search as search_module
 from mutation_forge.native_v3_python.contracts import (
     PYTHON_EXPERIMENT_PROTOCOL_ID,
 )
@@ -198,6 +200,107 @@ class _Evaluator:
                 "app_server_calls": 0,
             },
         }
+
+
+class _ProcessFixtureEvaluator:
+    def evaluate(
+        self,
+        *,
+        source: str,
+        case: DevelopmentCaseV1,
+        candidate_id: str,
+    ) -> Mapping[str, JsonValue]:
+        del source
+        return {
+            "kind": "candidate",
+            "candidate_id": candidate_id,
+            "case_id": case.case_id,
+            "process_id": os.getpid(),
+        }
+
+    def evaluate_baseline(
+        self,
+        *,
+        baseline: str,
+        case: DevelopmentCaseV1,
+        generation: int,
+    ) -> Mapping[str, JsonValue]:
+        return {
+            "kind": "baseline",
+            "baseline": baseline,
+            "case_id": case.case_id,
+            "generation": generation,
+            "process_id": os.getpid(),
+        }
+
+
+def _process_backend_factory(_: preview_module.PythonPreviewConfig) -> _Backend:
+    return _Backend()
+
+
+def _process_evaluator_factory(
+    _: preview_module.PythonPreviewConfig,
+    __: Any,
+) -> _ProcessFixtureEvaluator:
+    return _ProcessFixtureEvaluator()
+
+
+def test_candidate_and_baseline_evaluation_run_in_owned_child_process(
+    tmp_path: Path,
+) -> None:
+    config = load_python_preview_config(_config(tmp_path, exp_id="process-owned"))
+    first = preview_module._ProcessOwnedEvaluator(
+        config,
+        backend_factory=_process_backend_factory,
+        evaluator_factory=_process_evaluator_factory,
+    )
+    second = preview_module._ProcessOwnedEvaluator(
+        config,
+        backend_factory=_process_backend_factory,
+        evaluator_factory=_process_evaluator_factory,
+    )
+    case = DevelopmentCaseV1("case-00", 30, 101, 17, 1, 64, (4, 8))
+    try:
+        first_candidate_name = search_module._evaluation_process_name(
+            0, "candidate:g0000-slot-01"
+        )
+        second_candidate_name = search_module._evaluation_process_name(
+            1, "candidate:g0000-slot-01"
+        )
+        first.set_worker_name(first_candidate_name)
+        second.set_worker_name(second_candidate_name)
+        candidate = first.evaluate(
+            source=_source("process"),
+            case=case,
+            candidate_id="g0000-slot-01",
+        )
+        assert candidate["process_id"] == first.worker_pid
+        assert candidate["process_id"] != os.getpid()
+        assert first_candidate_name != second_candidate_name
+        assert len(first_candidate_name.encode("ascii")) <= 15
+        assert (
+            Path(f"/proc/{first.worker_pid}/comm").read_text().strip()
+            == first_candidate_name
+        )
+
+        baseline_name = search_module._evaluation_process_name(
+            0, "baseline:structural"
+        )
+        first.set_worker_name(baseline_name)
+        baseline = first.evaluate_baseline(
+            baseline="structural",
+            case=case,
+            generation=0,
+        )
+        assert baseline["process_id"] == first.worker_pid
+        assert baseline["process_id"] != os.getpid()
+        assert "struct" in baseline_name
+        assert Path(f"/proc/{first.worker_pid}/comm").read_text().strip() == baseline_name
+    finally:
+        first.close()
+        second.close()
+    assert not Path(f"/proc/{first.worker_pid}").exists()
+    assert not Path(f"/proc/{second.worker_pid}").exists()
 
 
 class _FailFirstEvaluator(_Evaluator):

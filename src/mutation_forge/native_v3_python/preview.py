@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import shutil
+import signal
+import sys
 import tempfile
 import time
 import tomllib
@@ -1650,10 +1653,10 @@ def _progress(
                 JsonValue,
                 [
                     {
-                        "thread_id": thread_id,
+                        "worker_id": worker_id,
                         **dict(item),
                     }
-                    for thread_id, item in sorted(
+                    for worker_id, item in sorted(
                         active_evaluation_work.items()
                     )
                     if isinstance(item, Mapping)
@@ -2173,6 +2176,202 @@ class _BackendOwnedEvaluator:
         self._backend.close()
 
 
+class _RemoteEvaluationError(RuntimeError):
+    def __init__(self, error_type: str, message: str) -> None:
+        self.remote_type = error_type
+        super().__init__(f"{error_type}: {message}" if message else error_type)
+
+
+def _set_evaluator_process_name(name: str) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl(15, name[:15].encode("ascii", "replace"), 0, 0, 0)
+
+
+def _evaluation_process_main(
+    connection: Any,
+    config: PythonPreviewConfig,
+    backend_factory: BackendFactory,
+    evaluator_factory: EvaluatorFactory,
+) -> None:
+    backend: GraphBackend | None = None
+    try:
+        process_group = None
+        if hasattr(os, "setsid"):
+            os.setsid()
+            process_group = os.getpgrp()
+        backend = backend_factory(config)
+        evaluator = _BackendOwnedEvaluator(
+            evaluator=cast(
+                M10ScientificEvaluator,
+                evaluator_factory(config, backend),
+            ),
+            backend=backend,
+        )
+        connection.send(("ready", os.getpid(), process_group))
+        while True:
+            request = connection.recv()
+            if not isinstance(request, tuple) or not request:
+                raise RuntimeError("evaluation worker request is malformed")
+            operation = request[0]
+            if operation == "close":
+                connection.send(("closed",))
+                return
+            if operation == "name":
+                name = str(request[1])[:15]
+                _set_evaluator_process_name(name)
+                evaluator.set_worker_name(name)
+                connection.send(("named",))
+                continue
+            try:
+                if operation == "candidate":
+                    result = evaluator.evaluate(
+                        source=str(request[1]),
+                        case=cast(DevelopmentCaseV1, request[2]),
+                        candidate_id=str(request[3]),
+                    )
+                elif operation == "baseline":
+                    result = evaluator.evaluate_baseline(
+                        baseline=str(request[1]),
+                        case=cast(DevelopmentCaseV1, request[2]),
+                        generation=int(request[3]),
+                    )
+                else:
+                    raise RuntimeError("evaluation worker operation is unknown")
+                connection.send(("result", dict(result)))
+            except Exception as error:
+                connection.send(("error", type(error).__name__, str(error)[:2048]))
+    except BaseException as error:
+        with suppress(Exception):
+            connection.send(("init_error", type(error).__name__, str(error)[:2048]))
+    finally:
+        if backend is not None:
+            with suppress(Exception):
+                backend.close()
+        connection.close()
+
+
+class _ProcessOwnedEvaluator:
+    """One persistent evaluator process behind a synchronous case interface."""
+
+    def __init__(
+        self,
+        config: PythonPreviewConfig,
+        *,
+        backend_factory: BackendFactory = _default_backend,
+        evaluator_factory: EvaluatorFactory = _default_evaluator,
+    ) -> None:
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe()
+        self._connection = parent
+        self._closed = False
+        self._process_group: int | None = None
+        self._process = context.Process(
+            target=_evaluation_process_main,
+            args=(child, config, backend_factory, evaluator_factory),
+        )
+        self._process.start()
+        child.close()
+        if not parent.poll(30):
+            self.close(force=True)
+            raise RuntimeError("evaluation worker did not initialize")
+        response = parent.recv()
+        if not isinstance(response, tuple) or not response or response[0] != "ready":
+            self.close(force=True)
+            error_type = str(response[1]) if len(response) > 1 else "RuntimeError"
+            message = str(response[2]) if len(response) > 2 else "evaluation worker failed"
+            raise _RemoteEvaluationError(error_type, message)
+        self.worker_pid = int(response[1])
+        self._process_group = (
+            int(response[2]) if isinstance(response[2], int) else None
+        )
+
+    def _request(self, request: tuple[Any, ...]) -> Mapping[str, JsonValue]:
+        if self._closed:
+            raise RuntimeError("evaluation worker is closed")
+        try:
+            self._connection.send(request)
+            response = self._connection.recv()
+        except (BrokenPipeError, EOFError, OSError) as error:
+            raise RuntimeError("evaluation worker exited unexpectedly") from error
+        if not isinstance(response, tuple) or not response:
+            raise RuntimeError("evaluation worker response is malformed")
+        if response[0] == "error":
+            raise _RemoteEvaluationError(str(response[1]), str(response[2]))
+        if response[0] != "result" or not isinstance(response[1], Mapping):
+            raise RuntimeError("evaluation worker response is malformed")
+        return cast(Mapping[str, JsonValue], response[1])
+
+    def set_worker_name(self, name: str) -> None:
+        if self._closed:
+            return
+        self._connection.send(("name", name[:15]))
+        response = self._connection.recv()
+        if response != ("named",):
+            raise RuntimeError("evaluation worker did not accept its process name")
+
+    def evaluate(
+        self,
+        *,
+        source: str,
+        case: DevelopmentCaseV1,
+        candidate_id: str,
+    ) -> Mapping[str, JsonValue]:
+        return self._request(("candidate", source, case, candidate_id))
+
+    def evaluate_baseline(
+        self,
+        *,
+        baseline: str,
+        case: DevelopmentCaseV1,
+        generation: int,
+    ) -> Mapping[str, JsonValue]:
+        return self._request(("baseline", baseline, case, generation))
+
+    def close(self, *, force: bool = False) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if force:
+            self._terminate_process_group()
+        else:
+            try:
+                self._connection.send(("close",))
+                if self._connection.poll(5):
+                    self._connection.recv()
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            self._process.join(timeout=5)
+            if self._process.is_alive():
+                self._terminate_process_group()
+        self._connection.close()
+
+    def _terminate_process_group(self) -> None:
+        if (
+            self._process.is_alive()
+            and self._process_group == self._process.pid
+            and hasattr(os, "killpg")
+        ):
+            with suppress(ProcessLookupError):
+                os.killpg(self._process_group, signal.SIGTERM)
+        elif self._process.is_alive():
+            self._process.terminate()
+        self._process.join(timeout=0.5)
+        if self._process.is_alive():
+            if (
+                self._process_group == self._process.pid
+                and hasattr(os, "killpg")
+            ):
+                with suppress(ProcessLookupError):
+                    os.killpg(self._process_group, signal.SIGKILL)
+            else:
+                self._process.kill()
+            self._process.join(timeout=0.5)
+
+
 def run_python_preview(
     config_path: str | Path,
     *,
@@ -2342,8 +2541,14 @@ def run_python_preview(
         else:
             scientific_search = config.scientific_search
             scientific_backend = backend
+            process_isolation = (
+                backend_factory is _default_backend
+                and evaluator_factory is _default_evaluator
+            )
 
             def make_evaluator() -> M10ScientificEvaluator:
+                if process_isolation:
+                    return _ProcessOwnedEvaluator(config)
                 worker_backend = backend_factory(config)
                 try:
                     evaluator = cast(

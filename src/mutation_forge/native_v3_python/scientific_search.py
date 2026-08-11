@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from collections import Counter, deque
@@ -788,6 +789,8 @@ class _RuntimeTelemetry:
         *,
         owner: str,
         case_id: str,
+        worker_id: str | None = None,
+        process_id: int | None = None,
     ) -> None:
         with self._lock:
             self._state["queued_evaluations"] = max(
@@ -806,10 +809,13 @@ class _RuntimeTelemetry:
             active_work = self._state.setdefault("active_evaluation_work", {})
             if not isinstance(active_work, dict):
                 raise core.M5InfrastructureError("M10 active evaluation work is malformed")
-            active_work[str(threading.get_native_id())] = {
+            identity = worker_id or str(threading.get_native_id())
+            active_work[identity] = {
                 "owner": owner,
                 "case_id": case_id,
                 "started_epoch_seconds": time.time(),
+                "dispatch_thread_id": threading.get_native_id(),
+                "process_id": process_id,
             }
             progress = self._state.setdefault("evaluation_progress", {})
             item = progress.get(owner) if isinstance(progress, dict) else None
@@ -839,6 +845,7 @@ class _RuntimeTelemetry:
         *,
         owner: str,
         failed: bool,
+        worker_id: str | None = None,
     ) -> None:
         with self._lock:
             self._state["active_evaluators"] = max(
@@ -852,7 +859,7 @@ class _RuntimeTelemetry:
             self._state[counter] = int(self._state[counter]) + 1
             active_work = self._state.setdefault("active_evaluation_work", {})
             if isinstance(active_work, dict):
-                active_work.pop(str(threading.get_native_id()), None)
+                active_work.pop(worker_id or str(threading.get_native_id()), None)
             progress = self._state.setdefault("evaluation_progress", {})
             item = progress.get(owner) if isinstance(progress, dict) else None
             if isinstance(item, dict):
@@ -992,6 +999,22 @@ class _PanelWork:
     failure_case_id: str | None = None
 
 
+def _evaluation_process_name(worker: int, owner: str) -> str:
+    """Return one unique owner-aware Linux process name."""
+
+    prefix = f"mf{worker:02d}-"
+    candidate = re.fullmatch(r"candidate:g(\d+)-slot-(\d+)", owner)
+    if candidate is not None:
+        owner_name = f"g{int(candidate.group(1)):x}s{int(candidate.group(2)):02d}"
+    elif owner == "baseline:random":
+        owner_name = "rand"
+    elif owner == "baseline:structural":
+        owner_name = "struct"
+    else:
+        owner_name = "work"
+    return f"{prefix}{owner_name}"[:15]
+
+
 class _ConcurrentEvaluatorPool:
     """Bounded fair case scheduler with one private evaluator per worker."""
 
@@ -1015,6 +1038,7 @@ class _ConcurrentEvaluatorPool:
         self._threads = tuple(
             threading.Thread(
                 target=self._worker,
+                args=(index,),
                 name=f"mforge-m10-evaluator-{index:02d}",
             )
             for index in range(workers)
@@ -1022,7 +1046,7 @@ class _ConcurrentEvaluatorPool:
         for thread in self._threads:
             thread.start()
 
-    def _worker(self) -> None:
+    def _worker(self, worker_index: int) -> None:
         evaluator: M10ScientificEvaluator | None = None
         while True:
             with self._condition:
@@ -1037,38 +1061,68 @@ class _ConcurrentEvaluatorPool:
                 if work.remaining_indices:
                     self._runnable.append(work)
                 case = work.panel[index]
-            started = time.monotonic()
             failed = False
             payload: dict[str, Any] | None = None
-            self._telemetry.evaluator_started(
-                started - work.queued_at,
-                owner=work.key,
-                case_id=case.case_id,
-            )
             try:
                 if evaluator is None:
                     evaluator = self._factory()
-                    set_worker_name = getattr(evaluator, "set_worker_name", None)
-                    if callable(set_worker_name):
-                        worker_suffix = threading.current_thread().name.rsplit("-", 1)[-1]
-                        set_worker_name(f"mforge-eval-{worker_suffix}"[:15])
                     with self._owned_lock:
                         if self._force_closing:
                             close = getattr(evaluator, "close", None)
                             if callable(close):
-                                close()
+                                try:
+                                    close(force=True)
+                                except TypeError:
+                                    close()
                             raise RuntimeError("evaluator pool is closing")
                         self._owned.append(evaluator)
                     self._telemetry.evaluator_created()
-                payload = dict(work.operation(evaluator, case))
-                self._telemetry.timed_persist(
-                    partial(_write_or_verify, work.evaluation_paths[index], payload)
+                set_worker_name = getattr(evaluator, "set_worker_name", None)
+                if callable(set_worker_name):
+                    set_worker_name(_evaluation_process_name(worker_index, work.key))
+                raw_worker_pid = getattr(evaluator, "worker_pid", None)
+                worker_id = (
+                    str(raw_worker_pid)
+                    if isinstance(raw_worker_pid, int) and not isinstance(raw_worker_pid, bool)
+                    else str(threading.get_native_id())
                 )
+                started = time.monotonic()
+                failed = False
+                payload: dict[str, Any] | None = None
+                self._telemetry.evaluator_started(
+                    started - work.queued_at,
+                    owner=work.key,
+                    case_id=case.case_id,
+                    worker_id=worker_id,
+                    process_id=(
+                        raw_worker_pid
+                        if isinstance(raw_worker_pid, int)
+                        and not isinstance(raw_worker_pid, bool)
+                        else None
+                    ),
+                )
+                try:
+                    payload = dict(work.operation(evaluator, case))
+                    self._telemetry.timed_persist(
+                        partial(_write_or_verify, work.evaluation_paths[index], payload)
+                    )
+                except Exception:
+                    failed = True
+                    raise
+                finally:
+                    self._telemetry.evaluator_finished(
+                        time.monotonic() - started,
+                        owner=work.key,
+                        failed=failed,
+                        worker_id=worker_id,
+                    )
             except Exception as error:
                 failed = True
                 with self._condition:
                     if work.failure_type is None:
-                        work.failure_type = type(error).__name__
+                        work.failure_type = str(
+                            getattr(error, "remote_type", type(error).__name__)
+                        )
                         work.failure_message = str(error)[:1024]
                         work.failure_case_id = case.case_id
                         self._runnable = deque(item for item in self._runnable if item is not work)
@@ -1078,12 +1132,6 @@ class _ConcurrentEvaluatorPool:
                             cancelled,
                             owner=work.key,
                         )
-            finally:
-                self._telemetry.evaluator_finished(
-                    time.monotonic() - started,
-                    owner=work.key,
-                    failed=failed,
-                )
             with self._condition:
                 if payload is not None:
                     work.payloads[index] = payload
@@ -1247,7 +1295,10 @@ class _ConcurrentEvaluatorPool:
                 close = getattr(evaluator, "close", None)
                 if callable(close):
                     try:
-                        close()
+                        try:
+                            close(force=True)
+                        except TypeError:
+                            close()
                     except Exception as error:
                         errors.append(error)
         for thread in self._threads:
