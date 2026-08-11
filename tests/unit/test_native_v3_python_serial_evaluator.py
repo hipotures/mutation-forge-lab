@@ -101,6 +101,7 @@ class _Backend:
         self.interval_mode = interval_mode
         self.score_calls: list[tuple[GraphState, tuple[int, ...], AttemptKind]] = []
         self.apply_calls: list[RewritePlan] = []
+        self.canonical_hash_calls = 0
         self.raw_graph_score_calls = 0
         self.unique_graph_scores = 0
 
@@ -202,6 +203,7 @@ class _Backend:
         return ExactVerification("REJECTED", True, "fixture", "fixture")
 
     def canonical_hash(self, graph: GraphState) -> str:
+        self.canonical_hash_calls += 1
         return self.state_hash(graph)
 
     def state_hash(self, graph: GraphState) -> str:
@@ -343,6 +345,7 @@ def test_no_plan_consumes_every_step_without_candidate_scoring() -> None:
         "EXPLICIT",
     ]
     assert len(backend.score_calls) == 1
+    assert backend.canonical_hash_calls == 1
 
 
 def test_builtin_baseline_uses_native_v2_operator_with_candidate_metric() -> None:

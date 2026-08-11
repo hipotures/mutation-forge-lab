@@ -330,6 +330,7 @@ def _inspect_apparent_zero(
     pipeline: CounterexampleInspector | None,
     backend: GraphBackend,
     graph: GraphState,
+    graph_identity: GraphIdentity,
     evidence: ScoreEvidence,
     config: SerialEpisodeConfig,
     program_hash: str,
@@ -364,7 +365,7 @@ def _inspect_apparent_zero(
         ),
     )
     return CounterexampleTrace(
-        graph_identity=_identity(backend, graph),
+        graph_identity=graph_identity,
         decision=outcome.decision.value,
         candidate_id=(
             outcome.candidate.candidate_id if outcome.candidate is not None else None
@@ -518,6 +519,7 @@ def _evaluate_serial(
         pipeline=counterexample_pipeline,
         backend=backend,
         graph=initial,
+        graph_identity=initial_identity,
         evidence=initial_evidence,
         config=config,
         program_hash=program_hash,
@@ -526,6 +528,7 @@ def _evaluate_serial(
     )
 
     current = initial
+    current_identity = initial_identity
     current_evidence = initial_evidence
     accepted_rewrites = 0
     failure: ProgramFailure | None = None
@@ -533,7 +536,7 @@ def _evaluate_serial(
     steps: list[SerialStepTrace] = []
     trajectory = [initial_utility]
     for step_index in range(config.horizon):
-        before_identity = _identity(backend, current)
+        before_identity = current_identity
         evidence_before = current_evidence
         invocation = invoke_step(current, step_index, accepted_rewrites)
         outcome = "failure"
@@ -609,6 +612,7 @@ def _evaluate_serial(
                         pipeline=counterexample_pipeline,
                         backend=backend,
                         graph=candidate,
+                        graph_identity=candidate_identity,
                         evidence=candidate_evidence,
                         config=config,
                         program_hash=program_hash,
@@ -622,6 +626,7 @@ def _evaluate_serial(
                     accepted = acceptance_proved
                     if accepted:
                         current = candidate
+                        current_identity = candidate_identity
                         current_evidence = candidate_evidence
                         accepted_rewrites += 1
 
@@ -647,7 +652,7 @@ def _evaluate_serial(
                 accepted=accepted,
                 acceptance_proved=acceptance_proved,
                 expanded_retry_timeouts=tuple(expanded_retry_timeouts),
-                incumbent_after=_identity(backend, current),
+                incumbent_after=current_identity,
                 evidence_after=current_evidence,
                 utility_after=utility_after,
                 counterexample=counterexample,
@@ -658,7 +663,7 @@ def _evaluate_serial(
 
     while len(trajectory) < config.horizon + 1:
         trajectory.append(_utility(scale, current_evidence))
-    terminal_identity = _identity(backend, current)
+    terminal_identity = current_identity
     if failure is not None:
         status = SerialEvaluationStatus.PROGRAM_FAILURE
     elif unsafe_score_timeout:
