@@ -2650,8 +2650,24 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
         "load_python_preview_config",
         lambda _path: config,
     )
-    monkeypatch.setattr(cli, "python_preview_status", lambda _path: status)
-    run = Mock(return_value=status)
+    worker_started = False
+
+    def bootstrap(_path: Path) -> dict[str, str]:
+        assert worker_started is False
+        return {"state": "ready"}
+
+    def poll(_path: Path) -> dict[str, object]:
+        assert worker_started is True
+        return status
+
+    def run_preview(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal worker_started
+        worker_started = True
+        return status
+
+    monkeypatch.setattr(cli, "python_preview_bootstrap_status", bootstrap)
+    monkeypatch.setattr(cli, "python_preview_status", poll)
+    run = Mock(side_effect=run_preview)
     monkeypatch.setattr(cli, "run_python_preview", run)
     monkeypatch.setattr(
         cli,
@@ -2672,9 +2688,9 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
     assert callable(run.call_args.kwargs["force_stop"])
     dashboard_factory.assert_called_once()
     initial = dashboard_factory.call_args.kwargs["initial_state"]
-    assert initial.completed_slots == 8
-    assert initial.provider_turns_attempted == 8
-    assert initial.evaluations_completed == 1
+    assert initial.completed_slots == 0
+    assert initial.provider_turns_attempted == 0
+    assert initial.evaluations_completed == 0
     assert sink.update_canonical_state.call_count == 2
     sink.close.assert_called_once()
 
@@ -2723,6 +2739,7 @@ def test_python_dashboard_retries_first_q_after_workspace_startup_race(
 
     monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "native-v3-python-v1")
     monkeypatch.setattr(cli, "load_python_preview_config", lambda _path: config)
+    monkeypatch.setattr(cli, "python_preview_bootstrap_status", lambda _path: status)
     monkeypatch.setattr(cli, "python_preview_status", lambda _path: status)
     monkeypatch.setattr(cli, "request_python_preview_stop", request_stop)
     monkeypatch.setattr(cli, "run_python_preview", fake_run)
@@ -2784,6 +2801,7 @@ def test_python_dashboard_second_q_does_not_wait_for_worker(
 
     monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "native-v3-python-v1")
     monkeypatch.setattr(cli, "load_python_preview_config", lambda _path: config)
+    monkeypatch.setattr(cli, "python_preview_bootstrap_status", lambda _path: status)
     monkeypatch.setattr(cli, "python_preview_status", lambda _path: status)
     monkeypatch.setattr(cli, "request_python_preview_stop", Mock())
     monkeypatch.setattr(cli, "run_python_preview", fake_run)

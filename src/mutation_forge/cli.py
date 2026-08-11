@@ -41,6 +41,7 @@ from mutation_forge.native_v3_python.contracts import (
 from mutation_forge.native_v3_python.preview import (
     experiment_protocol,
     load_python_preview_config,
+    python_preview_bootstrap_status,
     python_preview_status,
     request_python_preview_stop,
     run_python_preview,
@@ -392,7 +393,9 @@ def _experiment_run(
                         else None
                     ),
                 },
-                initial_state=project(python_preview_status(config_path)),
+                initial_state=project(
+                    python_preview_bootstrap_status(config_path)
+                ),
                 capabilities=DashboardCapabilities(
                     quit=request_stop,
                     interrupt=interrupt_stop,

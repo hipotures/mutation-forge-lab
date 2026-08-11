@@ -1831,9 +1831,9 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
     with monkeypatch.context() as no_work:
         no_work.setattr(
             preview_module,
-            "_evaluation_telemetry_snapshot",
-            lambda _: (_ for _ in ()).throw(
-                AssertionError("no-op rebuilt evaluation telemetry")
+            "_progress",
+            lambda *_: (_ for _ in ()).throw(
+                AssertionError("no-op built the full status projection")
             ),
         )
         same_limit = run_python_preview(
@@ -1911,9 +1911,9 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
     with monkeypatch.context() as no_work:
         no_work.setattr(
             preview_module,
-            "_evaluation_telemetry_snapshot",
-            lambda _: (_ for _ in ()).throw(
-                AssertionError("decreased limit rebuilt evaluation telemetry")
+            "_progress",
+            lambda *_: (_ for _ in ()).throw(
+                AssertionError("decreased limit built the full status projection")
             ),
         )
         decreased = run_python_preview(
@@ -2050,9 +2050,9 @@ def test_legacy_generation_budget_state_and_missing_capsule_are_narrowly_interpr
     with monkeypatch.context() as no_work:
         no_work.setattr(
             preview_module,
-            "_evaluation_telemetry_snapshot",
-            lambda _: (_ for _ in ()).throw(
-                AssertionError("legacy no-op rebuilt evaluation telemetry")
+            "_progress",
+            lambda *_: (_ for _ in ()).throw(
+                AssertionError("legacy no-op built the full status projection")
             ),
         )
         same_limit = run_python_preview(

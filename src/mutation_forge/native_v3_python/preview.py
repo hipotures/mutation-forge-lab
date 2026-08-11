@@ -10,7 +10,6 @@ import shutil
 import signal
 import sys
 import tempfile
-import threading
 import time
 import tomllib
 from collections import Counter
@@ -895,299 +894,57 @@ def _usage_total(
     return totals
 
 
-@dataclass(slots=True)
-class _EvaluationTelemetryTotals:
-    starts: int = 0
-    rotations: int = 0
-    failures: int = 0
-    timeouts: int = 0
-    maximum_rss_kib: int = 0
-    policy_invocations: int = 0
-    graph_score_attempts: int = 0
-    unique_graph_scores: int = 0
-    sandbox_wall_seconds: float = 0.0
-    selector_wall_seconds: float = 0.0
-    action_wall_seconds: float = 0.0
-    scoring_wall_seconds: float = 0.0
-
-    def as_dict(self) -> dict[str, int | float]:
-        return {
-            "starts": self.starts,
-            "rotations": self.rotations,
-            "failures": self.failures,
-            "timeouts": self.timeouts,
-            "maximum_rss_kib": self.maximum_rss_kib,
-            "policy_invocations": self.policy_invocations,
-            "graph_score_attempts": self.graph_score_attempts,
-            "unique_graph_scores": self.unique_graph_scores,
-            "sandbox_wall_seconds": self.sandbox_wall_seconds,
-            "selector_wall_seconds": self.selector_wall_seconds,
-            "action_wall_seconds": self.action_wall_seconds,
-            "scoring_wall_seconds": self.scoring_wall_seconds,
-        }
+_EVALUATION_TELEMETRY_FIELDS = (
+    "starts",
+    "rotations",
+    "failures",
+    "timeouts",
+    "maximum_rss_kib",
+    "policy_invocations",
+    "graph_score_attempts",
+    "unique_graph_scores",
+    "sandbox_wall_seconds",
+    "selector_wall_seconds",
+    "action_wall_seconds",
+    "scoring_wall_seconds",
+)
+_EVALUATION_TELEMETRY_MAX_FIELDS = frozenset({"maximum_rss_kib"})
 
 
-@dataclass(frozen=True, slots=True)
-class _EvaluationArtifactFingerprint:
-    device: int
-    inode: int
-    size: int
-    ctime_ns: int
+def _compact_evaluation_telemetry(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, int | float], bool]:
+    """Sum bounded panel aggregates without opening per-case evidence."""
 
-
-@dataclass(slots=True)
-class _EvaluationDirectoryIndex:
-    identity: tuple[int, int, int]
-    baseline: bool
-    artifacts: dict[Path, _EvaluationArtifactFingerprint]
-
-
-@dataclass(slots=True)
-class _EvaluationTelemetryIndex:
-    root_identity: tuple[int, int]
-    directories: dict[Path, _EvaluationDirectoryIndex] = field(default_factory=dict)
-    totals: _EvaluationTelemetryTotals = field(default_factory=_EvaluationTelemetryTotals)
-    candidate_case_artifact_count: int = 0
-    baseline_case_artifact_count: int = 0
-
-
-_EVALUATION_TELEMETRY_INDEXES: dict[Path, _EvaluationTelemetryIndex] = {}
-_EVALUATION_TELEMETRY_INDEX_LOCK = threading.Lock()
-
-
-def _filesystem_identity(stat_result: os.stat_result) -> tuple[int, int]:
-    return stat_result.st_dev, stat_result.st_ino
-
-
-def _directory_change_identity(
-    stat_result: os.stat_result,
-) -> tuple[int, int, int]:
-    return stat_result.st_dev, stat_result.st_ino, stat_result.st_ctime_ns
-
-
-def _evaluation_directories(root: Path) -> dict[Path, bool]:
-    return {
-        **{
-            path: False
-            for path in root.glob(
-                "generations/generation-*/slot-*/evaluations"
-            )
-            if path.is_dir()
-        },
-        **{
-            path: True
-            for path in root.glob(
-                "generations/generation-*/baselines/*/evaluations"
-            )
-            if path.is_dir()
-        },
+    totals: dict[str, int | float] = {
+        key: 0.0 if key.endswith("_seconds") else 0
+        for key in _EVALUATION_TELEMETRY_FIELDS
     }
-
-
-def _artifact_fingerprint(path: Path) -> _EvaluationArtifactFingerprint:
-    stat_result = path.stat()
-    return _EvaluationArtifactFingerprint(
-        device=stat_result.st_dev,
-        inode=stat_result.st_ino,
-        size=stat_result.st_size,
-        ctime_ns=stat_result.st_ctime_ns,
-    )
-
-
-def _accumulate_evaluation_telemetry(
-    totals: _EvaluationTelemetryTotals,
-    evaluation: Mapping[str, Any],
-) -> None:
-    runtime_profile = evaluation.get("runtime_profile")
-    if isinstance(runtime_profile, Mapping):
-        for key, target in (
-            ("sandbox_wall_seconds", "sandbox"),
-            ("selector_wall_seconds", "selector"),
-            ("action_wall_seconds", "action"),
-        ):
-            raw = runtime_profile.get(key)
-            value = (
-                float(raw)
-                if isinstance(raw, int | float) and not isinstance(raw, bool) and raw >= 0
-                else 0.0
-            )
-            if target == "sandbox":
-                totals.sandbox_wall_seconds += value
-            elif target == "selector":
-                totals.selector_wall_seconds += value
-            else:
-                totals.action_wall_seconds += value
-    worker = evaluation.get("worker_telemetry")
-    if isinstance(worker, Mapping):
-        totals.starts += 1
-        totals.rotations += _nonnegative_int(worker.get("rotations"))
-        totals.failures += _nonnegative_int(worker.get("failures"))
-        totals.maximum_rss_kib = max(
-            totals.maximum_rss_kib,
-            _nonnegative_int(worker.get("worker_rss_kib")),
-        )
-    scientific = evaluation.get("scientific_result")
-    if not isinstance(scientific, Mapping):
-        return
-    steps = scientific.get("steps")
-    if isinstance(steps, Sequence) and not isinstance(steps, str | bytes):
-        totals.policy_invocations += len(steps)
-    totals.graph_score_attempts += _nonnegative_int(scientific.get("score_attempts"))
-    totals.unique_graph_scores += _nonnegative_int(
-        scientific.get("unique_graph_scores")
-    )
-    stack: list[object] = [scientific]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, Mapping):
-            wall_time_ns = item.get("wall_time_ns")
+    complete = True
+    for record in records:
+        if _nonnegative_int(record.get("evaluation_case_count")) == 0:
+            continue
+        summary = record.get("evaluation_telemetry")
+        if not isinstance(summary, Mapping):
+            complete = False
+            continue
+        for key in _EVALUATION_TELEMETRY_FIELDS:
+            raw = summary.get(key)
             if (
-                isinstance(wall_time_ns, int)
-                and not isinstance(wall_time_ns, bool)
-                and wall_time_ns >= 0
-                and isinstance(item.get("forbidden_length"), int)
+                not isinstance(raw, int | float)
+                or isinstance(raw, bool)
+                or raw < 0
             ):
-                totals.scoring_wall_seconds += wall_time_ns / 1_000_000_000
-            stack.extend(item.values())
-        elif isinstance(item, Sequence) and not isinstance(item, str | bytes):
-            stack.extend(item)
-    failure = scientific.get("failure")
-    if isinstance(failure, Mapping) and failure.get("code") == "PROPOSE_TIMEOUT":
-        totals.timeouts += 1
-
-
-def _evaluation_artifacts(
-    directory: Path,
-) -> dict[Path, _EvaluationArtifactFingerprint]:
-    artifacts: dict[Path, _EvaluationArtifactFingerprint] = {}
-    for path in sorted(directory.glob("*.json.gz")):
-        try:
-            artifacts[path] = _artifact_fingerprint(path)
-        except OSError:
-            continue
-    return artifacts
-
-
-def _build_evaluation_telemetry_index(
-    root: Path,
-    root_identity: tuple[int, int],
-) -> _EvaluationTelemetryIndex:
-    index = _EvaluationTelemetryIndex(root_identity=root_identity)
-    for directory, baseline in _evaluation_directories(root).items():
-        try:
-            directory_stat = directory.stat()
-        except OSError:
-            continue
-        artifacts = _evaluation_artifacts(directory)
-        index.directories[directory] = _EvaluationDirectoryIndex(
-            identity=_directory_change_identity(directory_stat),
-            baseline=baseline,
-            artifacts=artifacts,
-        )
-        for path in artifacts:
-            evaluation = _load_mapping(path)
-            if evaluation is not None:
-                _accumulate_evaluation_telemetry(index.totals, evaluation)
-        if baseline:
-            index.baseline_case_artifact_count += len(artifacts)
-        else:
-            index.candidate_case_artifact_count += len(artifacts)
-    return index
-
-
-def _refresh_evaluation_telemetry_index(
-    root: Path,
-    index: _EvaluationTelemetryIndex,
-) -> _EvaluationTelemetryIndex:
-    discovered = _evaluation_directories(root)
-    if set(index.directories).difference(discovered):
-        return _build_evaluation_telemetry_index(root, index.root_identity)
-
-    updates: dict[
-        Path,
-        tuple[bool, os.stat_result, dict[Path, _EvaluationArtifactFingerprint]],
-    ] = {}
-    for directory, baseline in discovered.items():
-        try:
-            directory_stat = directory.stat()
-        except OSError:
-            return _build_evaluation_telemetry_index(root, index.root_identity)
-        retained = index.directories.get(directory)
-        if retained is None:
-            updates[directory] = (
-                baseline,
-                directory_stat,
-                _evaluation_artifacts(directory),
+                complete = False
+                break
+            value: int | float = (
+                float(raw) if key.endswith("_seconds") else int(raw)
             )
-            continue
-        directory_identity = _directory_change_identity(directory_stat)
-        if (
-            retained.identity[:2] != directory_identity[:2]
-            or retained.baseline != baseline
-        ):
-            return _build_evaluation_telemetry_index(root, index.root_identity)
-        if retained.identity == directory_identity:
-            continue
-        # Durable JSON artifacts are published through write_json's os.replace,
-        # which changes the parent directory metadata.  A changed known
-        # fingerprint therefore indicates an unexpected immutability violation.
-        artifacts = _evaluation_artifacts(directory)
-        if (
-            set(retained.artifacts).difference(artifacts)
-            or any(
-                artifacts[path] != fingerprint
-                for path, fingerprint in retained.artifacts.items()
-            )
-        ):
-            return _build_evaluation_telemetry_index(root, index.root_identity)
-        updates[directory] = (baseline, directory_stat, artifacts)
-
-    for directory, (baseline, directory_stat, artifacts) in updates.items():
-        retained = index.directories.get(directory)
-        known_paths = set(retained.artifacts) if retained is not None else set()
-        new_paths = sorted(set(artifacts).difference(known_paths))
-        for path in new_paths:
-            evaluation = _load_mapping(path)
-            if evaluation is not None:
-                _accumulate_evaluation_telemetry(index.totals, evaluation)
-        index.directories[directory] = _EvaluationDirectoryIndex(
-            identity=_directory_change_identity(directory_stat),
-            baseline=baseline,
-            artifacts=artifacts,
-        )
-        if baseline:
-            index.baseline_case_artifact_count += len(new_paths)
-        else:
-            index.candidate_case_artifact_count += len(new_paths)
-    return index
-
-
-def _evaluation_telemetry_snapshot(
-    root: Path,
-) -> tuple[dict[str, int | float], int, int]:
-    try:
-        root_stat = root.stat()
-    except OSError:
-        return _EvaluationTelemetryTotals().as_dict(), 0, 0
-    resolved_root = root.resolve()
-    root_identity = _filesystem_identity(root_stat)
-    with _EVALUATION_TELEMETRY_INDEX_LOCK:
-        index = _EVALUATION_TELEMETRY_INDEXES.get(resolved_root)
-        if index is None or index.root_identity != root_identity:
-            index = _build_evaluation_telemetry_index(root, root_identity)
-        else:
-            index = _refresh_evaluation_telemetry_index(root, index)
-        _EVALUATION_TELEMETRY_INDEXES[resolved_root] = index
-        return (
-            index.totals.as_dict(),
-            index.candidate_case_artifact_count,
-            index.baseline_case_artifact_count,
-        )
-
-
-def _evaluation_telemetry(root: Path) -> dict[str, int | float]:
-    telemetry, _, _ = _evaluation_telemetry_snapshot(root)
-    return telemetry
+            if key in _EVALUATION_TELEMETRY_MAX_FIELDS:
+                totals[key] = max(totals[key], value)
+            else:
+                totals[key] += value
+    return totals, complete
 
 
 def _provider_telemetry(
@@ -1362,6 +1119,7 @@ def _progress(
     baseline_projection: dict[str, JsonValue] = {}
     baseline_details: dict[str, JsonValue] = {}
     baseline_profiles: list[Mapping[str, Any]] = []
+    baseline_results: list[Mapping[str, Any]] = []
     generation_baseline_profiles: dict[int, dict[str, Mapping[str, Any]]] = {}
     if config.scientific_search is not None:
         baseline_projection = {
@@ -1389,6 +1147,8 @@ def _progress(
                     / baseline
                     / M10_BASELINE_RESULT_FILENAME
                 )
+                if individual is not None:
+                    baseline_results.append(individual)
                 profile = (
                     individual.get("profile")
                     if individual is not None
@@ -1557,11 +1317,17 @@ def _progress(
                 },
             }
         )
-    (
-        telemetry,
-        candidate_case_artifact_count,
-        baseline_case_artifact_count,
-    ) = _evaluation_telemetry_snapshot(root)
+    telemetry, profiling_available = _compact_evaluation_telemetry(
+        [*candidates, *baseline_results]
+    )
+    candidate_case_count = sum(
+        _nonnegative_int(candidate.get("evaluation_case_count"))
+        for candidate in candidates
+    )
+    baseline_case_count = sum(
+        _nonnegative_int(result.get("evaluation_case_count"))
+        for result in baseline_results
+    )
     profiles = _program_projection(candidates)
     behavior_profiles = [
         cast(Mapping[str, Any], item["behavior_profile"])
@@ -1698,6 +1464,7 @@ def _progress(
         int(item["completed"]) for item in evaluation_progress.values()
     )
     active_evaluation_total = sum(int(item["total"]) for item in evaluation_progress.values())
+    profiling_available = profiling_available and active_evaluation_cases == 0
 
     def active_evaluation_case_projection(prefix: str) -> dict[str, int]:
         active = [
@@ -1757,9 +1524,17 @@ def _progress(
             runtime.get("candidate_evaluation_cases_total")
         )
     else:
-        baseline_completed = baseline_case_artifact_count
+        baseline_completed = min(
+            baseline_evaluation_total,
+            baseline_case_count
+            + active_evaluation_case_projection("baseline")["active_completed"],
+        )
         baseline_total = baseline_evaluation_total
-        candidate_completed = candidate_case_artifact_count
+        candidate_completed = min(
+            candidate_evaluation_total,
+            candidate_case_count
+            + active_evaluation_case_projection("candidate")["active_completed"],
+        )
         candidate_total = candidate_evaluation_total
     baseline_evaluation_cases = {
         **active_evaluation_case_projection("baseline"),
@@ -2161,7 +1936,7 @@ def _progress(
             "candidate": candidate_evaluation_cases,
         },
         "sandbox": {
-            key: telemetry[key]
+            key: telemetry[key] if profiling_available else None
             for key in (
                 "starts",
                 "rotations",
@@ -2170,10 +1945,18 @@ def _progress(
                 "maximum_rss_kib",
             )
         },
-        "policy_invocations": policy_invocations,
+        "policy_invocations": (
+            policy_invocations if profiling_available else None
+        ),
         "graph_scores": {
-            "attempts": graph_score_attempts,
-            "unique_graphs": telemetry["unique_graph_scores"],
+            "attempts": (
+                graph_score_attempts if profiling_available else None
+            ),
+            "unique_graphs": (
+                telemetry["unique_graph_scores"]
+                if profiling_available
+                else None
+            ),
         },
         "evaluators": {
             "configured": configured_workers,
@@ -2243,8 +2026,8 @@ def _progress(
             "persistence_seconds": persistence,
             "dominant_bottleneck": bottleneck,
         },
-        "profiling_enabled": True,
-        "timing_profile": timing_profile,
+        "profiling_enabled": profiling_available,
+        "timing_profile": timing_profile if profiling_available else None,
         "best": {
             "candidate_id": best_candidate_id,
             "fitness_interval": runtime.get("best_fitness_interval"),
@@ -2304,6 +2087,47 @@ def python_preview_status(
     if pause_record_path is None:
         return status
     return _apply_pause_record(config, status, Path(pause_record_path))
+
+
+def python_preview_bootstrap_status(
+    config_path: str | Path,
+) -> dict[str, Any]:
+    """Return the minimal campaign state needed for the first dashboard frame."""
+
+    config = load_python_preview_config(config_path)
+    if not config.experiment_root.exists():
+        return {
+            **_public(_base_state(config)),
+            "profiling_enabled": False,
+        }
+    try:
+        state = _load_state(config)
+    except (OSError, ValueError, PythonPreviewWorkspaceError) as error:
+        return {
+            **_public(_base_state(config)),
+            "state": "failed",
+            "run_terminal": True,
+            "terminal_reason": "workspace_mismatch",
+            "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
+            "last_error": _safe_error(error, config),
+            "profiling_enabled": False,
+        }
+    state, report, _ = _generation_limit_lifecycle(config, state)
+    status = {
+        **_public(state),
+        "profiling_enabled": False,
+    }
+    if report is None:
+        return status
+    return {
+        **status,
+        "search_protocol": M10_SEARCH_PROTOCOL_ID,
+        "generation_index": (
+            _nonnegative_int(report.get("generation_count")) - 1
+            if _nonnegative_int(report.get("generation_count"))
+            else None
+        ),
+    }
 
 
 def _apply_pause_record(
@@ -3257,6 +3081,7 @@ __all__ = [
     "PythonPreviewWorkspaceError",
     "experiment_protocol",
     "load_python_preview_config",
+    "python_preview_bootstrap_status",
     "python_preview_status",
     "request_python_preview_stop",
     "run_python_preview",

@@ -68,6 +68,97 @@ _UUID = re.compile(
 _PRIVATE_PATH = re.compile(r"(?:/home/|/Users/|[A-Za-z]:\\Users\\)")
 
 
+def _evaluation_telemetry_summary(
+    evaluations: Sequence[Mapping[str, Any]],
+) -> dict[str, JsonValue]:
+    totals: dict[str, int | float] = {
+        "starts": 0,
+        "rotations": 0,
+        "failures": 0,
+        "timeouts": 0,
+        "maximum_rss_kib": 0,
+        "policy_invocations": 0,
+        "graph_score_attempts": 0,
+        "unique_graph_scores": 0,
+        "sandbox_wall_seconds": 0.0,
+        "selector_wall_seconds": 0.0,
+        "action_wall_seconds": 0.0,
+        "scoring_wall_seconds": 0.0,
+    }
+
+    def nonnegative_int(value: object) -> int:
+        return (
+            value
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            else 0
+        )
+
+    for evaluation in evaluations:
+        runtime_profile = evaluation.get("runtime_profile")
+        if isinstance(runtime_profile, Mapping):
+            for key in (
+                "sandbox_wall_seconds",
+                "selector_wall_seconds",
+                "action_wall_seconds",
+            ):
+                raw = runtime_profile.get(key)
+                if (
+                    isinstance(raw, int | float)
+                    and not isinstance(raw, bool)
+                    and raw >= 0
+                ):
+                    totals[key] += float(raw)
+        worker = evaluation.get("worker_telemetry")
+        if isinstance(worker, Mapping):
+            totals["starts"] += 1
+            totals["rotations"] += nonnegative_int(worker.get("rotations"))
+            totals["failures"] += nonnegative_int(worker.get("failures"))
+            totals["maximum_rss_kib"] = max(
+                totals["maximum_rss_kib"],
+                nonnegative_int(worker.get("worker_rss_kib")),
+            )
+        scientific = evaluation.get("scientific_result")
+        if not isinstance(scientific, Mapping):
+            continue
+        steps = scientific.get("steps")
+        if isinstance(steps, Sequence) and not isinstance(steps, str | bytes):
+            totals["policy_invocations"] += len(steps)
+        totals["graph_score_attempts"] += nonnegative_int(
+            scientific.get("score_attempts")
+        )
+        totals["unique_graph_scores"] += nonnegative_int(
+            scientific.get("unique_graph_scores")
+        )
+        stack: list[object] = [scientific]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, Mapping):
+                wall_time_ns = item.get("wall_time_ns")
+                if (
+                    isinstance(wall_time_ns, int)
+                    and not isinstance(wall_time_ns, bool)
+                    and wall_time_ns >= 0
+                    and isinstance(item.get("forbidden_length"), int)
+                ):
+                    totals["scoring_wall_seconds"] += (
+                        wall_time_ns / 1_000_000_000
+                    )
+                stack.extend(item.values())
+            elif isinstance(item, Sequence) and not isinstance(
+                item, str | bytes
+            ):
+                stack.extend(item)
+        failure = scientific.get("failure")
+        if (
+            isinstance(failure, Mapping)
+            and failure.get("code") == "PROPOSE_TIMEOUT"
+        ):
+            totals["timeouts"] += 1
+    return cast(dict[str, JsonValue], totals)
+
+
 class M5SearchError(RuntimeError):
     """The bounded search contract was violated."""
 
@@ -1754,6 +1845,9 @@ def run_m5_search(
                                     "behavior_profile": None,
                                     "duplicate_of": None,
                                     "evaluation_case_count": len(evaluation_payloads),
+                                    "evaluation_telemetry": _evaluation_telemetry_summary(
+                                        evaluation_payloads
+                                    ),
                                     "failure": {
                                         "type": type(error).__name__,
                                         "message": str(error)[:1024],
@@ -1793,6 +1887,9 @@ def run_m5_search(
                         "control_flow": python_control_flow_summary(source),
                         "duplicate_of": duplicate_of,
                         "evaluation_case_count": len(evaluation_payloads),
+                        "evaluation_telemetry": _evaluation_telemetry_summary(
+                            evaluation_payloads
+                        ),
                         "exact_verified": behavior_profile["exact_verified"],
                     }
                 )

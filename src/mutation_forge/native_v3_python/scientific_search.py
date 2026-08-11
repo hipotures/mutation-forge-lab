@@ -1284,6 +1284,7 @@ class _ConcurrentEvaluatorPool:
                 "panel_hash": core.panel_hash(panel),
                 "evaluation_case_count": len(payloads),
                 "profile": core.aggregate_behavior(payloads),
+                "evaluation_telemetry": core._evaluation_telemetry_summary(payloads),
             }
             self._telemetry.timed_persist(
                 partial(
@@ -1796,6 +1797,9 @@ def _commit_pending(
             "behavior_profile": None,
             "duplicate_of": None,
             "evaluation_case_count": len(outcome.payloads),
+            "evaluation_telemetry": core._evaluation_telemetry_summary(
+                outcome.payloads
+            ),
             "failure": {
                 "type": outcome.failure_type,
                 "message": outcome.failure_message,
@@ -1839,6 +1843,9 @@ def _commit_pending(
         "control_flow": core.python_control_flow_summary(str(base["source"])),
         "duplicate_of": duplicate_of,
         "evaluation_case_count": len(outcome.payloads),
+        "evaluation_telemetry": core._evaluation_telemetry_summary(
+            evaluation_payloads
+        ),
         "exact_verified": behavior_profile["exact_verified"],
     }
     telemetry.timed_persist(partial(_write_or_verify, candidate_path, candidate))
