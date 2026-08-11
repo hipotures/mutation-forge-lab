@@ -799,14 +799,15 @@ class _EvaluationTelemetryTotals:
 
 @dataclass(frozen=True, slots=True)
 class _EvaluationArtifactFingerprint:
+    device: int
+    inode: int
     size: int
-    mtime_ns: int
+    ctime_ns: int
 
 
 @dataclass(slots=True)
 class _EvaluationDirectoryIndex:
-    identity: tuple[int, int]
-    mtime_ns: int
+    identity: tuple[int, int, int]
     baseline: bool
     artifacts: dict[Path, _EvaluationArtifactFingerprint]
 
@@ -826,6 +827,12 @@ _EVALUATION_TELEMETRY_INDEX_LOCK = threading.Lock()
 
 def _filesystem_identity(stat_result: os.stat_result) -> tuple[int, int]:
     return stat_result.st_dev, stat_result.st_ino
+
+
+def _directory_change_identity(
+    stat_result: os.stat_result,
+) -> tuple[int, int, int]:
+    return stat_result.st_dev, stat_result.st_ino, stat_result.st_ctime_ns
 
 
 def _evaluation_directories(root: Path) -> dict[Path, bool]:
@@ -850,8 +857,10 @@ def _evaluation_directories(root: Path) -> dict[Path, bool]:
 def _artifact_fingerprint(path: Path) -> _EvaluationArtifactFingerprint:
     stat_result = path.stat()
     return _EvaluationArtifactFingerprint(
+        device=stat_result.st_dev,
+        inode=stat_result.st_ino,
         size=stat_result.st_size,
-        mtime_ns=stat_result.st_mtime_ns,
+        ctime_ns=stat_result.st_ctime_ns,
     )
 
 
@@ -941,8 +950,7 @@ def _build_evaluation_telemetry_index(
             continue
         artifacts = _evaluation_artifacts(directory)
         index.directories[directory] = _EvaluationDirectoryIndex(
-            identity=_filesystem_identity(directory_stat),
-            mtime_ns=directory_stat.st_mtime_ns,
+            identity=_directory_change_identity(directory_stat),
             baseline=baseline,
             artifacts=artifacts,
         )
@@ -982,12 +990,13 @@ def _refresh_evaluation_telemetry_index(
                 _evaluation_artifacts(directory),
             )
             continue
+        directory_identity = _directory_change_identity(directory_stat)
         if (
-            retained.identity != _filesystem_identity(directory_stat)
+            retained.identity[:2] != directory_identity[:2]
             or retained.baseline != baseline
         ):
             return _build_evaluation_telemetry_index(root, index.root_identity)
-        if retained.mtime_ns == directory_stat.st_mtime_ns:
+        if retained.identity == directory_identity:
             continue
         # Durable JSON artifacts are published through write_json's os.replace,
         # which changes the parent directory metadata.  A changed known
@@ -1012,8 +1021,7 @@ def _refresh_evaluation_telemetry_index(
             if evaluation is not None:
                 _accumulate_evaluation_telemetry(index.totals, evaluation)
         index.directories[directory] = _EvaluationDirectoryIndex(
-            identity=_filesystem_identity(directory_stat),
-            mtime_ns=directory_stat.st_mtime_ns,
+            identity=_directory_change_identity(directory_stat),
             baseline=baseline,
             artifacts=artifacts,
         )

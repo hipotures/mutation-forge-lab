@@ -1231,6 +1231,57 @@ def test_changed_evaluation_directory_does_not_reload_known_artifacts(
     assert candidate_count == 1
 
 
+def test_preserved_mtime_artifact_changes_are_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_evaluation_telemetry_indexes()
+    root = tmp_path / "experiment"
+    candidate_path, _ = _evaluation_artifact_paths(root)
+    write_json(candidate_path, _evaluation_payload(1))
+    preview_module._evaluation_telemetry_snapshot(root)
+    original_artifact_mtime_ns = candidate_path.stat().st_mtime_ns
+    original_directory_mtime_ns = candidate_path.parent.stat().st_mtime_ns
+    loaded = _evaluation_load_counter(monkeypatch)
+
+    write_json(candidate_path, _evaluation_payload(4, timeout=True))
+    os.utime(
+        candidate_path,
+        ns=(candidate_path.stat().st_atime_ns, original_artifact_mtime_ns),
+    )
+    os.utime(
+        candidate_path.parent,
+        ns=(candidate_path.parent.stat().st_atime_ns, original_directory_mtime_ns),
+    )
+    replaced, candidate_count, _ = preview_module._evaluation_telemetry_snapshot(root)
+
+    assert candidate_path.stat().st_mtime_ns == original_artifact_mtime_ns
+    assert candidate_path.parent.stat().st_mtime_ns == original_directory_mtime_ns
+    assert loaded == [candidate_path]
+    assert replaced["rotations"] == 4
+    assert replaced["timeouts"] == 1
+    assert candidate_count == 1
+
+    loaded.clear()
+    retained_directory_mtime_ns = candidate_path.parent.stat().st_mtime_ns
+    new_path = candidate_path.with_name("case-candidate-2.json.gz")
+    write_json(new_path, _evaluation_payload(2))
+    os.utime(
+        new_path,
+        ns=(new_path.stat().st_atime_ns, original_artifact_mtime_ns),
+    )
+    os.utime(
+        candidate_path.parent,
+        ns=(candidate_path.parent.stat().st_atime_ns, retained_directory_mtime_ns),
+    )
+    updated, candidate_count, _ = preview_module._evaluation_telemetry_snapshot(root)
+
+    assert candidate_path.parent.stat().st_mtime_ns == retained_directory_mtime_ns
+    assert loaded == [new_path]
+    assert updated["rotations"] == 6
+    assert candidate_count == 2
+
+
 def test_evaluation_telemetry_index_invalidates_on_workspace_replacement(
     tmp_path: Path,
 ) -> None:
@@ -1240,12 +1291,29 @@ def test_evaluation_telemetry_index_invalidates_on_workspace_replacement(
     write_json(candidate_path, _evaluation_payload(1))
     initial, _, _ = preview_module._evaluation_telemetry_snapshot(root)
     old_identity = preview_module._filesystem_identity(root.stat())
+    old_root_mtime_ns = root.stat().st_mtime_ns
+    old_directory_mtime_ns = candidate_path.parent.stat().st_mtime_ns
+    old_artifact_mtime_ns = candidate_path.stat().st_mtime_ns
+    replacement = tmp_path / "replacement-copy"
+    shutil.copytree(root, replacement, copy_function=shutil.copy2)
+    replacement_path = replacement / candidate_path.relative_to(root)
+    write_json(replacement_path, _evaluation_payload(3))
+    os.utime(
+        replacement_path,
+        ns=(replacement_path.stat().st_atime_ns, old_artifact_mtime_ns),
+    )
+    os.utime(
+        replacement_path.parent,
+        ns=(replacement_path.parent.stat().st_atime_ns, old_directory_mtime_ns),
+    )
 
     shutil.rmtree(root)
     (tmp_path / "inode-consumer").mkdir()
-    replacement_path, _ = _evaluation_artifact_paths(root)
-    write_json(replacement_path, _evaluation_payload(3))
+    shutil.copytree(replacement, root, copy_function=shutil.copy2)
 
+    assert root.stat().st_mtime_ns == old_root_mtime_ns
+    assert candidate_path.parent.stat().st_mtime_ns == old_directory_mtime_ns
+    assert candidate_path.stat().st_mtime_ns == old_artifact_mtime_ns
     assert preview_module._filesystem_identity(root.stat()) != old_identity
     replaced, candidate_count, baseline_count = (
         preview_module._evaluation_telemetry_snapshot(root)
