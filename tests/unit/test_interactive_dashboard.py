@@ -2432,7 +2432,7 @@ def test_slot_matrix_uses_score_header_and_four_decimal_values() -> None:
     assert "objective ↑" not in rendered
     assert "0.0769" in rendered
     assert "0.076991" not in rendered
-    assert "green better" in rendered
+    assert "score color:" not in rendered
     sink.close()
 
 

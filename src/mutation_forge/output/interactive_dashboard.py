@@ -3519,7 +3519,6 @@ class InteractiveDashboardSink:
         return Panel(
             table,
             title=title,
-            subtitle="score color: green better · red worse · neutral inconclusive/root",
             border_style="cyan",
             padding=(0, 0),
         )
