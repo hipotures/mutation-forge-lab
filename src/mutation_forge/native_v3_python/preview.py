@@ -565,6 +565,7 @@ def load_python_preview_config(
     if (
         not config.experiment_root.exists()
         and scientific_search is not None
+        and scientific_search.primary_program_slots is not None
         and scientific_search.primary_program_slots
         != scientific_search.current_primary_program_slots
     ):

@@ -521,6 +521,51 @@ def test_python_preview_config_is_explicit_and_native_v2_stays_default(
     assert loaded.experiment_root.name == "python-preview"
 
 
+def test_omitted_provider_budgets_follow_mutable_generation_limit(
+    tmp_path: Path,
+) -> None:
+    path = _scientific_status_config(tmp_path, exp_id="derived-provider-budget")
+    source = path.read_text(encoding="utf-8")
+    source = source.replace("primary_program_slots = 16\n", "")
+    source = source.replace("provider_total_turn_limit = 16\n", "")
+    path.write_text(source, encoding="utf-8")
+
+    initial = load_python_preview_config(path)
+    assert initial.scientific_search is not None
+    assert initial.scientific_search.primary_program_slots is None
+    assert initial.scientific_search.provider_total_turn_limit is None
+    assert initial.scientific_search.current_primary_program_slots == 16
+    assert initial.scientific_search.current_provider_total_turn_limit == 16
+
+    path.write_text(
+        source.replace("generation_limit = 2", "generation_limit = 5"),
+        encoding="utf-8",
+    )
+    extended = load_python_preview_config(path)
+    assert extended.scientific_config_sha256 == initial.scientific_config_sha256
+    assert extended.scientific_search is not None
+    assert extended.scientific_search.current_primary_program_slots == 40
+    assert extended.scientific_search.current_provider_total_turn_limit == 40
+
+
+def test_explicit_primary_budget_must_match_fresh_generation_limit(
+    tmp_path: Path,
+) -> None:
+    path = _scientific_status_config(tmp_path, exp_id="invalid-provider-budget")
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace("primary_program_slots = 16", "primary_program_slots = 8")
+        .replace("provider_total_turn_limit = 16", "provider_total_turn_limit = 8"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="primary_program_slots must provide exactly eight slots per generation",
+    ):
+        load_python_preview_config(path)
+
+
 def test_preview_runs_two_generations_and_status_is_bounded_read_only(
     tmp_path: Path,
 ) -> None:
