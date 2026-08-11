@@ -2404,7 +2404,7 @@ def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
     sink.close()
 
 
-def test_slot_matrix_keeps_score_and_adds_signed_six_decimal_gain() -> None:
+def test_slot_matrix_uses_four_decimal_score_and_signed_gain() -> None:
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=False),
         start_live=False,
@@ -2435,9 +2435,9 @@ def test_slot_matrix_keeps_score_and_adds_signed_six_decimal_gain() -> None:
     assert "objective ↑" not in rendered
     assert "0.0769" in rendered
     assert "0.076991" not in rendered
-    assert "+.002512" in rendered
-    assert "-.001234" in rendered
-    assert ".000000" in rendered
+    assert "+.0025" in rendered
+    assert "-.0012" in rendered
+    assert ".0000" in rendered
     assert "score color:" not in rendered
     sink.close()
 

@@ -4588,10 +4588,10 @@ def _score_text(slot: DashboardSlot) -> Text:
 def _gain(value: float | None) -> str:
     if value is None:
         return "—"
-    projected = Decimal(str(value)).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
+    projected = Decimal(str(value)).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
     if projected == 0:
-        return ".000000"
-    text = f"{projected:+.6f}"
+        return ".0000"
+    text = f"{projected:+.4f}"
     return text.replace("+0.", "+.", 1).replace("-0.", "-.", 1)
 
 
