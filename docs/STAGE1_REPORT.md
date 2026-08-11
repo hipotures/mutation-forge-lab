@@ -30,10 +30,9 @@ and HEG production integration are not implemented.
 
 The HEG checkout's untracked `_build/sglab-score-worker` predates the current
 protocol-v2 source and exits on a v2 request. Mutation Forge did not rebuild or
-modify HEG. The adapter detected the failure and used HEG's authoritative
-bounded Python witness enumerator, followed by the same
-`score_from_cycle_counts` implementation. Both runs record
-`heg-python-bounded-reference` as their score implementation.
+modify HEG. At the time, the adapter continued with HEG's bounded Python
+witness enumerator. That historical behavior is no longer supported: current
+scientific scoring fails closed unless the mandatory C++ worker succeeds.
 
 ## Commands validated
 

@@ -18,6 +18,7 @@ from mutation_forge.backends.base import (
     InvalidRewriteError,
     ProposalTimingRecorder,
     ScoreProfileRecorder,
+    ScoringBackendError,
 )
 from mutation_forge.models import (
     ExactVerification,
@@ -95,7 +96,6 @@ class HegBackend:
         self._plugin = target.PLUGIN
         self._worker_class = worker_module.PersistentScoreWorker
         self._worker_error = worker_module.ScoreWorkerError
-        self._cycle_count_result = worker_module.CycleCountResult
         self._validation_context_class = target_base.GraphValidationContext
         self._validation_result_class = target_base.ValidationResult
         self._worker: Any | None = None
@@ -300,27 +300,6 @@ class HegBackend:
         named_binary.symlink_to(target)
         worker.binary = named_binary
 
-    def _reference_cycle_counts(
-        self, graph: Any, lengths: tuple[int, ...], *, limit: int, node_budget: int
-    ) -> tuple[Any, ...]:
-        results = []
-        for length in lengths:
-            started = time.perf_counter_ns()
-            witnesses, complete = self._model.find_cycles_of_length_bounded(
-                graph, length, limit, node_budget
-            )
-            results.append(
-                self._cycle_count_result(
-                    length=length,
-                    count=len(witnesses),
-                    complete=complete,
-                    nodes=0,
-                    elapsed_ns=time.perf_counter_ns() - started,
-                )
-            )
-        self.score_implementation = "heg-python-bounded-reference"
-        return tuple(results)
-
     def _cutoff_tuple(
         self,
         graph: GraphState,
@@ -393,9 +372,12 @@ class HegBackend:
         node_budget: int,
         cutoff: tuple[int, int, int] | None,
         recorder: ScoreProfileRecorder | None,
-    ) -> Any | None:
+    ) -> Any:
         if self._worker_disabled:
-            return None
+            raise ScoringBackendError(
+                "mandatory C++ score worker is disabled after a prior failure"
+            )
+        last_error: BaseException | None = None
         for attempt in range(2):
             started_ns = time.perf_counter_ns() if recorder is not None else 0
             try:
@@ -418,7 +400,8 @@ class HegBackend:
                     ),
                     profile_timing=recorder is not None,
                 )
-            except self._worker_error:
+            except self._worker_error as error:
+                last_error = error
                 self._record(
                     recorder,
                     "worker_failure",
@@ -466,7 +449,10 @@ class HegBackend:
             self._score_worker_link_dir.cleanup()
             self._score_worker_link_dir = None
         self._worker_disabled = True
-        return None
+        detail = str(last_error) if last_error is not None else "unknown worker failure"
+        raise ScoringBackendError(
+            f"mandatory C++ score worker failed after restart: {detail}"
+        ) from last_error
 
     def score(
         self,
@@ -493,30 +479,9 @@ class HegBackend:
             cutoff=cutoff_tuple,
             recorder=record_profile,
         )
-        if response is not None:
-            if response.dominated:
-                return None
-            cycle_results = response.results
-        else:
-            fallback_started_ns = time.perf_counter_ns() if record_profile is not None else 0
-            cycle_results = self._reference_cycle_counts(
-                heg_graph,
-                lengths,
-                limit=limit,
-                node_budget=node_budget,
-            )
-            self._record(
-                record_profile,
-                "python_fallback",
-                {
-                    "calls": 1,
-                    "elapsed_ns": (
-                        time.perf_counter_ns() - fallback_started_ns
-                        if record_profile is not None
-                        else 0
-                    ),
-                },
-            )
+        if response.dominated:
+            return None
+        cycle_results = response.results
         assembly_started_ns = time.perf_counter_ns() if record_profile is not None else 0
         assert prepared.validation_context is not None
         result = self._plugin.score_from_cycle_counts(
