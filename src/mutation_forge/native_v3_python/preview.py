@@ -16,6 +16,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast
 
@@ -685,20 +686,53 @@ def _nonnegative_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _fitness_value(profile: Mapping[str, Any]) -> float:
+def _fitness_interval_fractions(
+    profile: Mapping[str, Any],
+) -> tuple[Fraction, Fraction]:
     interval = profile.get("fitness_interval")
-    lower = interval.get("lower") if isinstance(interval, Mapping) else None
-    numerator = lower.get("numerator") if isinstance(lower, Mapping) else None
-    denominator = lower.get("denominator") if isinstance(lower, Mapping) else None
-    if (
-        not isinstance(numerator, int)
-        or isinstance(numerator, bool)
-        or not isinstance(denominator, int)
-        or isinstance(denominator, bool)
-        or denominator == 0
-    ):
-        raise PythonPreviewWorkspaceError("baseline fitness interval is malformed")
-    return numerator / denominator
+    if not isinstance(interval, Mapping):
+        raise PythonPreviewWorkspaceError("fitness interval is malformed")
+    values: list[Fraction] = []
+    for endpoint in ("lower", "upper"):
+        raw = interval.get(endpoint)
+        numerator = raw.get("numerator") if isinstance(raw, Mapping) else None
+        denominator = raw.get("denominator") if isinstance(raw, Mapping) else None
+        if (
+            not isinstance(numerator, int)
+            or isinstance(numerator, bool)
+            or not isinstance(denominator, int)
+            or isinstance(denominator, bool)
+            or denominator == 0
+        ):
+            raise PythonPreviewWorkspaceError("fitness interval is malformed")
+        values.append(Fraction(numerator, denominator))
+    if values[0] > values[1]:
+        raise PythonPreviewWorkspaceError("fitness interval is inverted")
+    return values[0], values[1]
+
+
+def _fitness_value(profile: Mapping[str, Any]) -> float:
+    lower, _ = _fitness_interval_fractions(profile)
+    return float(lower)
+
+
+def _fraction_dict(value: Fraction) -> dict[str, int]:
+    return {
+        "numerator": value.numerator,
+        "denominator": value.denominator,
+    }
+
+
+def _fitness_delta_interval(
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, dict[str, int]]:
+    candidate_lower, candidate_upper = _fitness_interval_fractions(candidate)
+    reference_lower, reference_upper = _fitness_interval_fractions(reference)
+    return {
+        "lower": _fraction_dict(candidate_lower - reference_upper),
+        "upper": _fraction_dict(candidate_upper - reference_lower),
+    }
 
 
 def _usage_total(
@@ -1002,6 +1036,7 @@ def _progress(
     baseline_projection: dict[str, JsonValue] = {}
     baseline_details: dict[str, JsonValue] = {}
     baseline_profiles: list[Mapping[str, Any]] = []
+    generation_baseline_profiles: dict[int, dict[str, Mapping[str, Any]]] = {}
     if config.scientific_search is not None:
         baseline_projection = {
             baseline: None for baseline in config.scientific_search.evaluation.baselines
@@ -1010,6 +1045,7 @@ def _progress(
             baseline: None for baseline in config.scientific_search.evaluation.baselines
         }
         for generation in generations:
+            generation_baseline_profiles[generation] = {}
             summary = _load_mapping(
                 root / "generations" / f"generation-{generation:04d}" / M10_BASELINE_FILENAME
             )
@@ -1034,6 +1070,7 @@ def _progress(
                 )
                 if isinstance(profile, Mapping):
                     baseline_profiles.append(profile)
+                    generation_baseline_profiles[generation][baseline] = profile
                     if generation == max(generations, default=-1):
                         baseline_projection[baseline] = _fitness_value(profile)
                         baseline_details[baseline] = cast(
@@ -1083,6 +1120,117 @@ def _progress(
                     panel=panel,
                     options=config.scientific_search.evaluation,
                 )
+    generation_objectives: list[dict[str, JsonValue]] = []
+    for generation in generations:
+        generation_candidates = [
+            item
+            for item in candidates
+            if _nonnegative_int(item.get("generation")) == generation
+        ]
+        generation_statuses = Counter(
+            str(item.get("status", "unknown")) for item in generation_candidates
+        )
+        ranked: list[
+            tuple[
+                Fraction,
+                Fraction,
+                str,
+                Mapping[str, Any],
+                Mapping[str, Any],
+            ]
+        ] = []
+        for generation_candidate in generation_candidates:
+            profile = generation_candidate.get("behavior_profile")
+            if (
+                generation_candidate.get("status") not in {"evaluated", "duplicate"}
+                or not isinstance(profile, Mapping)
+            ):
+                continue
+            lower, upper = _fitness_interval_fractions(profile)
+            ranked.append(
+                (
+                    lower,
+                    upper,
+                    str(generation_candidate.get("program_hash", "")),
+                    generation_candidate,
+                    profile,
+                )
+            )
+        best_entry = min(
+            ranked,
+            key=lambda item: (-item[0], -item[1], item[2]),
+            default=None,
+        )
+        generation_best_candidate = best_entry[3] if best_entry is not None else None
+        generation_best_profile = best_entry[4] if best_entry is not None else None
+        baseline_values: dict[str, JsonValue] = {}
+        for baseline in (
+            config.scientific_search.evaluation.baselines
+            if config.scientific_search is not None
+            else ()
+        ):
+            profile = generation_baseline_profiles.get(generation, {}).get(baseline)
+            baseline_values[baseline] = cast(
+                JsonValue,
+                (
+                    {
+                        "fitness_interval": profile.get("fitness_interval"),
+                        "value": _fitness_value(profile),
+                        "best_minus_reference": (
+                            _fitness_delta_interval(generation_best_profile, profile)
+                            if generation_best_profile is not None
+                            else None
+                        ),
+                    }
+                    if profile is not None
+                    else None
+                ),
+            )
+        generation_objectives.append(
+            {
+                "generation": generation,
+                "panel_hash": (
+                    (
+                        _load_mapping(
+                            root
+                            / "generations"
+                            / f"generation-{generation:04d}"
+                            / M10_BASELINE_FILENAME
+                        )
+                        or {}
+                    ).get("panel_hash")
+                ),
+                "best": cast(
+                    JsonValue,
+                    (
+                        {
+                            "candidate_id": generation_best_candidate.get(
+                                "candidate_id"
+                            ),
+                            "program_hash": generation_best_candidate.get(
+                                "program_hash"
+                            ),
+                            "fitness_interval": generation_best_profile.get(
+                                "fitness_interval"
+                            ),
+                            "value": _fitness_value(generation_best_profile),
+                        }
+                        if generation_best_candidate is not None
+                        and generation_best_profile is not None
+                        else None
+                    ),
+                ),
+                "baselines": baseline_values,
+                "archive": {
+                    "valid": generation_statuses["evaluated"]
+                    + generation_statuses["duplicate"],
+                    "invalid": generation_statuses["contract_invalid"],
+                    "failed": generation_statuses["provider_failed"]
+                    + generation_statuses["evaluation_infrastructure_failure"],
+                    "duplicate": generation_statuses["duplicate"],
+                },
+            }
+        )
     telemetry = _evaluation_telemetry(root)
     profiles = _program_projection(candidates)
     behavior_profiles = [
@@ -1738,6 +1886,7 @@ def _progress(
         "evaluation_workload": evaluation_workload,
         "baselines": baseline_projection,
         "baseline_details": baseline_details,
+        "generation_objectives": generation_objectives,
         "equal_development_panel": (
             evaluation_workload.get("panel_hash") if evaluation_workload is not None else None
         ),

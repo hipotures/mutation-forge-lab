@@ -436,6 +436,10 @@ def _experiment_run(
                             )
                     preview_sink.update_canonical_state(project(result))
                 finally:
+                    with suppress(Exception):
+                        preview_sink.update_canonical_state(
+                            project(python_preview_status(config_path))
+                        )
                     preview_sink.close()
             finally:
                 executor.shutdown(

@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import ROUND_DOWN, Decimal
+from fractions import Fraction
 from pathlib import Path, PurePath
 from typing import Any, Literal, TextIO, cast
 
@@ -154,7 +155,7 @@ PANEL_COPY_WIDTHS = {
     "slots": 240,
     "performance": 60,
     "tokens": 60,
-    "objective": 60,
+    "objective": 160,
     "profiling": 60,
     "activity": 100,
     "quick-view": 80,
@@ -222,6 +223,26 @@ class DashboardSlot:
 class GenerationSlots:
     generation: int
     slots: tuple[DashboardSlot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationObjectiveSummary:
+    generation: int
+    candidate_id: str = "—"
+    program_hash: str = "—"
+    fitness_interval: Mapping[str, Any] | None = None
+    objective: float | None = None
+    random_interval: Mapping[str, Any] | None = None
+    random_objective: float | None = None
+    random_delta_interval: Mapping[str, Any] | None = None
+    structural_interval: Mapping[str, Any] | None = None
+    structural_objective: float | None = None
+    structural_delta_interval: Mapping[str, Any] | None = None
+    archive_valid: int = 0
+    archive_invalid: int = 0
+    archive_failed: int = 0
+    archive_duplicate: int = 0
+    panel_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +317,7 @@ class DashboardState:
     archive_seen: frozenset[tuple[str, str, str]] = frozenset()
     failed_slots_seen: frozenset[tuple[int, str]] = frozenset()
     generations: tuple[GenerationSlots, ...] = ()
+    generation_objectives: tuple[GenerationObjectiveSummary, ...] = ()
     selected_index: int = 0
     view: str = "matrix"
     detail_tab: int = 0
@@ -317,6 +339,7 @@ class DashboardState:
     counterexample_primary: str = "not started"
     counterexample_independent: str = "not started"
     counterexample_certificate: str = "—"
+    terminal_reason: str | None = None
     event_keys: frozenset[str] = frozenset()
 
 
@@ -396,7 +419,6 @@ def dashboard_state_from_python_status(
     raw_candidate_cases = evaluation_cases.get("candidate")
     candidate_cases = raw_candidate_cases if isinstance(raw_candidate_cases, Mapping) else {}
     throughput = mapping("throughput")
-    activity = mapping("scientific_activity")
     phase = mapping("phase_timings")
     timing_profile = mapping("timing_profile")
     best = mapping("best")
@@ -521,6 +543,86 @@ def dashboard_state_from_python_status(
         )
         for generation, slots in sorted(groups.items())
     )
+    generation_objectives: list[GenerationObjectiveSummary] = []
+    raw_generation_objectives = status.get("generation_objectives")
+    if isinstance(raw_generation_objectives, Sequence) and not isinstance(
+        raw_generation_objectives,
+        str | bytes,
+    ):
+        for raw_summary in raw_generation_objectives:
+            if not isinstance(raw_summary, Mapping):
+                continue
+            raw_best = raw_summary.get("best")
+            summary_best = raw_best if isinstance(raw_best, Mapping) else {}
+            raw_baselines = raw_summary.get("baselines")
+            summary_baselines = (
+                raw_baselines if isinstance(raw_baselines, Mapping) else {}
+            )
+            raw_random = summary_baselines.get("random")
+            random_summary = raw_random if isinstance(raw_random, Mapping) else {}
+            raw_structural = summary_baselines.get("structural")
+            structural_summary = (
+                raw_structural if isinstance(raw_structural, Mapping) else {}
+            )
+            raw_archive = raw_summary.get("archive")
+            archive = raw_archive if isinstance(raw_archive, Mapping) else {}
+            generation_objectives.append(
+                GenerationObjectiveSummary(
+                    generation=integer(raw_summary.get("generation")),
+                    candidate_id=str(summary_best.get("candidate_id") or "—"),
+                    program_hash=str(summary_best.get("program_hash") or "—"),
+                    fitness_interval=(
+                        dict(summary_best["fitness_interval"])
+                        if isinstance(summary_best.get("fitness_interval"), Mapping)
+                        else None
+                    ),
+                    objective=fitness_objective(summary_best.get("fitness_interval")),
+                    random_interval=(
+                        dict(random_summary["fitness_interval"])
+                        if isinstance(random_summary.get("fitness_interval"), Mapping)
+                        else None
+                    ),
+                    random_objective=fitness_objective(
+                        random_summary.get("fitness_interval")
+                    ),
+                    random_delta_interval=(
+                        dict(random_summary["best_minus_reference"])
+                        if isinstance(
+                            random_summary.get("best_minus_reference"),
+                            Mapping,
+                        )
+                        else None
+                    ),
+                    structural_interval=(
+                        dict(structural_summary["fitness_interval"])
+                        if isinstance(
+                            structural_summary.get("fitness_interval"),
+                            Mapping,
+                        )
+                        else None
+                    ),
+                    structural_objective=fitness_objective(
+                        structural_summary.get("fitness_interval")
+                    ),
+                    structural_delta_interval=(
+                        dict(structural_summary["best_minus_reference"])
+                        if isinstance(
+                            structural_summary.get("best_minus_reference"),
+                            Mapping,
+                        )
+                        else None
+                    ),
+                    archive_valid=integer(archive.get("valid")),
+                    archive_invalid=integer(archive.get("invalid")),
+                    archive_failed=integer(archive.get("failed")),
+                    archive_duplicate=integer(archive.get("duplicate")),
+                    panel_hash=(
+                        str(raw_summary["panel_hash"])
+                        if raw_summary.get("panel_hash") is not None
+                        else None
+                    ),
+                )
+            )
     raw_current_elapsed = throughput.get("current_run_elapsed_seconds")
     if isinstance(raw_current_elapsed, int | float) and not isinstance(raw_current_elapsed, bool):
         elapsed = max(0.0, float(raw_current_elapsed))
@@ -563,68 +665,6 @@ def dashboard_state_from_python_status(
                 best_fitness = (
                     lower_text if lower_text == upper_text else f"[{lower_text}, {upper_text}]"
                 )
-    scientific_activity = (
-        f"NoPlan={integer(activity.get('no_plan_count'))} · "
-        f"illegal-final={integer(activity.get('illegal_final_state_count'))} · "
-        f"bottleneck={phase.get('dominant_bottleneck', 'unknown')}"
-    )
-    exact_activity = (
-        f"exact queue={integer(exact.get('queue'))} · "
-        f"submitted={integer(exact.get('submissions'))} · "
-        f"records={integer(exact.get('records'))} · "
-        f"verified={bool(exact.get('verified'))}"
-    )
-    current_slots = groups.get(generation, ())
-    live_slots = sorted(
-        (slot for slot in current_slots if slot.state in ACTIVE_STATES or slot.state == "queued"),
-        key=lambda slot: (slot.state == "queued", slot.slot),
-    )
-    live_activity = tuple(
-        ActivityEntry(
-            timestamp=(
-                _duration(slot.elapsed_seconds) if slot.elapsed_seconds is not None else "live"
-            ),
-            component=slot.phase,
-            severity="info",
-            message=(
-                f"{slot.state} · {slot.usage.total} tokens" if slot.usage.total else slot.state
-            ),
-            slot=slot.slot,
-        )
-        for slot in live_slots
-    )
-    baseline_activity = tuple(
-        ActivityEntry(
-            timestamp="live",
-            component="baseline",
-            severity="info",
-            message=(
-                f"{str(item.get('state', 'queued'))} · "
-                f"{integer(item.get('completed'))}/{integer(item.get('total'))} cases"
-            ),
-            slot=str(key),
-        )
-        for key, item in sorted(evaluation_progress.items())
-        if str(key).startswith("baseline:")
-        and isinstance(item, Mapping)
-        and (
-            integer(item.get("running")) > 0
-            or integer(item.get("queued")) > 0
-        )
-    )
-    last_error = status.get("last_error")
-    error_activity = (
-        (
-            ActivityEntry(
-                timestamp="status",
-                component="infrastructure",
-                severity="error",
-                message=str(last_error),
-            ),
-        )
-        if isinstance(last_error, str) and last_error
-        else ()
-    )
     best_program = best.get("program")
     best_program = best_program if isinstance(best_program, Mapping) else {}
     best_program_hash = str(best_program.get("program_hash") or "—")
@@ -647,6 +687,16 @@ def dashboard_state_from_python_status(
         if isinstance(raw_orders, Sequence) and not isinstance(raw_orders, str | bytes)
         else ()
     )
+
+    def cumulative_progress(value: Mapping[str, Any]) -> tuple[int, int | None]:
+        total = optional_integer(value.get("total"))
+        completed = integer(value.get("completed"))
+        return (min(completed, total), total) if total is not None else (completed, None)
+
+    evaluation_completed, evaluation_total = cumulative_progress(evaluation_cases)
+    baseline_completed, baseline_total = cumulative_progress(baseline_cases)
+    candidate_completed, candidate_total = cumulative_progress(candidate_cases)
+
     return DashboardState(
         run_id=run_id,
         session_id="ordinary-python",
@@ -692,33 +742,12 @@ def dashboard_state_from_python_status(
         active_provider_turns=integer(provider.get("active")),
         configured_provider_concurrency=integer(provider.get("configured_concurrency")),
         evaluations_completed=integer(evaluators.get("completed")),
-        evaluation_cases_completed=max(
-            integer(evaluation_cases.get("active_completed")),
-            integer(evaluation_cases.get("completed")),
-        ),
-        evaluation_cases_total=(
-            optional_integer(evaluation_cases.get("active_total"))
-            if integer(evaluation_cases.get("active_total")) > 0
-            else optional_integer(evaluation_cases.get("total"))
-        ),
-        baseline_cases_completed=max(
-            integer(baseline_cases.get("active_completed")),
-            integer(baseline_cases.get("completed")),
-        ),
-        baseline_cases_total=(
-            optional_integer(baseline_cases.get("active_total"))
-            if integer(baseline_cases.get("active_total")) > 0
-            else optional_integer(baseline_cases.get("total"))
-        ),
-        candidate_cases_completed=max(
-            integer(candidate_cases.get("active_completed")),
-            integer(candidate_cases.get("completed")),
-        ),
-        candidate_cases_total=(
-            optional_integer(candidate_cases.get("active_total"))
-            if integer(candidate_cases.get("active_total")) > 0
-            else optional_integer(candidate_cases.get("total"))
-        ),
+        evaluation_cases_completed=evaluation_completed,
+        evaluation_cases_total=evaluation_total,
+        baseline_cases_completed=baseline_completed,
+        baseline_cases_total=baseline_total,
+        candidate_cases_completed=candidate_completed,
+        candidate_cases_total=candidate_total,
         evaluation_workers_active=integer(evaluators.get("active")),
         evaluation_workers_configured=integer(evaluators.get("configured")),
         archive_size=integer(counts.get("valid")),
@@ -727,7 +756,7 @@ def dashboard_state_from_python_status(
         failed_candidates=integer(counts.get("provider_failed"))
         + integer(counts.get("evaluation_infrastructure_failure")),
         duplicate_candidates=integer(counts.get("duplicate")),
-        current_objective=best_value,
+        current_objective=None,
         best_objective=best_value,
         best_candidate=str(best.get("candidate_id") or "—"),
         best_program_hash=best_program_hash,
@@ -744,35 +773,8 @@ def dashboard_state_from_python_status(
         cumulative_usage=token_usage,
         session_usage=token_usage,
         generations=generation_groups,
-        activity=live_activity
-        + baseline_activity
-        + error_activity
-        + (
-            ActivityEntry(
-                timestamp="live",
-                component="science",
-                severity="info",
-                message=scientific_activity,
-            ),
-            ActivityEntry(
-                timestamp="live",
-                component="verification",
-                severity="info",
-                message=exact_activity,
-            ),
-            ActivityEntry(
-                timestamp="status",
-                component="best",
-                severity="info",
-                message=(f"candidate {best.get('candidate_id') or '—'} · fitness {best_fitness}"),
-            ),
-            ActivityEntry(
-                timestamp="status",
-                component="program",
-                severity="info",
-                message=f"program {best_program_hash}",
-            ),
-        ),
+        generation_objectives=tuple(generation_objectives),
+        activity=(),
         counterexample_state=("verified" if exact.get("verified") is True else "none"),
         counterexample_candidate=(
             str(best.get("candidate_id")) if exact.get("verified") is True else "—"
@@ -782,7 +784,185 @@ def dashboard_state_from_python_status(
             if status.get("state") == "PAUSED_FOR_BUDGET"
             else ""
         ),
+        terminal_reason=(
+            str(status["terminal_reason"])
+            if status.get("terminal_reason") is not None
+            else None
+        ),
     )
+
+
+def _run_elapsed_timestamp(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return (
+        f"{hours}:{minutes:02d}:{secs:02d}"
+        if hours
+        else f"{minutes:02d}:{secs:02d}"
+    )
+
+
+def _canonical_transition_activity(
+    previous: DashboardState,
+    current: DashboardState,
+) -> tuple[ActivityEntry, ...]:
+    timestamp = _run_elapsed_timestamp(current.elapsed_seconds)
+    events: list[ActivityEntry] = []
+    if current.generation > previous.generation:
+        events.append(
+            ActivityEntry(
+                timestamp,
+                "generation",
+                "info",
+                f"{_human_generation(current.generation)} started",
+            )
+        )
+
+    previous_slots = {
+        (slot.generation, slot.slot): slot
+        for group in previous.generations
+        for slot in group.slots
+    }
+    for group in current.generations:
+        for slot in group.slots:
+            prior = previous_slots.get((slot.generation, slot.slot))
+            prior_state = prior.state if prior is not None else None
+            if prior_state == slot.state:
+                continue
+            if prior_state == "model" and slot.state == "persisting":
+                events.append(
+                    ActivityEntry(
+                        timestamp,
+                        "provider",
+                        "info",
+                        "model completed · persisting",
+                        slot.slot,
+                    )
+                )
+            elif slot.state == "invalid":
+                events.append(
+                    ActivityEntry(
+                        timestamp,
+                        "validation",
+                        "warning",
+                        slot.validation_message or "invalid · contract",
+                        slot.slot,
+                    )
+                )
+            elif slot.state == "accepted":
+                events.append(
+                    ActivityEntry(
+                        timestamp,
+                        "evaluation",
+                        "info",
+                        f"accepted · {_objective(slot.objective)}",
+                        slot.slot,
+                    )
+                )
+            elif slot.state == "duplicate":
+                events.append(
+                    ActivityEntry(
+                        timestamp,
+                        "evaluation",
+                        "info",
+                        "duplicate",
+                        slot.slot,
+                    )
+                )
+            elif slot.state == "failed":
+                events.append(
+                    ActivityEntry(
+                        timestamp,
+                        "provider" if slot.phase in {"provider", "archived"} else "evaluation",
+                        "error",
+                        slot.error or "failed",
+                        slot.slot,
+                    )
+                )
+
+    previous_objectives = {
+        item.generation: item for item in previous.generation_objectives
+    }
+    for summary in current.generation_objectives:
+        prior_summary = previous_objectives.get(summary.generation)
+        for baseline, value, old_value in (
+            (
+                "random",
+                summary.random_objective,
+                (
+                    prior_summary.random_objective
+                    if prior_summary is not None
+                    else None
+                ),
+            ),
+            (
+                "structural",
+                summary.structural_objective,
+                (
+                    prior_summary.structural_objective
+                    if prior_summary is not None
+                    else None
+                ),
+            ),
+        ):
+            if value is not None and old_value is None:
+                events.append(
+                    ActivityEntry(
+                        timestamp,
+                        "baseline",
+                        "info",
+                        f"{baseline} completed · {_objective(value)}",
+                    )
+                )
+        if (
+            summary.objective is not None
+            and (
+                prior_summary is None
+                or prior_summary.candidate_id != summary.candidate_id
+                or prior_summary.objective != summary.objective
+            )
+        ):
+            events.append(
+                ActivityEntry(
+                    timestamp,
+                    "best",
+                    "info",
+                    (
+                        f"{_human_generation(summary.generation)} · "
+                        f"{compact_display_ids(summary.candidate_id)} · "
+                        f"{_objective(summary.objective)}"
+                    ),
+                )
+            )
+
+    if (
+        current.counterexample_state != previous.counterexample_state
+        and current.counterexample_state != "none"
+    ):
+        events.append(
+            ActivityEntry(
+                timestamp,
+                "verification",
+                "info" if current.counterexample_state == "verified" else "warning",
+                current.counterexample_state,
+                current.counterexample_candidate,
+            )
+        )
+    if (
+        current.terminal_reason is not None
+        and current.terminal_reason != previous.terminal_reason
+    ):
+        events.append(
+            ActivityEntry(
+                timestamp,
+                "experiment",
+                "error" if current.terminal_reason == "infrastructure_failure" else "info",
+                current.terminal_reason,
+            )
+        )
+
+    return tuple(reversed(events)) + previous.activity
 
 
 def load_persisted_dashboard_state(
@@ -1660,7 +1840,11 @@ def reduce_dashboard_event(
         state = replace(
             state,
             generation=generation,
-            displayed_generation=generation,
+            displayed_generation=(
+                generation
+                if was_following_current_generation
+                else previous_displayed_generation
+            ),
             population_size=count,
             completed_slots=0,
             selected_index=0,
@@ -2655,6 +2839,10 @@ class InteractiveDashboardSink:
         with self._lock:
             previous = self.state
             generations = {group.generation for group in state.generations}
+            was_following_current = (
+                previous.displayed_generation == previous.generation
+            )
+            activity = _canonical_transition_activity(previous, state)[:24]
             self.state = replace(
                 state,
                 experiment_state=(
@@ -2664,7 +2852,9 @@ class InteractiveDashboardSink:
                     else state.experiment_state
                 ),
                 displayed_generation=(
-                    previous.displayed_generation
+                    state.generation
+                    if was_following_current
+                    else previous.displayed_generation
                     if previous.displayed_generation in generations
                     else state.displayed_generation
                 ),
@@ -2676,6 +2866,8 @@ class InteractiveDashboardSink:
                 slot_icon_mode=previous.slot_icon_mode,
                 retry_confirmation=previous.retry_confirmation,
                 status_message=(previous.status_message or state.status_message),
+                activity=activity,
+                logs=previous.logs,
             )
             self._rendered.clear()
             self._dirty.set()
@@ -2835,7 +3027,7 @@ class InteractiveDashboardSink:
         if panel_name == "tokens":
             return "Token Accounting", self._tokens_panel()
         if panel_name == "objective":
-            return "Objective / Archive", self._objective_panel()
+            return "Objective / Archive", self._objective_panel(copy=True)
         if panel_name == "profiling":
             return "Profiling · top-N", self._profiling_panel()
         if panel_name == "activity":
@@ -3534,7 +3726,7 @@ class InteractiveDashboardSink:
         rows.extend(
             (
                 ("", "output", cumulative.output),
-                ("", "reasoning (in output)", cumulative.reasoning),
+                ("", "reasoning", cumulative.reasoning),
                 ("session", "total", session.total),
                 ("", "input", session.input),
                 ("", "cached", session.cached),
@@ -3545,17 +3737,17 @@ class InteractiveDashboardSink:
         rows.extend(
             (
                 ("", "output", session.output),
-                ("", "reasoning (in output)", session.reasoning),
+                ("", "reasoning", session.reasoning),
                 ("usage", "quality", cumulative.quality),
             )
         )
         if compact:
             compact_rows: list[tuple[str, str, object]] = [
                 ("experiment", "total", cumulative.total),
-                ("", "reasoning (in output)", cumulative.reasoning),
+                ("", "reasoning", cumulative.reasoning),
                 ("", "input", session.input),
                 ("", "output", session.output),
-                ("", "reasoning (in output)", session.reasoning),
+                ("", "reasoning", session.reasoning),
                 ("usage", "quality", cumulative.quality),
             ]
             rows = compact_rows[: row_limit or 1]
@@ -3572,25 +3764,108 @@ class InteractiveDashboardSink:
         *,
         compact: bool = False,
         row_limit: int | None = None,
+        copy: bool = False,
     ) -> Panel:
-        rows: list[tuple[str, object]] = [
-            ("direction", f"{self.state.objective_direction} ↑"),
-            ("current", _objective(self.state.current_objective)),
-            ("best", _objective(self.state.best_objective)),
-            ("best candidate", Text(self.state.best_candidate)),
-            ("best program", Text(self.state.best_program_hash)),
-            ("exact fitness", Text(self.state.best_fitness)),
-            ("random baseline", _objective(self.state.baseline_random)),
-            ("structural baseline", _objective(self.state.baseline_structural)),
-            ("accepted", self.state.accepted_candidates),
-            ("invalid", self.state.invalid_candidates),
-            ("failed", self.state.failed_candidates),
-            ("duplicate", self.state.duplicate_candidates),
-            ("archive size", self.state.archive_size),
+        summary = next(
+            (
+                item
+                for item in self.state.generation_objectives
+                if item.generation == self.state.displayed_generation
+            ),
+            None,
+        )
+        title = f"Objective · G{_human_generation(self.state.displayed_generation)}"
+        if summary is None:
+            return Panel(
+                Text("Waiting for generation-local results", style="dim"),
+                title=title,
+                border_style="cyan",
+            )
+
+        score_rows = [
+            (
+                "generation best",
+                _fitness_interval_text(summary.fitness_interval, exact=copy),
+                "—",
+            ),
+            (
+                "structural",
+                _fitness_interval_text(summary.structural_interval, exact=copy),
+                _delta_interval_text(summary.structural_delta_interval, exact=copy),
+            ),
+            (
+                "random",
+                _fitness_interval_text(summary.random_interval, exact=copy),
+                _delta_interval_text(summary.random_delta_interval, exact=copy),
+            ),
         ]
         if compact:
-            rows = rows[: row_limit or 1]
-        return Panel(_key_value_grid(rows), title="Objective / Archive", border_style="cyan")
+            score_rows = score_rows[: max(1, min(len(score_rows), row_limit or 1))]
+        scores = Table.grid(expand=True, padding=(0, 1))
+        scores.add_column()
+        scores.add_column(justify="right")
+        scores.add_column(justify="right")
+        scores.add_row("reference", "score", "best-ref", style="dim")
+        for reference, score, delta in score_rows:
+            scores.add_row(reference, score, delta)
+        if compact:
+            return Panel(scores, title=title, border_style="cyan")
+
+        candidate = (
+            summary.candidate_id
+            if copy
+            else compact_display_ids(summary.candidate_id)
+        )
+        program_hash = (
+            summary.program_hash
+            if copy
+            else summary.program_hash[:8]
+            if summary.program_hash != "—"
+            else "—"
+        )
+        archive = (
+            f"{summary.archive_valid} ok · "
+            f"{summary.archive_invalid} invalid · "
+            f"{summary.archive_failed} failed"
+        )
+        if summary.archive_duplicate:
+            archive += f" · {summary.archive_duplicate} duplicate"
+        campaign_candidate = (
+            self.state.best_candidate
+            if copy
+            else compact_display_ids(self.state.best_candidate)
+        )
+        campaign_score = (
+            self.state.best_fitness
+            if copy
+            else _objective(self.state.best_objective)
+        )
+        campaign_generation = next(
+            (
+                item.generation
+                for item in self.state.generation_objectives
+                if item.candidate_id == self.state.best_candidate
+            ),
+            None,
+        )
+        campaign = (
+            f"G{_human_generation(campaign_generation)} · "
+            if campaign_generation is not None
+            else ""
+        ) + f"{campaign_candidate} · {campaign_score}"
+        metadata = _key_value_grid(
+            (
+                ("candidate", Text(candidate)),
+                ("program", Text(program_hash)),
+                ("archive", archive),
+                ("campaign champion", campaign),
+            )
+        )
+        return Panel(
+            Group(scores, Text(), metadata),
+            title=title,
+            border_style="cyan",
+        )
 
     def _profiling_panel(self) -> Panel:
         profile = self.state.timing_profile
@@ -3941,7 +4216,10 @@ class InteractiveDashboardSink:
         ):
             self._refresh_thread.join(timeout=1.0)
         if self._live_started:
+            final_render = self.render()
+            self.live.update(final_render, refresh=True)
             self.live.stop()
+            self.console.print(final_render)
 
 
 def _responsive_mode(width: int, height: int) -> Literal["full", "compact", "minimal"]:
@@ -4135,7 +4413,7 @@ def _token_grid(usage: TokenUsage, *, charged: bool | None) -> Table:
             ("input", usage.input),
             ("cached input", usage.cached),
             ("output", usage.output),
-            ("reasoning (in output)", usage.reasoning),
+            ("reasoning", usage.reasoning),
             ("authoritative total", usage.total),
             ("usage quality", usage.quality),
             (
@@ -4173,6 +4451,59 @@ def _duration(value: float | int | None) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _interval_fractions(
+    interval: Mapping[str, Any] | None,
+) -> tuple[Fraction, Fraction] | None:
+    if not isinstance(interval, Mapping):
+        return None
+    values: list[Fraction] = []
+    for endpoint in ("lower", "upper"):
+        item = interval.get(endpoint)
+        if not isinstance(item, Mapping):
+            return None
+        numerator = item.get("numerator")
+        denominator = item.get("denominator")
+        if (
+            not isinstance(numerator, int)
+            or isinstance(numerator, bool)
+            or not isinstance(denominator, int)
+            or isinstance(denominator, bool)
+            or denominator == 0
+        ):
+            return None
+        values.append(Fraction(numerator, denominator))
+    return values[0], values[1]
+
+
+def _fitness_interval_text(
+    interval: Mapping[str, Any] | None,
+    *,
+    exact: bool,
+) -> str:
+    values = _interval_fractions(interval)
+    if values is None:
+        return "—"
+    lower, upper = values
+    if exact:
+        lower_text = f"{lower.numerator}/{lower.denominator}"
+        upper_text = f"{upper.numerator}/{upper.denominator}"
+    else:
+        lower_text = _objective(float(lower))
+        upper_text = _objective(float(upper))
+    return lower_text if lower == upper else f"[{lower_text}, {upper_text}]"
+
+
+def _delta_interval_text(
+    interval: Mapping[str, Any] | None,
+    *,
+    exact: bool,
+) -> str:
+    value = _fitness_interval_text(interval, exact=exact)
+    if value == "—" or value.startswith("-") or value.startswith("["):
+        return value
+    return f"+{value}"
 
 
 def _objective(value: float | None) -> str:

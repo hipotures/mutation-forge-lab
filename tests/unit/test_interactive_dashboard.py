@@ -313,7 +313,8 @@ def test_token_accounting_groups_rows_without_extra_separator_lines() -> None:
     assert "total" in rendered
     assert "input" in rendered
     assert "quality" in rendered
-    assert "reasoning (in output)" in rendered
+    assert "reasoning" in rendered
+    assert "reasoning (in output)" not in rendered
     assert len(rendered.splitlines()) == 13
     sink.close()
 
@@ -1607,15 +1608,7 @@ def test_python_status_separates_baseline_and_candidate_progress_and_errors() ->
     assert state.candidate_cases_total == 0
     assert state.generations[0].slots[0].phase == "response"
     assert state.generations[0].slots[0].state == "persisting"
-    assert any(
-        item.component == "baseline" and "267/320 cases" in item.message
-        for item in state.activity
-    )
-    assert any(
-        item.component == "infrastructure"
-        and "provider turn exceeded 300s" in item.message
-        for item in state.activity
-    )
+    assert state.activity == ()
 
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=False),
@@ -1631,6 +1624,227 @@ def test_python_status_separates_baseline_and_candidate_progress_and_errors() ->
     assert "587/640" in rendered
     assert "Candidates" in rendered
     assert "0/0" in rendered
+    sink.close()
+
+
+def test_python_progress_uses_matching_cumulative_scopes_across_generations() -> None:
+    snapshots = (
+        (960, 1280, 2560, 2560),
+        (1280, 1280, 3840, 3840),
+    )
+    states = []
+    for baseline_completed, baseline_total, candidate_completed, candidate_total in snapshots:
+        status = {
+            "state": "running",
+            "generation_index": 1,
+            "counts": {"planned": 16, "terminal": 11},
+            "provider": {},
+            "evaluators": {},
+            "evaluation_cases": {
+                "active_completed": 960,
+                "active_total": 1280,
+                "completed": baseline_completed + candidate_completed,
+                "total": baseline_total + candidate_total,
+                "baseline": {
+                    "active_completed": 320,
+                    "active_total": 640,
+                    "completed": baseline_completed,
+                    "total": baseline_total,
+                },
+                "candidate": {
+                    "active_completed": 640,
+                    "active_total": 640,
+                    "completed": candidate_completed,
+                    "total": candidate_total,
+                },
+            },
+            "throughput": {},
+            "phase_timings": {},
+            "best": {},
+            "exact_verification": {},
+            "slots": [],
+        }
+        states.append(
+            dashboard.dashboard_state_from_python_status(
+                status,
+                run_id="two-generation",
+                model="fixture",
+                effort="high",
+                generation_limit=2,
+                wall_seconds=3600.0,
+            )
+        )
+
+    for state in states:
+        assert state.baseline_cases_completed <= (state.baseline_cases_total or 0)
+        assert state.candidate_cases_completed <= (state.candidate_cases_total or 0)
+    assert (
+        states[-1].baseline_cases_completed,
+        states[-1].baseline_cases_total,
+    ) == (
+        1280,
+        1280,
+    )
+    assert (
+        states[-1].candidate_cases_completed,
+        states[-1].candidate_cases_total,
+    ) == (
+        3840,
+        3840,
+    )
+
+
+def test_python_dashboard_auto_follows_current_generation_but_preserves_history() -> None:
+    generation_zero = GenerationSlots(0, (DashboardSlot("g0000-slot-00", 0),))
+    generation_one = GenerationSlots(1, (DashboardSlot("g0001-slot-00", 1),))
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        initial_state=DashboardState(
+            generation=0,
+            displayed_generation=0,
+            generations=(generation_zero,),
+        ),
+        start_live=False,
+    )
+
+    current = DashboardState(
+        generation=1,
+        displayed_generation=1,
+        generations=(generation_zero, generation_one),
+        elapsed_seconds=358.0,
+    )
+    sink.update_canonical_state(current)
+    assert sink.state.displayed_generation == 1
+
+    sink.state = replace(sink.state, displayed_generation=0)
+    sink.update_canonical_state(replace(current, elapsed_seconds=359.0))
+    assert sink.state.displayed_generation == 0
+    sink.close()
+
+
+def test_python_recent_activity_contains_transitions_not_live_rows() -> None:
+    model_slot = DashboardSlot(
+        "g0000-slot-00",
+        0,
+        phase="provider",
+        state="model",
+    )
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        initial_state=DashboardState(
+            generation=0,
+            displayed_generation=0,
+            generations=(GenerationSlots(0, (model_slot,)),),
+        ),
+        start_live=False,
+    )
+    persisting = replace(model_slot, phase="response", state="persisting")
+    sink.update_canonical_state(
+        DashboardState(
+            generation=0,
+            displayed_generation=0,
+            generations=(GenerationSlots(0, (persisting,)),),
+            elapsed_seconds=61.0,
+        )
+    )
+    assert sink.state.activity[0].timestamp == "01:01"
+    assert sink.state.activity[0].message == "model completed · persisting"
+
+    accepted = replace(
+        persisting,
+        phase="archived",
+        state="accepted",
+        objective=0.379,
+    )
+    sink.update_canonical_state(
+        replace(
+            sink.state,
+            generations=(GenerationSlots(0, (accepted,)),),
+            elapsed_seconds=3672.0,
+            generation_objectives=(
+                dashboard.GenerationObjectiveSummary(
+                    generation=0,
+                    candidate_id="g0000-slot-00",
+                    objective=0.379,
+                    random_objective=0.35,
+                    structural_objective=0.36,
+                ),
+            ),
+        )
+    )
+    messages = [item.message for item in sink.state.activity]
+    assert sink.state.activity[0].timestamp == "1:01:12"
+    assert any("accepted" in message for message in messages)
+    assert any("random completed" in message for message in messages)
+    assert any("structural completed" in message for message in messages)
+    assert not any("evaluating ·" in message for message in messages)
+    assert not any("status program" in message for message in messages)
+    sink.close()
+
+
+def test_objective_panel_uses_generation_local_values_and_full_copy() -> None:
+    candidate = "g0001-slot-04-full-candidate"
+    program_hash = "58e31933" + "a" * 56
+    exact = {
+        "lower": {"numerator": 1234567890123456789, "denominator": 10**19},
+        "upper": {"numerator": 1234567890123456789, "denominator": 10**19},
+    }
+    state = DashboardState(
+        generation=1,
+        displayed_generation=1,
+        best_candidate="g0000-slot-01",
+        best_objective=0.379,
+        best_fitness="379/1000",
+        generation_objectives=(
+            dashboard.GenerationObjectiveSummary(
+                generation=1,
+                candidate_id=candidate,
+                program_hash=program_hash,
+                fitness_interval=exact,
+                objective=0.1234,
+                structural_interval=exact,
+                structural_objective=0.12,
+                structural_delta_interval={
+                    "lower": {"numerator": 1, "denominator": 100},
+                    "upper": {"numerator": 1, "denominator": 100},
+                },
+                random_interval=exact,
+                random_objective=0.11,
+                random_delta_interval={
+                    "lower": {"numerator": 2, "denominator": 100},
+                    "upper": {"numerator": 2, "denominator": 100},
+                },
+                archive_valid=5,
+                archive_failed=3,
+            ),
+        ),
+    )
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        initial_state=state,
+        start_live=False,
+    )
+    live_output = io.StringIO()
+    Console(file=live_output, width=80, force_terminal=False).print(
+        sink._objective_panel()
+    )
+    live = live_output.getvalue()
+    assert "Objective · G2" in live
+    assert "generation best" in live
+    assert "best-ref" in live
+    assert "58e31933" in live
+    assert program_hash not in live
+    assert "current" not in live
+
+    title, renderable = sink._panel_copy_source("objective")
+    copied = dashboard.render_panel_copy_text(
+        title,
+        renderable,
+        width=dashboard.PANEL_COPY_WIDTHS["objective"],
+    )
+    assert candidate in copied
+    assert program_hash in copied
+    assert "1234567890123456789/10000000000000000000" in copied
     sink.close()
 
 
@@ -2461,7 +2675,7 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
     assert initial.completed_slots == 8
     assert initial.provider_turns_attempted == 8
     assert initial.evaluations_completed == 1
-    sink.update_canonical_state.assert_called_once()
+    assert sink.update_canonical_state.call_count == 2
     sink.close.assert_called_once()
 
 
@@ -2910,6 +3124,24 @@ def test_live_updates_immediately_on_events_and_heartbeats_while_active() -> Non
     sink.write(_event("experiment_completed", state="completed"))
     assert updated.wait(timeout=0.5)
     sink.close()
+
+
+def test_dashboard_prints_final_render_after_live_shutdown() -> None:
+    order: list[str] = []
+    console = Console(file=io.StringIO(), force_terminal=False)
+    sink = InteractiveDashboardSink(
+        console=console,
+        start_live=False,
+    )
+    sink._live_started = True
+    sink.live.update = Mock(side_effect=lambda *_args, **_kwargs: order.append("update"))
+    sink.live.stop = Mock(side_effect=lambda: order.append("stop"))
+    sink.console.print = Mock(side_effect=lambda *_args, **_kwargs: order.append("print"))
+
+    sink.close()
+
+    assert order[-3:] == ["update", "stop", "print"]
+    sink.console.print.assert_called_once()
 
 
 @pytest.mark.parametrize(
