@@ -1335,6 +1335,8 @@ def _progress(
             )
         )
     }
+    if _nonnegative_int(runtime.get("active_provider_turns")) == 0:
+        active_provider_keys.clear()
     active_provider_elapsed = sum(
         max(0.0, time.time() - provider_turn_started(raw_turn))
         for key, raw_turn in provider_turns_by_key.items()
@@ -1470,7 +1472,15 @@ def _progress(
                 else "failed"
                 if (
                     provider_turn is not None
-                    and provider_turn.get("failed") is True
+                    and (
+                        provider_turn.get("failed") is True
+                        or (
+                            state == "blocked"
+                            and terminal_reason
+                            in {"infrastructure_failure", "provider_runtime_missing"}
+                            and retained_state.get("last_error")
+                        )
+                    )
                 )
                 else "queued"
             )

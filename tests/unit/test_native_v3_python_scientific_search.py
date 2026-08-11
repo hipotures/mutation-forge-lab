@@ -1603,6 +1603,40 @@ def test_terminal_provider_turn_projects_persisting_before_result_artifact(
     assert rich.generations[0].slots[0].state == "persisting"
     assert rich.generations[0].slots[0].phase == "response"
 
+    state.update(
+        {
+            "state": "blocked",
+            "terminal_reason": "infrastructure_failure",
+            "last_error": "M5InfrastructureError: provider turn exceeded 300s",
+        }
+    )
+    write_json(
+        root / search_module.M10_RUNTIME_FILENAME,
+        {
+            "protocol_id": search_module.M10_RUNTIME_PROTOCOL_ID,
+            "resume_started_epoch_seconds": time.time() - 1,
+            "active_provider_turns": 0,
+            "provider_turns_submitted": 1,
+            "provider_concurrency_timeline": [
+                {
+                    "key": "g0000-slot-00-initial",
+                    "kind": "primary",
+                    "started_epoch_seconds": time.time() - 0.5,
+                    "finished_epoch_seconds": time.time(),
+                    "failed": True,
+                    "error": "M5InfrastructureError: provider turn exceeded 300s",
+                }
+            ],
+            "evaluation_progress": {},
+        },
+    )
+    failed = preview_module._progress(config, state)
+    assert failed["last_error"] == "M5InfrastructureError: provider turn exceeded 300s"
+    assert failed["slots"][0]["state"] == "failed"
+    assert failed["slots"][0]["error"] == (
+        "M5InfrastructureError: provider turn exceeded 300s"
+    )
+
 
 def test_fresh_dashboard_keeps_unknown_baselines_and_tokens_unknown(
     tmp_path: Path,
