@@ -43,6 +43,7 @@ M10_BASELINE_FILENAME = "generation-baselines.json.gz"
 M10_BASELINE_PROTOCOL_ID = "mforge.native.python_generation_baselines.v1"
 M10_BASELINE_RESULT_FILENAME = "baseline-result.json.gz"
 M10_BASELINE_RESULT_PROTOCOL_ID = "mforge.native.python_generation_baseline.v1"
+_RUNTIME_TELEMETRY_FLUSH_INTERVAL_SECONDS = 0.25
 
 
 class _ProviderTurnBudgetExhausted(core.M5SearchError):
@@ -495,6 +496,8 @@ class _RuntimeTelemetry:
             }
         self._state = state
         self._state["resume_started_epoch_seconds"] = self._resume_started_epoch
+        self._dirty = False
+        self._last_persist_monotonic = float("-inf")
         self._resume_budget = resume_budget
         current_started = self._string_keys_locked("provider_started_keys")
         current_repairs = self._string_keys_locked("repair_turn_keys")
@@ -537,7 +540,7 @@ class _RuntimeTelemetry:
         self._started_at_resume = frozenset(baseline_started)
         self._repairs_at_resume = frozenset(baseline_repairs)
         self._provider_active_started: float | None = None
-        self._persist_locked()
+        self._persist_locked(force=True)
 
     def _elapsed_locked(self) -> float:
         return float(self._state["active_elapsed_seconds"]) + (
@@ -555,8 +558,18 @@ class _RuntimeTelemetry:
             "updated_epoch_seconds": time.time(),
         }
 
-    def _persist_locked(self) -> None:
+    def _persist_locked(self, *, force: bool = False) -> None:
+        self._dirty = True
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_persist_monotonic
+            < _RUNTIME_TELEMETRY_FLUSH_INTERVAL_SECONDS
+        ):
+            return
         write_json(self._path, self._payload_locked())
+        self._dirty = False
+        self._last_persist_monotonic = now
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -565,7 +578,7 @@ class _RuntimeTelemetry:
     def boundary(self, value: str) -> None:
         with self._lock:
             self._state["last_boundary"] = value
-            self._persist_locked()
+            self._persist_locked(force=True)
 
     def wall_expired(self, limit: float) -> bool:
         with self._lock:
@@ -596,7 +609,7 @@ class _RuntimeTelemetry:
                 raise _ProviderTurnBudgetExhausted("fewer than eight primary program slots remain")
             retained.extend(new)
             self._state["primary_slot_keys"] = retained
-            self._persist_locked()
+            self._persist_locked(force=True)
 
     def reserve_repair(self, key: str, *, limit: int | None) -> bool:
         with self._lock:
@@ -613,7 +626,7 @@ class _RuntimeTelemetry:
                 return False
             repairs.append(key)
             self._state["repair_turn_keys"] = repairs
-            self._persist_locked()
+            self._persist_locked(force=True)
             return True
 
     def primary_was_started(self, key: str) -> bool:
@@ -656,7 +669,7 @@ class _RuntimeTelemetry:
                             "M10 interrupted primary retry evidence is malformed"
                         )
                     retries[retry_key] = key
-                    self._persist_locked()
+                    self._persist_locked(force=True)
                     return retry_key, attempt
             raise core.M5InfrastructureError("interrupted primary retry attempts are exhausted")
 
@@ -710,7 +723,7 @@ class _RuntimeTelemetry:
                     },
                 )
             )
-            self._persist_locked()
+            self._persist_locked(force=True)
             return True
 
     def provider_finished(
@@ -750,7 +763,7 @@ class _RuntimeTelemetry:
                     if error:
                         item["error"] = error[:1024]
                     break
-            self._persist_locked()
+            self._persist_locked(force=True)
 
     def timed_persist(self, operation: Callable[[], None]) -> None:
         started = time.monotonic()
@@ -966,12 +979,12 @@ class _RuntimeTelemetry:
             self._state["active_provider_turns"] = 0
             self._state["active_evaluation_work"] = {}
             self._state["terminal_reason"] = reason
-            self._persist_locked()
+            self._persist_locked(force=True)
 
     def clear_terminal_reason(self) -> None:
         with self._lock:
             self._state["terminal_reason"] = None
-            self._persist_locked()
+            self._persist_locked(force=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2496,6 +2509,7 @@ def run_sustained_search(
 
             generation_dir = root / "generations" / f"generation-{generation:04d}"
             core._write_exclusive_or_verify(generation_dir / "manifest.json.gz", manifest.as_dict())
+            telemetry.boundary(f"generation_{generation}_manifest")
             baseline_summary_path = generation_dir / M10_BASELINE_FILENAME
             retained_baselines = (
                 core._load_mapping(baseline_summary_path)
@@ -2559,6 +2573,7 @@ def run_sustained_search(
                 submitted_at=prepare_started_at,
             )
             check_force_stop()
+            telemetry.boundary(f"generation_{generation}_snapshot")
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_snapshot")
 
@@ -3073,6 +3088,7 @@ def run_sustained_search(
         options.max_total_tokens_per_hour,
     )
     write_json(root / M10_REPORT_FILENAME, report)
+    telemetry.boundary("report_persisted")
     if boundary_hook is not None:
         boundary_hook("report_persisted")
     return report

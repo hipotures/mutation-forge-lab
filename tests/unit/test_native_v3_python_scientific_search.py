@@ -1423,6 +1423,50 @@ def test_resume_budget_remains_cumulative_across_process_restarts(
     )
 
 
+def test_runtime_telemetry_throttles_case_updates_and_forces_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    writes: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(search_module.time, "monotonic", lambda: now[0])
+
+    def record_runtime(_path: Path, payload: Mapping[str, Any]) -> None:
+        writes.append(json.loads(json.dumps(payload)))
+
+    monkeypatch.setattr(search_module, "write_json", record_runtime)
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options())
+    telemetry.evaluation_started(
+        key="candidate:g0000-slot-00",
+        total=1000,
+        completed=0,
+        queued=1000,
+    )
+
+    for completed in range(1, 1001):
+        now[0] = completed / 1000
+        telemetry.evaluation_case_completed(
+            key="candidate:g0000-slot-00",
+            completed=completed,
+        )
+
+    assert len(writes) < 10
+    assert telemetry.snapshot()["candidate_evaluation_cases_completed"] == 1000
+    writes_before_boundary = len(writes)
+
+    telemetry.boundary("generation_0_committed")
+
+    assert len(writes) == writes_before_boundary + 1
+    assert writes[-1]["candidate_evaluation_cases_completed"] == 1000
+    assert writes[-1]["last_boundary"] == "generation_0_committed"
+
+    telemetry.finish("generation_budget")
+
+    assert writes[-1]["candidate_evaluation_cases_completed"] == 1000
+    assert writes[-1]["terminal_reason"] == "generation_budget"
+
+
 def test_one_provider_failure_consumes_its_slot_and_search_continues(
     tmp_path: Path,
 ) -> None:
