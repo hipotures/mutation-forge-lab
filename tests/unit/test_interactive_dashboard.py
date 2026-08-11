@@ -1527,7 +1527,110 @@ def test_profiling_panel_is_numbered_and_copyable() -> None:
     )
     assert title == "Profiling · top-N"
     assert "provider.generate" in copied
-    assert "calls=1" in copied
+    assert "component" in copied
+    assert "share" in copied
+    assert "calls" in copied
+    assert "calls=1" not in copied
+    assert "calls=—" not in copied
+    assert re.search(r"provider\.generate\s+100\.0%\s+1", copied)
+    sink.close()
+
+
+def test_python_status_separates_baseline_and_candidate_progress_and_errors() -> None:
+    status = {
+        "state": "running",
+        "generation_index": 0,
+        "counts": {"planned": 8, "terminal": 0},
+        "provider": {
+            "program_turns_reserved": 1,
+            "active": 1,
+            "configured_concurrency": 2,
+        },
+        "evaluators": {"configured": 12, "active": 12},
+        "evaluation_cases": {
+            "active_completed": 587,
+            "active_total": 640,
+            "completed": 587,
+            "total": 640,
+            "baseline": {
+                "active_completed": 587,
+                "active_total": 640,
+                "completed": 587,
+                "total": 640,
+            },
+            "candidate": {
+                "active_completed": 0,
+                "active_total": 0,
+                "completed": 0,
+                "total": 0,
+            },
+        },
+        "evaluation_progress": {
+            "baseline:random": {
+                "completed": 320,
+                "total": 320,
+                "queued": 0,
+                "running": 0,
+                "state": "terminal",
+            },
+            "baseline:structural": {
+                "completed": 267,
+                "total": 320,
+                "queued": 41,
+                "running": 12,
+                "state": "running",
+            },
+        },
+        "slots": [
+            {
+                "candidate_id": "g0000-slot-00",
+                "generation": 0,
+                "slot": "slot-00",
+                "phase": "response",
+                "state": "persisting",
+            }
+        ],
+        "last_error": "M5InfrastructureError: provider turn exceeded 300s",
+    }
+    state = dashboard.dashboard_state_from_python_status(
+        status,
+        run_id="status-fixture",
+        model="fixture",
+        effort="high",
+        generation_limit=1,
+        wall_seconds=3600.0,
+    )
+
+    assert state.baseline_cases_completed == 587
+    assert state.baseline_cases_total == 640
+    assert state.candidate_cases_completed == 0
+    assert state.candidate_cases_total == 0
+    assert state.generations[0].slots[0].phase == "response"
+    assert state.generations[0].slots[0].state == "persisting"
+    assert any(
+        item.component == "baseline" and "267/320 cases" in item.message
+        for item in state.activity
+    )
+    assert any(
+        item.component == "infrastructure"
+        and "provider turn exceeded 300s" in item.message
+        for item in state.activity
+    )
+
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), width=150, force_terminal=False),
+        start_live=False,
+    )
+    sink.state = state
+    output = io.StringIO()
+    Console(file=output, width=150, force_terminal=False).print(
+        sink._progress(150, horizontal=False)
+    )
+    rendered = output.getvalue()
+    assert "Baselines" in rendered
+    assert "587/640" in rendered
+    assert "Candidates" in rendered
+    assert "0/0" in rendered
     sink.close()
 
 

@@ -662,6 +662,7 @@ def test_logs_persist_incrementally_on_success_and_failure(tmp_path: Path) -> No
         "slot-00.codex-rpc.jsonl",
         "slot-00.events.jsonl",
         "slot-00.stdout.jsonl",
+        "slot-00.turn-terminal.json",
     ):
         assert (root / name).is_file(), name
     assert "gpt-5.6-luna" in (root / "slot-00.codex-profile.json").read_text()

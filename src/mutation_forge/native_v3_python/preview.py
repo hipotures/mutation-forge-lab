@@ -1217,6 +1217,24 @@ def _progress(
         int(item["completed"]) for item in evaluation_progress.values()
     )
     active_evaluation_total = sum(int(item["total"]) for item in evaluation_progress.values())
+
+    def evaluation_case_projection(prefix: str) -> dict[str, int]:
+        active = [
+            item
+            for key, item in evaluation_progress.items()
+            if key.startswith(f"{prefix}:")
+        ]
+        completed_field = f"{prefix}_evaluation_cases_completed"
+        total_field = f"{prefix}_evaluation_cases_total"
+        return {
+            "active_completed": sum(int(item["completed"]) for item in active),
+            "active_total": sum(int(item["total"]) for item in active),
+            "completed": _nonnegative_int(runtime.get(completed_field)),
+            "total": _nonnegative_int(runtime.get(total_field)),
+        }
+
+    baseline_evaluation_cases = evaluation_case_projection("baseline")
+    candidate_evaluation_cases = evaluation_case_projection("candidate")
     raw_active_evaluation_work = runtime.get("active_evaluation_work", {})
     active_evaluation_work = (
         cast(Mapping[str, Mapping[str, JsonValue]], raw_active_evaluation_work)
@@ -1270,20 +1288,6 @@ def _progress(
         ):
             provider_projection["candidate_turns"] = reserved_turns
             provider_projection["turns"] = reserved_turns + int((root / "anchor.json.gz").is_file())
-    timing_profile = {
-        "phase_seconds": {
-            "provider": provider_wait,
-            "evaluator/scorer": evaluator_busy,
-            "sandbox": telemetry["sandbox_wall_seconds"],
-            "HEG scoring": telemetry["scoring_wall_seconds"],
-            "persistence": persistence,
-        },
-        "phase_calls": {
-            "provider": _nonnegative_int(runtime.get("provider_turns_submitted")),
-            "evaluator/scorer": _nonnegative_int(runtime.get("completed_evaluations")),
-        },
-        "unattributed_fraction": 0.0,
-    }
     candidates_by_id = {
         str(item["candidate_id"]): item
         for item in candidates
@@ -1305,6 +1309,15 @@ def _progress(
             key = raw_turn.get("key")
             if isinstance(key, str):
                 provider_turns_by_key[key] = raw_turn
+
+    def provider_turn_started(turn: Mapping[str, Any]) -> float:
+        value = turn.get("started_epoch_seconds")
+        return (
+            float(value)
+            if isinstance(value, int | float) and not isinstance(value, bool)
+            else 0.0
+        )
+
     active_provider_keys = {
         key
         for key, raw_turn in provider_turns_by_key.items()
@@ -1319,19 +1332,30 @@ def _progress(
             )
         )
     }
+    active_provider_elapsed = sum(
+        max(0.0, time.time() - provider_turn_started(raw_turn))
+        for key, raw_turn in provider_turns_by_key.items()
+        if key in active_provider_keys
+    )
+    timing_profile = {
+        "phase_seconds": {
+            "provider/transport": provider_wait + active_provider_elapsed,
+            "evaluator/scorer": evaluator_busy,
+            "sandbox": telemetry["sandbox_wall_seconds"],
+            "HEG scoring": telemetry["scoring_wall_seconds"],
+            "persistence": persistence,
+        },
+        "phase_calls": {
+            "provider/transport": _nonnegative_int(runtime.get("provider_turns_submitted")),
+            "evaluator/scorer": _nonnegative_int(runtime.get("completed_evaluations")),
+        },
+        "unattributed_fraction": 0.0,
+    }
     legacy_runtime_stale = (
         resume_started_epoch is None
         and not isinstance(runtime.get("current_run_elapsed_seconds"), int | float)
         and _nonnegative_int(runtime.get("active_provider_turns")) == 0
     )
-
-    def provider_turn_started(turn: Mapping[str, Any]) -> float:
-        value = turn.get("started_epoch_seconds")
-        return (
-            float(value)
-            if isinstance(value, int | float) and not isinstance(value, bool)
-            else 0.0
-        )
 
     active_provider_candidate_ids: list[str] = []
     slot_projection: list[dict[str, JsonValue]] = []
@@ -1357,6 +1381,7 @@ def _progress(
                     (key, turn)
                     for key, turn in provider_turns_by_key.items()
                     if key == f"{request_key}-initial"
+                    or key.startswith(f"{request_key}-initial-resume-")
                     or key.startswith(f"{request_prefix}repair-")
                 ]
                 if related_turns:
@@ -1413,11 +1438,30 @@ def _progress(
                 if isinstance(progress, Mapping)
                 else "queued"
             )
+            provider_artifact_dir = (
+                root
+                / "generations"
+                / f"generation-{generation:04d}"
+                / slot
+                / (
+                    f"provider-repair-{provider_turn_key.rsplit('-repair-', 1)[-1]}"
+                    if provider_turn_key is not None and "-repair-" in provider_turn_key
+                    else f"provider-resume-{provider_turn_key.rsplit('-resume-', 1)[-1]}"
+                    if provider_turn_key is not None and "-resume-" in provider_turn_key
+                    else "provider-initial"
+                )
+            )
+            provider_turn_terminal = (
+                current_provider_turn is not None
+                and any(provider_artifact_dir.glob("*.turn-terminal.json*"))
+            )
             candidate_status = (
                 str(candidate.get("status"))
                 if candidate is not None
                 else f"evaluation_{progress_state}"
                 if prepared
+                else "persisting"
+                if provider_turn_terminal
                 else "model"
                 if current_provider_turn is not None
                 else "failed"
@@ -1448,6 +1492,8 @@ def _progress(
                         if candidate_status in _TERMINAL_CANDIDATE_STATUSES
                         else "evaluation"
                         if prepared
+                        else "response"
+                        if provider_turn_terminal
                         else "provider"
                     ),
                     "started_epoch_seconds": (
@@ -1477,6 +1523,13 @@ def _progress(
                     ),
                     "evaluation_total": (
                         int(progress["total"]) if progress is not None else None
+                    ),
+                    "error": (
+                        str(provider_turn.get("error"))
+                        if provider_turn is not None and provider_turn.get("error")
+                        else str(retained_state.get("last_error"))
+                        if candidate_status == "failed" and retained_state.get("last_error")
+                        else None
                     ),
                 }
             )
@@ -1558,6 +1611,8 @@ def _progress(
             "active_total": active_evaluation_total,
             "completed": _nonnegative_int(runtime.get("evaluation_cases_completed")),
             "total": _nonnegative_int(runtime.get("evaluation_cases_total")),
+            "baseline": baseline_evaluation_cases,
+            "candidate": candidate_evaluation_cases,
         },
         "sandbox": {
             key: telemetry[key]

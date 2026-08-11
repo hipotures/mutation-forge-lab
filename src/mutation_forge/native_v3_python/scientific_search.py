@@ -444,6 +444,10 @@ class _RuntimeTelemetry:
             state["evaluation_progress"] = {}
             state["evaluation_cases_completed"] = 0
             state["evaluation_cases_total"] = 0
+            state["baseline_evaluation_cases_completed"] = 0
+            state["baseline_evaluation_cases_total"] = 0
+            state["candidate_evaluation_cases_completed"] = 0
+            state["candidate_evaluation_cases_total"] = 0
         else:
             state = {
                 "protocol_id": M10_RUNTIME_PROTOCOL_ID,
@@ -477,6 +481,10 @@ class _RuntimeTelemetry:
                 "active_evaluation_work": {},
                 "evaluation_cases_completed": 0,
                 "evaluation_cases_total": 0,
+                "baseline_evaluation_cases_completed": 0,
+                "baseline_evaluation_cases_total": 0,
+                "candidate_evaluation_cases_completed": 0,
+                "candidate_evaluation_cases_total": 0,
                 "first_valid_program_seconds": None,
                 "last_scientific_improvement_epoch_seconds": None,
                 "best_candidate_id": None,
@@ -710,6 +718,7 @@ class _RuntimeTelemetry:
         *,
         key: str,
         failed: bool,
+        error: str | None = None,
     ) -> None:
         with self._lock:
             self._state["provider_wait_seconds"] = (
@@ -737,6 +746,8 @@ class _RuntimeTelemetry:
                     item["finished_epoch_seconds"] = time.time()
                     item["duration_seconds"] = elapsed
                     item["failed"] = failed
+                    if error:
+                        item["error"] = error[:1024]
                     break
             self._persist_locked()
 
@@ -876,6 +887,11 @@ class _RuntimeTelemetry:
             self._state["evaluation_cases_total"] = (
                 int(self._state.get("evaluation_cases_total", 0)) + total
             )
+            owner = "baseline" if key.startswith("baseline:") else "candidate"
+            completed_field = f"{owner}_evaluation_cases_completed"
+            total_field = f"{owner}_evaluation_cases_total"
+            self._state[completed_field] = int(self._state.get(completed_field, 0)) + completed
+            self._state[total_field] = int(self._state.get(total_field, 0)) + total
             self._persist_locked()
 
     def evaluation_case_completed(self, *, key: str, completed: int) -> None:
@@ -894,6 +910,11 @@ class _RuntimeTelemetry:
             item["completed"] = max(previous, value)
             self._state["evaluation_cases_completed"] = int(
                 self._state.get("evaluation_cases_completed", 0)
+            ) + max(0, item["completed"] - previous)
+            owner = "baseline" if key.startswith("baseline:") else "candidate"
+            completed_field = f"{owner}_evaluation_cases_completed"
+            self._state[completed_field] = int(
+                self._state.get(completed_field, 0)
             ) + max(0, item["completed"] - previous)
             self._persist_locked()
 
@@ -1399,15 +1420,20 @@ def _provider_call(
         return operation()
     started = time.monotonic()
     failed = True
+    error_message: str | None = None
     try:
         result = operation()
         failed = False
         return result
+    except Exception as error:
+        error_message = f"{type(error).__name__}: {error}"
+        raise
     finally:
         telemetry.provider_finished(
             time.monotonic() - started,
             key=key,
             failed=failed,
+            error=error_message,
         )
 
 

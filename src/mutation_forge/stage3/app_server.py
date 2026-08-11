@@ -1225,6 +1225,19 @@ class CodexAppServerAdapter:
                 ):
                     raise ProtocolError("final agent item is absent from completed turn")
                 terminal = True
+                if self.logger:
+                    self.logger.document(
+                        "turn-terminal.json",
+                        {
+                            "status": "completed",
+                            "thread_id": thread_id,
+                            "turn_id": t["id"],
+                            "final_item_received": final is not None,
+                            "usage_observed": usage_raw is not None,
+                            "duration_ms": turn_duration_ms,
+                        },
+                    )
+                    self.logger.finalize()
                 if turn_id is not None:
                     break
             elif method == "error":

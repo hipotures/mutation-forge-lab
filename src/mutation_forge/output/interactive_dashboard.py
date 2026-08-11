@@ -65,6 +65,7 @@ TERMINAL_EVENTS = {
 ACTIVE_STATES = {
     "starting",
     "model",
+    "persisting",
     "retrying",
     "repair",
     "validating",
@@ -76,6 +77,7 @@ STATE_STYLES = {
     "queued": "grey62",
     "starting": "cyan",
     "model": "cyan",
+    "persisting": "blue",
     "retrying": "yellow",
     "repair": "yellow",
     "validating": "blue",
@@ -97,6 +99,7 @@ STATE_ICONS = {
     "queued": "…",
     "starting": "▶",
     "model": "●",
+    "persisting": "◆",
     "retrying": "R",
     "repair": "✚",
     "validating": "V",
@@ -120,6 +123,7 @@ PHASE_ICONS: dict[str, str] = {
     "development": "⋆",
     "replay": "↺",
     "provider": "P",
+    "response": "R",
     "evaluation": "E",
     "archived": "A",
 }
@@ -260,6 +264,10 @@ class DashboardState:
     evaluations_completed: int = 0
     evaluation_cases_completed: int = 0
     evaluation_cases_total: int | None = None
+    baseline_cases_completed: int = 0
+    baseline_cases_total: int | None = None
+    candidate_cases_completed: int = 0
+    candidate_cases_total: int | None = None
     evaluation_workers_active: int | None = None
     evaluation_workers_configured: int | None = None
     archive_size: int = 0
@@ -383,6 +391,16 @@ def dashboard_state_from_python_status(
     provider = mapping("provider")
     evaluators = mapping("evaluators")
     evaluation_cases = mapping("evaluation_cases")
+    baseline_cases = (
+        evaluation_cases.get("baseline")
+        if isinstance(evaluation_cases.get("baseline"), Mapping)
+        else {}
+    )
+    candidate_cases = (
+        evaluation_cases.get("candidate")
+        if isinstance(evaluation_cases.get("candidate"), Mapping)
+        else {}
+    )
     throughput = mapping("throughput")
     activity = mapping("scientific_activity")
     phase = mapping("phase_timings")
@@ -492,7 +510,11 @@ def dashboard_state_from_python_status(
                         else "—"
                     ),
                     candidate=candidate_id,
-                    error=raw_state if state == "failed" else "",
+                    error=(
+                        str(raw.get("error") or raw_state)
+                        if state == "failed"
+                        else ""
+                    ),
                     objective=fitness_objective(
                         programs_by_candidate.get(candidate_id, {}).get("fitness_interval")
                     ),
@@ -577,6 +599,38 @@ def dashboard_state_from_python_status(
         )
         for slot in live_slots
     )
+    baseline_activity = tuple(
+        ActivityEntry(
+            timestamp="live",
+            component="baseline",
+            severity="info",
+            message=(
+                f"{str(item.get('state', 'queued'))} · "
+                f"{integer(item.get('completed'))}/{integer(item.get('total'))} cases"
+            ),
+            slot=str(key),
+        )
+        for key, item in sorted(evaluation_progress.items())
+        if str(key).startswith("baseline:")
+        and isinstance(item, Mapping)
+        and (
+            integer(item.get("running")) > 0
+            or integer(item.get("queued")) > 0
+        )
+    )
+    last_error = status.get("last_error")
+    error_activity = (
+        (
+            ActivityEntry(
+                timestamp="status",
+                component="infrastructure",
+                severity="error",
+                message=str(last_error),
+            ),
+        )
+        if isinstance(last_error, str) and last_error
+        else ()
+    )
     best_program = best.get("program")
     best_program = best_program if isinstance(best_program, Mapping) else {}
     best_program_hash = str(best_program.get("program_hash") or "—")
@@ -653,6 +707,24 @@ def dashboard_state_from_python_status(
             if integer(evaluation_cases.get("active_total")) > 0
             else optional_integer(evaluation_cases.get("total"))
         ),
+        baseline_cases_completed=max(
+            integer(baseline_cases.get("active_completed")),
+            integer(baseline_cases.get("completed")),
+        ),
+        baseline_cases_total=(
+            optional_integer(baseline_cases.get("active_total"))
+            if integer(baseline_cases.get("active_total")) > 0
+            else optional_integer(baseline_cases.get("total"))
+        ),
+        candidate_cases_completed=max(
+            integer(candidate_cases.get("active_completed")),
+            integer(candidate_cases.get("completed")),
+        ),
+        candidate_cases_total=(
+            optional_integer(candidate_cases.get("active_total"))
+            if integer(candidate_cases.get("active_total")) > 0
+            else optional_integer(candidate_cases.get("total"))
+        ),
         evaluation_workers_active=integer(evaluators.get("active")),
         evaluation_workers_configured=integer(evaluators.get("configured")),
         archive_size=integer(counts.get("valid")),
@@ -679,6 +751,8 @@ def dashboard_state_from_python_status(
         session_usage=token_usage,
         generations=generation_groups,
         activity=live_activity
+        + baseline_activity
+        + error_activity
         + (
             ActivityEntry(
                 timestamp="live",
@@ -3038,11 +3112,8 @@ class InteractiveDashboardSink:
                 self.state.completed_slots,
                 self.state.population_size,
             ),
-            (
-                "Evaluation cases",
-                self.state.evaluation_cases_completed,
-                self.state.evaluation_cases_total,
-            ),
+            ("Baselines", self.state.baseline_cases_completed, self.state.baseline_cases_total),
+            ("Candidates", self.state.candidate_cases_completed, self.state.candidate_cases_total),
             (
                 "Model Turn Budget",
                 self.state.provider_turns_attempted,
@@ -3543,7 +3614,7 @@ class InteractiveDashboardSink:
                 title="Profiling",
                 border_style="cyan",
             )
-        rows = sorted(
+        all_rows = sorted(
             (
                 (str(name), float(seconds))
                 for name, seconds in phases.items()
@@ -3553,21 +3624,23 @@ class InteractiveDashboardSink:
             ),
             key=lambda item: item[1],
             reverse=True,
-        )[:6]
+        )
+        rows = all_rows[:6]
         if not rows:
             return Panel(
                 Text("Waiting for profile data", style="dim"),
                 title="Profiling · top-N",
                 border_style="cyan",
             )
-        measured = sum(value for _, value in rows)
+        measured = sum(value for _, value in all_rows)
         table = Table.grid(expand=True, padding=(0, 1))
         table.add_column(overflow="ellipsis")
         table.add_column(justify="right")
         table.add_column(justify="right")
+        table.add_row("component", "share", "calls", style="dim")
         for name, seconds in rows:
             count = calls.get(name) if isinstance(calls, Mapping) else None
-            table.add_row(name, f"{seconds / measured:5.1%}", f"calls={_show(count)}")
+            table.add_row(name, f"{seconds / measured:5.1%}", _show(count))
         unattributed = _number(profile.get("unattributed_fraction"))
         if unattributed is not None and unattributed > 0:
             table.add_row("unattributed", f"{unattributed:5.1%}", "—")

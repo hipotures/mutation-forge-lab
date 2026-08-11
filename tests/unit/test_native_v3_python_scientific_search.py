@@ -1486,6 +1486,18 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
     assert status["provider"]["turns"] == 9
     assert status["provider"]["candidate_turns"] == 8
     assert status["provider"]["program_turns_reserved"] == 8
+    assert status["evaluation_cases"]["baseline"] == {
+        "active_completed": 0,
+        "active_total": 0,
+        "completed": 8,
+        "total": 8,
+    }
+    assert status["evaluation_cases"]["candidate"] == {
+        "active_completed": 0,
+        "active_total": 0,
+        "completed": 32,
+        "total": 32,
+    }
     assert status["throughput"]["policy_invocations_per_second"] > 0
     assert status["phase_timings"]["dominant_bottleneck"] in {
         "provider",
@@ -1515,6 +1527,81 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
             "lower": {"numerator": 1, "denominator": 2},
             "upper": {"numerator": 1, "denominator": 2},
         }
+
+
+def test_terminal_provider_turn_projects_persisting_before_result_artifact(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(tmp_path, exp_id="provider-persisting")
+    config = load_python_preview_config(config_path)
+    state = preview_module._initialize_workspace(config)
+    state.update(
+        {
+            "state": "running",
+            "resumable": True,
+            "run_terminal": False,
+            "last_boundary": "generation_0_snapshot",
+        }
+    )
+    root = config.experiment_root
+    slot_dir = root / "generations" / "generation-0000" / "slot-00"
+    write_json(
+        slot_dir.parent / "manifest.json.gz",
+        {
+            "generation": 0,
+            "slots": [
+                {
+                    "slot": "slot-00",
+                    "kind": "root",
+                    "parent_candidate_id": None,
+                    "request_key": "g0000-slot-00",
+                }
+            ],
+        },
+    )
+    write_json(
+        root / search_module.M10_RUNTIME_FILENAME,
+        {
+            "protocol_id": search_module.M10_RUNTIME_PROTOCOL_ID,
+            "resume_started_epoch_seconds": time.time() - 1,
+            "active_provider_turns": 1,
+            "provider_turns_submitted": 1,
+            "provider_concurrency_timeline": [
+                {
+                    "key": "g0000-slot-00-initial",
+                    "kind": "primary",
+                    "started_epoch_seconds": time.time() - 0.5,
+                }
+            ],
+            "evaluation_progress": {},
+        },
+    )
+    write_json(
+        slot_dir
+        / "provider-initial"
+        / "g0000-slot-00-root.turn-terminal.json.gz",
+        {
+            "status": "completed",
+            "turn_id": "turn-slot-00",
+            "final_item_received": True,
+            "usage_observed": True,
+        },
+    )
+
+    status = preview_module._progress(config, state)
+    assert not (slot_dir / "provider-initial" / "m5-provider-result.json.gz").exists()
+    assert status["slots"][0]["state"] == "persisting"
+    assert status["slots"][0]["phase"] == "response"
+    rich = dashboard_state_from_python_status(
+        status,
+        run_id=config.exp_id,
+        model=config.model,
+        effort=config.effort,
+        generation_limit=1,
+        wall_seconds=60,
+    )
+    assert rich.generations[0].slots[0].state == "persisting"
+    assert rich.generations[0].slots[0].phase == "response"
 
 
 def test_fresh_dashboard_keeps_unknown_baselines_and_tokens_unknown(
