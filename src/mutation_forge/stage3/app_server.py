@@ -264,6 +264,7 @@ class CodexAppServerAdapter:
         self._thread: Json | None = None
         self._forked_threads: dict[str, Json] = {}
         self._completed_turn_ids: dict[str, list[str]] = {}
+        self._idle_durable_threads: set[str] = set()
         self._turns = 0
         self._campaigns = 0
         self._failed = False
@@ -704,6 +705,7 @@ class CodexAppServerAdapter:
         ):
             raise IsolationError("thread/resume returned a different or ephemeral thread")
         self._forked_threads[thread_id] = dict(thread)
+        self._idle_durable_threads.add(thread_id)
         self._campaigns += 1
         self._drain_resume_notifications(thread_id)
         return dict(thread)
@@ -980,7 +982,11 @@ class CodexAppServerAdapter:
         self._last_usage_raw = None
         self._active.clear()
         self._completed.clear()
-        self._last_status = "completed" if known_turns else "initialized"
+        self._last_status = (
+            "completed"
+            if known_turns or child_thread_id in self._idle_durable_threads
+            else "initialized"
+        )
 
     def _generate_on_thread(
         self,

@@ -766,10 +766,7 @@ class CodexM5SearchProvider:
         artifact_dir: Path,
     ) -> M5ProviderResultV1:
         self.ensure_context(parent)
-        self.adapter.activate_forked_thread(
-            parent.thread_id,
-            completed_turn_ids=parent.included_turn_ids,
-        )
+        self.adapter.activate_forked_thread(parent.thread_id)
         fork = self._fork(
             last_turn_id=parent.turn_id,
             expected_history=parent.included_turn_ids,

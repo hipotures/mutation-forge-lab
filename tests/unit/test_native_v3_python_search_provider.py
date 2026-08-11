@@ -8,7 +8,10 @@ from typing import Any, cast
 import pytest
 
 from mutation_forge.experiment.json_io import read_json, write_json
-from mutation_forge.native_v3_python.search import M5InfrastructureError
+from mutation_forge.native_v3_python.search import (
+    M5InfrastructureError,
+    M5ProviderContextV1,
+)
 from mutation_forge.native_v3_python.search_provider import (
     M5_PROVIDER_STDOUT_BYTES,
     M5_PROVIDER_TRANSCRIPT_BYTES,
@@ -19,6 +22,7 @@ from mutation_forge.stage3.app_server import (
     ForkResult,
     GenerationResult,
     ModelProfile,
+    ProtocolError,
     TokenUsage,
 )
 from mutation_forge.stage3.artifacts import TransportLogger
@@ -140,6 +144,11 @@ class _Adapter:
     ) -> None:
         assert thread_id in self.histories
         if completed_turn_ids is not None:
+            if (
+                self.histories[thread_id]
+                and self.histories[thread_id] != completed_turn_ids
+            ):
+                raise ProtocolError("completed turn history changed during activation")
             self.histories[thread_id] = completed_turn_ids
         self.activations.append((thread_id, completed_turn_ids))
         self.current_thread = thread_id
@@ -338,6 +347,90 @@ def test_first_root_after_resume_reactivates_exact_anchor(tmp_path: Path) -> Non
     assert resumed_adapter.forks == [
         (anchor.thread_id, anchor.turn_id, anchor.included_turn_ids)
     ]
+
+
+def test_child_forks_historical_parent_on_reused_provider_lane(
+    tmp_path: Path,
+) -> None:
+    adapter = _Adapter()
+    provider = CodexM5SearchProvider(
+        workspace=tmp_path / "runtime",
+        model="fixture-model",
+        effort="high",
+        base_instructions="Return only the structured response.",
+        adapter=cast(Any, adapter),
+    )
+    anchor = provider.ensure_specification_anchor(
+        prompt="retain specification",
+        system_prompt="system",
+        output_schema=specification_ack_schema(),
+        artifact_dir=tmp_path / "anchor",
+    ).context
+    worker = provider.fork_root_worker_from_active_anchor(
+        anchor=anchor,
+        worker=0,
+        artifact_dir=tmp_path / "worker-fork",
+    )
+    roots = []
+    for slot in range(3):
+        worker = provider.generate_root_on_worker(
+            worker_context=worker,
+            generation=0,
+            slot=f"slot-0{slot}",
+            prompt=f"root {slot}",
+            system_prompt="system",
+            output_schema={"type": "object"},
+            idempotency_key=f"root-{slot}",
+            artifact_dir=tmp_path / f"root-{slot}",
+        ).context
+        roots.append(worker)
+
+    historical_parent = roots[0]
+    latest_history = adapter.histories[historical_parent.thread_id]
+    assert len(latest_history) == len(historical_parent.included_turn_ids) + 2
+
+    child = provider.generate_child(
+        parent=historical_parent,
+        generation=1,
+        slot="slot-00",
+        prompt="historical child",
+        system_prompt="system",
+        output_schema={"type": "object"},
+        idempotency_key="historical-child",
+        artifact_dir=tmp_path / "historical-child",
+    )
+
+    assert adapter.activations[-2] == (historical_parent.thread_id, None)
+    assert adapter.forks[-1][1] == historical_parent.turn_id
+    assert adapter.forks[-1][2] == historical_parent.included_turn_ids
+    assert child.context.included_turn_ids[:-1] == historical_parent.included_turn_ids
+    assert not set(latest_history[len(historical_parent.included_turn_ids) :]).intersection(
+        child.context.included_turn_ids
+    )
+
+    divergent_parent = M5ProviderContextV1(
+        thread_id=historical_parent.thread_id,
+        turn_id=historical_parent.turn_id,
+        thread_path=historical_parent.thread_path,
+        included_turn_ids=(
+            "divergent-turn",
+            historical_parent.turn_id,
+        ),
+    )
+    with pytest.raises(
+        M5InfrastructureError,
+        match="exact inclusive turn boundary",
+    ):
+        provider.generate_child(
+            parent=divergent_parent,
+            generation=1,
+            slot="slot-01",
+            prompt="divergent child",
+            system_prompt="system",
+            output_schema={"type": "object"},
+            idempotency_key="divergent-child",
+            artifact_dir=tmp_path / "divergent-child",
+        )
 
 
 def test_retained_fork_mismatch_fails_closed(tmp_path: Path) -> None:
