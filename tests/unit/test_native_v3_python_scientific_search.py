@@ -150,6 +150,21 @@ def _result(
     }
 
 
+def _panel_of_size(size: int) -> tuple[DevelopmentCaseV1, ...]:
+    return tuple(
+        DevelopmentCaseV1(
+            f"case-{index:04d}",
+            8,
+            1000 + index,
+            2000 + index,
+            1,
+            64,
+            (4, 8),
+        )
+        for index in range(size)
+    )
+
+
 def _usage() -> dict[str, JsonValue]:
     return {
         "inputTokens": 1,
@@ -940,6 +955,133 @@ def test_partial_baseline_cases_are_durable_and_skipped_on_resume(
     ).is_file()
 
 
+def test_fresh_commit_uses_compact_outcome_and_resume_loads_durable_panel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel_of_size(320)
+    options = _options(workers=4)
+    slot_dir = tmp_path / "generations" / "generation-0000" / "slot-00"
+
+    class Evaluator:
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            del candidate_id
+            return _result(source=source, case=case)
+
+        def close(self) -> None:
+            pass
+
+    telemetry = search_module._RuntimeTelemetry(tmp_path, options)
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=4,
+        queue_capacity=4,
+        evaluator_factory=Evaluator,
+        telemetry=telemetry,
+    )
+    source = _source("fresh-320")
+    future = pool.submit(
+        source=source,
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=slot_dir,
+    )
+    outcome = future.result(timeout=30)
+    pool.close()
+
+    assert outcome.evaluation_case_count == 320
+    assert outcome.behavior_profile is not None
+    assert not hasattr(outcome, "payloads")
+
+    prepared = {
+        "protocol_id": search_module.M10_PREPARED_CANDIDATE_PROTOCOL_ID,
+        "status": "evaluation_pending",
+        "candidate_id": "g0000-slot-00",
+        "generation": 0,
+        "slot": "slot-00",
+        "kind": "root",
+        "parent_candidate_id": None,
+        "program_hash": "a" * 64,
+        "source": source,
+    }
+    pending = search_module._PendingCommit(
+        slot_plan=search_module.core.SlotPlanV1(
+            slot="slot-00",
+            kind="root",
+            parent_candidate_id=None,
+            panel_hash=search_module.core.panel_hash(panel),
+            request_key="request-00",
+        ),
+        candidate_id="g0000-slot-00",
+        slot_dir=slot_dir,
+        prepared=prepared,
+        future=future,
+    )
+    loads = 0
+    original_load = search_module.core._load_mapping
+
+    def counted_load(path: Path) -> dict[str, Any]:
+        nonlocal loads
+        if path.parent.name == "evaluations":
+            loads += 1
+        return original_load(path)
+
+    monkeypatch.setattr(search_module.core, "_load_mapping", counted_load)
+    committed = search_module._commit_pending(
+        pending=pending,
+        root=tmp_path,
+        panel=panel,
+        telemetry=telemetry,
+        block=True,
+        boundary_hook=None,
+    )
+
+    assert committed == (False, None)
+    assert loads == 0
+
+    resume_root = tmp_path / "resume"
+    resume_slot = resume_root / "generations" / "generation-0000" / "slot-00"
+    resume_telemetry = search_module._RuntimeTelemetry(resume_root, options)
+    first_pool = search_module._ConcurrentEvaluatorPool(
+        workers=4,
+        queue_capacity=4,
+        evaluator_factory=Evaluator,
+        telemetry=resume_telemetry,
+    )
+    first_pool.submit(
+        source=source,
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=resume_slot,
+    ).result(timeout=30)
+    first_pool.close()
+
+    loads = 0
+    resumed_telemetry = search_module._RuntimeTelemetry(resume_root, options)
+    resumed_pool = search_module._ConcurrentEvaluatorPool(
+        workers=4,
+        queue_capacity=4,
+        evaluator_factory=Evaluator,
+        telemetry=resumed_telemetry,
+    )
+    resumed = resumed_pool.submit(
+        source=source,
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=resume_slot,
+    ).result(timeout=30)
+    resumed_pool.close()
+
+    assert resumed.evaluation_case_count == 320
+    assert resumed.behavior_profile == outcome.behavior_profile
+    assert loads == 320
+
+
 def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -1481,6 +1623,9 @@ def test_runtime_telemetry_throttles_case_updates_and_forces_boundaries(
 
     assert writes[-1]["candidate_evaluation_cases_completed"] == 1000
     assert writes[-1]["terminal_reason"] == "generation_budget"
+    assert writes[-1]["current_run_elapsed_seconds"] == pytest.approx(1.0)
+    now[0] = 10.0
+    assert telemetry.snapshot()["current_run_elapsed_seconds"] == pytest.approx(1.0)
 
 
 def test_one_provider_failure_consumes_its_slot_and_search_continues(
@@ -1826,7 +1971,29 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
     assert first["state"] == "blocked"
     assert first["resumable"] is True
     assert first["terminal_reason"] == "generation_budget"
+    assert all(
+        isinstance(slot["elapsed_seconds"], int | float)
+        and slot["elapsed_seconds"] > 0
+        for slot in first["slots"]
+    )
     assert {generation for generation, _ in providers[0].calls} == {0, 1}
+    status_evaluation_reads = 0
+    original_status_load = preview_module._load_mapping
+
+    def counted_status_load(path: Path) -> dict[str, Any] | None:
+        nonlocal status_evaluation_reads
+        if path.parent.name == "evaluations":
+            status_evaluation_reads += 1
+        return original_status_load(path)
+
+    with monkeypatch.context() as status_probe:
+        status_probe.setattr(
+            preview_module,
+            "_load_mapping",
+            counted_status_load,
+        )
+        python_preview_status(config_path)
+    assert status_evaluation_reads == 0
 
     with monkeypatch.context() as no_work:
         no_work.setattr(

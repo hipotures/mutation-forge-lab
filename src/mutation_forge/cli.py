@@ -478,10 +478,14 @@ def _experiment_run(
                 and scientific is not None
                 and scientific.generation_limit is not None
             ):
+                configured_generation_limit = scientific.generation_limit
+                primary_slots = scientific.current_primary_program_slots
                 reason = (
                     f"generation_budget "
-                    f"({scientific.generation_limit} generations / "
-                    f"{scientific.primary_program_slots} primary slots)"
+                    f"({configured_generation_limit} "
+                    f"{'generation' if configured_generation_limit == 1 else 'generations'} / "
+                    f"{primary_slots} primary "
+                    f"{'slot' if primary_slots == 1 else 'slots'})"
                 )
             elif reason == "hourly_token_limit":
                 retry_after = str(result.get("hourly_retry_after") or "—")
@@ -503,7 +507,7 @@ def _experiment_run(
                 f"slots {counts.get('terminal', 0)}/"
                 f"{counts.get('planned', 0)} · "
                 f"evaluated {counts.get('evaluated', 0)} · "
-                f"provider turns {provider.get('turns', 0)} · "
+                f"provider turns total {provider.get('turns', 0)} · "
                 f"tokens {usage.get('totalTokens', 0)} · "
                 f"exact verified {bool(exact.get('verified'))} · "
                 f"reason {reason}"
@@ -516,7 +520,7 @@ def _experiment_run(
             0
             if result.get("state") == "completed"
             or result.get("terminal_reason")
-            == "resume_generation_complete"
+            in {"generation_budget", "resume_generation_complete"}
             else 1
         )
     if resume_budget is not None:

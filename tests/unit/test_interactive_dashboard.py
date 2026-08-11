@@ -1831,7 +1831,8 @@ def test_objective_panel_uses_generation_local_values_and_full_copy() -> None:
     live = live_output.getvalue()
     assert "Objective · G2" in live
     assert "generation best" in live
-    assert "best-ref" in live
+    assert "candidate-ref" in live
+    assert "lower bound" in live
     assert "58e31933" in live
     assert program_hash not in live
     assert "current" not in live
@@ -1845,6 +1846,99 @@ def test_objective_panel_uses_generation_local_values_and_full_copy() -> None:
     assert candidate in copied
     assert program_hash in copied
     assert "1234567890123456789/10000000000000000000" in copied
+    sink.close()
+
+
+def test_completed_python_projection_retains_wall_activity_and_objective_history() -> None:
+    interval = {
+        "lower": {"numerator": 3633, "denominator": 10000},
+        "upper": {"numerator": 2009, "denominator": 5000},
+    }
+    status = {
+        "state": "blocked",
+        "terminal_reason": "generation_budget",
+        "generation_index": 0,
+        "counts": {"planned": 8, "terminal": 8, "valid": 8, "evaluated": 8},
+        "provider": {
+            "turns": 9,
+            "program_turns_reserved": 8,
+            "completed_turns": 8,
+        },
+        "evaluators": {"configured": 12, "active": 0, "completed": 3200},
+        "evaluation_cases": {
+            "completed": 3200,
+            "total": 3200,
+            "baseline": {"completed": 640, "total": 640},
+            "candidate": {"completed": 2560, "total": 2560},
+        },
+        "throughput": {
+            "elapsed_seconds": 392.0,
+            "current_run_elapsed_seconds": 392.0,
+        },
+        "best": {
+            "candidate_id": "g0000-slot-05",
+            "fitness_interval": interval,
+            "program": {"program_hash": "a" * 64},
+        },
+        "generation_objectives": [
+            {
+                "generation": 0,
+                "best": {
+                    "candidate_id": "g0000-slot-05",
+                    "program_hash": "a" * 64,
+                    "fitness_interval": interval,
+                },
+                "baselines": {},
+                "archive": {"valid": 8},
+            }
+        ],
+        "slots": [
+            {
+                "candidate_id": "g0000-slot-05",
+                "generation": 0,
+                "slot": "slot-05",
+                "phase": "archived",
+                "state": "evaluated",
+                "elapsed_seconds": 390.0,
+            }
+        ],
+        "exact_verification": {"verified": False},
+    }
+    projected = dashboard.dashboard_state_from_python_status(
+        status,
+        run_id="completed-fixture",
+        model="fixture",
+        effort="high",
+        generation_limit=1,
+        wall_seconds=3600.0,
+    )
+
+    assert projected.elapsed_seconds == pytest.approx(392.0)
+    assert projected.generations[0].slots[0].elapsed_seconds == pytest.approx(390.0)
+    assert projected.current_objective == pytest.approx(0.3633)
+    assert projected.objective_history == pytest.approx((0.3633,))
+
+    sink = InteractiveDashboardSink(
+        console=Console(file=io.StringIO(), force_terminal=False),
+        initial_state=DashboardState(run_id="completed-fixture"),
+        start_live=False,
+    )
+    sink.update_canonical_state(projected)
+    assert sink.state.activity[0].timestamp == "06:32"
+    assert sink.state.activity[0].message == "generation_budget"
+
+    performance_output = io.StringIO()
+    Console(file=performance_output, width=80, force_terminal=False).print(
+        sink._performance_panel()  # noqa: SLF001
+    )
+    assert "392/" in performance_output.getvalue()
+
+    quick_output = io.StringIO()
+    Console(file=quick_output, width=100, force_terminal=False).print(
+        sink._quick_view_panel("full", content_width=96)  # noqa: SLF001
+    )
+    assert "No evaluated objective history yet" not in quick_output.getvalue()
+    assert "0.3633" in quick_output.getvalue()
     sink.close()
 
 
@@ -2591,9 +2685,11 @@ def test_current_generation_resume_flags_route_transient_budget(
 
 def test_standard_dashboard_routes_explicit_python_through_existing_sink(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     scientific = SimpleNamespace(
         generation_limit=12,
+        current_primary_program_slots=96,
         wall_seconds=36000.0,
         as_dict=lambda: {"provider_concurrency": 4},
     )
@@ -2607,7 +2703,8 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
         scientific_search=scientific,
     )
     status = {
-        "state": "completed",
+        "state": "blocked",
+        "terminal_reason": "generation_budget",
         "generation_index": 0,
         "counts": {
             "planned": 8,
@@ -2620,6 +2717,7 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
             "duplicate": 0,
         },
         "provider": {
+            "turns": 9,
             "program_turns_reserved": 8,
             "active": 0,
             "configured_concurrency": 4,
@@ -2693,6 +2791,70 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
     assert initial.evaluations_completed == 0
     assert sink.update_canonical_state.call_count == 2
     sink.close.assert_called_once()
+    final_line = capsys.readouterr().out
+    assert "provider turns" in final_line
+    assert "total 9" in final_line
+    assert "generation_budget (12" in final_line
+    assert "generations / 96 primary slots)" in final_line
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    (
+        (
+            {
+                "state": "blocked",
+                "resumable": True,
+                "terminal_reason": "generation_budget",
+            },
+            0,
+        ),
+        (
+            {
+                "state": "blocked",
+                "resumable": True,
+                "terminal_reason": "generation_budget",
+                "no_op": True,
+            },
+            0,
+        ),
+        (
+            {
+                "state": "blocked",
+                "resumable": False,
+                "terminal_reason": "infrastructure_failure",
+            },
+            1,
+        ),
+        (
+            {
+                "state": "blocked",
+                "resumable": False,
+                "terminal_reason": "provider_runtime_missing",
+            },
+            1,
+        ),
+    ),
+)
+def test_python_run_exit_codes_distinguish_requested_bound_from_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    result: dict[str, object],
+    expected: int,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "experiment_protocol",
+        lambda _path: "native-v3-python-v1",
+    )
+    monkeypatch.setattr(cli, "run_python_preview", lambda _path: result)
+
+    assert (
+        cli._experiment_run(
+            Path("m10.toml"),
+            json_output=True,
+        )
+        == expected
+    )
 
 
 def test_python_dashboard_retries_first_q_after_workspace_startup_race(

@@ -463,6 +463,7 @@ class _RuntimeTelemetry:
             state["baseline_evaluation_cases_total"] = 0
             state["candidate_evaluation_cases_completed"] = 0
             state["candidate_evaluation_cases_total"] = 0
+            state.pop("current_run_elapsed_seconds", None)
         else:
             state = {
                 "protocol_id": M10_RUNTIME_PROTOCOL_ID,
@@ -493,6 +494,7 @@ class _RuntimeTelemetry:
                 "failed_evaluations": 0,
                 "evaluator_instances": 0,
                 "evaluation_progress": {},
+                "candidate_commit_epoch_seconds": {},
                 "active_evaluation_work": {},
                 "evaluation_cases_completed": 0,
                 "evaluation_cases_total": 0,
@@ -561,12 +563,18 @@ class _RuntimeTelemetry:
         )
 
     def _payload_locked(self) -> dict[str, Any]:
+        current_run_elapsed = self._state.get("current_run_elapsed_seconds")
         return {
             **self._state,
             "active_elapsed_seconds": self._elapsed_locked(),
             "current_run_elapsed_seconds": max(
                 0.0,
-                time.monotonic() - self._resume_started,
+                (
+                    float(current_run_elapsed)
+                    if isinstance(current_run_elapsed, int | float)
+                    and not isinstance(current_run_elapsed, bool)
+                    else time.monotonic() - self._resume_started
+                ),
             ),
             "updated_epoch_seconds": time.time(),
         }
@@ -969,6 +977,19 @@ class _RuntimeTelemetry:
             if not isinstance(progress, dict):
                 raise core.M5InfrastructureError("M10 evaluation progress is malformed")
             progress.pop(key, None)
+            if key.startswith("candidate:"):
+                committed = self._state.setdefault(
+                    "candidate_commit_epoch_seconds",
+                    {},
+                )
+                if not isinstance(committed, dict):
+                    raise core.M5InfrastructureError(
+                        "M10 candidate commit timestamps are malformed"
+                    )
+                committed.setdefault(
+                    key.removeprefix("candidate:"),
+                    time.time(),
+                )
             self._persist_locked()
 
     def scientific_improvement(
@@ -985,6 +1006,10 @@ class _RuntimeTelemetry:
 
     def finish(self, reason: str) -> None:
         with self._lock:
+            self._state["current_run_elapsed_seconds"] = max(
+                0.0,
+                time.monotonic() - self._resume_started,
+            )
             self._state["active_elapsed_seconds"] = self._elapsed_locked()
             self._resume_started = time.monotonic()
             self._state["active_evaluators"] = 0
@@ -1002,7 +1027,9 @@ class _RuntimeTelemetry:
 
 @dataclass(frozen=True, slots=True)
 class _EvaluationOutcome:
-    payloads: tuple[dict[str, Any], ...]
+    evaluation_case_count: int
+    behavior_profile: dict[str, JsonValue] | None
+    evaluation_telemetry: dict[str, JsonValue]
     failure_type: str | None = None
     failure_message: str | None = None
     failure_case_id: str | None = None
@@ -1018,7 +1045,7 @@ class _PanelWork:
     payloads: list[dict[str, Any] | None]
     queued_at: float
     remaining_indices: deque[int]
-    finalize: Callable[[tuple[dict[str, Any], ...]], None] | None = None
+    finalize: Callable[[_EvaluationOutcome], None] | None = None
     running: int = 0
     failure_type: str | None = None
     failure_message: str | None = None
@@ -1157,6 +1184,7 @@ class _ConcurrentEvaluatorPool:
                             cancelled,
                             owner=work.key,
                         )
+            finish_work = False
             with self._condition:
                 if payload is not None:
                     work.payloads[index] = payload
@@ -1169,27 +1197,45 @@ class _ConcurrentEvaluatorPool:
                     work.running == 0
                     and (work.failure_type is not None or not work.remaining_indices)
                 ):
-                    self._finish_work(work)
+                    finish_work = True
                 self._condition.notify_all()
+            if finish_work:
+                self._finish_work(work)
+            payload = None
+            del work
 
     def _finish_work(self, work: _PanelWork) -> None:
         payloads = tuple(item for item in work.payloads if item is not None)
+        behavior_profile: dict[str, JsonValue] | None = None
+        evaluation_telemetry = core._evaluation_telemetry_summary(payloads)
+        if work.failure_type is None and len(payloads) != len(work.panel):
+            work.failure_type = core.M5InfrastructureError.__name__
+            work.failure_message = "evaluator returned an incomplete development panel"
         if work.failure_type is None and len(payloads) == len(work.panel):
             try:
+                behavior_profile = core.aggregate_behavior(payloads)
+                outcome = _EvaluationOutcome(
+                    evaluation_case_count=len(payloads),
+                    behavior_profile=behavior_profile,
+                    evaluation_telemetry=evaluation_telemetry,
+                )
                 if work.finalize is not None:
-                    work.finalize(payloads)
+                    work.finalize(outcome)
             except Exception as error:
                 work.failure_type = type(error).__name__
                 work.failure_message = str(error)[:1024]
         self._telemetry.evaluation_finished(key=work.key)
-        work.future.set_result(
-            _EvaluationOutcome(
-                payloads,
-                work.failure_type,
-                work.failure_message,
-                work.failure_case_id,
+        if work.failure_type is not None:
+            outcome = _EvaluationOutcome(
+                evaluation_case_count=len(payloads),
+                behavior_profile=None,
+                evaluation_telemetry=evaluation_telemetry,
+                failure_type=work.failure_type,
+                failure_message=work.failure_message,
+                failure_case_id=work.failure_case_id,
             )
-        )
+        work.future.set_result(outcome)
+        work.payloads.clear()
         self._panel_capacity.release()
 
     def _submit_panel(
@@ -1202,7 +1248,7 @@ class _ConcurrentEvaluatorPool:
             [M10ScientificEvaluator, core.DevelopmentCaseV1],
             Mapping[str, JsonValue],
         ],
-        finalize: Callable[[tuple[dict[str, Any], ...]], None] | None = None,
+        finalize: Callable[[_EvaluationOutcome], None] | None = None,
     ) -> Future[_EvaluationOutcome]:
         self._panel_capacity.acquire()
         future: Future[_EvaluationOutcome] = Future()
@@ -1238,8 +1284,8 @@ class _ConcurrentEvaluatorPool:
                 if missing:
                     self._runnable.append(work)
                     self._condition.notify_all()
-                else:
-                    self._finish_work(work)
+            if not missing:
+                self._finish_work(work)
             return future
         except BaseException:
             self._panel_capacity.release()
@@ -1276,15 +1322,19 @@ class _ConcurrentEvaluatorPool:
         baseline_dir = generation_dir / "baselines" / baseline
         paths = tuple(baseline_dir / "evaluations" / f"{case.case_id}.json.gz" for case in panel)
 
-        def finalize(payloads: tuple[dict[str, Any], ...]) -> None:
+        def finalize(outcome: _EvaluationOutcome) -> None:
+            if outcome.behavior_profile is None:
+                raise core.M5InfrastructureError(
+                    f"baseline {baseline} returned an incomplete panel"
+                )
             result = {
                 "protocol_id": M10_BASELINE_RESULT_PROTOCOL_ID,
                 "generation": generation,
                 "baseline": baseline,
                 "panel_hash": core.panel_hash(panel),
-                "evaluation_case_count": len(payloads),
-                "profile": core.aggregate_behavior(payloads),
-                "evaluation_telemetry": core._evaluation_telemetry_summary(payloads),
+                "evaluation_case_count": outcome.evaluation_case_count,
+                "profile": outcome.behavior_profile,
+                "evaluation_telemetry": outcome.evaluation_telemetry,
             }
             self._telemetry.timed_persist(
                 partial(
@@ -1766,6 +1816,7 @@ def _commit_pending(
     if pending.terminal_payload is not None:
         terminal_payload = pending.terminal_payload
         telemetry.timed_persist(partial(_write_or_verify, candidate_path, terminal_payload))
+        telemetry.evaluation_committed(key=f"candidate:{pending.candidate_id}")
         if boundary_hook is not None:
             boundary_hook(f"{pending.candidate_id}_committed")
         pending.terminal_payload = None
@@ -1796,10 +1847,8 @@ def _commit_pending(
             "behavior_signature": None,
             "behavior_profile": None,
             "duplicate_of": None,
-            "evaluation_case_count": len(outcome.payloads),
-            "evaluation_telemetry": core._evaluation_telemetry_summary(
-                outcome.payloads
-            ),
+            "evaluation_case_count": outcome.evaluation_case_count,
+            "evaluation_telemetry": outcome.evaluation_telemetry,
             "failure": {
                 "type": outcome.failure_type,
                 "message": outcome.failure_message,
@@ -1820,15 +1869,12 @@ def _commit_pending(
                 f"{outcome.failure_type}"
             ),
         )
-    evaluation_payloads = tuple(
-        core._load_mapping(
-            pending.slot_dir / "evaluations" / f"{case.case_id}.json.gz"
-        )
-        for case in panel
-    )
-    if len(evaluation_payloads) != len(panel):
+    if (
+        outcome.evaluation_case_count != len(panel)
+        or outcome.behavior_profile is None
+    ):
         raise core.M5InfrastructureError("M10 evaluator returned an incomplete development panel")
-    behavior_profile = core.aggregate_behavior(evaluation_payloads)
+    behavior_profile = outcome.behavior_profile
     behavior_signature = str(behavior_profile["behavior_signature"])
     duplicate_of = core._seen_duplicates(
         core._all_candidates(root),
@@ -1842,10 +1888,8 @@ def _commit_pending(
         "behavior_profile": behavior_profile,
         "control_flow": core.python_control_flow_summary(str(base["source"])),
         "duplicate_of": duplicate_of,
-        "evaluation_case_count": len(outcome.payloads),
-        "evaluation_telemetry": core._evaluation_telemetry_summary(
-            evaluation_payloads
-        ),
+        "evaluation_case_count": outcome.evaluation_case_count,
+        "evaluation_telemetry": outcome.evaluation_telemetry,
         "exact_verified": behavior_profile["exact_verified"],
     }
     telemetry.timed_persist(partial(_write_or_verify, candidate_path, candidate))

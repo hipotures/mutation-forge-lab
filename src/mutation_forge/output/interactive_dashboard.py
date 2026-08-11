@@ -696,6 +696,11 @@ def dashboard_state_from_python_status(
     evaluation_completed, evaluation_total = cumulative_progress(evaluation_cases)
     baseline_completed, baseline_total = cumulative_progress(baseline_cases)
     candidate_completed, candidate_total = cumulative_progress(candidate_cases)
+    objective_history = tuple(
+        summary.objective
+        for summary in generation_objectives
+        if summary.objective is not None
+    )
 
     return DashboardState(
         run_id=run_id,
@@ -756,7 +761,11 @@ def dashboard_state_from_python_status(
         failed_candidates=integer(counts.get("provider_failed"))
         + integer(counts.get("evaluation_infrastructure_failure")),
         duplicate_candidates=integer(counts.get("duplicate")),
-        current_objective=None,
+        current_objective=(
+            objective_history[-1]
+            if objective_history
+            else None
+        ),
         best_objective=best_value,
         best_candidate=str(best.get("candidate_id") or "—"),
         best_program_hash=best_program_hash,
@@ -774,6 +783,7 @@ def dashboard_state_from_python_status(
         session_usage=token_usage,
         generations=generation_groups,
         generation_objectives=tuple(generation_objectives),
+        objective_history=objective_history[-60:],
         activity=(),
         counterexample_state=("verified" if exact.get("verified") is True else "none"),
         counterexample_candidate=(
@@ -3679,7 +3689,7 @@ class InteractiveDashboardSink:
                 ),
             ),
             (
-                "provider turns",
+                "candidate turns",
                 f"{self.state.provider_turns_completed}/{self.state.provider_turns_attempted}",
             ),
             ("evaluations", self.state.evaluations_completed),
@@ -3805,7 +3815,7 @@ class InteractiveDashboardSink:
         scores.add_column()
         scores.add_column(justify="right")
         scores.add_column(justify="right")
-        scores.add_row("reference", "score", "best-ref", style="dim")
+        scores.add_row("reference", "interval", "candidate-ref", style="dim")
         for reference, score, delta in score_rows:
             scores.add_row(reference, score, delta)
         if compact:
@@ -3835,11 +3845,9 @@ class InteractiveDashboardSink:
             if copy
             else compact_display_ids(self.state.best_candidate)
         )
-        campaign_score = (
-            self.state.best_fitness
-            if copy
-            else _objective(self.state.best_objective)
-        )
+        campaign_score = f"lower bound {_objective(self.state.best_objective)}"
+        if copy and self.state.best_fitness != "—":
+            campaign_score += f" · interval {self.state.best_fitness}"
         campaign_generation = next(
             (
                 item.generation

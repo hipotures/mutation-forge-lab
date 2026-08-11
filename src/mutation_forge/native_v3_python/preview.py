@@ -1607,6 +1607,12 @@ def _progress(
     }
     provider_turns_by_key: dict[str, Mapping[str, Any]] = {}
     raw_timeline = runtime.get("provider_concurrency_timeline", ())
+    raw_candidate_commits = runtime.get("candidate_commit_epoch_seconds", {})
+    candidate_commit_epochs = (
+        raw_candidate_commits
+        if isinstance(raw_candidate_commits, Mapping)
+        else {}
+    )
     resume_started_epoch = runtime.get("resume_started_epoch_seconds")
     resume_started_epoch = (
         float(resume_started_epoch)
@@ -1689,6 +1695,7 @@ def _progress(
             request_key = raw_slot.get("request_key")
             provider_turn_key: str | None = None
             provider_turn: Mapping[str, Any] | None = None
+            related_turns: list[tuple[str, Mapping[str, Any]]] = []
             if isinstance(request_key, str):
                 request_prefix = f"{request_key}-"
                 related_turns = [
@@ -1709,34 +1716,19 @@ def _progress(
                             -provider_turn_started(item[1]),
                         ),
                     )
-            provider_started = (
-                provider_turn.get("started_epoch_seconds") if provider_turn is not None else None
-            )
-            provider_finished = (
-                provider_turn.get("finished_epoch_seconds") if provider_turn is not None else None
-            )
-            started_epoch = (
-                float(provider_started)
-                if isinstance(provider_started, int | float)
-                and not isinstance(provider_started, bool)
-                else None
+            lifecycle_started_epoch = min(
+                (
+                    provider_turn_started(turn)
+                    for _key, turn in related_turns
+                    if provider_turn_started(turn) > 0
+                ),
+                default=0.0,
             )
             current_provider_turn = (
                 provider_turn
                 if provider_turn is not None
                 and not legacy_runtime_stale
                 and provider_turn_key in active_provider_keys
-                else None
-            )
-            finished_epoch = (
-                float(provider_finished)
-                if isinstance(provider_finished, int | float)
-                and not isinstance(provider_finished, bool)
-                else None
-            )
-            elapsed_seconds = (
-                max(0.0, (finished_epoch or time.time()) - started_epoch)
-                if started_epoch is not None
                 else None
             )
             prepared = (
@@ -1793,6 +1785,27 @@ def _progress(
                 )
                 else "queued"
             )
+            raw_commit_epoch = candidate_commit_epochs.get(candidate_id)
+            commit_epoch = (
+                float(raw_commit_epoch)
+                if isinstance(raw_commit_epoch, int | float)
+                and not isinstance(raw_commit_epoch, bool)
+                else None
+            )
+            lifecycle_terminal = candidate_status in _TERMINAL_CANDIDATE_STATUSES
+            elapsed_seconds = (
+                max(
+                    0.0,
+                    (
+                        commit_epoch
+                        if lifecycle_terminal and commit_epoch is not None
+                        else time.time()
+                    )
+                    - lifecycle_started_epoch,
+                )
+                if lifecycle_started_epoch > 0
+                else None
+            )
             if (
                 current_provider_turn is not None
             ):
@@ -1819,11 +1832,15 @@ def _progress(
                         else "provider"
                     ),
                     "started_epoch_seconds": (
-                        started_epoch if current_provider_turn is not None else None
+                        lifecycle_started_epoch
+                        if lifecycle_started_epoch > 0
+                        and (
+                            not lifecycle_terminal
+                            or commit_epoch is not None
+                        )
+                        else None
                     ),
-                    "elapsed_seconds": (
-                        elapsed_seconds if current_provider_turn is not None else None
-                    ),
+                    "elapsed_seconds": elapsed_seconds,
                     "repairs": (
                         _nonnegative_int(candidate.get("repairs")) if candidate is not None else 0
                     ),
