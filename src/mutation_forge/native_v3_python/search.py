@@ -528,6 +528,39 @@ def _component_map(evidence: object) -> dict[int, Mapping[str, Any]]:
     return result
 
 
+def _initial_only_fitness_lower(
+    evaluations: Sequence[Mapping[str, Any]],
+) -> Fraction | None:
+    """Project the frozen panel's no-policy lower bound from in-memory results."""
+
+    values_by_order: dict[int, list[Fraction]] = {}
+    for evaluation in evaluations:
+        scientific = _scientific_result(evaluation)
+        config = scientific.get("config")
+        trajectory = scientific.get("utility_trajectory")
+        if (
+            not isinstance(config, Mapping)
+            or not isinstance(config.get("order"), int)
+            or isinstance(config.get("order"), bool)
+            or not isinstance(trajectory, Sequence)
+            or isinstance(trajectory, str | bytes)
+            or not trajectory
+            or not isinstance(trajectory[0], Mapping)
+        ):
+            return None
+        initial = cast(Mapping[str, Any], trajectory[0]).get("lower")
+        if not isinstance(initial, Mapping):
+            return None
+        values_by_order.setdefault(int(config["order"]), []).append(_fraction(initial))
+    if not values_by_order:
+        return None
+    per_order = [
+        sum(values_by_order[order], Fraction()) / len(values_by_order[order])
+        for order in sorted(values_by_order)
+    ]
+    return sum(per_order, Fraction()) / len(per_order)
+
+
 def aggregate_behavior(
     evaluations: Sequence[Mapping[str, Any]],
 ) -> dict[str, JsonValue]:
@@ -639,6 +672,7 @@ def aggregate_behavior(
     count = len(evaluations)
     if count == 0:
         raise M5InfrastructureError("candidate received no development evaluations")
+    initial_only_lower = _initial_only_fitness_lower(evaluations)
     aggregate_signature = domain_hash(
         _BEHAVIOR_DOMAIN,
         canonical_json_bytes(
@@ -659,6 +693,16 @@ def aggregate_behavior(
                 "lower": _fraction_dict(lower / count),
                 "upper": _fraction_dict(upper / count),
             },
+        ),
+        **(
+            {
+                "initial_only_fitness_lower": cast(
+                    JsonValue,
+                    _fraction_dict(initial_only_lower),
+                )
+            }
+            if initial_only_lower is not None
+            else {}
         ),
         "episode_statuses": cast(JsonValue, statuses),
         "propose_calls": propose_calls,

@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 
+from mutation_forge import cli
 from mutation_forge.experiment.config import orders_for_generation
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
@@ -98,6 +99,17 @@ def _result(
         },
         "scientific_result": {
             "status": "COMPLETE",
+            "config": {
+                "order": case.order,
+                "horizon": case.horizon,
+            },
+            "utility_trajectory": [
+                {
+                    "lower": {"numerator": 2, "denominator": 5},
+                    "upper": {"numerator": 2, "denominator": 5},
+                }
+                for _ in range(case.horizon + 1)
+            ],
             "fitness_interval": {
                 "lower": {"numerator": 1, "denominator": 2},
                 "upper": {"numerator": 1, "denominator": 2},
@@ -186,8 +198,16 @@ class _Provider:
     def __init__(
         self,
         durable: dict[str, M5ProviderResultV1] | None = None,
+        *,
+        program_barrier: threading.Barrier | None = None,
+        result_hook: Callable[[int, str], None] | None = None,
     ) -> None:
         self.durable = durable if durable is not None else {}
+        self.program_barrier = program_barrier
+        self.result_hook = result_hook
+        self.program_lock = threading.Lock()
+        self.active_program_calls = 0
+        self.peak_program_calls = 0
         self.calls: list[tuple[int, str]] = []
         self.prompts: dict[tuple[int, str], str] = {}
         self.anchor = M5ProviderContextV1(
@@ -198,6 +218,7 @@ class _Provider:
         )
         self.snapshots: list[Mapping[str, Any]] = []
         self.released: list[tuple[int, str]] = []
+        self.parents: dict[tuple[int, str], M5ProviderContextV1] = {}
         self.release_condition = threading.Condition()
 
     def prepare_generation(
@@ -258,40 +279,57 @@ class _Provider:
         artifact_dir: Path,
         prompt: str,
     ) -> M5ProviderResultV1:
+        self.parents[(generation, slot)] = parent
         if idempotency_key in self.durable:
             result = self.durable[idempotency_key]
             write_json(
                 artifact_dir / "m5-provider-result.json.gz",
                 result.as_dict(),
             )
+            if self.result_hook is not None:
+                self.result_hook(generation, slot)
             return result
-        turn = f"turn-{generation}-{slot}"
-        result = M5ProviderResultV1(
-            response_text=json.dumps(
-                {
-                    "schema_version": ("mforge.native.python_policy_response.v1"),
-                    "source": _source(f"{generation}-{slot}"),
-                },
-                separators=(",", ":"),
-            ),
-            context=M5ProviderContextV1(
-                f"thread-{generation}-{slot}",
-                turn,
-                None,
-                parent.included_turn_ids + (turn,),
-            ),
-            usage=_usage(),
-            duration_ms=1,
-            warnings=0,
-        )
-        self.durable[idempotency_key] = result
-        self.calls.append((generation, slot))
-        self.prompts[(generation, slot)] = prompt
-        write_json(
-            artifact_dir / "m5-provider-result.json.gz",
-            result.as_dict(),
-        )
-        return result
+        with self.program_lock:
+            self.active_program_calls += 1
+            self.peak_program_calls = max(
+                self.peak_program_calls,
+                self.active_program_calls,
+            )
+        try:
+            if self.program_barrier is not None:
+                self.program_barrier.wait(timeout=2)
+            turn = f"turn-{generation}-{slot}"
+            result = M5ProviderResultV1(
+                response_text=json.dumps(
+                    {
+                        "schema_version": ("mforge.native.python_policy_response.v1"),
+                        "source": _source(f"{generation}-{slot}"),
+                    },
+                    separators=(",", ":"),
+                ),
+                context=M5ProviderContextV1(
+                    f"thread-{generation}-{slot}",
+                    turn,
+                    None,
+                    parent.included_turn_ids + (turn,),
+                ),
+                usage=_usage(),
+                duration_ms=1,
+                warnings=0,
+            )
+            self.durable[idempotency_key] = result
+            self.calls.append((generation, slot))
+            self.prompts[(generation, slot)] = prompt
+            write_json(
+                artifact_dir / "m5-provider-result.json.gz",
+                result.as_dict(),
+            )
+            if self.result_hook is not None:
+                self.result_hook(generation, slot)
+            return result
+        finally:
+            with self.program_lock:
+                self.active_program_calls -= 1
 
     def generate_root(
         self,
@@ -356,6 +394,7 @@ class _Concurrency:
         self.active = 0
         self.peak = 0
         self.calls: list[tuple[str, str]] = []
+        self.baseline_calls: list[tuple[int, str, str]] = []
         self.barrier_candidates: set[str] = set()
 
 
@@ -398,6 +437,10 @@ class _Evaluator:
         case: DevelopmentCaseV1,
         generation: int,
     ) -> Mapping[str, JsonValue]:
+        with self.concurrency.lock:
+            self.concurrency.baseline_calls.append(
+                (generation, baseline, case.case_id)
+            )
         return _result(
             source=f"{baseline}:{generation}",
             case=case,
@@ -2071,6 +2114,148 @@ def test_terminal_provider_turn_projects_persisting_before_result_artifact(
     )
 
 
+def test_slot_usage_is_identical_from_provider_terminal_through_archive(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(tmp_path, exp_id="live-slot-usage")
+    config = load_python_preview_config(config_path)
+    state = preview_module._initialize_workspace(config)
+    state.update(
+        {
+            "state": "running",
+            "resumable": True,
+            "run_terminal": False,
+            "last_boundary": "generation_0_snapshot",
+        }
+    )
+    root = config.experiment_root
+    slot_dir = root / "generations" / "generation-0000" / "slot-00"
+    expected_usage = {
+        "inputTokens": 101,
+        "cachedInputTokens": 11,
+        "cacheWriteInputTokens": 7,
+        "outputTokens": 23,
+        "reasoningOutputTokens": 5,
+        "totalTokens": 131,
+    }
+    attempt = {
+        "usage": {
+            **expected_usage,
+            "final": True,
+            "partial": False,
+        },
+        "warnings": 0,
+    }
+    write_json(
+        slot_dir.parent / "manifest.json.gz",
+        {
+            "generation": 0,
+            "slots": [
+                {
+                    "slot": "slot-00",
+                    "kind": "root",
+                    "parent_candidate_id": None,
+                    "request_key": "g0000-slot-00",
+                }
+            ],
+        },
+    )
+    write_json(
+        root / search_module.M10_RUNTIME_FILENAME,
+        {
+            "protocol_id": search_module.M10_RUNTIME_PROTOCOL_ID,
+            "resume_started_epoch_seconds": time.time() - 1,
+            "active_provider_turns": 1,
+            "provider_turns_submitted": 1,
+            "provider_concurrency_timeline": [
+                {
+                    "key": "g0000-slot-00-initial",
+                    "kind": "primary",
+                    "started_epoch_seconds": time.time() - 0.5,
+                }
+            ],
+            "evaluation_progress": {},
+        },
+    )
+    write_json(slot_dir / "provider-initial" / "m5-provider-result.json.gz", attempt)
+    write_json(
+        slot_dir / "provider-initial" / "turn.turn-terminal.json.gz",
+        {"status": "completed", "usage_observed": True},
+    )
+
+    provider_terminal = preview_module._progress(config, state)
+    assert provider_terminal["slots"][0]["state"] == "persisting"
+    assert provider_terminal["slots"][0]["usage"] == expected_usage
+    assert provider_terminal["provider"]["usage"] == {
+        key: value for key, value in expected_usage.items()
+    }
+
+    write_json(
+        slot_dir / search_module.M10_PREPARED_FILENAME,
+        {
+            "provider_attempts": [attempt],
+            "usage": expected_usage,
+            "repairs": 0,
+        },
+    )
+    runtime = cast(
+        dict[str, Any],
+        read_json(root / search_module.M10_RUNTIME_FILENAME),
+    )
+    runtime["active_provider_turns"] = 0
+    runtime["evaluation_progress"] = {
+        "candidate:g0000-slot-00": {
+            "state": "running",
+            "completed": 1,
+            "total": 4,
+        }
+    }
+    write_json(root / search_module.M10_RUNTIME_FILENAME, runtime)
+
+    evaluating = preview_module._progress(config, state)
+    assert evaluating["slots"][0]["state"] == "evaluation_running"
+    assert evaluating["slots"][0]["usage"] == expected_usage
+    assert evaluating["provider"]["usage"] == expected_usage
+
+    write_json(
+        slot_dir / "candidate.json.gz",
+        {
+            "candidate_id": "g0000-slot-00",
+            "generation": 0,
+            "slot": "slot-00",
+            "kind": "root",
+            "status": "evaluated",
+            "parent_candidate_id": None,
+            "provider_attempts": [attempt],
+            "usage": expected_usage,
+            "behavior_profile": {
+                "fitness_interval": {
+                    "lower": {"numerator": 1, "denominator": 2},
+                    "upper": {"numerator": 1, "denominator": 2},
+                }
+            },
+        },
+    )
+    write_json(
+        slot_dir / search_module.M10_PREPARED_FILENAME,
+        {
+            "provider_attempts": [],
+            "usage": {},
+            "repairs": 0,
+        },
+    )
+
+    archived = preview_module._progress(config, state)
+    assert archived["slots"][0]["state"] == "evaluated"
+    assert archived["slots"][0]["phase"] == "archived"
+    assert archived["slots"][0]["usage"] == expected_usage
+    assert archived["provider"]["usage"] == expected_usage
+    assert [
+        snapshot["slots"][0]["usage"]
+        for snapshot in (provider_terminal, evaluating, archived)
+    ] == [expected_usage] * 3
+
+
 def test_fresh_dashboard_keeps_unknown_baselines_and_tokens_unknown(
     tmp_path: Path,
 ) -> None:
@@ -2150,7 +2335,7 @@ def test_same_exp_id_rejects_changed_frozen_scientific_config_before_work(
     assert calls == {"provider": 0, "backend": 0}
 
 
-def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
+def test_provider_free_multi_generation_lifecycle_regression(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2165,17 +2350,47 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
     ).scientific_config_sha256
     durable: dict[str, M5ProviderResultV1] = {}
     providers: list[_Provider] = []
+    evaluator_runs: list[_Concurrency] = []
+    live_usage_before_evaluation: list[Mapping[str, Any]] = []
+
+    def record_live_usage(generation: int, slot: str) -> None:
+        if generation != 0 or slot != "slot-00" or live_usage_before_evaluation:
+            return
+        live_status = python_preview_status(config_path)
+        live_slot = next(
+            item
+            for item in live_status["slots"]
+            if item["candidate_id"] == "g0000-slot-00"
+        )
+        slot_dir = (
+            load_python_preview_config(config_path).experiment_root
+            / "generations"
+            / "generation-0000"
+            / "slot-00"
+        )
+        assert not list((slot_dir / "evaluations").glob("*.json.gz"))
+        live_usage_before_evaluation.append(cast(Mapping[str, Any], live_slot["usage"]))
 
     def provider_factory(*_: Any) -> _Provider:
-        provider = _Provider(durable)
+        provider = _Provider(
+            durable,
+            program_barrier=threading.Barrier(4, timeout=2),
+            result_hook=record_live_usage,
+        )
         providers.append(provider)
         return provider
 
+    def evaluator_factory(*_: Any) -> _Evaluator:
+        instrumentation = _Concurrency(parties=1)
+        evaluator_runs.append(instrumentation)
+        return _Evaluator(instrumentation)
+
+    # Phase A: create two generations in one stable experiment.
     first = run_python_preview(
         config_path,
         provider_factory=provider_factory,
         backend_factory=lambda _: _Backend(),
-        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        evaluator_factory=evaluator_factory,
         provenance_guard=lambda **_: {},
         auth_available=lambda _: True,
     )
@@ -2198,12 +2413,73 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
     assert first["state"] == "blocked"
     assert first["resumable"] is True
     assert first["terminal_reason"] == "generation_budget"
+    assert first["generation_index"] == 1
+    assert first["counts"]["terminal"] == 16
+    assert first["provider"]["candidate_turns"] == 16
+    assert first["provider"]["usage"]["totalTokens"] == 34
+    assert live_usage_before_evaluation == [
+        {
+            key: value
+            for key, value in _usage().items()
+            if key not in {"final", "partial"}
+        }
+    ]
+    assert providers[0].peak_program_calls == 4
+    assert len(providers[0].calls) == 16
+    assert len(evaluator_runs) == 1
+    panel_case_count = first["evaluation_workload"]["case_count"]
+    assert len(
+        [
+            call
+            for call in evaluator_runs[0].calls
+            if call[0].startswith(("g0000-", "g0001-"))
+        ]
+    ) == 16 * panel_case_count
+    assert len(evaluator_runs[0].baseline_calls) == 2 * 2 * panel_case_count
     assert all(
         isinstance(slot["elapsed_seconds"], int | float)
         and slot["elapsed_seconds"] > 0
         for slot in first["slots"]
     )
     assert {generation for generation, _ in providers[0].calls} == {0, 1}
+
+    for generation in (0, 1):
+        manifest = cast(
+            Mapping[str, Any],
+            read_json(
+                root
+                / "generations"
+                / f"generation-{generation:04d}"
+                / "manifest.json.gz"
+            ),
+        )
+        slots = cast(list[Mapping[str, Any]], manifest["slots"])
+        expected_kinds = ["root"] * 8 if generation == 0 else ["child"] * 4 + ["root"] * 4
+        assert [slot["kind"] for slot in slots] == expected_kinds
+        for slot in slots:
+            slot_name = str(slot["slot"])
+            parent_id = slot.get("parent_candidate_id")
+            provider_parent = providers[0].parents[(generation, slot_name)]
+            if slot["kind"] == "root":
+                assert parent_id is None
+                assert provider_parent == providers[0].anchor
+                continue
+            assert isinstance(parent_id, str)
+            assert parent_id.startswith(f"g{generation - 1:04d}-")
+            parent_slot = parent_id.split("-", 1)[1]
+            parent = cast(
+                Mapping[str, Any],
+                read_json(
+                    root
+                    / "generations"
+                    / f"generation-{generation - 1:04d}"
+                    / parent_slot
+                    / "candidate.json.gz"
+                ),
+            )
+            assert provider_parent.as_dict() == parent["provider_context"]
+            assert str(parent["source"]) in providers[0].prompts[(generation, slot_name)]
+
     status_evaluation_reads = 0
     original_status_load = preview_module._load_mapping
 
@@ -2222,6 +2498,7 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
         python_preview_status(config_path)
     assert status_evaluation_reads == 0
 
+    # At the bound, the ordinary run path is a read-only no-op.
     with monkeypatch.context() as no_work:
         no_work.setattr(
             preview_module,
@@ -2252,6 +2529,7 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
         if path.is_file()
     } == all_bytes_at_limit
 
+    # Phase B: extend only generation_limit and resume the same campaign to G4.
     protocol = cast(dict[str, Any], read_json(root / "protocol.json.gz"))
     protocol["generation_limit"] = 2
     write_json(root / "protocol.json.gz", protocol)
@@ -2263,13 +2541,43 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
         config_path,
         provider_factory=provider_factory,
         backend_factory=lambda _: _Backend(),
-        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        evaluator_factory=evaluator_factory,
         provenance_guard=lambda **_: {},
         auth_available=lambda _: True,
     )
 
+    assert to_five["state"] == "blocked"
+    assert to_five["resumable"] is True
     assert to_five["terminal_reason"] == "generation_budget"
+    assert to_five["generation_index"] == 4
+    assert to_five["counts"]["planned"] == 40
+    assert to_five["counts"]["terminal"] == 40
+    assert to_five["provider"]["candidate_turns"] == 40
+    assert to_five["provider"]["turns"] == 41
+    assert to_five["provider"]["usage"] == {
+        "inputTokens": 41,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 41,
+        "reasoningOutputTokens": 0,
+        "totalTokens": 82,
+    }
     assert {generation for generation, _ in providers[1].calls} == {2, 3, 4}
+    assert len(providers[1].calls) == 24
+    assert providers[1].peak_program_calls == 4
+    assert len(evaluator_runs) == 2
+    resumed_candidate_calls = [
+        call for call in evaluator_runs[1].calls if call[0].startswith("g")
+    ]
+    assert len(resumed_candidate_calls) == 24 * panel_case_count
+    assert all(
+        candidate_id.startswith(("g0002-", "g0003-", "g0004-"))
+        for candidate_id, _case_id in resumed_candidate_calls
+    )
+    assert len(evaluator_runs[1].baseline_calls) == 3 * 2 * panel_case_count
+    assert {
+        generation for generation, _baseline, _case_id in evaluator_runs[1].baseline_calls
+    } == {2, 3, 4}
     assert {
         path.relative_to(root): path.read_bytes()
         for generation in (0, 1)
@@ -2279,62 +2587,106 @@ def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
         if path.is_file()
     } == retained_generation_bytes
 
-    _change_generation_limit(config_path, old=5, new=7)
-    to_seven = run_python_preview(
-        config_path,
-        provider_factory=provider_factory,
-        backend_factory=lambda _: _Backend(),
-        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
-        provenance_guard=lambda **_: {},
-        auth_available=lambda _: True,
+    assert sorted(
+        path.name
+        for path in (root / "generations").glob("generation-*")
+    ) == [f"generation-{generation:04d}" for generation in range(5)]
+
+    for generation in (2, 3, 4):
+        manifest = cast(
+            Mapping[str, Any],
+            read_json(
+                root
+                / "generations"
+                / f"generation-{generation:04d}"
+                / "manifest.json.gz"
+            ),
+        )
+        slots = cast(list[Mapping[str, Any]], manifest["slots"])
+        assert [slot["kind"] for slot in slots] == ["child"] * 4 + ["root"] * 4
+        for slot in slots:
+            slot_name = str(slot["slot"])
+            parent_id = slot.get("parent_candidate_id")
+            if slot["kind"] == "root":
+                assert parent_id is None
+                assert providers[1].parents[(generation, slot_name)] == providers[1].anchor
+                continue
+            assert isinstance(parent_id, str)
+            assert parent_id.startswith(f"g{generation - 1:04d}-")
+            parent_slot = parent_id.split("-", 1)[1]
+            parent = cast(
+                Mapping[str, Any],
+                read_json(
+                    root
+                    / "generations"
+                    / f"generation-{generation - 1:04d}"
+                    / parent_slot
+                    / "candidate.json.gz"
+                ),
+            )
+            assert (
+                providers[1].parents[(generation, slot_name)].as_dict()
+                == parent["provider_context"]
+            )
+            assert str(parent["source"]) in providers[1].prompts[(generation, slot_name)]
+
+    current_slots = [
+        slot for slot in to_five["slots"] if slot["generation"] == 4
+    ]
+    assert len(current_slots) == 8
+    assert all(slot["usage"]["totalTokens"] == 2 for slot in current_slots)
+    assert all(slot["gain"] == pytest.approx(0.1) for slot in current_slots)
+
+    # Phase C: cold status reads only compact summaries, preserves browsing,
+    # and the idle dashboard exits on q without starting worker work.
+    cold_evaluation_reads = 0
+
+    def counted_cold_load(path: Path) -> dict[str, Any] | None:
+        nonlocal cold_evaluation_reads
+        if path.parent.name == "evaluations":
+            cold_evaluation_reads += 1
+        return original_status_load(path)
+
+    with monkeypatch.context() as cold_probe:
+        cold_probe.setattr(preview_module, "_load_mapping", counted_cold_load)
+        cold = python_preview_status(config_path)
+    assert cold_evaluation_reads == 0
+    assert cold["terminal_reason"] == "generation_budget"
+    rich = dashboard_state_from_python_status(
+        cold,
+        run_id=config.exp_id,
+        model=config.model,
+        effort=config.effort,
+        generation_limit=5,
+        wall_seconds=60,
     )
+    assert [group.generation for group in rich.generations] == [0, 1, 2, 3, 4]
 
-    assert to_seven["terminal_reason"] == "generation_budget"
-    assert {generation for generation, _ in providers[2].calls} == {5, 6}
-    assert sorted(
-        path.name
-        for path in (root / "generations").glob("generation-*")
-    ) == [f"generation-{generation:04d}" for generation in range(7)]
+    dashboard_states: list[Any] = []
 
-    bytes_before_decrease = {
-        path.relative_to(root): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-    _change_generation_limit(config_path, old=7, new=3)
-    with monkeypatch.context() as no_work:
-        no_work.setattr(
-            preview_module,
-            "_progress",
-            lambda *_: (_ for _ in ()).throw(
-                AssertionError("decreased limit built the full status projection")
-            ),
-        )
-        decreased = run_python_preview(
-            config_path,
-            provider_factory=lambda *_: (_ for _ in ()).throw(
-                AssertionError("decreased limit constructed provider")
-            ),
-            backend_factory=lambda _: (_ for _ in ()).throw(
-                AssertionError("decreased limit constructed backend")
-            ),
-            evaluator_factory=lambda *_: (_ for _ in ()).throw(
-                AssertionError("decreased limit constructed evaluator")
-            ),
-            provenance_guard=lambda **_: {},
-            auth_available=lambda _: True,
-        )
+    class AutoQuitDashboard:
+        def __init__(self, **kwargs: Any) -> None:
+            dashboard_states.append(kwargs["initial_state"])
+            kwargs["capabilities"].quit()
 
-    assert decreased["state"] == "blocked"
-    assert sorted(
-        path.name
-        for path in (root / "generations").glob("generation-*")
-    ) == [f"generation-{generation:04d}" for generation in range(7)]
-    assert {
-        path.relative_to(root): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    } == bytes_before_decrease
+        def update_canonical_state(self, status: Any) -> None:
+            dashboard_states.append(status)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "InteractiveDashboardSink", AutoQuitDashboard)
+    monkeypatch.setattr(
+        cli,
+        "run_python_preview",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("idle dashboard started worker work")
+        ),
+    )
+    started = time.monotonic()
+    assert cli._experiment_run(config_path, json_output=False, dashboard=True) == 0
+    assert time.monotonic() - started < 0.5
+    assert dashboard_states[-1].terminal_reason == "generation_budget"
 
 
 def test_generation_limit_stop_preserves_provider_capsule_but_exact_stop_cleans_it(

@@ -206,6 +206,7 @@ class DashboardSlot:
     candidate: str = ""
     error: str = ""
     objective: float | None = None
+    gain: float | None = None
     score_effect: str = "neutral"
     retryable: bool = False
     charged: bool | None = None
@@ -398,6 +399,13 @@ def dashboard_state_from_python_status(
             float(value) if isinstance(value, int | float) and not isinstance(value, bool) else 0.0
         )
 
+    def optional_number(value: object) -> float | None:
+        return (
+            float(value)
+            if isinstance(value, int | float) and not isinstance(value, bool)
+            else None
+        )
+
     def fitness_objective(value: object) -> float | None:
         if not isinstance(value, Mapping):
             return None
@@ -541,6 +549,12 @@ def dashboard_state_from_python_status(
                         raw.get(
                             "fitness_interval",
                             programs_by_candidate.get(candidate_id, {}).get("fitness_interval"),
+                        )
+                    ),
+                    gain=optional_number(
+                        raw.get(
+                            "gain",
+                            programs_by_candidate.get(candidate_id, {}).get("gain"),
                         )
                     ),
                     score_effect=str(raw.get("score_effect", "neutral")),
@@ -3431,6 +3445,7 @@ class InteractiveDashboardSink:
             ("probe", "left", 14),
             ("candidate / error", "left", 24),
             ("score ↑", "right", 7),
+            ("gain ↑", "right", 9),
         ]
         if mode == "compact":
             visible = {
@@ -3507,6 +3522,7 @@ class InteractiveDashboardSink:
                 "probe": slot.probe,
                 "candidate / error": compact_display_ids(slot.error or slot.candidate or "—"),
                 "score ↑": _score_text(slot),
+                "gain ↑": _gain(slot.gain),
             }
             style = "bold on grey15" if selected else "bold" if slot.state in ACTIVE_STATES else ""
             table.add_row(*(values[name] for name, _, _ in columns), style=style)
@@ -4567,6 +4583,16 @@ def _score_text(slot: DashboardSlot) -> Text:
             else ""
         ),
     )
+
+
+def _gain(value: float | None) -> str:
+    if value is None:
+        return "—"
+    projected = Decimal(str(value)).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
+    if projected == 0:
+        return ".000000"
+    text = f"{projected:+.6f}"
+    return text.replace("+0.", "+.", 1).replace("-0.", "-.", 1)
 
 
 def _slot_state_label(slot: DashboardSlot) -> str:

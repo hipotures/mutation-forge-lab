@@ -103,6 +103,17 @@ def _evaluation(
         },
         "scientific_result": {
             "status": "COMPLETE",
+            "config": {
+                "order": case.order,
+                "horizon": case.horizon,
+            },
+            "utility_trajectory": [
+                {
+                    "lower": _fraction(4),
+                    "upper": _fraction(4),
+                }
+                for _ in range(case.horizon + 1)
+            ],
             "fitness_interval": {
                 "lower": _fraction(7 if accepted else 4),
                 "upper": _fraction(7 if accepted else 4),
@@ -481,6 +492,44 @@ def test_parent_diversity_uses_measured_behavior_not_digest_distance() -> None:
     assert selected[:2] == ("candidate-0", "candidate-2")
 
 
+def test_initial_only_diagnostic_is_exact_and_excluded_from_selection_inputs() -> None:
+    source = _source("diagnostic")
+    profile = aggregate_behavior(
+        [_evaluation(source=source, case=case, accepted=True) for case in _PANEL]
+    )
+
+    assert profile["fitness_interval"]["lower"] == _fraction(7)
+    assert profile["initial_only_fitness_lower"] == {
+        "numerator": 2,
+        "denominator": 5,
+    }
+    prompt = build_child_prompt(parent_source=source, parent_profile=profile)
+    assert "initial_only_fitness_lower" not in prompt
+
+    candidates = [
+        {
+            "candidate_id": candidate_id,
+            "status": "evaluated",
+            "duplicate_of": None,
+            "program_hash": program_hash,
+            "behavior_signature": behavior_signature,
+            "behavior_profile": {
+                **profile,
+                "fitness_interval": {
+                    "lower": _fraction(score),
+                    "upper": _fraction(score),
+                },
+                "initial_only_fitness_lower": _fraction(initial),
+            },
+        }
+        for candidate_id, score, initial, program_hash, behavior_signature in (
+            ("higher-score-negative-gain", 8, 9, "1" * 64, "a" * 64),
+            ("lower-score-positive-gain", 7, 1, "2" * 64, "b" * 64),
+        )
+    ]
+    assert select_parent_candidates(candidates)[0] == "higher-score-negative-gain"
+
+
 def test_search_memory_is_bounded_source_free_and_active_parent_null() -> None:
     profile = aggregate_behavior(
         [_evaluation(source=_source("memory"), case=_PANEL[0], accepted=True)]
@@ -507,6 +556,7 @@ def test_search_memory_is_bounded_source_free_and_active_parent_null() -> None:
     assert "source" not in text
     assert "program_hash" not in text
     assert "behavior_signature" not in text
+    assert "initial_only_fitness_lower" not in text
     assert len(json.dumps(memory, sort_keys=True).encode()) < 16 * 1024
     prompt = build_root_prompt(memory)
     assert _source("memory") not in prompt

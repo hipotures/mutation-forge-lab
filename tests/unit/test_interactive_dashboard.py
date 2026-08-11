@@ -2404,14 +2404,16 @@ def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
     sink.close()
 
 
-def test_slot_matrix_uses_score_header_and_four_decimal_values() -> None:
+def test_slot_matrix_keeps_score_and_adds_signed_six_decimal_gain() -> None:
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=False),
         start_live=False,
     )
     state = _running_state()
     slots = list(state.generations[0].slots)
-    slots[0] = replace(slots[0], objective=0.076991)
+    slots[0] = replace(slots[0], objective=0.076991, gain=0.0025129)
+    slots[1] = replace(slots[1], gain=-0.0012349)
+    slots[2] = replace(slots[2], gain=0.0)
     sink.state = replace(
         state,
         generations=(GenerationSlots(1, tuple(slots)),),
@@ -2427,13 +2429,48 @@ def test_slot_matrix_uses_score_header_and_four_decimal_values() -> None:
     rendered = output.getvalue()
 
     assert "score ↑" in rendered
+    assert "gain ↑" in rendered
     assert "goal ↑" not in rendered
     assert "fitness ↑" not in rendered
     assert "objective ↑" not in rendered
     assert "0.0769" in rendered
     assert "0.076991" not in rendered
+    assert "+.002512" in rendered
+    assert "-.001234" in rendered
+    assert ".000000" in rendered
     assert "score color:" not in rendered
     sink.close()
+
+
+def test_missing_retained_gain_projects_as_unknown() -> None:
+    state = dashboard.dashboard_state_from_python_status(
+        {
+            "state": "blocked",
+            "counts": {},
+            "provider": {},
+            "evaluators": {},
+            "slots": [
+                {
+                    "candidate_id": "g0000-slot-00",
+                    "generation": 0,
+                    "state": "evaluated",
+                    "phase": "archived",
+                    "fitness_interval": {
+                        "lower": {"numerator": 1, "denominator": 2},
+                        "upper": {"numerator": 1, "denominator": 2},
+                    },
+                }
+            ],
+        },
+        run_id="legacy",
+        model="fixture",
+        effort="medium",
+        generation_limit=1,
+        wall_seconds=60,
+    )
+
+    assert state.generations[0].slots[0].gain is None
+    assert dashboard._gain(state.generations[0].slots[0].gain) == "—"
 
 
 def test_score_color_is_conservative_and_zero_remains_an_absolute_score() -> None:

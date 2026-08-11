@@ -848,6 +848,24 @@ def _fitness_value(profile: Mapping[str, Any]) -> float:
     return float(lower)
 
 
+def _diagnostic_gain(profile: Mapping[str, Any]) -> float | None:
+    raw_initial = profile.get("initial_only_fitness_lower")
+    if raw_initial is None:
+        return None
+    numerator = raw_initial.get("numerator") if isinstance(raw_initial, Mapping) else None
+    denominator = raw_initial.get("denominator") if isinstance(raw_initial, Mapping) else None
+    if (
+        not isinstance(numerator, int)
+        or isinstance(numerator, bool)
+        or not isinstance(denominator, int)
+        or isinstance(denominator, bool)
+        or denominator == 0
+    ):
+        raise PythonPreviewWorkspaceError("initial-only fitness lower is malformed")
+    lower, _ = _fitness_interval_fractions(profile)
+    return float(lower - Fraction(numerator, denominator))
+
+
 def _fraction_dict(value: Fraction) -> dict[str, int]:
     return {
         "numerator": value.numerator,
@@ -929,6 +947,33 @@ def _usage_total(
         for key in keys:
             totals[key] += _nonnegative_int(usage.get(key))
     return totals
+
+
+def _precommit_provider_candidate(slot_dir: Path) -> dict[str, Any] | None:
+    prepared = _load_mapping(slot_dir / "prepared-candidate.json.gz")
+    raw_attempts = prepared.get("provider_attempts") if prepared is not None else None
+    attempts = (
+        [item for item in raw_attempts if isinstance(item, Mapping)]
+        if isinstance(raw_attempts, Sequence) and not isinstance(raw_attempts, str | bytes)
+        else []
+    )
+    if not attempts:
+        attempts = [
+            result
+            for path in sorted(slot_dir.glob("provider-*/m5-provider-result.json.gz"))
+            if (result := _load_mapping(path)) is not None
+        ]
+    if not attempts:
+        return None
+    usage = _usage_total(({"provider_attempts": attempts},), None)
+    return {
+        "provider_attempts": attempts,
+        "repairs": (
+            _nonnegative_int(prepared.get("repairs")) if prepared is not None else 0
+        ),
+        "warnings": sum(_nonnegative_int(attempt.get("warnings")) for attempt in attempts),
+        "usage": usage,
+    }
 
 
 _EVALUATION_TELEMETRY_FIELDS = (
@@ -1046,6 +1091,9 @@ def _program_projection(
                 "behavior_signature": candidate.get("behavior_signature"),
                 "fitness_interval": (
                     profile.get("fitness_interval") if isinstance(profile, Mapping) else None
+                ),
+                "gain": (
+                    _diagnostic_gain(profile) if isinstance(profile, Mapping) else None
                 ),
                 "selector_frequencies": (
                     profile.get("selector_frequencies") if isinstance(profile, Mapping) else {}
@@ -1626,7 +1674,36 @@ def _progress(
         _nonnegative_int(profile.get("exact_verifier_records")) for profile in baseline_profiles
     )
     exact |= any(profile.get("exact_verified") is True for profile in baseline_profiles)
-    provider_projection = _provider_telemetry(root, candidates)
+    candidates_by_id = {
+        str(item["candidate_id"]): item
+        for item in candidates
+        if isinstance(item.get("candidate_id"), str)
+    }
+    precommit_candidates_by_id: dict[str, dict[str, Any]] = {}
+    for manifest in manifests:
+        generation = _nonnegative_int(manifest.get("generation"))
+        raw_slots = manifest.get("slots", ())
+        if not isinstance(raw_slots, Sequence) or isinstance(raw_slots, str | bytes):
+            continue
+        for raw_slot in raw_slots:
+            slot = raw_slot.get("slot") if isinstance(raw_slot, Mapping) else None
+            if not isinstance(slot, str):
+                continue
+            candidate_id = f"g{generation:04d}-{slot}"
+            if candidate_id in candidates_by_id:
+                continue
+            projected = _precommit_provider_candidate(
+                root
+                / "generations"
+                / f"generation-{generation:04d}"
+                / slot
+            )
+            if projected is not None:
+                precommit_candidates_by_id[candidate_id] = projected
+    provider_projection = _provider_telemetry(
+        root,
+        [*candidates, *precommit_candidates_by_id.values()],
+    )
     if config.scientific_search is not None:
         reserved_turns = runtime.get("provider_turns_submitted")
         if (
@@ -1636,11 +1713,6 @@ def _progress(
         ):
             provider_projection["candidate_turns"] = reserved_turns
             provider_projection["turns"] = reserved_turns + int((root / "anchor.json.gz").is_file())
-    candidates_by_id = {
-        str(item["candidate_id"]): item
-        for item in candidates
-        if isinstance(item.get("candidate_id"), str)
-    }
     parent_references: dict[tuple[int, str], Mapping[str, Any]] = {}
     for manifest in manifests:
         generation = _nonnegative_int(manifest.get("generation"))
@@ -1769,6 +1841,7 @@ def _progress(
                 continue
             candidate_id = f"g{generation:04d}-{slot}"
             candidate = candidates_by_id.get(candidate_id)
+            precommit_candidate = precommit_candidates_by_id.get(candidate_id)
             request_key = raw_slot.get("request_key")
             provider_turn_key: str | None = None
             provider_turn: Mapping[str, Any] | None = None
@@ -1954,6 +2027,11 @@ def _progress(
                         if candidate_profile is not None
                         else None
                     ),
+                    "gain": (
+                        _diagnostic_gain(candidate_profile)
+                        if candidate_profile is not None
+                        else None
+                    ),
                     "score_effect": score_effect,
                     "started_epoch_seconds": (
                         lifecycle_started_epoch
@@ -1966,7 +2044,11 @@ def _progress(
                     ),
                     "elapsed_seconds": elapsed_seconds,
                     "repairs": (
-                        _nonnegative_int(candidate.get("repairs")) if candidate is not None else 0
+                        _nonnegative_int(candidate.get("repairs"))
+                        if candidate is not None
+                        else _nonnegative_int(precommit_candidate.get("repairs"))
+                        if precommit_candidate is not None
+                        else 0
                     ),
                     "usage": cast(
                         JsonValue,
@@ -1978,6 +2060,14 @@ def _progress(
                                 )
                             )
                             if candidate is not None and isinstance(candidate.get("usage"), Mapping)
+                            else dict(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    precommit_candidate.get("usage", {}),
+                                )
+                            )
+                            if precommit_candidate is not None
+                            and isinstance(precommit_candidate.get("usage"), Mapping)
                             else {}
                         ),
                     ),
