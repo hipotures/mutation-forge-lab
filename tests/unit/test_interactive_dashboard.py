@@ -2905,6 +2905,127 @@ def test_standard_dashboard_routes_explicit_python_through_existing_sink(
     assert "generations / 96 primary slots)" in final_line
 
 
+def test_generation_limit_dashboard_stays_read_only_until_q(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "retained.json").write_bytes(b'{"retained":true}\n')
+    before = {
+        path.relative_to(workspace): path.read_bytes()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+    scientific = SimpleNamespace(
+        generation_limit=2,
+        current_primary_program_slots=16,
+        wall_seconds=3600.0,
+        as_dict=lambda: {"provider_concurrency": 2},
+    )
+    config = SimpleNamespace(
+        protocol="native-v3-python-v1",
+        source_path=tmp_path / "experiment.toml",
+        experiment_root=workspace,
+        exp_id="idle-dashboard",
+        model="gpt-fixture",
+        effort="medium",
+        scientific_search=scientific,
+    )
+    bootstrap = {
+        "state": "blocked",
+        "terminal_reason": "generation_budget",
+        "generation_index": 1,
+    }
+    status = {
+        **bootstrap,
+        "counts": {"planned": 16, "terminal": 16},
+        "provider": {"active": 0, "configured_concurrency": 2},
+        "evaluators": {"active": 0, "configured": 12},
+        "throughput": {},
+        "scientific_activity": {},
+        "phase_timings": {},
+        "best": {},
+        "exact_verification": {},
+        "slots": [
+            {
+                "candidate_id": f"g{generation:04d}-slot-00",
+                "generation": generation,
+                "slot": "slot-00",
+                "state": "evaluated",
+                "phase": "archived",
+            }
+            for generation in (0, 1)
+        ],
+        "recovery": {"last_boundary": "report_persisted"},
+    }
+    ready = threading.Event()
+    captured_sink: list[InteractiveDashboardSink] = []
+
+    class IdleSink(InteractiveDashboardSink):
+        def update_canonical_state(self, state: DashboardState) -> None:
+            super().update_canonical_state(state)
+            ready.set()
+
+    def dashboard_factory(**kwargs: Any) -> InteractiveDashboardSink:
+        kwargs.pop("console", None)
+        sink = IdleSink(
+            **kwargs,
+            console=Console(file=io.StringIO(), force_terminal=False),
+            start_live=False,
+        )
+        captured_sink.append(sink)
+        return sink
+
+    run = Mock()
+    request_stop = Mock()
+    status_reader = Mock(return_value=status)
+    monkeypatch.setattr(cli, "experiment_protocol", lambda _path: "native-v3-python-v1")
+    monkeypatch.setattr(cli, "load_python_preview_config", lambda _path: config)
+    monkeypatch.setattr(cli, "python_preview_bootstrap_status", lambda _path: bootstrap)
+    monkeypatch.setattr(cli, "python_preview_status", status_reader)
+    monkeypatch.setattr(cli, "run_python_preview", run)
+    monkeypatch.setattr(cli, "request_python_preview_stop", request_stop)
+    monkeypatch.setattr(cli, "InteractiveDashboardSink", dashboard_factory)
+
+    outcome: list[int] = []
+    command = threading.Thread(
+        target=lambda: outcome.append(
+            cli._experiment_run(
+                config.source_path,
+                json_output=False,
+                dashboard=True,
+            )
+        )
+    )
+    command.start()
+    assert ready.wait(timeout=1)
+    assert command.is_alive()
+    assert run.call_count == 0
+    assert status_reader.call_count == 1
+    assert request_stop.call_count == 0
+
+    sink = captured_sink[0]
+    assert sink.state.displayed_generation == 1
+    sink.handle_key("LEFT")
+    assert sink.state.displayed_generation == 0
+
+    started = time.monotonic()
+    sink.handle_key("q")
+    command.join(timeout=1)
+    assert not command.is_alive()
+    assert time.monotonic() - started < 0.5
+    assert outcome == [0]
+    assert status_reader.call_count == 1
+    assert request_stop.call_count == 0
+    after = {
+        path.relative_to(workspace): path.read_bytes()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     (

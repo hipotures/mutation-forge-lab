@@ -393,6 +393,17 @@ def _experiment_run(
                 with suppress(Exception):
                     request_python_preview_stop(config_path)
 
+            bootstrap_status = python_preview_bootstrap_status(config_path)
+            bootstrap_generation = bootstrap_status.get("generation_index")
+            idle_at_generation_limit = (
+                scientific is not None
+                and scientific.generation_limit is not None
+                and bootstrap_status.get("terminal_reason") == "generation_budget"
+                and isinstance(bootstrap_generation, int)
+                and not isinstance(bootstrap_generation, bool)
+                and bootstrap_generation + 1 >= scientific.generation_limit
+            )
+            idle_quit = Event()
             preview_sink = InteractiveDashboardSink(
                 console=Console(file=sys.stdout),
                 locked_config={
@@ -405,62 +416,72 @@ def _experiment_run(
                         else None
                     ),
                 },
-                initial_state=project(
-                    python_preview_bootstrap_status(config_path)
-                ),
+                initial_state=project(bootstrap_status),
                 capabilities=DashboardCapabilities(
-                    quit=request_stop,
-                    interrupt=interrupt_stop,
+                    quit=(idle_quit.set if idle_at_generation_limit else request_stop),
+                    interrupt=(
+                        idle_quit.set
+                        if idle_at_generation_limit
+                        else interrupt_stop
+                    ),
                 ),
             )
-            executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="mforge-python-preview",
-            )
-            try:
-                if resume_budget is None:
-                    future = executor.submit(
-                        run_python_preview,
-                        config_path,
-                        force_stop=immediate_stop.is_set,
-                    )
-                else:
-                    future = executor.submit(
-                        run_python_preview,
-                        config_path,
-                        resume_budget=resume_budget,
-                        force_stop=immediate_stop.is_set,
-                    )
+            if idle_at_generation_limit:
+                result = python_preview_status(config_path)
+                preview_sink.update_canonical_state(project(result))
                 try:
-                    while True:
-                        try:
-                            result = future.result(timeout=0.5)
-                            break
-                        except FutureTimeoutError:
-                            if immediate_stop.is_set():
-                                # The worker normally observes force_stop and
-                                # returns a durable blocked result.  Do not
-                                # make the dashboard wait forever if a provider
-                                # implementation ignores cancellation.
-                                result = python_preview_status(config_path)
+                    idle_quit.wait()
+                finally:
+                    preview_sink.close()
+            else:
+                executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="mforge-python-preview",
+                )
+                try:
+                    if resume_budget is None:
+                        future = executor.submit(
+                            run_python_preview,
+                            config_path,
+                            force_stop=immediate_stop.is_set,
+                        )
+                    else:
+                        future = executor.submit(
+                            run_python_preview,
+                            config_path,
+                            resume_budget=resume_budget,
+                            force_stop=immediate_stop.is_set,
+                        )
+                    try:
+                        while True:
+                            try:
+                                result = future.result(timeout=0.5)
                                 break
-                            if pending_stop.is_set() and not immediate_stop.is_set():
-                                persist_stop_request()
+                            except FutureTimeoutError:
+                                if immediate_stop.is_set():
+                                    # The worker normally observes force_stop and
+                                    # returns a durable blocked result.  Do not
+                                    # make the dashboard wait forever if a provider
+                                    # implementation ignores cancellation.
+                                    result = python_preview_status(config_path)
+                                    break
+                                if pending_stop.is_set() and not immediate_stop.is_set():
+                                    persist_stop_request()
+                                preview_sink.update_canonical_state(
+                                    project(python_preview_status(config_path))
+                                )
+                        preview_sink.update_canonical_state(project(result))
+                    finally:
+                        with suppress(Exception):
                             preview_sink.update_canonical_state(
                                 project(python_preview_status(config_path))
                             )
-                    preview_sink.update_canonical_state(project(result))
+                        preview_sink.close()
                 finally:
-                    with suppress(Exception):
-                        preview_sink.update_canonical_state(
-                            project(python_preview_status(config_path))
-                        )
-                    preview_sink.close()
-            finally:
-                executor.shutdown(
-                    wait=not immediate_stop.is_set(),
-                    cancel_futures=immediate_stop.is_set(),
-                )
+                    executor.shutdown(
+                        wait=not immediate_stop.is_set(),
+                        cancel_futures=immediate_stop.is_set(),
+                    )
         else:
             if resume_budget is None:
                 result = run_python_preview(config_path)
