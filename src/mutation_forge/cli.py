@@ -365,6 +365,8 @@ def _experiment_run(
             stop_control = ExperimentControl()
             immediate_stop = Event()
             pending_stop = Event()
+            read_only_idle = Event()
+            idle_quit = Event()
 
             def persist_stop_request() -> bool:
                 """Persist a graceful request once the worker workspace exists."""
@@ -381,11 +383,17 @@ def _experiment_run(
                 return True
 
             def request_stop() -> None:
+                if read_only_idle.is_set():
+                    idle_quit.set()
+                    return
                 if not stop_control.request_graceful_stop():
                     return
                 persist_stop_request()
 
             def interrupt_stop() -> None:
+                if read_only_idle.is_set():
+                    idle_quit.set()
+                    return
                 # The second q is an immediate stop, not another graceful
                 # request.  Persist the request as well so a worker that is
                 # between protocol calls observes the same operator intent.
@@ -403,7 +411,8 @@ def _experiment_run(
                 and not isinstance(bootstrap_generation, bool)
                 and bootstrap_generation + 1 >= scientific.generation_limit
             )
-            idle_quit = Event()
+            if idle_at_generation_limit:
+                read_only_idle.set()
             preview_sink = InteractiveDashboardSink(
                 console=Console(file=sys.stdout),
                 locked_config={
@@ -418,12 +427,8 @@ def _experiment_run(
                 },
                 initial_state=project(bootstrap_status),
                 capabilities=DashboardCapabilities(
-                    quit=(idle_quit.set if idle_at_generation_limit else request_stop),
-                    interrupt=(
-                        idle_quit.set
-                        if idle_at_generation_limit
-                        else interrupt_stop
-                    ),
+                    quit=request_stop,
+                    interrupt=interrupt_stop,
                 ),
             )
             if idle_at_generation_limit:
@@ -439,6 +444,7 @@ def _experiment_run(
                     thread_name_prefix="mforge-python-preview",
                 )
                 try:
+                    reached_generation_limit = False
                     if resume_budget is None:
                         future = executor.submit(
                             run_python_preview,
@@ -470,12 +476,21 @@ def _experiment_run(
                                 preview_sink.update_canonical_state(
                                     project(python_preview_status(config_path))
                                 )
+                        reached_generation_limit = (
+                            result.get("state") == "blocked"
+                            and result.get("terminal_reason") == "generation_budget"
+                        )
+                        if reached_generation_limit:
+                            read_only_idle.set()
                         preview_sink.update_canonical_state(project(result))
+                        if reached_generation_limit:
+                            idle_quit.wait()
                     finally:
-                        with suppress(Exception):
-                            preview_sink.update_canonical_state(
-                                project(python_preview_status(config_path))
-                            )
+                        if not reached_generation_limit:
+                            with suppress(Exception):
+                                preview_sink.update_canonical_state(
+                                    project(python_preview_status(config_path))
+                                )
                         preview_sink.close()
                 finally:
                     executor.shutdown(
