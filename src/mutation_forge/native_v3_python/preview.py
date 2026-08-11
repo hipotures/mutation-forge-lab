@@ -12,7 +12,7 @@ import tomllib
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,7 +28,7 @@ from .contracts import (
     PythonWorkspaceProtocolError,
     require_python_workspace_schema_version,
 )
-from .provenance import M5_PROVENANCE_FILENAME
+from .provenance import ensure_m5_acceptance_provenance
 from .runtime_contracts import PolicyRuntimeLimitsV1
 from .scientific_evaluation import (
     ScientificEvaluationOptionsV1,
@@ -36,6 +36,7 @@ from .scientific_evaluation import (
 )
 from .scientific_search import (
     M10_BASELINE_FILENAME,
+    M10_BASELINE_RESULT_FILENAME,
     M10_REPORT_FILENAME,
     M10_REPORT_PROTOCOL_ID,
     M10_RUNTIME_FILENAME,
@@ -77,7 +78,6 @@ _SUPERSEDED_JSON_DSL_SELECTOR = "v3"
 _STATE_NAME = "python-preview-state.json.gz"
 _CONFIG_NAME = "python-preview.toml"
 _STOP_REQUEST_NAME = "python-preview-stop-request.json.gz"
-_RECOVERY_MARKER_PROTOCOL = "mforge.native.python_preview.recovery.v1"
 _STOP_REQUEST_PROTOCOL_ID = "mforge.native.python_preview.stop_request.v1"
 _M10_PAUSE_RECORD_SCHEMA_VERSION = "mforge.native.python_m10_emergency_stop_evidence.v1"
 _PAUSED_FOR_BUDGET = "PAUSED_FOR_BUDGET"
@@ -130,10 +130,6 @@ type EvaluatorFactory = Callable[
 type ProvenanceGuard = Callable[..., Mapping[str, JsonValue]]
 
 
-def _disabled_provenance_guard(**_: Any) -> Mapping[str, JsonValue]:
-    return {}
-
-
 @dataclass(frozen=True, slots=True)
 class PythonPreviewConfig:
     """Strict opt-in configuration for the bounded Python preview."""
@@ -157,6 +153,29 @@ class PythonPreviewConfig:
     @property
     def source_sha256(self) -> str:
         return hashlib.sha256(self.source_bytes).hexdigest()
+
+    @property
+    def scientific_config_sha256(self) -> str:
+        payload = {
+            "schema_version": self.schema_version,
+            "protocol": self.protocol,
+            "model": self.model,
+            "effort": self.effort,
+            "scientific_search": (
+                self.scientific_search.scientific_identity_dict()
+                if self.scientific_search is not None
+                else None
+            ),
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
 
 
 class PythonPreviewWorkspaceError(RuntimeError):
@@ -521,32 +540,6 @@ def _state_path(config: PythonPreviewConfig) -> Path:
     return config.experiment_root / _STATE_NAME
 
 
-def _recovery_marker_path(config: PythonPreviewConfig) -> Path:
-    return config.workspace / f".{config.exp_id}.active-recovery.json.gz"
-
-
-def _config_for_root(config: PythonPreviewConfig, root: Path) -> PythonPreviewConfig:
-    return replace(config, workspace=root.resolve().parent)
-
-
-def _active_recovery_root(config: PythonPreviewConfig) -> Path | None:
-    marker = _recovery_marker_path(config)
-    raw = _load_mapping(marker)
-    if raw is None or raw.get("protocol_id") != _RECOVERY_MARKER_PROTOCOL:
-        return None
-    value = raw.get("root")
-    if not isinstance(value, str) or not value:
-        return None
-    root = Path(value).resolve()
-    try:
-        root.relative_to(config.workspace.resolve())
-    except ValueError:
-        return None
-    if root == config.experiment_root.resolve():
-        return None
-    return root
-
-
 def _provider_runtime_missing(root: Path) -> bool:
     state_paths = (
         root / "provider-runtime" / "coordinator" / "provider-state.json.gz",
@@ -560,66 +553,6 @@ def _provider_runtime_missing(root: Path) -> bool:
         if isinstance(capsule_root, str) and capsule_root:
             return not Path(capsule_root).is_dir()
     return False
-
-
-def _seed_recovery_artifacts(source_root: Path, recovery_root: Path) -> None:
-    source_generations = source_root / "generations"
-    if not source_generations.is_dir():
-        return
-    for generation in sorted(source_generations.glob("generation-*")):
-        if not generation.is_dir():
-            continue
-        target_generation = recovery_root / "generations" / generation.name
-        for slot in sorted(generation.glob("slot-*")):
-            if not slot.is_dir():
-                continue
-            if not any(
-                (slot / name).is_file()
-                for name in ("candidate.json.gz", "prepared-candidate.json.gz")
-            ):
-                continue
-            shutil.copytree(
-                slot,
-                target_generation / slot.name,
-                dirs_exist_ok=True,
-            )
-        baselines = generation / "baselines"
-        if baselines.is_dir():
-            shutil.copytree(
-                baselines,
-                target_generation / "baselines",
-                dirs_exist_ok=True,
-            )
-
-
-def _new_recovery_config(config: PythonPreviewConfig) -> PythonPreviewConfig:
-    config.workspace.mkdir(parents=True, exist_ok=True)
-    recovery_parent = Path(
-        tempfile.mkdtemp(
-            prefix=f".{config.exp_id}.recovery-",
-            dir=config.workspace,
-        )
-    )
-    recovery_config = _config_for_root(config, recovery_parent / config.exp_id)
-    write_json(
-        _recovery_marker_path(config),
-        {
-            "protocol_id": _RECOVERY_MARKER_PROTOCOL,
-            "root": str(recovery_config.experiment_root),
-        },
-    )
-    return recovery_config
-
-
-def _run_config(config: PythonPreviewConfig) -> PythonPreviewConfig:
-    active_root = _active_recovery_root(config)
-    if active_root is not None:
-        active_config = _config_for_root(config, active_root)
-        if not _provider_runtime_missing(active_root):
-            return active_config
-    if config.experiment_root.exists() and _provider_runtime_missing(config.experiment_root):
-        return _new_recovery_config(config)
-    return config
 
 
 def _base_state(config: PythonPreviewConfig) -> dict[str, Any]:
@@ -642,7 +575,7 @@ def _base_state(config: PythonPreviewConfig) -> dict[str, Any]:
         "last_error": None,
         "last_boundary": None,
         "resume_attempts": 0,
-        "config_sha256": config.source_sha256,
+        "config_sha256": config.scientific_config_sha256,
     }
 
 
@@ -689,6 +622,11 @@ def _load_state(config: PythonPreviewConfig) -> dict[str, Any]:
     ):
         raise PythonPreviewWorkspaceError(
             "Python preview workspace protocol does not match this runtime"
+        )
+    if raw.get("config_sha256") != config.scientific_config_sha256:
+        raise PythonPreviewWorkspaceError(
+            "existing experiment scientific configuration differs from the "
+            "frozen workspace identity; use a new exp_id"
         )
     return dict(raw)
 
@@ -744,6 +682,22 @@ def _nonnegative_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def _fitness_value(profile: Mapping[str, Any]) -> float:
+    interval = profile.get("fitness_interval")
+    lower = interval.get("lower") if isinstance(interval, Mapping) else None
+    numerator = lower.get("numerator") if isinstance(lower, Mapping) else None
+    denominator = lower.get("denominator") if isinstance(lower, Mapping) else None
+    if (
+        not isinstance(numerator, int)
+        or isinstance(numerator, bool)
+        or not isinstance(denominator, int)
+        or isinstance(denominator, bool)
+        or denominator == 0
+    ):
+        raise PythonPreviewWorkspaceError("baseline fitness interval is malformed")
+    return numerator / denominator
+
+
 def _usage_total(
     candidates: Sequence[Mapping[str, Any]],
     anchor: Mapping[str, Any] | None,
@@ -786,7 +740,15 @@ def _evaluation_telemetry(root: Path) -> dict[str, Any]:
     selector_wall_seconds = 0.0
     action_wall_seconds = 0.0
     scoring_wall_seconds = 0.0
-    for path in sorted(root.glob("generations/generation-*/slot-*/evaluations/*.json.gz")):
+    evaluation_paths = sorted(
+        (
+            *root.glob("generations/generation-*/slot-*/evaluations/*.json.gz"),
+            *root.glob(
+                "generations/generation-*/baselines/*/evaluations/*.json.gz"
+            ),
+        )
+    )
+    for path in evaluation_paths:
         evaluation = _load_mapping(path)
         if evaluation is None:
             continue
@@ -1035,25 +997,43 @@ def _progress(
     generations = [_nonnegative_int(manifest.get("generation")) for manifest in manifests]
     evaluation_workload: Mapping[str, JsonValue] | None = None
     baseline_projection: dict[str, JsonValue] = {}
+    baseline_details: dict[str, JsonValue] = {}
     baseline_profiles: list[Mapping[str, Any]] = []
     if config.scientific_search is not None:
         baseline_projection = {
+            baseline: None for baseline in config.scientific_search.evaluation.baselines
+        }
+        baseline_details = {
             baseline: None for baseline in config.scientific_search.evaluation.baselines
         }
         for generation in generations:
             summary = _load_mapping(
                 root / "generations" / f"generation-{generation:04d}" / M10_BASELINE_FILENAME
             )
-            if summary is None:
-                continue
-            raw_baselines = summary.get("baselines")
-            if not isinstance(raw_baselines, Mapping):
-                continue
-            for baseline, profile in raw_baselines.items():
+            raw_baselines = (
+                summary.get("baselines")
+                if summary is not None and isinstance(summary.get("baselines"), Mapping)
+                else {}
+            )
+            for baseline in config.scientific_search.evaluation.baselines:
+                individual = _load_mapping(
+                    root
+                    / "generations"
+                    / f"generation-{generation:04d}"
+                    / "baselines"
+                    / baseline
+                    / M10_BASELINE_RESULT_FILENAME
+                )
+                profile = (
+                    individual.get("profile")
+                    if individual is not None
+                    else cast(Mapping[str, Any], raw_baselines).get(baseline)
+                )
                 if isinstance(profile, Mapping):
                     baseline_profiles.append(profile)
                     if generation == max(generations, default=-1):
-                        baseline_projection[str(baseline)] = cast(
+                        baseline_projection[baseline] = _fitness_value(profile)
+                        baseline_details[baseline] = cast(
                             JsonValue,
                             {
                                 "status": "complete",
@@ -1215,7 +1195,7 @@ def _progress(
         else 0.0,
     )
     raw_evaluation_progress = runtime.get("evaluation_progress", {})
-    evaluation_progress: dict[str, dict[str, int | float]] = {}
+    evaluation_progress: dict[str, dict[str, int | float | str]] = {}
     if isinstance(raw_evaluation_progress, Mapping):
         for raw_key, raw_value in raw_evaluation_progress.items():
             if not isinstance(raw_key, str) or not isinstance(raw_value, Mapping):
@@ -1225,11 +1205,24 @@ def _progress(
             evaluation_progress[raw_key] = {
                 "completed": min(completed, total),
                 "total": total,
+                "queued": _nonnegative_int(raw_value.get("queued")),
+                "running": _nonnegative_int(raw_value.get("running")),
+                "state": (
+                    str(raw_value["state"])
+                    if raw_value.get("state") in {"queued", "running", "terminal"}
+                    else "queued"
+                ),
             }
     active_evaluation_cases = sum(
         int(item["completed"]) for item in evaluation_progress.values()
     )
     active_evaluation_total = sum(int(item["total"]) for item in evaluation_progress.values())
+    raw_active_evaluation_work = runtime.get("active_evaluation_work", {})
+    active_evaluation_work = (
+        cast(Mapping[str, Mapping[str, JsonValue]], raw_active_evaluation_work)
+        if isinstance(raw_active_evaluation_work, Mapping)
+        else {}
+    )
     policy_invocations = telemetry["policy_invocations"]
     graph_score_attempts = telemetry["graph_score_attempts"]
     last_improvement = runtime.get("last_scientific_improvement_epoch_seconds")
@@ -1277,6 +1270,20 @@ def _progress(
         ):
             provider_projection["candidate_turns"] = reserved_turns
             provider_projection["turns"] = reserved_turns + int((root / "anchor.json.gz").is_file())
+    timing_profile = {
+        "phase_seconds": {
+            "provider": provider_wait,
+            "evaluator/scorer": evaluator_busy,
+            "sandbox": telemetry["sandbox_wall_seconds"],
+            "HEG scoring": telemetry["scoring_wall_seconds"],
+            "persistence": persistence,
+        },
+        "phase_calls": {
+            "provider": _nonnegative_int(runtime.get("provider_turns_submitted")),
+            "evaluator/scorer": _nonnegative_int(runtime.get("completed_evaluations")),
+        },
+        "unattributed_fraction": 0.0,
+    }
     candidates_by_id = {
         str(item["candidate_id"]): item
         for item in candidates
@@ -1400,10 +1407,16 @@ def _progress(
                 / slot
                 / "prepared-candidate.json.gz"
             ).is_file()
+            progress = evaluation_progress.get(f"candidate:{candidate_id}")
+            progress_state = (
+                str(progress.get("state"))
+                if isinstance(progress, Mapping)
+                else "queued"
+            )
             candidate_status = (
                 str(candidate.get("status"))
                 if candidate is not None
-                else "evaluating"
+                else f"evaluation_{progress_state}"
                 if prepared
                 else "model"
                 if current_provider_turn is not None
@@ -1418,7 +1431,6 @@ def _progress(
                 current_provider_turn is not None
             ):
                 active_provider_candidate_ids.append(candidate_id)
-            progress = evaluation_progress.get(f"candidate:{candidate_id}")
             slot_projection.append(
                 {
                     "candidate_id": candidate_id,
@@ -1579,6 +1591,19 @@ def _progress(
                 if evaluator_capacity_seconds > 0
                 else 0.0
             ),
+            "active_work": cast(
+                JsonValue,
+                [
+                    {
+                        "thread_id": thread_id,
+                        **dict(item),
+                    }
+                    for thread_id, item in sorted(
+                        active_evaluation_work.items()
+                    )
+                    if isinstance(item, Mapping)
+                ],
+            ),
         },
         "throughput": {
             "policy_invocations_per_second": (policy_invocations / elapsed if elapsed > 0 else 0.0),
@@ -1617,6 +1642,8 @@ def _progress(
             "persistence_seconds": persistence,
             "dominant_bottleneck": bottleneck,
         },
+        "profiling_enabled": True,
+        "timing_profile": timing_profile,
         "best": {
             "candidate_id": best_candidate_id,
             "fitness_interval": runtime.get("best_fitness_interval"),
@@ -1642,6 +1669,7 @@ def _progress(
         },
         "evaluation_workload": evaluation_workload,
         "baselines": baseline_projection,
+        "baseline_details": baseline_details,
         "equal_development_panel": (
             evaluation_workload.get("panel_hash") if evaluation_workload is not None else None
         ),
@@ -1655,9 +1683,7 @@ def python_preview_status(
 ) -> dict[str, Any]:
     """Return a bounded read-only status projection without provider contact."""
 
-    base_config = load_python_preview_config(config_path)
-    active_root = _active_recovery_root(base_config)
-    config = _config_for_root(base_config, active_root) if active_root is not None else base_config
+    config = load_python_preview_config(config_path)
     if not config.experiment_root.exists():
         return _progress(config, _base_state(config))
     try:
@@ -1886,9 +1912,7 @@ def request_python_preview_stop(
 ) -> dict[str, Any]:
     """Request a resumable stop at the next durable candidate boundary."""
 
-    base_config = load_python_preview_config(config_path)
-    active_root = _active_recovery_root(base_config)
-    config = _config_for_root(base_config, active_root) if active_root is not None else base_config
+    config = load_python_preview_config(config_path)
     state = _load_state(config)
     if state.get("state") not in {"ready", "running"} or state.get("run_terminal") is True:
         raise PythonPreviewWorkspaceError(
@@ -2059,12 +2083,7 @@ class _BackendOwnedEvaluator:
         self._evaluator = evaluator
         self._backend = backend
 
-    @staticmethod
-    def _process_name(candidate_id: str) -> str:
-        suffix = candidate_id.rsplit("-slot-", 1)[-1]
-        return f"mforge-eval-{suffix}"[:15]
-
-    def _name_score_worker(self, name: str) -> None:
+    def set_worker_name(self, name: str) -> None:
         setter = getattr(self._backend, "set_score_worker_name", None)
         if callable(setter):
             setter(name)
@@ -2076,7 +2095,6 @@ class _BackendOwnedEvaluator:
         case: DevelopmentCaseV1,
         candidate_id: str,
     ) -> Mapping[str, JsonValue]:
-        self._name_score_worker(self._process_name(candidate_id))
         return self._evaluator.evaluate(
             source=source,
             case=case,
@@ -2090,7 +2108,6 @@ class _BackendOwnedEvaluator:
         case: DevelopmentCaseV1,
         generation: int,
     ) -> Mapping[str, JsonValue]:
-        self._name_score_worker("mforge-eval-base")
         return self._evaluator.evaluate_baseline(
             baseline=baseline,
             case=case,
@@ -2107,27 +2124,29 @@ def run_python_preview(
     provider_factory: ProviderFactory = _default_provider,
     backend_factory: BackendFactory = _default_backend,
     evaluator_factory: EvaluatorFactory = _default_evaluator,
-    provenance_guard: ProvenanceGuard = _disabled_provenance_guard,
+    provenance_guard: ProvenanceGuard = ensure_m5_acceptance_provenance,
     auth_available: Callable[[Path], bool] = Path.is_file,
     resume_budget: ScientificResumeBudgetV1 | None = None,
     force_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Run or resume the explicit ordinary-Python preview."""
 
-    base_config = load_python_preview_config(config_path)
-    config = _run_config(base_config)
-    recovery_root = (
-        config.experiment_root
-        if config.experiment_root != base_config.experiment_root
-        else None
-    )
+    config = load_python_preview_config(config_path)
     existed = config.experiment_root.exists()
-    if existed:
-        state = _load_state(config)
-    else:
-        state = _initialize_workspace(config)
-        if recovery_root is not None and config.scientific_search is not None:
-            _seed_recovery_artifacts(base_config.experiment_root, recovery_root)
+    state = _load_state(config) if existed else _initialize_workspace(config)
+    if existed and _provider_runtime_missing(config.experiment_root):
+        failed = {
+            **state,
+            "state": "failed",
+            "resumable": False,
+            "run_terminal": True,
+            "terminal_reason": "provider_runtime_missing",
+            "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
+            "scientific_success": False,
+            "last_error": "FileNotFoundError",
+        }
+        _write_state(config, failed)
+        return _progress(config, failed)
     if resume_budget is not None and (
         not existed or config.scientific_search is None or state.get("resumable") is not True
     ):
@@ -2171,10 +2190,11 @@ def run_python_preview(
     try:
         provenance_guard(
             workspace=config.experiment_root,
-            resume=(config.experiment_root / M5_PROVENANCE_FILENAME).is_file(),
+            resume=existed,
             repository_root=_PROJECT_ROOT,
             heg_root=config.heg_repo,
             experiment_config=config.source_path,
+            experiment_config_sha256=config.scientific_config_sha256,
             model=config.model,
             effort=config.effort,
             system_prompt=system_prompt,

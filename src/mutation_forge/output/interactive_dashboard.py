@@ -70,6 +70,7 @@ ACTIVE_STATES = {
     "validating",
     "probing",
     "evaluating",
+    "committing",
 }
 STATE_STYLES = {
     "queued": "grey62",
@@ -80,6 +81,7 @@ STATE_STYLES = {
     "validating": "blue",
     "probing": "magenta",
     "evaluating": "dark_orange",
+    "committing": "blue",
     "stopping": "yellow",
     "accepted": "green",
     "duplicate": "dim blue",
@@ -100,6 +102,7 @@ STATE_ICONS = {
     "validating": "V",
     "probing": "P",
     "evaluating": "▲",
+    "committing": "◆",
     "accepted": "✓",
     "duplicate": "D",
     "invalid": "×",
@@ -383,6 +386,7 @@ def dashboard_state_from_python_status(
     throughput = mapping("throughput")
     activity = mapping("scientific_activity")
     phase = mapping("phase_timings")
+    timing_profile = mapping("timing_profile")
     best = mapping("best")
     exact = mapping("exact_verification")
     workload = mapping("evaluation_workload")
@@ -420,16 +424,6 @@ def dashboard_state_from_python_status(
             if isinstance(candidate_id, str):
                 programs_by_candidate[candidate_id] = raw_program
     raw_slots = status.get("slots")
-    raw_active_candidate_ids = provider.get("active_candidate_ids")
-    active_candidate_ids = (
-        frozenset(item for item in raw_active_candidate_ids if isinstance(item, str))
-        if isinstance(raw_active_candidate_ids, Sequence)
-        and not isinstance(raw_active_candidate_ids, str | bytes)
-        else frozenset()
-    )
-    provider_active = integer(provider.get("active"))
-    evaluator_active = integer(evaluators.get("active"))
-    evaluation_cases_active = integer(evaluation_cases.get("active_total"))
     evaluation_progress = status.get("evaluation_progress")
     evaluation_progress = evaluation_progress if isinstance(evaluation_progress, Mapping) else {}
     if isinstance(raw_slots, Sequence) and not isinstance(raw_slots, str | bytes):
@@ -440,29 +434,15 @@ def dashboard_state_from_python_status(
             candidate_id = str(raw.get("candidate_id", raw.get("slot", "—")))
             raw_state = str(raw.get("state", "queued"))
             raw_phase = str(raw.get("phase", "queued"))
-            reset_stale_timing = False
-            if raw_state == "model" and raw_phase == "provider":
-                if active_candidate_ids:
-                    if candidate_id not in active_candidate_ids:
-                        raw_state = "queued"
-                        reset_stale_timing = True
-                elif provider_active == 0:
-                    raw_state = "queued"
-                    reset_stale_timing = True
-            elif (
-                raw_state == "evaluating"
-                and raw_phase == "evaluation"
-                and evaluator_active == 0
-                and evaluation_cases_active == 0
-            ):
-                raw_state = "queued"
-                reset_stale_timing = True
             state = {
                 "evaluated": "accepted",
                 "contract_invalid": "invalid",
                 "provider_failed": "failed",
                 "evaluation_infrastructure_failure": "failed",
                 "duplicate": "duplicate",
+                "evaluation_queued": "queued",
+                "evaluation_running": "evaluating",
+                "evaluation_terminal": "committing",
             }.get(raw_state, raw_state)
             raw_usage = raw.get("usage")
             raw_usage = raw_usage if isinstance(raw_usage, Mapping) else {}
@@ -475,9 +455,6 @@ def dashboard_state_from_python_status(
             evaluation_total = optional_integer(raw_evaluation_total)
             started_epoch = number(raw.get("started_epoch_seconds"))
             slot_elapsed = number(raw.get("elapsed_seconds"))
-            if reset_stale_timing:
-                started_epoch = 0.0
-                slot_elapsed = 0.0
             groups.setdefault(generation, []).append(
                 DashboardSlot(
                     slot=candidate_id,
@@ -605,12 +582,15 @@ def dashboard_state_from_python_status(
     best_program_hash = str(best_program.get("program_hash") or "—")
     random_baseline = baselines.get("random")
     structural_baseline = baselines.get("structural")
-    baseline_random = fitness_objective(
-        random_baseline.get("fitness_interval") if isinstance(random_baseline, Mapping) else None
+    baseline_random = (
+        float(random_baseline)
+        if isinstance(random_baseline, int | float) and not isinstance(random_baseline, bool)
+        else None
     )
-    baseline_structural = fitness_objective(
-        structural_baseline.get("fitness_interval")
-        if isinstance(structural_baseline, Mapping)
+    baseline_structural = (
+        float(structural_baseline)
+        if isinstance(structural_baseline, int | float)
+        and not isinstance(structural_baseline, bool)
         else None
     )
     raw_orders = workload.get("orders")
@@ -693,21 +673,8 @@ def dashboard_state_from_python_status(
         evaluation_horizon=optional_integer(workload.get("horizon")),
         improvement_rate=number(throughput.get("accepted_rewrites_per_second")),
         evaluation_rate=number(throughput.get("policy_invocations_per_second")),
-        profiling_enabled=status.get("state") != "PAUSED_FOR_BUDGET",
-        timing_profile={
-            "phase_seconds": {
-                "provider": number(phase.get("provider_wait_seconds")),
-                "evaluator/scorer": number(phase.get("evaluator_busy_seconds")),
-                "sandbox": number(phase.get("sandbox_seconds")),
-                "HEG scoring": number(phase.get("heg_scoring_seconds")),
-                "persistence": number(phase.get("persistence_seconds")),
-            },
-            "phase_calls": {
-                "provider": integer(provider.get("program_turns_reserved")),
-                "evaluator/scorer": integer(evaluators.get("completed")),
-            },
-            "unattributed_fraction": 0.0,
-        },
+        profiling_enabled=status.get("profiling_enabled") is True,
+        timing_profile=dict(timing_profile),
         cumulative_usage=token_usage,
         session_usage=token_usage,
         generations=generation_groups,
@@ -4145,6 +4112,8 @@ def _objective(value: float | None) -> str:
     if value is None:
         return "—"
     truncated = Decimal(str(value)).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+    if truncated == 0:
+        return "0"
     return f"{truncated:.4f}"
 
 

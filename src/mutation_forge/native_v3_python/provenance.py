@@ -170,12 +170,18 @@ def build_m5_acceptance_provenance(
     output_schema: Mapping[str, Any],
     specification_ack_schema: Mapping[str, Any],
     runtime_limits: PolicyRuntimeLimitsV1 | None = None,
+    experiment_config_sha256: str | None = None,
     git_identity_loader: GitIdentityLoader = read_git_repository_identity,
 ) -> dict[str, JsonValue]:
     """Build the deterministic provenance snapshot for one official run."""
 
     if not model or not effort or not system_prompt or not request_template:
         raise ValueError("M5 provenance inputs must be non-empty")
+    if experiment_config_sha256 is not None and (
+        len(experiment_config_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in experiment_config_sha256)
+    ):
+        raise ValueError("experiment_config_sha256 must be lowercase SHA-256")
     repository = (
         read_git_repository_identity(
             repository_root,
@@ -190,8 +196,10 @@ def build_m5_acceptance_provenance(
         "protocol_id": M5_PROVENANCE_PROTOCOL_ID,
         "mutation_forge": repository.as_dict(),
         "heg": heg.as_dict(),
-        "experiment_config_sha256": _sha256_bytes(
-            experiment_config.resolve(strict=True).read_bytes()
+        "experiment_config_sha256": (
+            experiment_config_sha256
+            if experiment_config_sha256 is not None
+            else _sha256_bytes(experiment_config.resolve(strict=True).read_bytes())
         ),
         "model": model,
         "reasoning_effort": effort,
@@ -255,6 +263,7 @@ def ensure_m5_acceptance_provenance(
     output_schema: Mapping[str, Any],
     specification_ack_schema: Mapping[str, Any],
     runtime_limits: PolicyRuntimeLimitsV1 | None = None,
+    experiment_config_sha256: str | None = None,
     git_identity_loader: GitIdentityLoader = read_git_repository_identity,
 ) -> dict[str, JsonValue]:
     """Persist or compare provenance before App Server construction."""
@@ -271,6 +280,7 @@ def ensure_m5_acceptance_provenance(
         output_schema=output_schema,
         specification_ack_schema=specification_ack_schema,
         runtime_limits=runtime_limits,
+        experiment_config_sha256=experiment_config_sha256,
         git_identity_loader=git_identity_loader,
     )
     repository = current["mutation_forge"]
