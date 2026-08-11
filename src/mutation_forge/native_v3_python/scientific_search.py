@@ -6,7 +6,7 @@ import hashlib
 import json
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -40,6 +40,8 @@ M10_STOP_FILENAME = "m10-stop.json.gz"
 M10_PREPARED_FILENAME = "prepared-candidate.json.gz"
 M10_BASELINE_FILENAME = "generation-baselines.json.gz"
 M10_BASELINE_PROTOCOL_ID = "mforge.native.python_generation_baselines.v1"
+M10_BASELINE_RESULT_FILENAME = "baseline-result.json.gz"
+M10_BASELINE_RESULT_PROTOCOL_ID = "mforge.native.python_generation_baseline.v1"
 
 
 class _ProviderTurnBudgetExhausted(core.M5SearchError):
@@ -133,6 +135,20 @@ class ScientificSearchOptionsV2:
             "provider_total_turn_limit": self.provider_total_turn_limit,
             "validated_queue_target": self.validated_queue_target,
             "validated_queue_capacity": self.validated_queue_capacity,
+            "stop_on_verified": self.stop_on_verified,
+            "resume_enabled": self.resume_enabled,
+            "replace_terminal_slots": self.replace_terminal_slots,
+            "evaluation": self.evaluation.as_dict(),
+        }
+
+    def scientific_identity_dict(self) -> dict[str, JsonValue]:
+        """Return experiment semantics without per-invocation execution controls."""
+
+        return {
+            "generation_limit": self.generation_limit,
+            "primary_program_slots": self.primary_program_slots,
+            "repair_turn_limit": self.repair_turn_limit,
+            "provider_total_turn_limit": self.provider_total_turn_limit,
             "stop_on_verified": self.stop_on_verified,
             "resume_enabled": self.resume_enabled,
             "replace_terminal_slots": self.replace_terminal_slots,
@@ -251,7 +267,6 @@ def _generation_snapshot(
     policy_schema: Mapping[str, Any],
     panel: tuple[core.DevelopmentCaseV1, ...],
     options: ScientificSearchOptionsV2,
-    provider_turn_timeout_seconds: float,
 ) -> dict[str, JsonValue]:
     model_projection = memory.get("model_projection")
     if not isinstance(model_projection, Mapping):
@@ -297,21 +312,12 @@ def _generation_snapshot(
         panel=tuple(case.as_dict() for case in panel),
         budgets={
             "generation_limit": options.generation_limit,
-            "evaluator_workers": options.evaluator_workers,
-            "provider_concurrency": options.provider_concurrency,
-            "wall_seconds_milliseconds": (
-                round(options.wall_seconds * 1000) if options.wall_seconds is not None else None
-            ),
-            "max_total_tokens_per_hour": (options.max_total_tokens_per_hour),
             "primary_program_slots": options.primary_program_slots,
             "repair_turn_limit": options.repair_turn_limit,
             "provider_total_turn_limit": options.provider_total_turn_limit,
-            "validated_queue_target": options.validated_queue_target,
-            "validated_queue_capacity": options.validated_queue_capacity,
             "stop_on_verified": options.stop_on_verified,
             "resume_enabled": options.resume_enabled,
             "replace_terminal_slots": options.replace_terminal_slots,
-            "provider_turn_timeout_milliseconds": round(provider_turn_timeout_seconds * 1000),
         },
     ).as_dict()
     core._assert_model_prompt_hygiene(
@@ -431,6 +437,7 @@ class _RuntimeTelemetry:
             state["active_evaluators"] = 0
             state["queued_evaluations"] = 0
             state["active_provider_turns"] = 0
+            state["active_evaluation_work"] = {}
             # Runtime counters describe the current invocation.  Scientific
             # lineage remains retained above, but stale in-flight UI rows must
             # not be presented as work started by this invocation.
@@ -467,6 +474,7 @@ class _RuntimeTelemetry:
                 "failed_evaluations": 0,
                 "evaluator_instances": 0,
                 "evaluation_progress": {},
+                "active_evaluation_work": {},
                 "evaluation_cases_completed": 0,
                 "evaluation_cases_total": 0,
                 "first_valid_program_seconds": None,
@@ -751,9 +759,11 @@ class _RuntimeTelemetry:
             self._state["evaluator_instances"] = int(self._state["evaluator_instances"]) + 1
             self._persist_locked()
 
-    def evaluator_queued(self) -> None:
+    def evaluator_queued(self, count: int = 1) -> None:
+        if count < 0:
+            raise ValueError("queued evaluator work cannot be negative")
         with self._lock:
-            queued = int(self._state["queued_evaluations"]) + 1
+            queued = int(self._state["queued_evaluations"]) + count
             self._state["queued_evaluations"] = queued
             self._state["peak_queued_evaluations"] = max(
                 queued,
@@ -761,7 +771,13 @@ class _RuntimeTelemetry:
             )
             self._persist_locked()
 
-    def evaluator_started(self, queue_wait_seconds: float) -> None:
+    def evaluator_started(
+        self,
+        queue_wait_seconds: float,
+        *,
+        owner: str,
+        case_id: str,
+    ) -> None:
         with self._lock:
             self._state["queued_evaluations"] = max(
                 0,
@@ -776,9 +792,43 @@ class _RuntimeTelemetry:
                 active,
                 int(self._state["peak_active_evaluators"]),
             )
+            active_work = self._state.setdefault("active_evaluation_work", {})
+            if not isinstance(active_work, dict):
+                raise core.M5InfrastructureError("M10 active evaluation work is malformed")
+            active_work[str(threading.get_native_id())] = {
+                "owner": owner,
+                "case_id": case_id,
+                "started_epoch_seconds": time.time(),
+            }
+            progress = self._state.setdefault("evaluation_progress", {})
+            item = progress.get(owner) if isinstance(progress, dict) else None
+            if isinstance(item, dict):
+                item["queued"] = max(0, int(item.get("queued", 0)) - 1)
+                item["running"] = int(item.get("running", 0)) + 1
+                item["state"] = "running"
             self._persist_locked()
 
-    def evaluator_finished(self, elapsed: float, *, failed: bool) -> None:
+    def evaluator_cancelled(self, count: int, *, owner: str) -> None:
+        if count < 0:
+            raise ValueError("cancelled evaluator work cannot be negative")
+        with self._lock:
+            self._state["queued_evaluations"] = max(
+                0,
+                int(self._state["queued_evaluations"]) - count,
+            )
+            progress = self._state.setdefault("evaluation_progress", {})
+            item = progress.get(owner) if isinstance(progress, dict) else None
+            if isinstance(item, dict):
+                item["queued"] = max(0, int(item.get("queued", 0)) - count)
+            self._persist_locked()
+
+    def evaluator_finished(
+        self,
+        elapsed: float,
+        *,
+        owner: str,
+        failed: bool,
+    ) -> None:
         with self._lock:
             self._state["active_evaluators"] = max(
                 0,
@@ -787,29 +837,44 @@ class _RuntimeTelemetry:
             self._state["evaluator_busy_seconds"] = (
                 float(self._state["evaluator_busy_seconds"]) + elapsed
             )
-            key = "failed_evaluations" if failed else "completed_evaluations"
-            self._state[key] = int(self._state[key]) + 1
+            counter = "failed_evaluations" if failed else "completed_evaluations"
+            self._state[counter] = int(self._state[counter]) + 1
+            active_work = self._state.setdefault("active_evaluation_work", {})
+            if isinstance(active_work, dict):
+                active_work.pop(str(threading.get_native_id()), None)
+            progress = self._state.setdefault("evaluation_progress", {})
+            item = progress.get(owner) if isinstance(progress, dict) else None
+            if isinstance(item, dict):
+                item["running"] = max(0, int(item.get("running", 0)) - 1)
             self._persist_locked()
 
-    def evaluation_started(self, *, key: str, total: int) -> None:
-        if not key or total < 0:
+    def evaluation_started(
+        self,
+        *,
+        key: str,
+        total: int,
+        completed: int,
+        queued: int,
+    ) -> None:
+        if not key or total < 0 or not 0 <= completed <= total or queued < 0:
             raise ValueError("evaluation progress identity or total is invalid")
         with self._lock:
             progress = self._state.setdefault("evaluation_progress", {})
             if not isinstance(progress, dict):
                 raise core.M5InfrastructureError("M10 evaluation progress is malformed")
             progress[key] = {
-                "completed": 0,
+                "completed": completed,
                 "total": total,
+                "queued": queued,
+                "running": 0,
+                "state": "queued" if queued else "terminal",
                 "started_epoch_seconds": time.time(),
             }
-            self._state["evaluation_cases_total"] = max(
-                int(self._state.get("evaluation_cases_total", 0)),
-                sum(
-                    int(item.get("total", 0))
-                    for item in progress.values()
-                    if isinstance(item, Mapping)
-                ),
+            self._state["evaluation_cases_completed"] = (
+                int(self._state.get("evaluation_cases_completed", 0)) + completed
+            )
+            self._state["evaluation_cases_total"] = (
+                int(self._state.get("evaluation_cases_total", 0)) + total
             )
             self._persist_locked()
 
@@ -837,6 +902,18 @@ class _RuntimeTelemetry:
             progress = self._state.setdefault("evaluation_progress", {})
             if not isinstance(progress, dict):
                 raise core.M5InfrastructureError("M10 evaluation progress is malformed")
+            item = progress.get(key)
+            if isinstance(item, dict):
+                item["queued"] = 0
+                item["running"] = 0
+                item["state"] = "terminal"
+            self._persist_locked()
+
+    def evaluation_committed(self, *, key: str) -> None:
+        with self._lock:
+            progress = self._state.setdefault("evaluation_progress", {})
+            if not isinstance(progress, dict):
+                raise core.M5InfrastructureError("M10 evaluation progress is malformed")
             progress.pop(key, None)
             self._persist_locked()
 
@@ -859,6 +936,7 @@ class _RuntimeTelemetry:
             self._state["active_evaluators"] = 0
             self._state["queued_evaluations"] = 0
             self._state["active_provider_turns"] = 0
+            self._state["active_evaluation_work"] = {}
             self._state["terminal_reason"] = reason
             self._persist_locked()
 
@@ -876,8 +954,25 @@ class _EvaluationOutcome:
     failure_case_id: str | None = None
 
 
+@dataclass(slots=True)
+class _PanelWork:
+    key: str
+    panel: tuple[core.DevelopmentCaseV1, ...]
+    evaluation_paths: tuple[Path, ...]
+    operation: Callable[[M10ScientificEvaluator, core.DevelopmentCaseV1], Mapping[str, JsonValue]]
+    future: Future[_EvaluationOutcome]
+    payloads: list[dict[str, Any] | None]
+    queued_at: float
+    remaining_indices: deque[int]
+    finalize: Callable[[tuple[dict[str, Any], ...]], None] | None = None
+    running: int = 0
+    failure_type: str | None = None
+    failure_message: str | None = None
+    failure_case_id: str | None = None
+
+
 class _ConcurrentEvaluatorPool:
-    """Thread pool whose workers each own one evaluator/backend chain."""
+    """Bounded fair case scheduler with one private evaluator per worker."""
 
     def __init__(
         self,
@@ -889,30 +984,172 @@ class _ConcurrentEvaluatorPool:
     ) -> None:
         self._factory = evaluator_factory
         self._telemetry = telemetry
-        self._local = threading.local()
         self._owned: list[M10ScientificEvaluator] = []
         self._owned_lock = threading.Lock()
         self._closing = False
-        self._capacity = threading.BoundedSemaphore(queue_capacity)
-        self._executor = ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="mforge-m10-evaluator",
+        self._force_closing = False
+        self._panel_capacity = threading.BoundedSemaphore(queue_capacity)
+        self._condition = threading.Condition()
+        self._runnable: deque[_PanelWork] = deque()
+        self._threads = tuple(
+            threading.Thread(
+                target=self._worker,
+                name=f"mforge-m10-evaluator-{index:02d}",
+            )
+            for index in range(workers)
         )
+        for thread in self._threads:
+            thread.start()
 
-    def _evaluator(self) -> M10ScientificEvaluator:
-        evaluator = getattr(self._local, "evaluator", None)
-        if evaluator is None:
-            evaluator = self._factory()
-            self._local.evaluator = evaluator
-            with self._owned_lock:
+    def _worker(self) -> None:
+        evaluator: M10ScientificEvaluator | None = None
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closing or bool(self._runnable))
+                if self._closing and (self._force_closing or not self._runnable):
+                    break
+                work = self._runnable.popleft()
+                if work.failure_type is not None or not work.remaining_indices:
+                    continue
+                index = work.remaining_indices.popleft()
+                work.running += 1
+                if work.remaining_indices:
+                    self._runnable.append(work)
+                case = work.panel[index]
+            started = time.monotonic()
+            failed = False
+            payload: dict[str, Any] | None = None
+            self._telemetry.evaluator_started(
+                started - work.queued_at,
+                owner=work.key,
+                case_id=case.case_id,
+            )
+            try:
+                if evaluator is None:
+                    evaluator = self._factory()
+                    set_worker_name = getattr(evaluator, "set_worker_name", None)
+                    if callable(set_worker_name):
+                        worker_suffix = threading.current_thread().name.rsplit("-", 1)[-1]
+                        set_worker_name(f"mforge-eval-{worker_suffix}"[:15])
+                    with self._owned_lock:
+                        if self._force_closing:
+                            close = getattr(evaluator, "close", None)
+                            if callable(close):
+                                close()
+                            raise RuntimeError("evaluator pool is closing")
+                        self._owned.append(evaluator)
+                    self._telemetry.evaluator_created()
+                payload = dict(work.operation(evaluator, case))
+                self._telemetry.timed_persist(
+                    partial(_write_or_verify, work.evaluation_paths[index], payload)
+                )
+            except Exception as error:
+                failed = True
+                with self._condition:
+                    if work.failure_type is None:
+                        work.failure_type = type(error).__name__
+                        work.failure_message = str(error)[:1024]
+                        work.failure_case_id = case.case_id
+                        self._runnable = deque(item for item in self._runnable if item is not work)
+                        cancelled = len(work.remaining_indices)
+                        work.remaining_indices.clear()
+                        self._telemetry.evaluator_cancelled(
+                            cancelled,
+                            owner=work.key,
+                        )
+            finally:
+                self._telemetry.evaluator_finished(
+                    time.monotonic() - started,
+                    owner=work.key,
+                    failed=failed,
+                )
+            with self._condition:
+                if payload is not None:
+                    work.payloads[index] = payload
+                    self._telemetry.evaluation_case_completed(
+                        key=work.key,
+                        completed=sum(item is not None for item in work.payloads),
+                    )
+                work.running -= 1
+                if (
+                    work.running == 0
+                    and (work.failure_type is not None or not work.remaining_indices)
+                ):
+                    self._finish_work(work)
+                self._condition.notify_all()
+
+    def _finish_work(self, work: _PanelWork) -> None:
+        payloads = tuple(item for item in work.payloads if item is not None)
+        if work.failure_type is None and len(payloads) == len(work.panel):
+            try:
+                if work.finalize is not None:
+                    work.finalize(payloads)
+            except Exception as error:
+                work.failure_type = type(error).__name__
+                work.failure_message = str(error)[:1024]
+        self._telemetry.evaluation_finished(key=work.key)
+        work.future.set_result(
+            _EvaluationOutcome(
+                payloads,
+                work.failure_type,
+                work.failure_message,
+                work.failure_case_id,
+            )
+        )
+        self._panel_capacity.release()
+
+    def _submit_panel(
+        self,
+        *,
+        key: str,
+        panel: tuple[core.DevelopmentCaseV1, ...],
+        evaluation_paths: tuple[Path, ...],
+        operation: Callable[
+            [M10ScientificEvaluator, core.DevelopmentCaseV1],
+            Mapping[str, JsonValue],
+        ],
+        finalize: Callable[[tuple[dict[str, Any], ...]], None] | None = None,
+    ) -> Future[_EvaluationOutcome]:
+        self._panel_capacity.acquire()
+        future: Future[_EvaluationOutcome] = Future()
+        payloads: list[dict[str, Any] | None] = [None] * len(panel)
+        missing: deque[int] = deque()
+        try:
+            for index, path in enumerate(evaluation_paths):
+                if path.is_file():
+                    payloads[index] = core._load_mapping(path)
+                else:
+                    missing.append(index)
+            self._telemetry.evaluation_started(
+                key=key,
+                total=len(panel),
+                completed=len(panel) - len(missing),
+                queued=len(missing),
+            )
+            self._telemetry.evaluator_queued(len(missing))
+            work = _PanelWork(
+                key=key,
+                panel=panel,
+                evaluation_paths=evaluation_paths,
+                operation=operation,
+                future=future,
+                payloads=payloads,
+                queued_at=time.monotonic(),
+                remaining_indices=missing,
+                finalize=finalize,
+            )
+            with self._condition:
                 if self._closing:
-                    close = getattr(evaluator, "close", None)
-                    if callable(close):
-                        close()
                     raise RuntimeError("evaluator pool is closing")
-                self._owned.append(evaluator)
-            self._telemetry.evaluator_created()
-        return cast(M10ScientificEvaluator, evaluator)
+                if missing:
+                    self._runnable.append(work)
+                    self._condition.notify_all()
+                else:
+                    self._finish_work(work)
+            return future
+        except BaseException:
+            self._panel_capacity.release()
+            raise
 
     def submit(
         self,
@@ -922,80 +1159,17 @@ class _ConcurrentEvaluatorPool:
         candidate_id: str,
         slot_dir: Path,
     ) -> Future[_EvaluationOutcome]:
-        self._capacity.acquire()
-        self._telemetry.evaluator_queued()
-        queued_at = time.monotonic()
-
-        def evaluate() -> _EvaluationOutcome:
-            started = time.monotonic()
-            self._telemetry.evaluator_started(started - queued_at)
-            payloads: list[dict[str, Any]] = []
-            failed = False
-            progress_key = f"candidate:{candidate_id}"
-            progress_started = False
-            try:
-                try:
-                    evaluator = self._evaluator()
-                except Exception as error:
-                    failed = True
-                    return _EvaluationOutcome(
-                        (),
-                        type(error).__name__,
-                        str(error)[:1024],
-                        panel[0].case_id,
-                    )
-                self._telemetry.evaluation_started(
-                    key=progress_key,
-                    total=len(panel),
-                )
-                progress_started = True
-                for case in panel:
-                    evaluation_path = slot_dir / "evaluations" / f"{case.case_id}.json.gz"
-                    if evaluation_path.is_file():
-                        payloads.append(core._load_mapping(evaluation_path))
-                        self._telemetry.evaluation_case_completed(
-                            key=progress_key,
-                            completed=len(payloads),
-                        )
-                        continue
-                    try:
-                        payloads.append(
-                            dict(
-                                evaluator.evaluate(
-                                    source=source,
-                                    case=case,
-                                    candidate_id=candidate_id,
-                                )
-                            )
-                        )
-                    except Exception as error:
-                        failed = True
-                        return _EvaluationOutcome(
-                            tuple(payloads),
-                            type(error).__name__,
-                            str(error)[:1024],
-                            case.case_id,
-                        )
-                    self._telemetry.evaluation_case_completed(
-                        key=progress_key,
-                        completed=len(payloads),
-                    )
-                return _EvaluationOutcome(tuple(payloads))
-            finally:
-                if progress_started:
-                    self._telemetry.evaluation_finished(key=progress_key)
-                self._telemetry.evaluator_finished(
-                    time.monotonic() - started,
-                    failed=failed,
-                )
-
-        try:
-            future = self._executor.submit(evaluate)
-        except BaseException:
-            self._capacity.release()
-            raise
-        future.add_done_callback(lambda _: self._capacity.release())
-        return future
+        paths = tuple(slot_dir / "evaluations" / f"{case.case_id}.json.gz" for case in panel)
+        return self._submit_panel(
+            key=f"candidate:{candidate_id}",
+            panel=panel,
+            evaluation_paths=paths,
+            operation=lambda evaluator, case: evaluator.evaluate(
+                source=source,
+                case=case,
+                candidate_id=candidate_id,
+            ),
+        )
 
     def submit_baseline(
         self,
@@ -1005,108 +1179,49 @@ class _ConcurrentEvaluatorPool:
         generation: int,
         generation_dir: Path,
     ) -> Future[_EvaluationOutcome]:
-        self._capacity.acquire()
-        self._telemetry.evaluator_queued()
-        queued_at = time.monotonic()
+        baseline_dir = generation_dir / "baselines" / baseline
+        paths = tuple(baseline_dir / "evaluations" / f"{case.case_id}.json.gz" for case in panel)
 
-        def evaluate() -> _EvaluationOutcome:
-            started = time.monotonic()
-            self._telemetry.evaluator_started(started - queued_at)
-            payloads: list[dict[str, Any]] = []
-            failed = False
-            progress_key = f"baseline:{baseline}"
-            progress_started = False
-            try:
-                try:
-                    evaluator = self._evaluator()
-                except Exception as error:
-                    failed = True
-                    return _EvaluationOutcome(
-                        (),
-                        type(error).__name__,
-                        str(error)[:1024],
-                        panel[0].case_id,
-                    )
-                self._telemetry.evaluation_started(
-                    key=progress_key,
-                    total=len(panel),
+        def finalize(payloads: tuple[dict[str, Any], ...]) -> None:
+            result = {
+                "protocol_id": M10_BASELINE_RESULT_PROTOCOL_ID,
+                "generation": generation,
+                "baseline": baseline,
+                "panel_hash": core.panel_hash(panel),
+                "evaluation_case_count": len(payloads),
+                "profile": core.aggregate_behavior(payloads),
+            }
+            self._telemetry.timed_persist(
+                partial(
+                    _write_or_verify,
+                    baseline_dir / M10_BASELINE_RESULT_FILENAME,
+                    result,
                 )
-                progress_started = True
-                for case in panel:
-                    evaluation_path = (
-                        generation_dir
-                        / "baselines"
-                        / baseline
-                        / "evaluations"
-                        / f"{case.case_id}.json.gz"
-                    )
-                    if evaluation_path.is_file():
-                        payloads.append(core._load_mapping(evaluation_path))
-                        self._telemetry.evaluation_case_completed(
-                            key=progress_key,
-                            completed=len(payloads),
-                        )
-                        continue
-                    try:
-                        payloads.append(
-                            dict(
-                                evaluator.evaluate_baseline(
-                                    baseline=baseline,
-                                    case=case,
-                                    generation=generation,
-                                )
-                            )
-                        )
-                    except Exception as error:
-                        failed = True
-                        return _EvaluationOutcome(
-                            tuple(payloads),
-                            type(error).__name__,
-                            str(error)[:1024],
-                            case.case_id,
-                        )
-                    self._telemetry.evaluation_case_completed(
-                        key=progress_key,
-                        completed=len(payloads),
-                    )
-                return _EvaluationOutcome(tuple(payloads))
-            finally:
-                if progress_started:
-                    self._telemetry.evaluation_finished(key=progress_key)
-                self._telemetry.evaluator_finished(
-                    time.monotonic() - started,
-                    failed=failed,
-                )
+            )
 
-        try:
-            future = self._executor.submit(evaluate)
-        except BaseException:
-            self._capacity.release()
-            raise
-        future.add_done_callback(lambda _: self._capacity.release())
-        return future
+        return self._submit_panel(
+            key=f"baseline:{baseline}",
+            panel=panel,
+            evaluation_paths=paths,
+            operation=lambda evaluator, case: evaluator.evaluate_baseline(
+                baseline=baseline,
+                case=case,
+                generation=generation,
+            ),
+            finalize=finalize,
+        )
 
     def close(self, *, force: bool = False) -> Exception | None:
         errors: list[Exception] = []
+        with self._condition:
+            self._closing = True
+            self._force_closing = force
+            if force:
+                self._runnable.clear()
+            self._condition.notify_all()
         if force:
-            # Stop accepting/running queued evaluator work before closing the
-            # owned backends.  A normal shutdown waits for evaluator threads
-            # first, but an in-flight HEG score call can only be released by
-            # closing its score worker.
             with self._owned_lock:
-                self._closing = True
                 owned = tuple(self._owned)
-            try:
-                self._executor.shutdown(wait=False, cancel_futures=True)
-            except Exception as error:
-                errors.append(error)
-        else:
-            try:
-                self._executor.shutdown(wait=True, cancel_futures=False)
-            except Exception as error:
-                errors.append(error)
-            owned = tuple(self._owned)
-        if force:
             for evaluator in owned:
                 close = getattr(evaluator, "close", None)
                 if callable(close):
@@ -1114,12 +1229,11 @@ class _ConcurrentEvaluatorPool:
                         close()
                     except Exception as error:
                         errors.append(error)
-        try:
-            if force:
-                self._executor.shutdown(wait=True, cancel_futures=True)
-        except Exception as error:
-            errors.append(error)
+        for thread in self._threads:
+            thread.join()
         if not force:
+            with self._owned_lock:
+                owned = tuple(self._owned)
             for evaluator in owned:
                 close = getattr(evaluator, "close", None)
                 if callable(close):
@@ -1549,11 +1663,6 @@ def _commit_pending(
             raise core.M5OperatorStop("immediate operator stop requested")
         time.sleep(0.05)
     outcome = pending.future.result()
-    for case, evaluation in zip(panel, outcome.payloads, strict=False):
-        evaluation_path = pending.slot_dir / "evaluations" / f"{case.case_id}.json.gz"
-        telemetry.timed_persist(partial(_write_or_verify, evaluation_path, evaluation))
-        if boundary_hook is not None:
-            boundary_hook(f"{pending.candidate_id}_evaluation_{case.case_id}")
     base = {
         key: value
         for key, value in pending.prepared.items()
@@ -1579,6 +1688,7 @@ def _commit_pending(
             },
         }
         telemetry.timed_persist(partial(_write_or_verify, candidate_path, candidate))
+        telemetry.evaluation_committed(key=f"candidate:{pending.candidate_id}")
         if boundary_hook is not None:
             boundary_hook(f"{pending.candidate_id}_committed")
         pending.prepared = None
@@ -1591,9 +1701,15 @@ def _commit_pending(
                 f"{outcome.failure_type}"
             ),
         )
-    if len(outcome.payloads) != len(panel):
+    evaluation_payloads = tuple(
+        core._load_mapping(
+            pending.slot_dir / "evaluations" / f"{case.case_id}.json.gz"
+        )
+        for case in panel
+    )
+    if len(evaluation_payloads) != len(panel):
         raise core.M5InfrastructureError("M10 evaluator returned an incomplete development panel")
-    behavior_profile = core.aggregate_behavior(outcome.payloads)
+    behavior_profile = core.aggregate_behavior(evaluation_payloads)
     behavior_signature = str(behavior_profile["behavior_signature"])
     duplicate_of = core._seen_duplicates(
         core._all_candidates(root),
@@ -1611,6 +1727,7 @@ def _commit_pending(
         "exact_verified": behavior_profile["exact_verified"],
     }
     telemetry.timed_persist(partial(_write_or_verify, candidate_path, candidate))
+    telemetry.evaluation_committed(key=f"candidate:{pending.candidate_id}")
     runtime = telemetry.snapshot()
     if _is_improvement(candidate, runtime.get("best_fitness_interval")):
         interval = behavior_profile.get("fitness_interval")
@@ -1645,20 +1762,28 @@ def _commit_generation_baselines(
                 raise core.M5OperatorStop("immediate operator stop requested")
             time.sleep(0.05)
         outcome = future.result()
-        for case, evaluation in zip(panel, outcome.payloads, strict=False):
-            evaluation_path = (
-                generation_dir / "baselines" / baseline / "evaluations" / f"{case.case_id}.json.gz"
-            )
-            telemetry.timed_persist(partial(_write_or_verify, evaluation_path, evaluation))
         if outcome.failure_type is not None:
             raise core.M5InfrastructureError(
                 "baseline evaluation failed for "
                 f"generation {generation}/{baseline}/"
                 f"{outcome.failure_case_id}: {outcome.failure_type}"
             )
-        if len(outcome.payloads) != len(panel):
+        baseline_result = core._load_mapping(
+            generation_dir
+            / "baselines"
+            / baseline
+            / M10_BASELINE_RESULT_FILENAME
+        )
+        if (
+            baseline_result.get("protocol_id") != M10_BASELINE_RESULT_PROTOCOL_ID
+            or baseline_result.get("generation") != generation
+            or baseline_result.get("baseline") != baseline
+            or baseline_result.get("panel_hash") != core.panel_hash(panel)
+            or baseline_result.get("evaluation_case_count") != len(panel)
+            or not isinstance(baseline_result.get("profile"), Mapping)
+        ):
             raise core.M5InfrastructureError(f"baseline {baseline} returned an incomplete panel")
-        profile = core.aggregate_behavior(outcome.payloads)
+        profile = cast(Mapping[str, Any], baseline_result["profile"])
         profiles[baseline] = cast(JsonValue, profile)
         if boundary_hook is not None:
             boundary_hook(f"generation_{generation}_baseline_{baseline}_evaluated")
@@ -1682,6 +1807,8 @@ def _commit_generation_baselines(
     )
     if boundary_hook is not None:
         boundary_hook(f"generation_{generation}_baselines_committed")
+    for baseline in options.baselines:
+        telemetry.evaluation_committed(key=f"baseline:{baseline}")
     return summary
 
 
@@ -2144,8 +2271,7 @@ def run_sustained_search(
         "later_root_slots": core.ROOT_SLOTS,
         "model": provider.model,
         "effort": provider.effort,
-        **options.as_dict(),
-        "provider_turn_timeout_seconds": provider_turn_timeout_seconds,
+        **options.scientific_identity_dict(),
         "replace_terminal_slots": False,
         "safe_api_expanded": True,
         "preview_active": True,
@@ -2195,11 +2321,11 @@ def run_sustained_search(
             close_provider_forcefully()
         raise core.M5OperatorStop("immediate operator stop requested")
 
-    def wait_for_provider_result(
-        future: Future[core.M5ProviderResultV1],
+    def wait_for_provider_result[T](
+        future: Future[T],
         *,
         submitted_at: float | None = None,
-    ) -> core.M5ProviderResultV1:
+    ) -> T:
         nonlocal provider_abort
         deadline = (submitted_at or time.monotonic()) + provider_turn_timeout_seconds
         while True:
@@ -2338,7 +2464,6 @@ def run_sustained_search(
                 policy_schema=policy_schema,
                 panel=panel,
                 options=options,
-                provider_turn_timeout_seconds=provider_turn_timeout_seconds,
             )
             _write_or_verify(generation_dir / "generation-snapshot.json.gz", snapshot)
             # Forking/resuming the provider lanes performs app-server
