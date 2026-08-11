@@ -5,6 +5,7 @@ import importlib
 import random
 import subprocess
 import sys
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -99,6 +100,7 @@ class HegBackend:
         self._validation_result_class = target_base.ValidationResult
         self._worker: Any | None = None
         self._score_worker_name: str | None = None
+        self._score_worker_link_dir: tempfile.TemporaryDirectory[str] | None = None
         self._worker_disabled = False
         self.score_implementation = "heg-cpp-score-worker"
         self._score_timeout_seconds = score_timeout_seconds
@@ -262,6 +264,7 @@ class HegBackend:
                 cutoff_longest_first=self._score_longest_first_enabled,
                 prepared_request_cache_enabled=(self._score_prepared_request_cache_enabled),
             )
+            self._configure_score_worker_binary()
         return self._worker
 
     def set_score_worker_name(self, name: str) -> None:
@@ -272,25 +275,30 @@ class HegBackend:
         # Linux exposes at most 15 bytes through /proc/<pid>/comm.  The
         # evaluator names are ASCII, so truncating characters is sufficient.
         self._score_worker_name = name[:15]
-        self._apply_score_worker_name()
+        self._configure_score_worker_binary()
 
-    def _apply_score_worker_name(self) -> None:
+    def _configure_score_worker_binary(self) -> None:
         name = self._score_worker_name
         worker = self._worker
-        if name is None or worker is None or not sys.platform.startswith("linux"):
+        if (
+            name is None
+            or worker is None
+            or not sys.platform.startswith("linux")
+            or getattr(worker, "process", None) is not None
+        ):
             return
-        process = getattr(worker, "process", None)
-        pid = getattr(process, "pid", None)
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        binary = getattr(worker, "binary", None)
+        if not isinstance(binary, Path) or not binary.is_file():
             return
-        try:
-            (Path(f"/proc/{pid}/comm")).write_text(
-                name + "\n",
-                encoding="ascii",
-            )
-        except (OSError, UnicodeError):
-            # Process naming is observability only and must not affect scoring.
-            return
+        target = binary.resolve()
+        if self._score_worker_link_dir is not None:
+            self._score_worker_link_dir.cleanup()
+        self._score_worker_link_dir = tempfile.TemporaryDirectory(
+            prefix="mforge-score-worker-"
+        )
+        named_binary = Path(self._score_worker_link_dir.name) / name
+        named_binary.symlink_to(target)
+        worker.binary = named_binary
 
     def _reference_cycle_counts(
         self, graph: Any, lengths: tuple[int, ...], *, limit: int, node_budget: int
@@ -396,7 +404,6 @@ class HegBackend:
                     # Start the child before the first request so top/ps sees
                     # its evaluator identity throughout the scoring call.
                     worker.start()
-                    self._apply_score_worker_name()
                 response = worker.score(
                     graph,
                     lengths=lengths,
@@ -430,7 +437,6 @@ class HegBackend:
                     )
                     try:
                         self._worker.restart()
-                        self._apply_score_worker_name()
                     except self._worker_error:
                         self._record(
                             recorder,
@@ -456,6 +462,9 @@ class HegBackend:
         if self._worker is not None:
             self._worker.close()
             self._worker = None
+        if self._score_worker_link_dir is not None:
+            self._score_worker_link_dir.cleanup()
+            self._score_worker_link_dir = None
         self._worker_disabled = True
         return None
 
@@ -750,3 +759,6 @@ class HegBackend:
         if self._worker is not None:
             self._worker.close()
             self._worker = None
+        if self._score_worker_link_dir is not None:
+            self._score_worker_link_dir.cleanup()
+            self._score_worker_link_dir = None
