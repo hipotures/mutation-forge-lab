@@ -248,6 +248,30 @@ def build_m5_acceptance_provenance(
     return {**payload, "sha256": _snapshot_hash(payload)}
 
 
+def _resume_comparison_payload(
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = dict(provenance)
+    payload.pop("sha256", None)
+    raw_repository = payload.get("mutation_forge")
+    if (
+        not isinstance(raw_repository, Mapping)
+        or set(raw_repository) != {"commit_sha", "tree_sha", "dirty"}
+        or not isinstance(raw_repository.get("dirty"), bool)
+    ):
+        return payload
+    try:
+        repository = GitRepositoryIdentityV1(
+            commit_sha=str(raw_repository["commit_sha"]),
+            tree_sha=str(raw_repository["tree_sha"]),
+            dirty=raw_repository["dirty"] is True,
+        )
+    except ValueError:
+        return payload
+    payload["mutation_forge"] = {"dirty": repository.dirty}
+    return payload
+
+
 def ensure_m5_acceptance_provenance(
     *,
     workspace: Path,
@@ -304,11 +328,9 @@ def ensure_m5_acceptance_provenance(
         retained_hash = retained_dict.pop("sha256", None)
         if retained_hash != _snapshot_hash(retained_dict):
             raise M5ProvenanceError("retained M5 provenance hash is invalid")
-        if dict(retained) != current:
-            retained_payload = dict(retained)
-            current_payload = dict(current)
-            retained_payload.pop("sha256", None)
-            current_payload.pop("sha256", None)
+        retained_payload = _resume_comparison_payload(retained)
+        current_payload = _resume_comparison_payload(current)
+        if retained_payload != current_payload:
             retained_config_hash = retained_payload.get(
                 "experiment_config_sha256"
             )

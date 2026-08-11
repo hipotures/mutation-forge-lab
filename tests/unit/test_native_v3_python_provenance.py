@@ -154,8 +154,6 @@ def test_dirty_worktree_fails_before_workspace_or_provider_start(
 @pytest.mark.parametrize(
     "mutation",
     (
-        "repository_commit",
-        "repository_tree",
         "config",
         "model",
         "effort",
@@ -163,6 +161,7 @@ def test_dirty_worktree_fails_before_workspace_or_provider_start(
         "request_template",
         "specification_prompt",
         "output_schema",
+        "ack_schema",
         "runtime_limits",
         "heg_commit",
         "heg_tree",
@@ -176,15 +175,7 @@ def test_resume_rejects_every_semantic_provenance_mismatch(
     inputs = _inputs(tmp_path)
     ensure_m5_acceptance_provenance(**inputs)
     inputs["resume"] = True
-    if mutation == "repository_commit":
-        inputs["git_identity_loader"] = _identity_loader(
-            GitRepositoryIdentityV1("5" * 40, "2" * 40, False)
-        )
-    elif mutation == "repository_tree":
-        inputs["git_identity_loader"] = _identity_loader(
-            GitRepositoryIdentityV1("1" * 40, "5" * 40, False)
-        )
-    elif mutation == "config":
+    if mutation == "config":
         Path(inputs["experiment_config"]).write_text(
             "schema_version = 2\n", encoding="utf-8"
         )
@@ -198,6 +189,8 @@ def test_resume_rejects_every_semantic_provenance_mismatch(
         inputs[mutation] = str(inputs[mutation]) + "-changed"
     elif mutation == "output_schema":
         inputs["output_schema"] = {**_OUTPUT_SCHEMA, "title": "changed"}
+    elif mutation == "ack_schema":
+        inputs["specification_ack_schema"] = {**_ACK_SCHEMA, "title": "changed"}
     elif mutation == "runtime_limits":
         inputs["runtime_limits"] = PolicyRuntimeLimitsV1(
             propose_wall_seconds=0.5
@@ -216,6 +209,31 @@ def test_resume_rejects_every_semantic_provenance_mismatch(
         )
     with pytest.raises(M5ProvenanceError, match="differs"):
         ensure_m5_acceptance_provenance(**inputs)
+
+
+@pytest.mark.parametrize(
+    "repository_identity",
+    (
+        GitRepositoryIdentityV1("5" * 40, "2" * 40, False),
+        GitRepositoryIdentityV1("1" * 40, "5" * 40, False),
+        GitRepositoryIdentityV1("5" * 40, "6" * 40, False),
+    ),
+)
+def test_resume_accepts_newer_mutation_forge_revision_without_rewriting_snapshot(
+    tmp_path: Path,
+    repository_identity: GitRepositoryIdentityV1,
+) -> None:
+    inputs = _inputs(tmp_path)
+    ensure_m5_acceptance_provenance(**inputs)
+    path = inputs["workspace"] / M5_PROVENANCE_FILENAME
+    before = path.read_bytes()
+    inputs["resume"] = True
+    inputs["git_identity_loader"] = _identity_loader(repository_identity)
+
+    resumed = ensure_m5_acceptance_provenance(**inputs)
+
+    assert resumed["mutation_forge"] == repository_identity.as_dict()
+    assert path.read_bytes() == before
 
 
 def test_matching_provenance_resumes_without_rewriting_snapshot(
