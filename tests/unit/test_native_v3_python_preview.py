@@ -63,6 +63,59 @@ heg_repo = "{heg.as_posix()}"
     return path
 
 
+def _interval(lower: int, upper: int) -> dict[str, dict[str, int]]:
+    return {
+        "lower": {"numerator": lower, "denominator": 10},
+        "upper": {"numerator": upper, "denominator": 10},
+    }
+
+
+@pytest.mark.parametrize(
+    ("child", "parent", "expected"),
+    [
+        (_interval(6, 7), _interval(3, 5), "proven_better"),
+        (_interval(1, 2), _interval(3, 5), "proven_worse"),
+        (_interval(4, 6), _interval(3, 5), "neutral"),
+    ],
+)
+def test_same_panel_score_effect_uses_conservative_intervals(
+    child: Mapping[str, Any],
+    parent: Mapping[str, Any],
+    expected: str,
+) -> None:
+    assert (
+        preview_module._same_panel_score_effect(
+            candidate={
+                "panel_hash": "same-panel",
+                "behavior_profile": {"fitness_interval": child},
+            },
+            reference={
+                "panel_hash": "same-panel",
+                "profile": {"fitness_interval": parent},
+            },
+            panel_hash="same-panel",
+        )
+        == expected
+    )
+
+
+def test_same_panel_score_effect_never_compares_cross_panel_scores() -> None:
+    assert (
+        preview_module._same_panel_score_effect(
+            candidate={
+                "panel_hash": "child-panel",
+                "behavior_profile": {"fitness_interval": _interval(9, 10)},
+            },
+            reference={
+                "panel_hash": "parent-panel",
+                "profile": {"fitness_interval": _interval(0, 1)},
+            },
+            panel_hash="child-panel",
+        )
+        == "neutral"
+    )
+
+
 def _scientific_status_config(tmp_path: Path, *, exp_id: str) -> Path:
     heg = tmp_path / "heg"
     (heg / "src" / "sglab").mkdir(parents=True, exist_ok=True)

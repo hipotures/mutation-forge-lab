@@ -41,6 +41,7 @@ from .scientific_evaluation import (
 from .scientific_search import (
     M10_BASELINE_FILENAME,
     M10_BASELINE_RESULT_FILENAME,
+    M10_PARENT_REFERENCE_RESULT_FILENAME,
     M10_REPORT_FILENAME,
     M10_REPORT_PROTOCOL_ID,
     M10_RUNTIME_FILENAME,
@@ -866,6 +867,41 @@ def _fitness_delta_interval(
     }
 
 
+def _fitness_direction(
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> str:
+    candidate_lower, candidate_upper = _fitness_interval_fractions(candidate)
+    reference_lower, reference_upper = _fitness_interval_fractions(reference)
+    if candidate_lower > reference_upper:
+        return "proven_better"
+    if candidate_upper < reference_lower:
+        return "proven_worse"
+    return "neutral"
+
+
+def _same_panel_score_effect(
+    *,
+    candidate: Mapping[str, Any] | None,
+    reference: Mapping[str, Any] | None,
+    panel_hash: object,
+) -> str:
+    if (
+        candidate is None
+        or reference is None
+        or not isinstance(panel_hash, str)
+        or candidate.get("panel_hash") != panel_hash
+        or reference.get("panel_hash") != panel_hash
+        or not isinstance(candidate.get("behavior_profile"), Mapping)
+        or not isinstance(reference.get("profile"), Mapping)
+    ):
+        return "neutral"
+    return _fitness_direction(
+        cast(Mapping[str, Any], candidate["behavior_profile"]),
+        cast(Mapping[str, Any], reference["profile"]),
+    )
+
+
 def _usage_total(
     candidates: Sequence[Mapping[str, Any]],
     anchor: Mapping[str, Any] | None,
@@ -1605,9 +1641,50 @@ def _progress(
         for item in candidates
         if isinstance(item.get("candidate_id"), str)
     }
+    parent_references: dict[tuple[int, str], Mapping[str, Any]] = {}
+    for manifest in manifests:
+        generation = _nonnegative_int(manifest.get("generation"))
+        raw_slots = manifest.get("slots", ())
+        if not isinstance(raw_slots, Sequence) or isinstance(raw_slots, str | bytes):
+            continue
+        parent_ids = {
+            str(raw_slot["parent_candidate_id"])
+            for raw_slot in raw_slots
+            if isinstance(raw_slot, Mapping)
+            and raw_slot.get("parent_candidate_id") is not None
+        }
+        for parent_id in parent_ids:
+            reference = _load_mapping(
+                root
+                / "generations"
+                / f"generation-{generation:04d}"
+                / "parent-references"
+                / parent_id
+                / M10_PARENT_REFERENCE_RESULT_FILENAME
+            )
+            if (
+                reference is not None
+                and reference.get("generation") == generation
+                and reference.get("parent_candidate_id") == parent_id
+                and reference.get("authoritative") is False
+                and isinstance(reference.get("profile"), Mapping)
+            ):
+                parent_references[(generation, parent_id)] = reference
     provider_turns_by_key: dict[str, Mapping[str, Any]] = {}
     raw_timeline = runtime.get("provider_concurrency_timeline", ())
     raw_candidate_commits = runtime.get("candidate_commit_epoch_seconds", {})
+    raw_slot_starts = runtime.get("slot_started_epoch_seconds", {})
+    slot_started_epochs = raw_slot_starts if isinstance(raw_slot_starts, Mapping) else {}
+    queued_provider_keys = set(
+        item
+        for item in runtime.get("queued_provider_keys", ())
+        if isinstance(item, str)
+    ) if isinstance(runtime.get("queued_provider_keys"), Sequence) else set()
+    waiting_provider_keys = set(
+        item
+        for item in runtime.get("waiting_provider_keys", ())
+        if isinstance(item, str)
+    ) if isinstance(runtime.get("waiting_provider_keys"), Sequence) else set()
     candidate_commit_epochs = (
         raw_candidate_commits
         if isinstance(raw_candidate_commits, Mapping)
@@ -1724,6 +1801,13 @@ def _progress(
                 ),
                 default=0.0,
             )
+            raw_slot_started = slot_started_epochs.get(candidate_id)
+            if (
+                isinstance(raw_slot_started, int | float)
+                and not isinstance(raw_slot_started, bool)
+                and raw_slot_started > 0
+            ):
+                lifecycle_started_epoch = float(raw_slot_started)
             current_provider_turn = (
                 provider_turn
                 if provider_turn is not None
@@ -1761,6 +1845,17 @@ def _progress(
                 current_provider_turn is not None
                 and any(provider_artifact_dir.glob("*.turn-terminal.json*"))
             )
+            provider_key_prefix = (
+                f"{request_key}-"
+                if isinstance(request_key, str)
+                else ""
+            )
+            waiting_for_provider = bool(provider_key_prefix) and any(
+                key.startswith(provider_key_prefix) for key in waiting_provider_keys
+            )
+            queued_for_provider = bool(provider_key_prefix) and any(
+                key.startswith(provider_key_prefix) for key in queued_provider_keys
+            )
             candidate_status = (
                 str(candidate.get("status"))
                 if candidate is not None
@@ -1770,6 +1865,10 @@ def _progress(
                 if provider_turn_terminal
                 else "model"
                 if current_provider_turn is not None
+                else "waiting"
+                if waiting_for_provider
+                else "queued"
+                if queued_for_provider
                 else "failed"
                 if (
                     provider_turn is not None
@@ -1784,6 +1883,27 @@ def _progress(
                     )
                 )
                 else "queued"
+            )
+            candidate_profile = (
+                candidate.get("behavior_profile")
+                if candidate is not None
+                and isinstance(candidate.get("behavior_profile"), Mapping)
+                else None
+            )
+            slot_parent_id = (
+                str(raw_slot["parent_candidate_id"])
+                if raw_slot.get("parent_candidate_id") is not None
+                else None
+            )
+            parent_reference = (
+                parent_references.get((generation, slot_parent_id))
+                if slot_parent_id is not None
+                else None
+            )
+            score_effect = _same_panel_score_effect(
+                candidate=candidate,
+                reference=parent_reference,
+                panel_hash=raw_slot.get("panel_hash"),
             )
             raw_commit_epoch = candidate_commit_epochs.get(candidate_id)
             commit_epoch = (
@@ -1817,9 +1937,7 @@ def _progress(
                     "slot": slot,
                     "kind": str(raw_slot.get("kind", "root")),
                     "parent_candidate_id": (
-                        str(raw_slot["parent_candidate_id"])
-                        if raw_slot.get("parent_candidate_id") is not None
-                        else None
+                        slot_parent_id
                     ),
                     "state": candidate_status,
                     "phase": (
@@ -1831,6 +1949,12 @@ def _progress(
                         if provider_turn_terminal
                         else "provider"
                     ),
+                    "fitness_interval": (
+                        candidate_profile.get("fitness_interval")
+                        if candidate_profile is not None
+                        else None
+                    ),
+                    "score_effect": score_effect,
                     "started_epoch_seconds": (
                         lifecycle_started_epoch
                         if lifecycle_started_epoch > 0
@@ -1930,6 +2054,8 @@ def _progress(
             "primary_turns": _nonnegative_int(runtime.get("primary_turns_submitted")),
             "repair_turns": _nonnegative_int(runtime.get("repair_turns_submitted")),
             "active": _nonnegative_int(runtime.get("active_provider_turns")),
+            "waiting": len(waiting_provider_keys),
+            "queued": len(queued_provider_keys),
             "peak_active": _nonnegative_int(runtime.get("peak_active_provider_turns")),
             "configured_concurrency": (
                 config.scientific_search.provider_concurrency
@@ -1952,6 +2078,15 @@ def _progress(
             "total": baseline_total + candidate_total,
             "baseline": baseline_evaluation_cases,
             "candidate": candidate_evaluation_cases,
+            "parent_reference": {
+                **active_evaluation_case_projection("parent_reference"),
+                "completed": _nonnegative_int(
+                    runtime.get("parent_reference_evaluation_cases_completed")
+                ),
+                "total": _nonnegative_int(
+                    runtime.get("parent_reference_evaluation_cases_total")
+                ),
+            },
         },
         "sandbox": {
             key: telemetry[key] if profiling_available else None

@@ -382,7 +382,7 @@ def test_event_reducer_keeps_authoritative_counts_and_deduplicates_tokens() -> N
     assert once.cumulative_usage.total == 178
     assert twice.cumulative_usage.total == 178
     assert once.session_usage.total == 18
-    assert once.generations[0].slots[2].elapsed_seconds == pytest.approx(412.859)
+    assert once.generations[0].slots[2].elapsed_seconds == pytest.approx(16.0)
     assert twice.session_usage.total == 18
 
     archived = _event(
@@ -691,7 +691,7 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
     )
     active = state.generations[0].slots[2]
     assert state.elapsed_seconds == 360.0
-    assert active.started_monotonic == 120.0
+    assert active.started_monotonic == 104.0
     assert active.evaluation_completed == 29
     assert active.evaluation_total == 128
     assert active.evaluation_pass == "replay"
@@ -732,7 +732,7 @@ def test_evaluation_elapsed_is_per_slot_and_does_not_replace_run_elapsed() -> No
     completed = state.generations[0].slots[2]
     assert state.elapsed_seconds == 360.0
     assert completed.started_monotonic is None
-    assert completed.elapsed_seconds == 12.5
+    assert completed.elapsed_seconds == 28.5
 
 
 def test_slot_matrix_shows_independent_parallel_evaluation_progress() -> None:
@@ -801,6 +801,19 @@ def test_slot_elapsed_covers_every_phase_from_provider_start_to_evaluation_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = DashboardState()
+    state = reduce_dashboard_event(
+        state,
+        _event(
+            "slot_queued",
+            generation=0,
+            slot="slot-00",
+            phase="queued",
+        ),
+        monotonic=0.0,
+    )
+    queued = state.generations[0].slots[0]
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 0.5)
+    assert InteractiveDashboardSink._slot_elapsed(queued) == pytest.approx(0.5)
     events = (
         (1.0, "provider_turn_started", {}),
         (6.0, "provider_turn_completed", {"accepted": True}),
@@ -834,7 +847,7 @@ def test_slot_elapsed_covers_every_phase_from_provider_start_to_evaluation_end(
         initial_state=state,
         start_live=False,
     )
-    assert sink._slot_elapsed(active) == pytest.approx(19.0)  # noqa: SLF001
+    assert sink._slot_elapsed(active) == pytest.approx(20.0)  # noqa: SLF001
     sink.close()
 
     state = reduce_dashboard_event(
@@ -850,7 +863,7 @@ def test_slot_elapsed_covers_every_phase_from_provider_start_to_evaluation_end(
         monotonic=24.0,
     )
     completed = state.generations[0].slots[0]
-    assert completed.elapsed_seconds == pytest.approx(23.0)
+    assert completed.elapsed_seconds == pytest.approx(24.0)
     assert completed.started_monotonic is None
     assert completed.phase_started_monotonic is None
     lifecycle = {step.phase: step.elapsed_seconds for step in completed.lifecycle}
@@ -858,6 +871,21 @@ def test_slot_elapsed_covers_every_phase_from_provider_start_to_evaluation_end(
     assert lifecycle["schema"] == pytest.approx(2.0)
     assert lifecycle["probe"] == pytest.approx(3.0)
     assert lifecycle["evaluation"] == pytest.approx(10.0)
+    archived_state = reduce_dashboard_event(
+        state,
+        _event(
+            "candidate_archived",
+            generation=0,
+            slot="slot-00",
+            status="accepted",
+        ),
+        monotonic=25.0,
+    )
+    archived = archived_state.generations[0].slots[0]
+    monkeypatch.setattr(dashboard.time, "monotonic", lambda: 30.0)
+    assert archived.phase == "archived"
+    assert archived.elapsed_seconds == pytest.approx(24.0)
+    assert InteractiveDashboardSink._slot_elapsed(archived) == pytest.approx(24.0)
 
 
 def test_evaluation_rate_sums_active_worker_rates() -> None:
@@ -2376,7 +2404,7 @@ def test_slot_matrix_integrates_selection_marker_into_slot_column() -> None:
     sink.close()
 
 
-def test_slot_matrix_uses_six_character_goal_header_and_four_decimal_values() -> None:
+def test_slot_matrix_uses_score_header_and_four_decimal_values() -> None:
     sink = InteractiveDashboardSink(
         console=Console(file=io.StringIO(), width=150, force_terminal=False),
         start_live=False,
@@ -2398,12 +2426,91 @@ def test_slot_matrix_uses_six_character_goal_header_and_four_decimal_values() ->
     ).print(sink._slot_matrix(150, "full"))
     rendered = output.getvalue()
 
-    assert "goal ↑" in rendered
+    assert "score ↑" in rendered
+    assert "goal ↑" not in rendered
     assert "fitness ↑" not in rendered
     assert "objective ↑" not in rendered
     assert "0.0769" in rendered
     assert "0.076991" not in rendered
+    assert "green better" in rendered
     sink.close()
+
+
+def test_score_color_is_conservative_and_zero_remains_an_absolute_score() -> None:
+    root = DashboardSlot(
+        slot="g0000-slot-00",
+        generation=0,
+        objective=0.0,
+    )
+    better = replace(root, parent="g0000-slot-01", score_effect="proven_better")
+    worse = replace(root, parent="g0000-slot-01", score_effect="proven_worse")
+
+    root_text = dashboard._score_text(root)
+    better_text = dashboard._score_text(better)
+    worse_text = dashboard._score_text(worse)
+
+    assert root_text.plain == "0.0000"
+    assert str(root_text.style) == ""
+    assert better_text.plain == "0.0000"
+    assert str(better_text.style) == "green"
+    assert str(worse_text.style) == "red"
+
+
+def test_provider_active_waiting_and_queued_are_distinct() -> None:
+    state = dashboard.dashboard_state_from_python_status(
+        {
+            "state": "running",
+            "provider": {
+                "active": 1,
+                "waiting": 2,
+                "queued": 4,
+                "configured_concurrency": 2,
+            },
+            "slots": [
+                {
+                    "candidate_id": "g0000-slot-00",
+                    "generation": 0,
+                    "state": "model",
+                },
+                {
+                    "candidate_id": "g0000-slot-01",
+                    "generation": 0,
+                    "state": "waiting",
+                },
+                {
+                    "candidate_id": "g0000-slot-02",
+                    "generation": 0,
+                    "state": "queued",
+                },
+            ],
+        },
+        run_id="provider-counters",
+        model="fixture",
+        effort="high",
+        generation_limit=1,
+        wall_seconds=60.0,
+    )
+    assert state.active_provider_turns == 1
+    assert state.waiting_provider_turns == 2
+    assert state.queued_provider_turns == 4
+    assert [slot.state for slot in state.generations[0].slots] == [
+        "model",
+        "waiting",
+        "queued",
+    ]
+
+
+def test_exact_verification_visual_states_are_distinct() -> None:
+    neutral = cli._exact_verification_text({"verified": False})
+    verified = cli._exact_verification_text({"verified": True})
+    failed = cli._exact_verification_text({"error": "verifier unavailable"})
+
+    assert neutral.plain == "no"
+    assert neutral.spans == []
+    assert verified.plain == "yes"
+    assert verified.spans[0].style == "green"
+    assert failed.plain == "error"
+    assert failed.spans[0].style == "red"
 
 
 def test_slot_matrix_uses_available_width_for_full_parent_id() -> None:

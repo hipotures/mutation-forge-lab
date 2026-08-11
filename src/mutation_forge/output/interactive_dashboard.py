@@ -66,6 +66,7 @@ TERMINAL_EVENTS = {
 ACTIVE_STATES = {
     "starting",
     "model",
+    "waiting",
     "persisting",
     "retrying",
     "repair",
@@ -74,10 +75,12 @@ ACTIVE_STATES = {
     "evaluating",
     "committing",
 }
+SLOT_TIMER_RUNNING_STATES = ACTIVE_STATES | {"queued"}
 STATE_STYLES = {
     "queued": "grey62",
     "starting": "cyan",
     "model": "cyan",
+    "waiting": "yellow",
     "persisting": "blue",
     "retrying": "yellow",
     "repair": "yellow",
@@ -203,6 +206,7 @@ class DashboardSlot:
     candidate: str = ""
     error: str = ""
     objective: float | None = None
+    score_effect: str = "neutral"
     retryable: bool = False
     charged: bool | None = None
     evaluation_id: str | None = None
@@ -281,6 +285,8 @@ class DashboardState:
     hourly_limit_reached: bool = False
     hourly_retry_after: str | None = None
     active_provider_turns: int = 0
+    waiting_provider_turns: int = 0
+    queued_provider_turns: int = 0
     configured_provider_concurrency: int | None = None
     evaluations_completed: int = 0
     evaluation_cases_completed: int = 0
@@ -532,8 +538,12 @@ def dashboard_state_from_python_status(
                         else ""
                     ),
                     objective=fitness_objective(
-                        programs_by_candidate.get(candidate_id, {}).get("fitness_interval")
+                        raw.get(
+                            "fitness_interval",
+                            programs_by_candidate.get(candidate_id, {}).get("fitness_interval"),
+                        )
                     ),
+                    score_effect=str(raw.get("score_effect", "neutral")),
                 )
             )
     generation_groups = tuple(
@@ -745,6 +755,8 @@ def dashboard_state_from_python_status(
             else None
         ),
         active_provider_turns=integer(provider.get("active")),
+        waiting_provider_turns=integer(provider.get("waiting")),
+        queued_provider_turns=integer(provider.get("queued")),
         configured_provider_concurrency=integer(provider.get("configured_concurrency")),
         evaluations_completed=integer(evaluators.get("completed")),
         evaluation_cases_completed=evaluation_completed,
@@ -2155,6 +2167,7 @@ def reduce_dashboard_event(
         if event_type == "slot_queued":
             lifecycle_phase = "queued"
             lifecycle_status = "pass"
+            started = now if started is None else started
             if payload.get("status") == "retrying":
                 slot_state = "retrying"
                 error = ""
@@ -2253,7 +2266,7 @@ def reduce_dashboard_event(
             started = now if started is None else started
             phase_started = now
         elif event_type == "validation_completed":
-            if started is None:
+            if slot.state != "validating":
                 return state
             valid = payload.get("valid") is True
             slot_state = "probing" if valid else "invalid"
@@ -2380,6 +2393,7 @@ def reduce_dashboard_event(
             if not (archived_state == "invalid" and slot.state == "failed" and slot.retryable):
                 slot_state = archived_state or slot_state
             lifecycle_phase = "archived"
+            phase = "archived"
             lifecycle_status = "pass" if slot_state in {"accepted", "duplicate"} else "fail"
             elapsed = max(0.0, now - started) if started is not None else elapsed
             started = None
@@ -3253,9 +3267,13 @@ class InteractiveDashboardSink:
             self.state.evaluation_workers_active,
             self.state.evaluation_workers_configured,
         )
-        provider_concurrency = _ratio(
-            self.state.active_provider_turns,
-            self.state.configured_provider_concurrency,
+        provider_concurrency = (
+            f"{_ratio(
+                self.state.active_provider_turns,
+                self.state.configured_provider_concurrency,
+            )}"
+            f" · wait {self.state.waiting_provider_turns}"
+            f" · queue {self.state.queued_provider_turns}"
         )
         second = _parameter_line(
             (
@@ -3412,7 +3430,7 @@ class InteractiveDashboardSink:
             ("validation", "left", 22),
             ("probe", "left", 14),
             ("candidate / error", "left", 24),
-            ("goal ↑", "right", 6),
+            ("score ↑", "right", 7),
         ]
         if mode == "compact":
             visible = {
@@ -3488,7 +3506,7 @@ class InteractiveDashboardSink:
                 "validation": slot.validation,
                 "probe": slot.probe,
                 "candidate / error": compact_display_ids(slot.error or slot.candidate or "—"),
-                "goal ↑": _objective(slot.objective),
+                "score ↑": _score_text(slot),
             }
             style = "bold on grey15" if selected else "bold" if slot.state in ACTIVE_STATES else ""
             table.add_row(*(values[name] for name, _, _ in columns), style=style)
@@ -3498,7 +3516,13 @@ class InteractiveDashboardSink:
         )
         if self.state.search_query:
             title += f" · filter {self.state.search_query!r}"
-        return Panel(table, title=title, border_style="cyan", padding=(0, 0))
+        return Panel(
+            table,
+            title=title,
+            subtitle="score color: green better · red worse · neutral inconclusive/root",
+            border_style="cyan",
+            padding=(0, 0),
+        )
 
     def _minimal_slot(self) -> Panel:
         slot = _selected_slot(self.state)
@@ -3688,6 +3712,8 @@ class InteractiveDashboardSink:
                     self.state.configured_provider_concurrency,
                 ),
             ),
+            ("provider waiting", self.state.waiting_provider_turns),
+            ("provider queued", self.state.queued_provider_turns),
             (
                 "candidate turns",
                 f"{self.state.provider_turns_completed}/{self.state.provider_turns_attempted}",
@@ -4204,7 +4230,10 @@ class InteractiveDashboardSink:
 
     @staticmethod
     def _slot_elapsed(slot: DashboardSlot) -> float | None:
-        if slot.started_monotonic is not None and slot.state in ACTIVE_STATES:
+        if (
+            slot.started_monotonic is not None
+            and slot.state in SLOT_TIMER_RUNNING_STATES
+        ):
             return max(0.0, time.monotonic() - slot.started_monotonic)
         return slot.elapsed_seconds
 
@@ -4521,6 +4550,24 @@ def _objective(value: float | None) -> str:
     if truncated == 0:
         return "0"
     return f"{truncated:.4f}"
+
+
+def _score_text(slot: DashboardSlot) -> Text:
+    score = (
+        "—"
+        if slot.objective is None
+        else f"{Decimal(str(slot.objective)).quantize(Decimal('0.0001'), rounding=ROUND_DOWN):.4f}"
+    )
+    return Text(
+        score,
+        style=(
+            "green"
+            if slot.score_effect == "proven_better"
+            else "red"
+            if slot.score_effect == "proven_worse"
+            else ""
+        ),
+    )
 
 
 def _slot_state_label(slot: DashboardSlot) -> str:

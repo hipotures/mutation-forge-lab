@@ -5,7 +5,7 @@ import json
 import shutil
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -449,10 +449,11 @@ def _run(
     operator_stop: Any = None,
     boundary_hook: Any = None,
     resume_budget: ScientificResumeBudgetV1 | None = None,
+    evaluator_factory: Callable[[], _Evaluator] | None = None,
 ) -> dict[str, Any]:
     return run_sustained_search(
         provider=provider,
-        evaluator_factory=lambda: _Evaluator(concurrency),
+        evaluator_factory=evaluator_factory or (lambda: _Evaluator(concurrency)),
         workspace=root,
         panel_factory=lambda _generation: _PANEL,
         system_prompt="system",
@@ -1129,6 +1130,220 @@ def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
     assert retained == snapshot
 
 
+def test_two_provider_lanes_advance_independently_without_duplicate_turns(
+    tmp_path: Path,
+) -> None:
+    class TwoLaneProvider(_Provider):
+        provider_concurrency = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.initial = threading.Barrier(2, timeout=2)
+            self.slot_two_started = threading.Event()
+            self.lock = threading.Lock()
+            self.starts: list[str] = []
+            self.active_by_lane = [0, 0]
+            self.peak_by_lane = [0, 0]
+            self.active = 0
+            self.peak = 0
+
+        def generate_root(self, **kwargs: Any) -> M5ProviderResultV1:
+            slot = str(kwargs["slot"])
+            lane = self.primary_lane(generation=int(kwargs["generation"]), slot=slot)
+            with self.lock:
+                self.starts.append(slot)
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                self.active_by_lane[lane] += 1
+                self.peak_by_lane[lane] = max(
+                    self.peak_by_lane[lane],
+                    self.active_by_lane[lane],
+                )
+            try:
+                if slot in {"slot-00", "slot-01"}:
+                    self.initial.wait()
+                if slot == "slot-01":
+                    assert self.slot_two_started.wait(timeout=2)
+                elif slot == "slot-02":
+                    self.slot_two_started.set()
+                return super().generate_root(**kwargs)
+            finally:
+                with self.lock:
+                    self.active -= 1
+                    self.active_by_lane[lane] -= 1
+
+    provider = TwoLaneProvider()
+    report = _run(
+        tmp_path,
+        provider=provider,
+        concurrency=_Concurrency(parties=1),
+        options=_options(workers=2, concurrency=2),
+    )
+
+    assert set(provider.starts[:2]) == {"slot-00", "slot-01"}
+    assert provider.starts.index("slot-02") < provider.starts.index("slot-03")
+    assert provider.peak == 2
+    assert provider.peak_by_lane == [1, 1]
+    assert sorted(provider.calls) == [
+        (0, f"slot-{index:02d}") for index in range(8)
+    ]
+    assert len(set(provider.calls)) == 8
+    assert report["runtime"]["peak_active_provider_turns"] == 2
+
+
+def test_provider_telemetry_distinguishes_queued_waiting_and_active(
+    tmp_path: Path,
+) -> None:
+    telemetry = search_module._RuntimeTelemetry(
+        tmp_path,
+        _options(concurrency=2),
+    )
+    keys = [f"g0000-slot-{index:02d}-initial" for index in range(8)]
+    telemetry.reserve_primary_generation(keys, limit=8)
+    telemetry.provider_tasks_queued(keys)
+    telemetry.provider_task_waiting(keys[0])
+    waiting = telemetry.snapshot()
+    assert len(cast(list[object], waiting["queued_provider_keys"])) == 7
+    assert waiting["waiting_provider_keys"] == [keys[0]]
+    assert waiting["active_provider_turns"] == 0
+
+    assert telemetry.provider_started(keys[0], kind="primary")
+    active = telemetry.snapshot()
+    assert len(cast(list[object], active["queued_provider_keys"])) == 7
+    assert active["waiting_provider_keys"] == []
+    assert active["active_provider_turns"] == 1
+    telemetry.provider_finished(0.1, key=keys[0], failed=False)
+
+
+def test_parent_references_are_deduplicated_persisted_and_reused(
+    tmp_path: Path,
+) -> None:
+    concurrency = _Concurrency(parties=1)
+    reference_calls: list[tuple[str, str]] = []
+
+    class CountingEvaluator(_Evaluator):
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            if candidate_id.startswith("parent-reference-"):
+                reference_calls.append((candidate_id, case.case_id))
+            return super().evaluate(
+                source=source,
+                case=case,
+                candidate_id=candidate_id,
+            )
+
+    provider = _Provider()
+    _run(
+        tmp_path,
+        provider=provider,
+        concurrency=concurrency,
+        options=_options(workers=2, generations=2),
+        evaluator_factory=lambda: CountingEvaluator(concurrency),
+    )
+
+    reference_root = (
+        tmp_path / "generations" / "generation-0001" / "parent-references"
+    )
+    results = sorted(reference_root.glob("*/parent-reference-result.json.gz"))
+    assert results
+    assert len(reference_calls) == len(results) * len(_PANEL)
+    assert len({candidate_id for candidate_id, _case_id in reference_calls}) == len(results)
+    assert len(provider.calls) == 16
+    assert not list(reference_root.glob("*/candidate.json.gz"))
+    for path in results:
+        retained = read_json(path)
+        assert retained["authoritative"] is False
+        assert retained["purpose"] == "same_panel_mutation_display"
+
+    completed_calls = list(reference_calls)
+    _run(
+        tmp_path,
+        provider=provider,
+        concurrency=concurrency,
+        options=_options(workers=2, generations=2),
+        evaluator_factory=lambda: CountingEvaluator(concurrency),
+    )
+    assert reference_calls == completed_calls
+    assert len(provider.calls) == 16
+
+
+def test_parent_reference_resume_reuses_completed_cases_without_provider(
+    tmp_path: Path,
+) -> None:
+    concurrency = _Concurrency(parties=1)
+    calls: list[str] = []
+
+    class CountingEvaluator(_Evaluator):
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            calls.append(case.case_id)
+            return super().evaluate(
+                source=source,
+                case=case,
+                candidate_id=candidate_id,
+            )
+
+    generation_dir = tmp_path / "generations" / "generation-0001"
+    parent = {
+        "candidate_id": "g0000-slot-00",
+        "program_hash": "parent-program",
+        "source": _source("parent"),
+    }
+    first_case_path = (
+        generation_dir
+        / "parent-references"
+        / "g0000-slot-00"
+        / "evaluations"
+        / f"{_PANEL[0].case_id}.json.gz"
+    )
+    write_json(
+        first_case_path,
+        _result(source=str(parent["source"]), case=_PANEL[0]),
+    )
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options())
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=2,
+        queue_capacity=4,
+        evaluator_factory=lambda: CountingEvaluator(concurrency),
+        telemetry=telemetry,
+    )
+    outcome = pool.submit_parent_reference(
+        parent=parent,
+        panel=_PANEL,
+        generation=1,
+        generation_dir=generation_dir,
+    ).result(timeout=30)
+    pool.close()
+    assert outcome.evaluation_case_count == len(_PANEL)
+    assert calls == [_PANEL[1].case_id]
+
+    resumed_telemetry = search_module._RuntimeTelemetry(tmp_path, _options())
+    resumed_pool = search_module._ConcurrentEvaluatorPool(
+        workers=2,
+        queue_capacity=4,
+        evaluator_factory=lambda: CountingEvaluator(concurrency),
+        telemetry=resumed_telemetry,
+    )
+    resumed_pool.submit_parent_reference(
+        parent=parent,
+        panel=_PANEL,
+        generation=1,
+        generation_dir=generation_dir,
+    ).result(timeout=30)
+    resumed_pool.close()
+    assert calls == [_PANEL[1].case_id]
+
+
 def test_repair_budget_is_separate_and_allocated_in_canonical_slot_order(
     tmp_path: Path,
 ) -> None:
@@ -1282,7 +1497,19 @@ def test_operator_stop_resume_repeats_no_terminal_work(
     assert report["candidate_count"] == 16
     assert sorted(resumed_provider.calls) == [(1, f"slot-{index:02d}") for index in range(8)]
     assert all(path.read_bytes() == content for path, content in retained.items())
-    assert len(first_concurrency.calls) + len(resumed_concurrency.calls) == 32
+    all_evaluations = [*first_concurrency.calls, *resumed_concurrency.calls]
+    authoritative = [
+        item
+        for item in all_evaluations
+        if not item[0].startswith("parent-reference-")
+    ]
+    parent_references = [
+        item
+        for item in all_evaluations
+        if item[0].startswith("parent-reference-")
+    ]
+    assert len(authoritative) == 32
+    assert len(parent_references) == 8
 
 
 def test_crash_after_prepared_boundary_repeats_no_provider_turn(

@@ -43,6 +43,8 @@ M10_BASELINE_FILENAME = "generation-baselines.json.gz"
 M10_BASELINE_PROTOCOL_ID = "mforge.native.python_generation_baselines.v1"
 M10_BASELINE_RESULT_FILENAME = "baseline-result.json.gz"
 M10_BASELINE_RESULT_PROTOCOL_ID = "mforge.native.python_generation_baseline.v1"
+M10_PARENT_REFERENCE_RESULT_FILENAME = "parent-reference-result.json.gz"
+M10_PARENT_REFERENCE_RESULT_PROTOCOL_ID = "mforge.native.python_parent_reference.v1"
 _RUNTIME_TELEMETRY_FLUSH_INTERVAL_SECONDS = 0.25
 
 
@@ -452,6 +454,8 @@ class _RuntimeTelemetry:
             state["active_evaluators"] = 0
             state["queued_evaluations"] = 0
             state["active_provider_turns"] = 0
+            state["queued_provider_keys"] = []
+            state["waiting_provider_keys"] = []
             state["active_evaluation_work"] = {}
             # Runtime counters describe the current invocation.  Scientific
             # lineage remains retained above, but stale in-flight UI rows must
@@ -481,6 +485,8 @@ class _RuntimeTelemetry:
                 "provider_active_wall_seconds": 0.0,
                 "active_provider_turns": 0,
                 "peak_active_provider_turns": 0,
+                "queued_provider_keys": [],
+                "waiting_provider_keys": [],
                 "provider_concurrency_timeline": [],
                 "resume_started_epoch_seconds": self._resume_started_epoch,
                 "persistence_seconds": 0.0,
@@ -495,6 +501,7 @@ class _RuntimeTelemetry:
                 "evaluator_instances": 0,
                 "evaluation_progress": {},
                 "candidate_commit_epoch_seconds": {},
+                "slot_started_epoch_seconds": {},
                 "active_evaluation_work": {},
                 "evaluation_cases_completed": 0,
                 "evaluation_cases_total": 0,
@@ -502,6 +509,8 @@ class _RuntimeTelemetry:
                 "baseline_evaluation_cases_total": 0,
                 "candidate_evaluation_cases_completed": 0,
                 "candidate_evaluation_cases_total": 0,
+                "parent_reference_evaluation_cases_completed": 0,
+                "parent_reference_evaluation_cases_total": 0,
                 "first_valid_program_seconds": None,
                 "last_scientific_improvement_epoch_seconds": None,
                 "best_candidate_id": None,
@@ -708,6 +717,11 @@ class _RuntimeTelemetry:
             started = self._string_keys_locked("provider_started_keys")
             if key in started:
                 return False
+            for field in ("queued_provider_keys", "waiting_provider_keys"):
+                values = self._string_keys_locked(field)
+                if key in values:
+                    values.remove(key)
+                    self._state[field] = values
             if (
                 self._resume_budget is not None
                 and kind == "primary"
@@ -746,6 +760,47 @@ class _RuntimeTelemetry:
             )
             self._persist_locked(force=True)
             return True
+
+    def provider_tasks_queued(self, keys: Sequence[str]) -> None:
+        with self._lock:
+            queued = self._string_keys_locked("queued_provider_keys")
+            started = set(self._string_keys_locked("provider_started_keys"))
+            waiting = set(self._string_keys_locked("waiting_provider_keys"))
+            for key in keys:
+                if key not in queued and key not in started and key not in waiting:
+                    queued.append(key)
+            self._state["queued_provider_keys"] = queued
+            self._persist_locked(force=True)
+
+    def provider_task_waiting(self, key: str) -> None:
+        with self._lock:
+            queued = self._string_keys_locked("queued_provider_keys")
+            if key in queued:
+                queued.remove(key)
+                self._state["queued_provider_keys"] = queued
+            waiting = self._string_keys_locked("waiting_provider_keys")
+            if key not in waiting:
+                waiting.append(key)
+                self._state["waiting_provider_keys"] = waiting
+            self._persist_locked(force=True)
+
+    def provider_task_wait_finished(self, key: str) -> None:
+        with self._lock:
+            waiting = self._string_keys_locked("waiting_provider_keys")
+            if key in waiting:
+                waiting.remove(key)
+                self._state["waiting_provider_keys"] = waiting
+                self._persist_locked(force=True)
+
+    def slots_started(self, candidate_ids: Sequence[str]) -> None:
+        with self._lock:
+            values = self._state.setdefault("slot_started_epoch_seconds", {})
+            if not isinstance(values, dict):
+                raise core.M5InfrastructureError("M10 slot start timestamps are malformed")
+            now = time.time()
+            for candidate_id in candidate_ids:
+                values.setdefault(candidate_id, now)
+            self._persist_locked(force=True)
 
     def provider_finished(
         self,
@@ -928,7 +983,13 @@ class _RuntimeTelemetry:
             self._state["evaluation_cases_total"] = (
                 int(self._state.get("evaluation_cases_total", 0)) + total
             )
-            owner = "baseline" if key.startswith("baseline:") else "candidate"
+            owner = (
+                "baseline"
+                if key.startswith("baseline:")
+                else "parent_reference"
+                if key.startswith("parent_reference:")
+                else "candidate"
+            )
             completed_field = f"{owner}_evaluation_cases_completed"
             total_field = f"{owner}_evaluation_cases_total"
             self._state[completed_field] = int(self._state.get(completed_field, 0)) + completed
@@ -952,7 +1013,13 @@ class _RuntimeTelemetry:
             self._state["evaluation_cases_completed"] = int(
                 self._state.get("evaluation_cases_completed", 0)
             ) + max(0, item["completed"] - previous)
-            owner = "baseline" if key.startswith("baseline:") else "candidate"
+            owner = (
+                "baseline"
+                if key.startswith("baseline:")
+                else "parent_reference"
+                if key.startswith("parent_reference:")
+                else "candidate"
+            )
             completed_field = f"{owner}_evaluation_cases_completed"
             self._state[completed_field] = int(
                 self._state.get(completed_field, 0)
@@ -1015,6 +1082,8 @@ class _RuntimeTelemetry:
             self._state["active_evaluators"] = 0
             self._state["queued_evaluations"] = 0
             self._state["active_provider_turns"] = 0
+            self._state["queued_provider_keys"] = []
+            self._state["waiting_provider_keys"] = []
             self._state["active_evaluation_work"] = {}
             self._state["terminal_reason"] = reason
             self._persist_locked(force=True)
@@ -1356,6 +1425,64 @@ class _ConcurrentEvaluatorPool:
             finalize=finalize,
         )
 
+    def submit_parent_reference(
+        self,
+        *,
+        parent: Mapping[str, Any],
+        panel: tuple[core.DevelopmentCaseV1, ...],
+        generation: int,
+        generation_dir: Path,
+    ) -> Future[_EvaluationOutcome]:
+        parent_id = str(parent["candidate_id"])
+        reference_dir = generation_dir / "parent-references" / parent_id
+        paths = tuple(
+            reference_dir / "evaluations" / f"{case.case_id}.json.gz"
+            for case in panel
+        )
+
+        def finalize(outcome: _EvaluationOutcome) -> None:
+            if outcome.behavior_profile is None:
+                raise core.M5InfrastructureError(
+                    f"parent reference {parent_id} returned an incomplete panel"
+                )
+            result = {
+                "protocol_id": M10_PARENT_REFERENCE_RESULT_PROTOCOL_ID,
+                "generation": generation,
+                "parent_candidate_id": parent_id,
+                "parent_program_hash": parent["program_hash"],
+                "panel_hash": core.panel_hash(panel),
+                "panel_case_ids": [case.case_id for case in panel],
+                "evaluation_case_count": outcome.evaluation_case_count,
+                "profile": outcome.behavior_profile,
+                "evaluation_telemetry": outcome.evaluation_telemetry,
+                "authoritative": False,
+                "purpose": "same_panel_mutation_display",
+            }
+            self._telemetry.timed_persist(
+                partial(
+                    _write_or_verify,
+                    reference_dir / M10_PARENT_REFERENCE_RESULT_FILENAME,
+                    result,
+                )
+            )
+
+        source = parent.get("source")
+        if not isinstance(source, str):
+            raise core.M5InfrastructureError(
+                f"parent reference {parent_id} omitted retained source"
+            )
+        return self._submit_panel(
+            key=f"parent_reference:{generation}:{parent_id}",
+            panel=panel,
+            evaluation_paths=paths,
+            operation=lambda evaluator, case: evaluator.evaluate(
+                source=source,
+                case=case,
+                candidate_id=f"parent-reference-g{generation:04d}-{parent_id}",
+            ),
+            finalize=finalize,
+        )
+
     def close(self, *, force: bool = False) -> Exception | None:
         errors: list[Exception] = []
         with self._condition:
@@ -1587,7 +1714,12 @@ def _primary_provider_call(
     durable_result_path: Path,
     operation: Callable[[], core.M5ProviderResultV1],
 ) -> core.M5ProviderResultV1:
-    provider.await_primary_slot(generation=generation, slot=slot)
+    telemetry.provider_task_waiting(key)
+    try:
+        provider.await_primary_slot(generation=generation, slot=slot)
+    except BaseException:
+        telemetry.provider_task_wait_finished(key)
+        raise
     return _provider_call(
         telemetry=telemetry,
         key=key,
@@ -1595,6 +1727,75 @@ def _primary_provider_call(
         durable_result_path=durable_result_path,
         operation=operation,
     )
+
+
+def _parent_reference_path(generation_dir: Path, parent_id: str) -> Path:
+    return (
+        generation_dir
+        / "parent-references"
+        / parent_id
+        / M10_PARENT_REFERENCE_RESULT_FILENAME
+    )
+
+
+def _verify_parent_reference(
+    *,
+    path: Path,
+    generation: int,
+    parent: Mapping[str, Any],
+    panel: tuple[core.DevelopmentCaseV1, ...],
+) -> dict[str, Any]:
+    value = core._load_mapping(path)
+    if (
+        value.get("protocol_id") != M10_PARENT_REFERENCE_RESULT_PROTOCOL_ID
+        or value.get("generation") != generation
+        or value.get("parent_candidate_id") != parent.get("candidate_id")
+        or value.get("parent_program_hash") != parent.get("program_hash")
+        or value.get("panel_hash") != core.panel_hash(panel)
+        or value.get("panel_case_ids") != [case.case_id for case in panel]
+        or value.get("evaluation_case_count") != len(panel)
+        or value.get("authoritative") is not False
+        or value.get("purpose") != "same_panel_mutation_display"
+        or not isinstance(value.get("profile"), Mapping)
+    ):
+        raise core.M5InfrastructureError(f"retained parent reference changed: {path}")
+    return value
+
+
+def _commit_parent_references(
+    *,
+    generation: int,
+    generation_dir: Path,
+    panel: tuple[core.DevelopmentCaseV1, ...],
+    parents: Mapping[str, Mapping[str, Any]],
+    futures: Mapping[str, Future[_EvaluationOutcome]],
+    telemetry: _RuntimeTelemetry,
+    force_stop: Callable[[], bool] | None = None,
+) -> None:
+    for parent_id, parent in parents.items():
+        path = _parent_reference_path(generation_dir, parent_id)
+        if not path.is_file():
+            future = futures[parent_id]
+            while not future.done():
+                if force_stop is not None and force_stop():
+                    raise core.M5OperatorStop("immediate operator stop requested")
+                time.sleep(0.05)
+            outcome = future.result()
+            if outcome.failure_type is not None:
+                raise core.M5InfrastructureError(
+                    "parent reference evaluation failed for "
+                    f"generation {generation}/{parent_id}/"
+                    f"{outcome.failure_case_id}: {outcome.failure_type}"
+                )
+        _verify_parent_reference(
+            path=path,
+            generation=generation,
+            parent=parent,
+            panel=panel,
+        )
+        telemetry.evaluation_committed(
+            key=f"parent_reference:{generation}:{parent_id}"
+        )
 
 
 def _queue_valid_candidate(
@@ -2585,6 +2786,12 @@ def run_sustained_search(
 
             generation_dir = root / "generations" / f"generation-{generation:04d}"
             core._write_exclusive_or_verify(generation_dir / "manifest.json.gz", manifest.as_dict())
+            telemetry.slots_started(
+                [
+                    core._candidate_id(generation, slot_plan.slot)
+                    for slot_plan in manifest.slots
+                ]
+            )
             telemetry.boundary(f"generation_{generation}_manifest")
             baseline_summary_path = generation_dir / M10_BASELINE_FILENAME
             retained_baselines = (
@@ -2618,6 +2825,24 @@ def run_sustained_search(
                 boundary_hook(f"generation_{generation}_search_memory")
             prior_candidates = core._all_candidates(root)
             by_id = {str(item["candidate_id"]): item for item in prior_candidates}
+            parent_references = {
+                parent_id: by_id[parent_id]
+                for parent_id in dict.fromkeys(
+                    slot.parent_candidate_id
+                    for slot in manifest.slots
+                    if slot.parent_candidate_id is not None
+                )
+            }
+            parent_reference_futures = {
+                parent_id: pool.submit_parent_reference(
+                    parent=parent,
+                    panel=panel,
+                    generation=generation,
+                    generation_dir=generation_dir,
+                )
+                for parent_id, parent in parent_references.items()
+                if not _parent_reference_path(generation_dir, parent_id).is_file()
+            }
             snapshot = _generation_snapshot(
                 generation=generation,
                 manifest=manifest,
@@ -2840,22 +3065,28 @@ def run_sustained_search(
                 if lane not in lane_tasks:
                     raise core.M5InfrastructureError("provider returned an invalid frozen lane")
                 lane_tasks[lane].append(task)
-            next_provider_task = 0
+            next_lane_task = {
+                lane: 0 for lane in range(options.provider_concurrency)
+            }
+            telemetry.provider_tasks_queued([task.key for task in provider_task_list])
 
             def submit_next_provider_task(
+                lane: int,
                 *,
-                task_list: list[_ProviderTask] = provider_task_list,
+                task_lists: Mapping[int, list[_ProviderTask]] = lane_tasks,
                 future_map: dict[str, Future[core.M5ProviderResultV1]] = provider_futures,
                 submitted_map: dict[str, float] = provider_submitted_at,
+                next_indices: dict[int, int] = next_lane_task,
                 executor: ThreadPoolExecutor = provider_executor,
                 provider_instance: core.M10SearchProvider = provider,
                 generation_number: int = generation,
             ) -> None:
-                nonlocal next_provider_task
-                if next_provider_task >= len(task_list):
+                next_index = next_indices[lane]
+                task_list = task_lists[lane]
+                if next_index >= len(task_list):
                     return
-                task = task_list[next_provider_task]
-                next_provider_task += 1
+                task = task_list[next_index]
+                next_indices[lane] = next_index + 1
                 submitted_at = time.monotonic()
                 future_map[task.pending.candidate_id] = executor.submit(
                     _primary_provider_call,
@@ -2872,10 +3103,14 @@ def run_sustained_search(
             # Keep at most one future per configured provider lane in flight.
             # The next task is submitted only after its predecessor has been
             # consumed and its lane released below.
-            for _ in range(min(options.provider_concurrency, len(provider_task_list))):
-                submit_next_provider_task()
+            for lane in range(options.provider_concurrency):
+                submit_next_provider_task(lane)
 
             for task in provider_task_list:
+                lane = provider.primary_lane(
+                    generation=generation,
+                    slot=task.slot_plan.slot,
+                )
                 future = provider_futures[task.pending.candidate_id]
                 pending = task.pending
                 try:
@@ -2914,7 +3149,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
-                    submit_next_provider_task()
+                    submit_next_provider_task(lane)
                     continue
                 if boundary_hook is not None:
                     boundary_hook(f"{pending.candidate_id}_provider")
@@ -2948,7 +3183,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
-                    submit_next_provider_task()
+                    submit_next_provider_task(lane)
                     continue
                 repair_key = f"{task.slot_plan.request_key}-repair-01"
                 if not telemetry.reserve_repair(repair_key, limit=options.repair_turn_limit):
@@ -2974,7 +3209,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
-                    submit_next_provider_task()
+                    submit_next_provider_task(lane)
                     continue
                 repair_prompt = _repair_prompt(
                     snapshot=snapshot,
@@ -2994,6 +3229,7 @@ def run_sustained_search(
                     artifact_dir=pending.slot_dir / "provider-repair-01",
                 )
                 repair_submitted_at = time.monotonic()
+                telemetry.provider_tasks_queued([repair_key])
                 repair_future = provider_executor.submit(
                     _provider_call,
                     telemetry=telemetry,
@@ -3038,7 +3274,7 @@ def run_sustained_search(
                         slot=task.slot_plan.slot,
                     )
                     commit_ready(block=False)
-                    submit_next_provider_task()
+                    submit_next_provider_task(lane)
                     continue
                 repaired_attempts = [
                     *attempts,
@@ -3076,11 +3312,20 @@ def run_sustained_search(
                     slot=task.slot_plan.slot,
                 )
                 commit_ready(block=False)
-                submit_next_provider_task()
+                submit_next_provider_task(lane)
 
             commit_ready(block=True)
             if commit_cursor != core.POPULATION_SIZE:
                 raise core.M5InfrastructureError("generation did not reach eight terminal slots")
+            _commit_parent_references(
+                generation=generation,
+                generation_dir=generation_dir,
+                panel=panel,
+                parents=parent_references,
+                futures=parent_reference_futures,
+                telemetry=telemetry,
+                force_stop=force_stop,
+            )
             baseline_summary = (
                 retained_baselines
                 if retained_baselines is not None

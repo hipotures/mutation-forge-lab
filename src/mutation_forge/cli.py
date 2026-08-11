@@ -20,6 +20,7 @@ from typing import Any, cast
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from mutation_forge import __version__
 from mutation_forge import stage4e as stage4e_commands
@@ -106,6 +107,17 @@ _LEGACY_COMMANDS = frozenset(
         "stage7",
     }
 )
+
+
+def _exact_verification_text(exact: Mapping[str, object]) -> Text:
+    value = Text()
+    if exact.get("error"):
+        value.append("error", style="red")
+    elif exact.get("verified") is True:
+        value.append("yes", style="green")
+    else:
+        value.append("no")
+    return value
 
 
 class _PublicArgumentParser(argparse.ArgumentParser):
@@ -501,7 +513,7 @@ def _experiment_run(
                     f"{result.get('hourly_token_limit', '—')} tokens; "
                     f"retry after {retry_after})"
                 )
-            Console().print(
+            terminal_summary = Text(
                 f"Run {preview_config.exp_id} · "
                 f"state {result.get('state', 'unknown')} · "
                 f"slots {counts.get('terminal', 0)}/"
@@ -509,9 +521,11 @@ def _experiment_run(
                 f"evaluated {counts.get('evaluated', 0)} · "
                 f"provider turns total {provider.get('turns', 0)} · "
                 f"tokens {usage.get('totalTokens', 0)} · "
-                f"exact verified {bool(exact.get('verified'))} · "
-                f"reason {reason}"
+                "exact verified "
             )
+            terminal_summary.append_text(_exact_verification_text(exact))
+            terminal_summary.append(f" · reason {reason}")
+            Console().print(terminal_summary)
         elif json_output:
             print(encoded)
         else:
