@@ -211,7 +211,11 @@ class TransportLogger:
             "stderr.txt",
         ):
             self._write_lines(name, [])
-        self.finalize()
+        self._write_lines(
+            "transcript.sha256",
+            [self.transcript_sha256 + "\n"],
+        )
+        self._finalized = True
 
     def _name(self, name: str) -> str:
         if self.compress_json and name.endswith(".json"):
@@ -395,6 +399,16 @@ class TransportLogger:
 
         if self._finalized:
             return
+        with _ARTIFACT_LOCK:
+            aggregate_size = sum(
+                path.stat().st_size
+                for path in self.aggregate_root.rglob("*")
+                if path.is_file()
+            )
+            if aggregate_size > self.max_aggregate_bytes:
+                self.telemetry["write_failures"] += 1
+                raise ValueError("transport run exceeds aggregate byte limit")
+            _AGGREGATE_SIZES[self.aggregate_root] = aggregate_size
         self._write_lines("transcript.sha256", [self.transcript_sha256 + "\n"])
         self._finalized = True
 

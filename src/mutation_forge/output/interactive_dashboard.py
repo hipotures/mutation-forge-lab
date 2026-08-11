@@ -391,16 +391,10 @@ def dashboard_state_from_python_status(
     provider = mapping("provider")
     evaluators = mapping("evaluators")
     evaluation_cases = mapping("evaluation_cases")
-    baseline_cases = (
-        evaluation_cases.get("baseline")
-        if isinstance(evaluation_cases.get("baseline"), Mapping)
-        else {}
-    )
-    candidate_cases = (
-        evaluation_cases.get("candidate")
-        if isinstance(evaluation_cases.get("candidate"), Mapping)
-        else {}
-    )
+    raw_baseline_cases = evaluation_cases.get("baseline")
+    baseline_cases = raw_baseline_cases if isinstance(raw_baseline_cases, Mapping) else {}
+    raw_candidate_cases = evaluation_cases.get("candidate")
+    candidate_cases = raw_candidate_cases if isinstance(raw_candidate_cases, Mapping) else {}
     throughput = mapping("throughput")
     activity = mapping("scientific_activity")
     phase = mapping("phase_timings")

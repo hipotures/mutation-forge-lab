@@ -1088,7 +1088,6 @@ class _ConcurrentEvaluatorPool:
                 )
                 started = time.monotonic()
                 failed = False
-                payload: dict[str, Any] | None = None
                 self._telemetry.evaluator_started(
                     started - work.queued_at,
                     owner=work.key,

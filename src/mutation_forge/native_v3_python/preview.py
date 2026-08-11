@@ -2350,23 +2350,26 @@ class _ProcessOwnedEvaluator:
         self._connection.close()
 
     def _terminate_process_group(self) -> None:
+        process_group = self._process_group
         if (
             self._process.is_alive()
-            and self._process_group == self._process.pid
+            and process_group is not None
+            and process_group == self._process.pid
             and hasattr(os, "killpg")
         ):
             with suppress(ProcessLookupError):
-                os.killpg(self._process_group, signal.SIGTERM)
+                os.killpg(process_group, signal.SIGTERM)
         elif self._process.is_alive():
             self._process.terminate()
         self._process.join(timeout=0.5)
         if self._process.is_alive():
             if (
-                self._process_group == self._process.pid
+                process_group is not None
+                and process_group == self._process.pid
                 and hasattr(os, "killpg")
             ):
                 with suppress(ProcessLookupError):
-                    os.killpg(self._process_group, signal.SIGKILL)
+                    os.killpg(process_group, signal.SIGKILL)
             else:
                 self._process.kill()
             self._process.join(timeout=0.5)

@@ -1026,6 +1026,8 @@ class CodexAppServerAdapter:
                 allow_server_retry=allow_server_retry,
             )
             self._last_status = "completed"
+            if self.logger:
+                self.logger.finalize()
             return r
         except Exception:
             self._last_status = "failed"
