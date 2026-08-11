@@ -86,6 +86,9 @@ _STOP_REQUEST_NAME = "python-preview-stop-request.json.gz"
 _STOP_REQUEST_PROTOCOL_ID = "mforge.native.python_preview.stop_request.v1"
 _M10_PAUSE_RECORD_SCHEMA_VERSION = "mforge.native.python_m10_emergency_stop_evidence.v1"
 _PAUSED_FOR_BUDGET = "PAUSED_FOR_BUDGET"
+_LEGACY_GENERATION_LIMIT_CAPSULE_MISSING = (
+    "legacy_generation_limit_provider_runtime_missing"
+)
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _TERMINAL_CANDIDATE_STATUSES = frozenset(
     {
@@ -161,16 +164,37 @@ class PythonPreviewConfig:
 
     @property
     def scientific_config_sha256(self) -> str:
+        return self._scientific_config_sha256(include_generation_limit=False)
+
+    @property
+    def legacy_scientific_config_sha256(self) -> str:
+        return self._scientific_config_sha256(include_generation_limit=True)
+
+    def _scientific_config_sha256(
+        self,
+        *,
+        include_generation_limit: bool,
+    ) -> str:
+        scientific_identity = (
+            self.scientific_search.scientific_identity_dict()
+            if self.scientific_search is not None
+            else None
+        )
+        if (
+            include_generation_limit
+            and scientific_identity is not None
+            and self.scientific_search is not None
+        ):
+            scientific_identity = {
+                "generation_limit": self.scientific_search.generation_limit,
+                **scientific_identity,
+            }
         payload = {
             "schema_version": self.schema_version,
             "protocol": self.protocol,
             "model": self.model,
             "effort": self.effort,
-            "scientific_search": (
-                self.scientific_search.scientific_identity_dict()
-                if self.scientific_search is not None
-                else None
-            ),
+            "scientific_search": scientific_identity,
         }
         return hashlib.sha256(
             json.dumps(
@@ -526,7 +550,7 @@ def load_python_preview_config(
         )
     elif schema_version == PYTHON_SCIENTIFIC_SEARCH_CONFIG_SCHEMA_VERSION:
         raise ValueError("scientific search config requires [python_preview.scientific_search]")
-    return PythonPreviewConfig(
+    config = PythonPreviewConfig(
         schema_version=str(schema_version),
         protocol=PYTHON_EXPERIMENT_PROTOCOL_ID,
         exp_id=exp_id,
@@ -539,6 +563,16 @@ def load_python_preview_config(
         source_path=source_path,
         source_bytes=source_bytes,
     )
+    if (
+        not config.experiment_root.exists()
+        and scientific_search is not None
+        and scientific_search.primary_program_slots
+        != scientific_search.current_primary_program_slots
+    ):
+        raise ValueError(
+            "primary_program_slots must provide exactly eight slots per generation"
+        )
+    return config
 
 
 def _state_path(config: PythonPreviewConfig) -> Path:
@@ -558,6 +592,88 @@ def _provider_runtime_missing(root: Path) -> bool:
         if isinstance(capsule_root, str) and capsule_root:
             return not Path(capsule_root).is_dir()
     return False
+
+
+def _generation_limit_lifecycle(
+    config: PythonPreviewConfig,
+    state: Mapping[str, Any],
+) -> tuple[dict[str, Any], Mapping[str, Any] | None, bool]:
+    if config.scientific_search is None:
+        return dict(state), None, False
+    report = _load_mapping(config.experiment_root / M10_REPORT_FILENAME)
+    if (
+        report is None
+        or report.get("protocol_id") != M10_REPORT_PROTOCOL_ID
+        or report.get("stop_reason") != "generation_budget"
+    ):
+        return dict(state), report, False
+    generation_count = _nonnegative_int(report.get("generation_count"))
+    generation_limit = config.scientific_search.generation_limit
+    at_limit = generation_limit is not None and generation_count >= generation_limit
+    terminal_reason = state.get("terminal_reason")
+    if (
+        terminal_reason == _LEGACY_GENERATION_LIMIT_CAPSULE_MISSING
+        and not at_limit
+    ):
+        return dict(state), report, False
+    legacy_generation_limit_state = (
+        terminal_reason == "generation_budget"
+        or (
+            state.get("state") == "completed"
+            and terminal_reason in {None, "generation_budget"}
+        )
+        or (
+            state.get("state") == "failed"
+            and terminal_reason == "provider_runtime_missing"
+        )
+    )
+    if not legacy_generation_limit_state:
+        return dict(state), report, at_limit
+    exact = report.get("exact_verified") is True
+    return (
+        {
+            **state,
+            "state": "blocked",
+            "resumable": True,
+            "run_terminal": False,
+            "terminal_reason": "generation_budget",
+            "scientific_result_kind": (
+                "VERIFIED_COUNTEREXAMPLE"
+                if exact
+                else "DEVELOPMENT_SEARCH_EVIDENCE"
+            ),
+            "scientific_success": exact,
+            "last_error": None,
+        },
+        report,
+        at_limit,
+    )
+
+
+def _generation_limit_noop_status(
+    state: Mapping[str, Any],
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    generation_count = _nonnegative_int(report.get("generation_count"))
+    return {
+        **_public(state),
+        "search_protocol": M10_SEARCH_PROTOCOL_ID,
+        "generation_index": generation_count - 1 if generation_count else None,
+    }
+
+
+def _legacy_workspace_config_sha256(
+    config: PythonPreviewConfig,
+) -> str | None:
+    try:
+        frozen_config = load_python_preview_config(
+            config.experiment_root / _CONFIG_NAME
+        )
+    except (OSError, ValueError):
+        return None
+    if frozen_config.scientific_config_sha256 != config.scientific_config_sha256:
+        return None
+    return frozen_config.legacy_scientific_config_sha256
 
 
 def _base_state(config: PythonPreviewConfig) -> dict[str, Any]:
@@ -629,10 +745,24 @@ def _load_state(config: PythonPreviewConfig) -> dict[str, Any]:
             "Python preview workspace protocol does not match this runtime"
         )
     if raw.get("config_sha256") != config.scientific_config_sha256:
-        raise PythonPreviewWorkspaceError(
-            "existing experiment scientific configuration differs from the "
-            "frozen workspace identity; use a new exp_id"
+        try:
+            frozen_config = load_python_preview_config(
+                config.experiment_root / _CONFIG_NAME
+            )
+        except (OSError, ValueError):
+            frozen_config = None
+        legacy_generation_limit_identity = (
+            frozen_config is not None
+            and raw.get("config_sha256")
+            == frozen_config.legacy_scientific_config_sha256
+            and frozen_config.scientific_config_sha256
+            == config.scientific_config_sha256
         )
+        if not legacy_generation_limit_identity:
+            raise PythonPreviewWorkspaceError(
+                "existing experiment scientific configuration differs from the "
+                "frozen workspace identity; use a new exp_id"
+            )
     return dict(raw)
 
 
@@ -1210,16 +1340,11 @@ def _progress(
         or (report_protocol == M5_REPORT_PROTOCOL_ID and retained_state.get("state") == "completed")
     ) and not active_boundary and not retained_state.get("last_error"):
         terminal_reason = str(report.get("stop_reason", "generation_budget"))
-        generation_count = _nonnegative_int(report.get("generation_count"))
-        configured_generation_limit = (
-            config.scientific_search.generation_limit
-            if config.scientific_search is not None
-            else generation_count
+        generation_limit_stop = (
+            report_protocol == M10_REPORT_PROTOCOL_ID
+            and terminal_reason == "generation_budget"
         )
-        generation_budget_extended = terminal_reason == "generation_budget" and (
-            configured_generation_limit is None or configured_generation_limit > generation_count
-        )
-        report_resumable = generation_budget_extended or terminal_reason in {
+        report_resumable = generation_limit_stop or terminal_reason in {
             "hourly_token_limit",
             "wall_clock_budget",
         }
@@ -2174,6 +2299,7 @@ def python_preview_status(
             "scientific_result_kind": "NO_SCIENTIFIC_RESULT",
             "last_error": _safe_error(error, config),
         }
+    state, _, _ = _generation_limit_lifecycle(config, state)
     status = _progress(config, state)
     if pause_record_path is None:
         return status
@@ -2515,7 +2641,9 @@ def _default_provider(
             auth_json=Path.home() / ".codex" / "auth.json",
             turn_timeout_seconds=config.timeout_seconds,
             provider_concurrency=(config.scientific_search.provider_concurrency),
-            provider_total_turn_limit=(config.scientific_search.provider_total_turn_limit),
+            provider_total_turn_limit=(
+                config.scientific_search.current_provider_total_turn_limit
+            ),
         )
     return CodexM5SearchProvider(
         workspace=config.experiment_root / "provider-runtime",
@@ -2810,7 +2938,28 @@ def run_python_preview(
     config = load_python_preview_config(config_path)
     existed = config.experiment_root.exists()
     state = _load_state(config) if existed else _initialize_workspace(config)
+    generation_limit_state, generation_limit_report, at_generation_limit = (
+        _generation_limit_lifecycle(config, state)
+    )
+    if existed and generation_limit_state != state:
+        state = generation_limit_state
+        _write_state(config, state)
+    if existed and at_generation_limit and generation_limit_report is not None:
+        return _generation_limit_noop_status(state, generation_limit_report)
     if existed and _provider_runtime_missing(config.experiment_root):
+        if generation_limit_report is not None:
+            blocked = {
+                **state,
+                "state": "blocked",
+                "resumable": False,
+                "run_terminal": False,
+                "terminal_reason": _LEGACY_GENERATION_LIMIT_CAPSULE_MISSING,
+                "scientific_result_kind": "DEVELOPMENT_SEARCH_EVIDENCE",
+                "scientific_success": False,
+                "last_error": "FileNotFoundError",
+            }
+            _write_state(config, blocked)
+            return _generation_limit_noop_status(blocked, generation_limit_report)
         failed = {
             **state,
             "state": "failed",
@@ -2844,6 +2993,10 @@ def run_python_preview(
     if (
         state.get("state") == "completed"
         and state.get("terminal_reason") not in resumable_terminal_reasons
+        and not (
+            config.scientific_search is not None
+            and state.get("terminal_reason") == "generation_budget"
+        )
     ):
         return _progress(config, state)
     if not (config.heg_repo / "src" / "sglab").is_dir():
@@ -2879,6 +3032,11 @@ def run_python_preview(
             output_schema=policy_schema,
             specification_ack_schema=ack_schema,
             runtime_limits=PolicyRuntimeLimitsV1(),
+            legacy_experiment_config_sha256=(
+                _legacy_workspace_config_sha256(config)
+                if existed
+                else None
+            ),
         )
     except Exception as error:
         failed = {
@@ -3009,7 +3167,10 @@ def run_python_preview(
             "resume_generation_complete",
             "hourly_token_limit",
             "wall_clock_budget",
-        }
+        } or (
+            config.scientific_search is not None
+            and report.get("stop_reason") == "generation_budget"
+        )
         final_state = {
             **running,
             "state": ("blocked" if resumable_stop else "completed"),

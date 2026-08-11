@@ -249,6 +249,28 @@ def test_resume_freezes_supplied_scientific_identity_not_invocation_config(
         ensure_m5_acceptance_provenance(**inputs)
 
 
+def test_resume_accepts_only_the_declared_legacy_scientific_identity_hash(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    inputs["experiment_config_sha256"] = "a" * 64
+    ensure_m5_acceptance_provenance(**inputs)
+    path = inputs["workspace"] / M5_PROVENANCE_FILENAME
+    before = path.read_bytes()
+
+    inputs["resume"] = True
+    inputs["experiment_config_sha256"] = "b" * 64
+    inputs["legacy_experiment_config_sha256"] = "a" * 64
+    resumed = ensure_m5_acceptance_provenance(**inputs)
+
+    assert resumed["experiment_config_sha256"] == "b" * 64
+    assert path.read_bytes() == before
+
+    inputs["legacy_experiment_config_sha256"] = "c" * 64
+    with pytest.raises(M5ProvenanceError, match="differs"):
+        ensure_m5_acceptance_provenance(**inputs)
+
+
 def test_old_workspace_without_snapshot_is_explicitly_rejected(
     tmp_path: Path,
 ) -> None:

@@ -264,6 +264,7 @@ def ensure_m5_acceptance_provenance(
     specification_ack_schema: Mapping[str, Any],
     runtime_limits: PolicyRuntimeLimitsV1 | None = None,
     experiment_config_sha256: str | None = None,
+    legacy_experiment_config_sha256: str | None = None,
     git_identity_loader: GitIdentityLoader = read_git_repository_identity,
 ) -> dict[str, JsonValue]:
     """Persist or compare provenance before App Server construction."""
@@ -304,9 +305,27 @@ def ensure_m5_acceptance_provenance(
         if retained_hash != _snapshot_hash(retained_dict):
             raise M5ProvenanceError("retained M5 provenance hash is invalid")
         if dict(retained) != current:
-            raise M5ProvenanceError(
-                "current environment differs from immutable M5 provenance"
+            retained_payload = dict(retained)
+            current_payload = dict(current)
+            retained_payload.pop("sha256", None)
+            current_payload.pop("sha256", None)
+            retained_config_hash = retained_payload.get(
+                "experiment_config_sha256"
             )
+            if (
+                legacy_experiment_config_sha256 is None
+                or retained_config_hash != legacy_experiment_config_sha256
+            ):
+                raise M5ProvenanceError(
+                    "current environment differs from immutable M5 provenance"
+                )
+            retained_payload["experiment_config_sha256"] = (
+                current_payload["experiment_config_sha256"]
+            )
+            if retained_payload != current_payload:
+                raise M5ProvenanceError(
+                    "current environment differs from immutable M5 provenance"
+                )
         return current
 
     write_json(path, current, exclusive=True)

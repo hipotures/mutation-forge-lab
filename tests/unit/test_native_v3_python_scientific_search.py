@@ -509,6 +509,21 @@ replay = false
     return config_path
 
 
+def _change_generation_limit(
+    config_path: Path,
+    *,
+    old: int,
+    new: int,
+) -> None:
+    before = f"generation_limit = {old}\n"
+    text = config_path.read_text(encoding="utf-8")
+    assert text.count(before) == 1
+    config_path.write_text(
+        text.replace(before, f"generation_limit = {new}\n"),
+        encoding="utf-8",
+    )
+
+
 def test_native_v2_reference_profile_derives_the_same_adaptive_orders() -> None:
     evaluation = ScientificEvaluationOptionsV1(
         graph_mode="unrestricted_min_degree_3",
@@ -773,7 +788,8 @@ def test_completed_baseline_is_visible_while_candidates_are_blocked(
     release_candidates.set()
     thread.join(timeout=5)
     assert not thread.is_alive()
-    assert result["state"] == "completed"
+    assert result["state"] == "blocked"
+    assert result["resumable"] is True
 
 
 def test_prepared_candidate_waiting_for_worker_is_evaluation_queued(
@@ -1519,7 +1535,8 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
         auth_available=lambda _: True,
     )
 
-    assert status["state"] == "completed"
+    assert status["state"] == "blocked"
+    assert status["resumable"] is True
     assert status["search_protocol"] == M10_SEARCH_PROTOCOL_ID
     assert status["safe_api_expanded"] is True
     assert status["counts"]["terminal"] == 8
@@ -1761,6 +1778,318 @@ def test_same_exp_id_rejects_changed_frozen_scientific_config_before_work(
     assert calls == {"provider": 0, "backend": 0}
 
 
+def test_generation_limit_repeatedly_extends_same_campaign_and_noops_at_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="mutable-generation-limit",
+        generations=2,
+        workers=1,
+    )
+    initial_identity = load_python_preview_config(
+        config_path
+    ).scientific_config_sha256
+    durable: dict[str, M5ProviderResultV1] = {}
+    providers: list[_Provider] = []
+
+    def provider_factory(*_: Any) -> _Provider:
+        provider = _Provider(durable)
+        providers.append(provider)
+        return provider
+
+    first = run_python_preview(
+        config_path,
+        provider_factory=provider_factory,
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    config = load_python_preview_config(config_path)
+    root = config.experiment_root
+    retained_generation_bytes = {
+        path.relative_to(root): path.read_bytes()
+        for generation in (0, 1)
+        for path in (
+            root / "generations" / f"generation-{generation:04d}"
+        ).rglob("*")
+        if path.is_file()
+    }
+    all_bytes_at_limit = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+    assert first["state"] == "blocked"
+    assert first["resumable"] is True
+    assert first["terminal_reason"] == "generation_budget"
+    assert {generation for generation, _ in providers[0].calls} == {0, 1}
+
+    with monkeypatch.context() as no_work:
+        no_work.setattr(
+            preview_module,
+            "_evaluation_telemetry_snapshot",
+            lambda _: (_ for _ in ()).throw(
+                AssertionError("no-op rebuilt evaluation telemetry")
+            ),
+        )
+        same_limit = run_python_preview(
+            config_path,
+            provider_factory=lambda *_: (_ for _ in ()).throw(
+                AssertionError("no-op constructed provider")
+            ),
+            backend_factory=lambda _: (_ for _ in ()).throw(
+                AssertionError("no-op constructed backend")
+            ),
+            evaluator_factory=lambda *_: (_ for _ in ()).throw(
+                AssertionError("no-op constructed evaluator")
+            ),
+            provenance_guard=lambda **_: {},
+            auth_available=lambda _: True,
+        )
+    assert same_limit["state"] == "blocked"
+    assert same_limit["resumable"] is True
+    assert {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    } == all_bytes_at_limit
+
+    protocol = cast(dict[str, Any], read_json(root / "protocol.json.gz"))
+    protocol["generation_limit"] = 2
+    write_json(root / "protocol.json.gz", protocol)
+    _change_generation_limit(config_path, old=2, new=5)
+    assert load_python_preview_config(config_path).scientific_config_sha256 == (
+        initial_identity
+    )
+    to_five = run_python_preview(
+        config_path,
+        provider_factory=provider_factory,
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+
+    assert to_five["terminal_reason"] == "generation_budget"
+    assert {generation for generation, _ in providers[1].calls} == {2, 3, 4}
+    assert {
+        path.relative_to(root): path.read_bytes()
+        for generation in (0, 1)
+        for path in (
+            root / "generations" / f"generation-{generation:04d}"
+        ).rglob("*")
+        if path.is_file()
+    } == retained_generation_bytes
+
+    _change_generation_limit(config_path, old=5, new=7)
+    to_seven = run_python_preview(
+        config_path,
+        provider_factory=provider_factory,
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+
+    assert to_seven["terminal_reason"] == "generation_budget"
+    assert {generation for generation, _ in providers[2].calls} == {5, 6}
+    assert sorted(
+        path.name
+        for path in (root / "generations").glob("generation-*")
+    ) == [f"generation-{generation:04d}" for generation in range(7)]
+
+    bytes_before_decrease = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    _change_generation_limit(config_path, old=7, new=3)
+    with monkeypatch.context() as no_work:
+        no_work.setattr(
+            preview_module,
+            "_evaluation_telemetry_snapshot",
+            lambda _: (_ for _ in ()).throw(
+                AssertionError("decreased limit rebuilt evaluation telemetry")
+            ),
+        )
+        decreased = run_python_preview(
+            config_path,
+            provider_factory=lambda *_: (_ for _ in ()).throw(
+                AssertionError("decreased limit constructed provider")
+            ),
+            backend_factory=lambda _: (_ for _ in ()).throw(
+                AssertionError("decreased limit constructed backend")
+            ),
+            evaluator_factory=lambda *_: (_ for _ in ()).throw(
+                AssertionError("decreased limit constructed evaluator")
+            ),
+            provenance_guard=lambda **_: {},
+            auth_available=lambda _: True,
+        )
+
+    assert decreased["state"] == "blocked"
+    assert sorted(
+        path.name
+        for path in (root / "generations").glob("generation-*")
+    ) == [f"generation-{generation:04d}" for generation in range(7)]
+    assert {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    } == bytes_before_decrease
+
+
+def test_generation_limit_stop_preserves_provider_capsule_but_exact_stop_cleans_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_flags: list[bool] = []
+
+    class RecordingProvider(_Provider):
+        def close(self, *, cleanup_capsule: bool = True) -> None:
+            cleanup_flags.append(cleanup_capsule)
+
+    monkeypatch.setattr(
+        preview_module,
+        "CodexM10SearchProvider",
+        RecordingProvider,
+    )
+    limit_path = _scientific_config(
+        tmp_path,
+        exp_id="generation-limit-cleanup",
+        workers=1,
+    )
+    result = run_python_preview(
+        limit_path,
+        provider_factory=lambda *_: RecordingProvider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+
+    assert result["terminal_reason"] == "generation_budget"
+    assert cleanup_flags == [False]
+
+    terminal_path = _scientific_config(
+        tmp_path,
+        exp_id="exact-stop-cleanup",
+        workers=1,
+    )
+    monkeypatch.setattr(
+        preview_module,
+        "run_sustained_search",
+        lambda **_: {
+            "stop_reason": "exact_verified_counterexample",
+            "exact_verified": True,
+        },
+    )
+    terminal = run_python_preview(
+        terminal_path,
+        provider_factory=lambda *_: RecordingProvider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+
+    assert terminal["state"] == "completed"
+    assert cleanup_flags == [False, True]
+
+
+def test_legacy_generation_budget_state_and_missing_capsule_are_narrowly_interpreted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="legacy-generation-limit",
+        workers=1,
+    )
+    run_python_preview(
+        config_path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    config = load_python_preview_config(config_path)
+    root = config.experiment_root
+    state_path = root / "python-preview-state.json.gz"
+    legacy_state = cast(dict[str, Any], read_json(state_path))
+    legacy_state.update(
+        {
+            "config_sha256": config.legacy_scientific_config_sha256,
+            "state": "completed",
+            "resumable": False,
+            "run_terminal": True,
+            "terminal_reason": "generation_budget",
+            "last_error": None,
+        }
+    )
+    write_json(state_path, legacy_state)
+    missing_capsule = tmp_path / "deleted-provider-capsule"
+    write_json(
+        root
+        / "provider-runtime"
+        / "coordinator"
+        / "provider-state.json.gz",
+        {"capsule_root": str(missing_capsule)},
+    )
+
+    status = python_preview_status(config_path)
+    assert status["state"] == "blocked"
+    assert status["resumable"] is True
+    assert status["terminal_reason"] == "generation_budget"
+
+    with monkeypatch.context() as no_work:
+        no_work.setattr(
+            preview_module,
+            "_evaluation_telemetry_snapshot",
+            lambda _: (_ for _ in ()).throw(
+                AssertionError("legacy no-op rebuilt evaluation telemetry")
+            ),
+        )
+        same_limit = run_python_preview(
+            config_path,
+            provider_factory=lambda *_: (_ for _ in ()).throw(
+                AssertionError("legacy no-op constructed provider")
+            ),
+            backend_factory=lambda _: (_ for _ in ()).throw(
+                AssertionError("legacy no-op constructed backend")
+            ),
+            provenance_guard=lambda **_: {},
+            auth_available=lambda _: True,
+        )
+    assert same_limit["state"] == "blocked"
+    assert same_limit["terminal_reason"] == "generation_budget"
+
+    _change_generation_limit(config_path, old=1, new=2)
+    continuation = run_python_preview(
+        config_path,
+        provider_factory=lambda *_: (_ for _ in ()).throw(
+            AssertionError("legacy missing capsule constructed provider")
+        ),
+        backend_factory=lambda _: (_ for _ in ()).throw(
+            AssertionError("legacy missing capsule constructed backend")
+        ),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+
+    assert continuation["state"] == "blocked"
+    assert continuation["resumable"] is False
+    assert (
+        continuation["terminal_reason"]
+        == "legacy_generation_limit_provider_runtime_missing"
+    )
+
+
 def test_new_exp_id_accepts_changed_scientific_config(
     tmp_path: Path,
 ) -> None:
@@ -1780,7 +2109,8 @@ def test_new_exp_id_accepts_changed_scientific_config(
             provenance_guard=lambda **_: {},
             auth_available=lambda _: True,
         )
-        assert status["state"] == "completed"
+        assert status["state"] == "blocked"
+        assert status["resumable"] is True
 
     assert load_python_preview_config(first_path).scientific_config_sha256 != (
         load_python_preview_config(second_path).scientific_config_sha256
@@ -1823,7 +2153,8 @@ def test_wall_budget_is_per_invocation_and_not_frozen(
         auth_available=lambda _: True,
     )
 
-    assert resumed["state"] == "completed"
+    assert resumed["state"] == "blocked"
+    assert resumed["resumable"] is True
     assert resumed["counts"]["terminal"] == 16
     assert resumed["throughput"]["current_run_elapsed_seconds"] < 0.3
 
@@ -2104,9 +2435,9 @@ def test_terminal_m10_report_wins_after_state_write_interruption(
     )
 
     status = python_preview_status(config_path)
-    assert status["state"] == "completed"
-    assert status["run_terminal"] is True
-    assert status["resumable"] is False
+    assert status["state"] == "blocked"
+    assert status["run_terminal"] is False
+    assert status["resumable"] is True
 
 
 def test_sustained_provider_transport_is_bounded_for_one_hundred_twenty_turns(

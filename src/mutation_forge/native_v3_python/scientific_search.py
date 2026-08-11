@@ -90,13 +90,6 @@ class ScientificSearchOptionsV2:
             raise ValueError("wall_seconds must be positive when configured")
         if self.max_total_tokens_per_hour is not None and self.max_total_tokens_per_hour < 1:
             raise ValueError("max_total_tokens_per_hour must be positive when configured")
-        if (
-            self.generation_limit is not None
-            and self.primary_program_slots != self.generation_limit * core.POPULATION_SIZE
-        ):
-            raise ValueError(
-                "primary_program_slots must provide exactly eight slots per generation"
-            )
         if self.generation_limit is None and self.primary_program_slots is not None:
             raise ValueError("primary_program_slots must be omitted for unlimited generations")
         if self.repair_turn_limit is not None and self.repair_turn_limit < 0:
@@ -147,7 +140,6 @@ class ScientificSearchOptionsV2:
         """Return experiment semantics without per-invocation execution controls."""
 
         return {
-            "generation_limit": self.generation_limit,
             "primary_program_slots": self.primary_program_slots,
             "repair_turn_limit": self.repair_turn_limit,
             "provider_total_turn_limit": self.provider_total_turn_limit,
@@ -156,6 +148,27 @@ class ScientificSearchOptionsV2:
             "replace_terminal_slots": self.replace_terminal_slots,
             "evaluation": self.evaluation.as_dict(),
         }
+
+    @property
+    def current_primary_program_slots(self) -> int | None:
+        """Return the primary-turn bound implied by the current generation limit."""
+
+        return (
+            None
+            if self.generation_limit is None
+            else self.generation_limit * core.POPULATION_SIZE
+        )
+
+    @property
+    def current_provider_total_turn_limit(self) -> int | None:
+        """Return the provider-turn bound implied by the current generation limit."""
+
+        primary = self.current_primary_program_slots
+        return (
+            None
+            if primary is None or self.repair_turn_limit is None
+            else primary + self.repair_turn_limit
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,9 +327,9 @@ def _generation_snapshot(
         panel=tuple(case.as_dict() for case in panel),
         budgets={
             "generation_limit": options.generation_limit,
-            "primary_program_slots": options.primary_program_slots,
+            "primary_program_slots": options.current_primary_program_slots,
             "repair_turn_limit": options.repair_turn_limit,
-            "provider_total_turn_limit": options.provider_total_turn_limit,
+            "provider_total_turn_limit": options.current_provider_total_turn_limit,
             "stop_on_verified": options.stop_on_verified,
             "resume_enabled": options.resume_enabled,
             "replace_terminal_slots": options.replace_terminal_slots,
@@ -1337,6 +1350,19 @@ def _write_or_verify(path: Path, value: Mapping[str, Any]) -> None:
     write_json(path, value, exclusive=True)
 
 
+def _write_or_verify_protocol(path: Path, value: Mapping[str, Any]) -> None:
+    if path.exists():
+        retained = read_json(path)
+        if not isinstance(retained, Mapping):
+            raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
+        comparable = dict(retained)
+        comparable.pop("generation_limit", None)
+        if comparable != dict(value):
+            raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
+        return
+    write_json(path, value, exclusive=True)
+
+
 def _prepared_path(slot_dir: Path) -> Path:
     return slot_dir / M10_PREPARED_FILENAME
 
@@ -2121,9 +2147,9 @@ def _report(
             + sum(int(item.get("warnings", 0)) for item in candidates),
             "duration_ms": anchor_result.duration_ms
             + sum(int(item.get("duration_ms", 0)) for item in candidates),
-            "primary_program_slots": options.primary_program_slots,
+            "primary_program_slots": options.current_primary_program_slots,
             "repair_turn_limit": options.repair_turn_limit,
-            "total_turn_limit": options.provider_total_turn_limit,
+            "total_turn_limit": options.current_provider_total_turn_limit,
             "primary_turns_submitted": int(runtime_payload.get("primary_turns_submitted", 0)),
             "repair_turns_submitted": int(runtime_payload.get("repair_turns_submitted", 0)),
         },
@@ -2230,9 +2256,9 @@ def _report(
             "exact_verifier_only_authority": True,
             "provider_program_turn_budget_respected": (
                 True
-                if options.provider_total_turn_limit is None
+                if options.current_provider_total_turn_limit is None
                 else int(runtime_payload.get("provider_turns_submitted", 0))
-                <= options.provider_total_turn_limit
+                <= options.current_provider_total_turn_limit
             ),
         },
     }
@@ -2354,7 +2380,6 @@ def run_sustained_search(
     protocol = {
         "protocol_id": M10_SEARCH_PROTOCOL_ID,
         "population_size": core.POPULATION_SIZE,
-        "generation_limit": options.generation_limit,
         "generation_zero_roots": core.POPULATION_SIZE,
         "later_child_slots": core.CHILD_SLOTS,
         "later_root_slots": core.ROOT_SLOTS,
@@ -2367,7 +2392,7 @@ def run_sustained_search(
         "native_v2_default": True,
         "dsl_runtime_used": False,
     }
-    _write_or_verify(root / "protocol.json.gz", protocol)
+    _write_or_verify_protocol(root / "protocol.json.gz", protocol)
     if boundary_hook is not None:
         boundary_hook("protocol_persisted")
     telemetry = _RuntimeTelemetry(root, options, resume_budget)
@@ -2504,7 +2529,7 @@ def run_sustained_search(
             primary_keys = [f"{slot.request_key}-initial" for slot in manifest.slots]
             telemetry.reserve_primary_generation(
                 primary_keys,
-                limit=options.primary_program_slots,
+                limit=options.current_primary_program_slots,
             )
 
             generation_dir = root / "generations" / f"generation-{generation:04d}"
@@ -2683,7 +2708,7 @@ def run_sustained_search(
 
                     provider_key, retry_attempt = telemetry.admit_primary_retry(
                         initial_key,
-                        limit=options.primary_program_slots,
+                        limit=options.current_primary_program_slots,
                         durable_result_exists=retry_result_exists,
                     )
                     idempotency_key = provider_key
