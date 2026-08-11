@@ -94,13 +94,15 @@ def _usage() -> dict[str, JsonValue]:
 
 
 def test_backend_owned_evaluator_uses_numbered_score_worker_names() -> None:
+    backend = _Backend()
     owned = preview_module._BackendOwnedEvaluator(
         evaluator=_Evaluator(),
-        backend=_Backend(),
+        backend=backend,
     )
 
-    assert owned._process_name("g0000-slot-00") == "mforge-eval-00"
-    assert owned._process_name("g0000-slot-07") == "mforge-eval-07"
+    owned.set_worker_name("mforge-eval-03")
+
+    assert backend.score_worker_name == "mforge-eval-03"
 
 
 class _Backend:
@@ -109,6 +111,10 @@ class _Backend:
 
     def __init__(self) -> None:
         self.closed = False
+        self.score_worker_name: str | None = None
+
+    def set_score_worker_name(self, name: str) -> None:
+        self.score_worker_name = name
 
     def target_forbidden_lengths(self, order: int) -> tuple[int, ...]:
         assert order == 30
@@ -636,7 +642,7 @@ def test_current_provider_error_is_not_masked_by_retained_report(
     assert python_preview_status(path)["state"] == "running"
 
 
-def test_missing_provider_runtime_uses_preserved_recovery_workspace(
+def test_missing_provider_runtime_fails_closed_without_copying_artifacts(
     tmp_path: Path,
 ) -> None:
     path = _config(tmp_path)
@@ -655,10 +661,12 @@ def test_missing_provider_runtime_uses_preserved_recovery_workspace(
     old_candidate = base_config.experiment_root / "generations/generation-0000/slot-00"
     assert old_candidate.is_dir()
 
-    roots: list[Path] = []
+    provider_calls = 0
 
     def provider_factory(config: Any, _: str) -> _Provider:
-        roots.append(config.experiment_root)
+        nonlocal provider_calls
+        del config
+        provider_calls += 1
         return _Provider()
 
     resumed = run_python_preview(
@@ -670,12 +678,14 @@ def test_missing_provider_runtime_uses_preserved_recovery_workspace(
         auth_available=lambda _: True,
     )
 
-    assert resumed["state"] == "completed"
-    assert roots and roots[0] != base_config.experiment_root
+    assert resumed["state"] == "failed"
+    assert resumed["terminal_reason"] == "provider_runtime_missing"
+    assert resumed["resumable"] is False
+    assert provider_calls == 0
     assert old_candidate.is_dir()
     marker = base_config.workspace / f".{base_config.exp_id}.active-recovery.json.gz"
-    assert marker.is_file()
-    assert python_preview_status(path)["state"] == "completed"
+    assert not marker.exists()
+    assert python_preview_status(path)["state"] == "failed"
 
 
 def test_resumable_operator_stop_is_consumed_and_can_resume(

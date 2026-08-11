@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -80,6 +81,24 @@ def _inputs(tmp_path: Path) -> dict[str, Any]:
     }
 
 
+def _commit_repository(path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@mutation-forge.invalid"],
+        cwd=path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Mutation Forge Tests"],
+        cwd=path,
+        check=True,
+    )
+    marker = path / ".gitkeep"
+    marker.touch()
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=path, check=True)
+
+
 def test_clean_run_persists_exact_provenance_before_provider_start(
     tmp_path: Path,
 ) -> None:
@@ -100,6 +119,24 @@ def test_clean_run_persists_exact_provenance_before_provider_start(
     assert snapshot["model"] == "gpt-5.6-luna"
     assert snapshot["reasoning_effort"] == "medium"
     assert snapshot["m2"]["frozen_limits"] == PolicyRuntimeLimitsV1().as_dict()
+
+
+def test_new_uncommitted_experiment_config_is_accepted(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    repository = cast(Path, inputs["repository_root"])
+    heg = cast(Path, inputs["heg_root"])
+    _commit_repository(repository)
+    _commit_repository(heg)
+    config = cast(Path, inputs["experiment_config"])
+    config.write_text("schema_version = 2\n", encoding="utf-8")
+    inputs.pop("git_identity_loader")
+
+    snapshot = ensure_m5_acceptance_provenance(**inputs)
+
+    assert snapshot["mutation_forge"]["dirty"] is False
+    assert snapshot["heg"]["dirty"] is False
 
 
 def test_dirty_worktree_fails_before_workspace_or_provider_start(
@@ -191,6 +228,25 @@ def test_matching_provenance_resumes_without_rewriting_snapshot(
     inputs["resume"] = True
     assert ensure_m5_acceptance_provenance(**inputs) == initial
     assert path.read_bytes() == before
+
+
+def test_resume_freezes_supplied_scientific_identity_not_invocation_config(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    inputs["experiment_config_sha256"] = "a" * 64
+    initial = ensure_m5_acceptance_provenance(**inputs)
+
+    Path(inputs["experiment_config"]).write_text(
+        "schema_version = 1\nwall_seconds = 60\n",
+        encoding="utf-8",
+    )
+    inputs["resume"] = True
+    assert ensure_m5_acceptance_provenance(**inputs) == initial
+
+    inputs["experiment_config_sha256"] = "b" * 64
+    with pytest.raises(M5ProvenanceError, match="differs"):
+        ensure_m5_acceptance_provenance(**inputs)
 
 
 def test_old_workspace_without_snapshot_is_explicitly_rejected(

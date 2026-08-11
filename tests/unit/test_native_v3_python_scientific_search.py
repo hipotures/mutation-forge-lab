@@ -14,6 +14,7 @@ import pytest
 from mutation_forge.experiment.config import orders_for_generation
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.models import JsonValue
+from mutation_forge.native_v3_python import preview as preview_module
 from mutation_forge.native_v3_python import scientific_search as search_module
 from mutation_forge.native_v3_python import search_provider as provider_module
 from mutation_forge.native_v3_python.contracts import (
@@ -52,6 +53,7 @@ from mutation_forge.native_v3_python.search_provider import (
     specification_ack_schema,
 )
 from mutation_forge.output.interactive_dashboard import (
+    _objective,
     dashboard_state_from_python_status,
 )
 
@@ -456,6 +458,9 @@ def _scientific_config(
     exp_id: str,
     generations: int = 1,
     repairs: int = 0,
+    workers: int = 2,
+    timeout_seconds: float = 30,
+    wall_seconds: float = 60,
 ) -> Path:
     heg = tmp_path / "heg"
     (heg / "src" / "sglab").mkdir(parents=True, exist_ok=True)
@@ -469,19 +474,19 @@ workspace = "{(tmp_path / "workspaces").as_posix()}"
 [python_preview]
 model = "fixture-model"
 effort = "medium"
-timeout_seconds = 30
+timeout_seconds = {timeout_seconds}
 heg_repo = "{heg.as_posix()}"
 
 [python_preview.scientific_search]
 generation_limit = {generations}
-evaluator_workers = 2
+evaluator_workers = {workers}
 provider_concurrency = 4
-wall_seconds = 60
+wall_seconds = {wall_seconds}
 primary_program_slots = {generations * 8}
 repair_turn_limit = {repairs}
 provider_total_turn_limit = {generations * 8 + repairs}
-validated_queue_target = 4
-validated_queue_capacity = 8
+validated_queue_target = {workers * 2}
+validated_queue_capacity = {workers * 4}
 stop_on_verified = true
 resume_enabled = true
 replace_terminal_slots = false
@@ -587,6 +592,336 @@ def test_sustained_search_overlaps_evaluations_and_commits_canonically(
         "random",
         "structural",
     }
+
+
+def test_case_scheduler_uses_all_configured_workers(
+    tmp_path: Path,
+) -> None:
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    peak = 0
+
+    class ConcurrentCaseEvaluator:
+        def _evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+        ) -> Mapping[str, JsonValue]:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                if peak == 12:
+                    release.set()
+            try:
+                assert release.wait(timeout=3)
+                return _result(source=source, case=case)
+            finally:
+                with lock:
+                    active -= 1
+
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            del candidate_id
+            return self._evaluate(source=source, case=case)
+
+        def evaluate_baseline(
+            self,
+            *,
+            baseline: str,
+            case: DevelopmentCaseV1,
+            generation: int,
+        ) -> Mapping[str, JsonValue]:
+            return self._evaluate(source=f"{baseline}:{generation}", case=case)
+
+    report = run_sustained_search(
+        provider=_Provider(),
+        evaluator_factory=ConcurrentCaseEvaluator,
+        workspace=tmp_path,
+        panel_factory=lambda _: _PANEL,
+        system_prompt="system",
+        specification_prompt="specification",
+        specification_ack_schema=specification_ack_schema(),
+        policy_schema=_POLICY_SCHEMA,
+        options=_options(workers=12),
+        provider_turn_timeout_seconds=1,
+    )
+
+    assert peak == 12
+    assert report["runtime"]["peak_active_evaluators"] == 12
+
+
+def test_candidates_and_both_baselines_use_identical_frozen_cases(
+    tmp_path: Path,
+) -> None:
+    lock = threading.Lock()
+    candidate_cases: dict[str, list[dict[str, JsonValue]]] = {}
+    baseline_cases: dict[str, list[dict[str, JsonValue]]] = {}
+
+    class RecordingEvaluator:
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            with lock:
+                candidate_cases.setdefault(candidate_id, []).append(case.as_dict())
+            return _result(source=source, case=case)
+
+        def evaluate_baseline(
+            self,
+            *,
+            baseline: str,
+            case: DevelopmentCaseV1,
+            generation: int,
+        ) -> Mapping[str, JsonValue]:
+            with lock:
+                baseline_cases.setdefault(baseline, []).append(case.as_dict())
+            return _result(source=f"{baseline}:{generation}", case=case)
+
+    run_sustained_search(
+        provider=_Provider(),
+        evaluator_factory=RecordingEvaluator,
+        workspace=tmp_path,
+        panel_factory=lambda _: _PANEL,
+        system_prompt="system",
+        specification_prompt="specification",
+        specification_ack_schema=specification_ack_schema(),
+        policy_schema=_POLICY_SCHEMA,
+        options=_options(workers=4),
+        provider_turn_timeout_seconds=1,
+    )
+
+    expected = sorted((case.as_dict() for case in _PANEL), key=lambda item: str(item["case_id"]))
+    assert set(baseline_cases) == {"random", "structural"}
+    for cases in (*candidate_cases.values(), *baseline_cases.values()):
+        assert sorted(cases, key=lambda item: str(item["case_id"])) == expected
+
+
+def test_completed_baseline_is_visible_while_candidates_are_blocked(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="baseline-visible-before-candidates",
+        workers=4,
+    )
+    candidate_started = threading.Event()
+    release_candidates = threading.Event()
+
+    class BlockingCandidateEvaluator(_Evaluator):
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            candidate_started.set()
+            assert release_candidates.wait(timeout=5)
+            return _result(source=source, case=case)
+
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        result.update(
+            run_python_preview(
+                config_path,
+                provider_factory=lambda *_: _Provider(),
+                backend_factory=lambda _: _Backend(),
+                evaluator_factory=lambda *_: BlockingCandidateEvaluator(
+                    _Concurrency(parties=1)
+                ),
+                provenance_guard=lambda **_: {},
+                auth_available=lambda _: True,
+            )
+        )
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert candidate_started.wait(timeout=3)
+    root = load_python_preview_config(config_path).experiment_root
+    deadline = time.monotonic() + 3
+    status: Mapping[str, Any] = {}
+    while time.monotonic() < deadline:
+        status = python_preview_status(config_path)
+        if all(status["baselines"][name] is not None for name in ("random", "structural")):
+            break
+        time.sleep(0.01)
+
+    assert status["baselines"] == {"random": 0.5, "structural": 0.5}
+    assert status["baseline_details"]["random"]["status"] == "complete"
+    assert status["baseline_details"]["structural"]["status"] == "complete"
+    assert len(list(root.glob("generations/generation-0000/slot-*/candidate.json.gz"))) < 8
+    assert len(
+        list(
+            root.glob(
+                "generations/generation-0000/baselines/*/baseline-result.json.gz"
+            )
+        )
+    ) == 2
+
+    release_candidates.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert result["state"] == "completed"
+
+
+def test_prepared_candidate_waiting_for_worker_is_evaluation_queued(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="prepared-evaluation-queued",
+        workers=1,
+    )
+    baseline_started = threading.Event()
+    release_baseline = threading.Event()
+
+    class BlockingBaselineEvaluator(_Evaluator):
+        def evaluate_baseline(
+            self,
+            *,
+            baseline: str,
+            case: DevelopmentCaseV1,
+            generation: int,
+        ) -> Mapping[str, JsonValue]:
+            baseline_started.set()
+            assert release_baseline.wait(timeout=5)
+            return _result(source=f"{baseline}:{generation}", case=case)
+
+    thread = threading.Thread(
+        target=lambda: run_python_preview(
+            config_path,
+            provider_factory=lambda *_: _Provider(),
+            backend_factory=lambda _: _Backend(),
+            evaluator_factory=lambda *_: BlockingBaselineEvaluator(
+                _Concurrency(parties=1)
+            ),
+            provenance_guard=lambda **_: {},
+            auth_available=lambda _: True,
+        )
+    )
+    thread.start()
+    assert baseline_started.wait(timeout=3)
+    deadline = time.monotonic() + 3
+    status: Mapping[str, Any] = {}
+    while time.monotonic() < deadline:
+        status = python_preview_status(config_path)
+        if any(slot["state"] == "evaluation_queued" for slot in status["slots"]):
+            break
+        time.sleep(0.01)
+
+    assert status["evaluators"]["active"] == 1
+    assert any(slot["state"] == "evaluation_queued" for slot in status["slots"])
+    assert all(slot["state"] != "evaluation_running" for slot in status["slots"])
+    assert status["evaluators"]["active_work"][0]["owner"].startswith("baseline:")
+
+    release_baseline.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_partial_baseline_cases_are_durable_and_skipped_on_resume(
+    tmp_path: Path,
+) -> None:
+    options = _options(workers=1)
+    first_started_second = threading.Event()
+    first_closed = threading.Event()
+    first_calls: list[str] = []
+
+    class InterruptibleEvaluator:
+        def evaluate(self, **_: Any) -> Mapping[str, JsonValue]:
+            raise AssertionError("candidate evaluation is not used")
+
+        def evaluate_baseline(
+            self,
+            *,
+            baseline: str,
+            case: DevelopmentCaseV1,
+            generation: int,
+        ) -> Mapping[str, JsonValue]:
+            first_calls.append(case.case_id)
+            if len(first_calls) == 2:
+                first_started_second.set()
+                assert first_closed.wait(timeout=3)
+                raise RuntimeError("closed")
+            return _result(source=f"{baseline}:{generation}", case=case)
+
+        def close(self) -> None:
+            first_closed.set()
+
+    telemetry = search_module._RuntimeTelemetry(tmp_path, options)
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=1,
+        queue_capacity=4,
+        evaluator_factory=InterruptibleEvaluator,
+        telemetry=telemetry,
+    )
+    pool.submit_baseline(
+        baseline="random",
+        panel=_PANEL,
+        generation=0,
+        generation_dir=tmp_path,
+    )
+    assert first_started_second.wait(timeout=3)
+    pool.close(force=True)
+
+    durable = list(
+        tmp_path.glob("baselines/random/evaluations/*.json.gz")
+    )
+    assert len(durable) == 1
+    durable_bytes = durable[0].read_bytes()
+
+    resumed_calls: list[str] = []
+
+    class ResumedEvaluator:
+        def evaluate(self, **_: Any) -> Mapping[str, JsonValue]:
+            raise AssertionError("candidate evaluation is not used")
+
+        def evaluate_baseline(
+            self,
+            *,
+            baseline: str,
+            case: DevelopmentCaseV1,
+            generation: int,
+        ) -> Mapping[str, JsonValue]:
+            resumed_calls.append(case.case_id)
+            return _result(source=f"{baseline}:{generation}", case=case)
+
+        def close(self) -> None:
+            pass
+
+    resumed_telemetry = search_module._RuntimeTelemetry(tmp_path, options)
+    resumed_pool = search_module._ConcurrentEvaluatorPool(
+        workers=1,
+        queue_capacity=4,
+        evaluator_factory=ResumedEvaluator,
+        telemetry=resumed_telemetry,
+    )
+    outcome = resumed_pool.submit_baseline(
+        baseline="random",
+        panel=_PANEL,
+        generation=0,
+        generation_dir=tmp_path,
+    ).result(timeout=3)
+    resumed_pool.close()
+
+    assert outcome.failure_type is None
+    assert len(resumed_calls) == 1
+    assert durable[0].read_bytes() == durable_bytes
+    assert (
+        tmp_path / "baselines/random" / search_module.M10_BASELINE_RESULT_FILENAME
+    ).is_file()
 
 
 def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
@@ -814,7 +1149,7 @@ def test_crash_after_prepared_boundary_repeats_no_provider_turn(
             boundary_hook=crash,
         )
 
-    assert first_provider.calls == [(0, f"slot-{index:02d}") for index in range(4)]
+    assert sorted(first_provider.calls) == [(0, f"slot-{index:02d}") for index in range(4)]
     resumed = _Provider(durable)
     report = _run(
         tmp_path,
@@ -1174,8 +1509,9 @@ def test_explicit_scientific_profile_routes_status_with_live_metrics(
         "replay": False,
     }
     for baseline in ("random", "structural"):
-        assert status["baselines"][baseline]["status"] == "complete"
-        assert status["baselines"][baseline]["fitness_interval"] == {
+        assert status["baselines"][baseline] == 0.5
+        assert status["baseline_details"][baseline]["status"] == "complete"
+        assert status["baseline_details"][baseline]["fitness_interval"] == {
             "lower": {"numerator": 1, "denominator": 2},
             "upper": {"numerator": 1, "denominator": 2},
         }
@@ -1208,6 +1544,148 @@ def test_fresh_dashboard_keeps_unknown_baselines_and_tokens_unknown(
     assert rich.baseline_structural is None
     assert rich.cumulative_usage.total is None
     assert rich.cumulative_usage.quality == "unknown"
+
+    zero_status = {**status, "baselines": {"random": 0, "structural": 0}}
+    zero_rich = dashboard_state_from_python_status(
+        zero_status,
+        run_id=config.exp_id,
+        model=config.model,
+        effort=config.effort,
+        generation_limit=config.scientific_search.generation_limit,
+        wall_seconds=config.scientific_search.wall_seconds,
+    )
+    assert zero_rich.baseline_random == 0
+    assert zero_rich.baseline_structural == 0
+    assert _objective(zero_rich.baseline_random) == "0"
+
+
+def test_same_exp_id_rejects_changed_frozen_scientific_config_before_work(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(tmp_path, exp_id="frozen-config")
+    run_python_preview(
+        config_path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("horizon = 1", "horizon = 2"),
+        encoding="utf-8",
+    )
+    calls = {"provider": 0, "backend": 0}
+
+    with pytest.raises(
+        preview_module.PythonPreviewWorkspaceError,
+        match="scientific configuration differs",
+    ):
+        run_python_preview(
+            config_path,
+            provider_factory=lambda *_: calls.__setitem__(
+                "provider", calls["provider"] + 1
+            ),
+            backend_factory=lambda _: calls.__setitem__(
+                "backend", calls["backend"] + 1
+            ),
+            provenance_guard=lambda **_: {},
+            auth_available=lambda _: True,
+        )
+
+    assert calls == {"provider": 0, "backend": 0}
+
+
+def test_new_exp_id_accepts_changed_scientific_config(
+    tmp_path: Path,
+) -> None:
+    first_path = _scientific_config(tmp_path, exp_id="config-a")
+    second_path = _scientific_config(tmp_path, exp_id="config-b")
+    second_path.write_text(
+        second_path.read_text(encoding="utf-8").replace("horizon = 1", "horizon = 2"),
+        encoding="utf-8",
+    )
+
+    for path in (first_path, second_path):
+        status = run_python_preview(
+            path,
+            provider_factory=lambda *_: _Provider(),
+            backend_factory=lambda _: _Backend(),
+            evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+            provenance_guard=lambda **_: {},
+            auth_available=lambda _: True,
+        )
+        assert status["state"] == "completed"
+
+    assert load_python_preview_config(first_path).scientific_config_sha256 != (
+        load_python_preview_config(second_path).scientific_config_sha256
+    )
+
+
+def test_wall_budget_is_per_invocation_and_not_frozen(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="per-invocation-wall",
+        generations=2,
+        timeout_seconds=0.2,
+        wall_seconds=0.3,
+    )
+
+    class SlowProvider(_Provider):
+        def generate_root(self, **kwargs: Any) -> M5ProviderResultV1:
+            time.sleep(0.12)
+            return super().generate_root(**kwargs)
+
+    first = run_python_preview(
+        config_path,
+        provider_factory=lambda *_: SlowProvider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+    assert first["terminal_reason"] == "wall_clock_budget"
+    assert first["resumable"] is True
+
+    resumed = run_python_preview(
+        config_path,
+        provider_factory=lambda *_: _Provider(),
+        backend_factory=lambda _: _Backend(),
+        evaluator_factory=lambda *_: _Evaluator(_Concurrency(parties=1)),
+        provenance_guard=lambda **_: {},
+        auth_available=lambda _: True,
+    )
+
+    assert resumed["state"] == "completed"
+    assert resumed["counts"]["terminal"] == 16
+    assert resumed["throughput"]["current_run_elapsed_seconds"] < 0.3
+
+
+def test_invocation_controls_do_not_change_scientific_config_identity(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_config(
+        tmp_path,
+        exp_id="invocation-controls",
+        workers=2,
+        timeout_seconds=1,
+        wall_seconds=2,
+    )
+    original = load_python_preview_config(config_path).scientific_config_sha256
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        text.replace("evaluator_workers = 2", "evaluator_workers = 12")
+        .replace("validated_queue_target = 4", "validated_queue_target = 24")
+        .replace("validated_queue_capacity = 8", "validated_queue_capacity = 48")
+        .replace("provider_concurrency = 2", "provider_concurrency = 4")
+        .replace("wall_seconds = 2", "wall_seconds = 60")
+        .replace("timeout_seconds = 1", "timeout_seconds = 300"),
+        encoding="utf-8",
+    )
+
+    assert load_python_preview_config(config_path).scientific_config_sha256 == original
 
 
 def test_rich_projection_uses_the_same_canonical_status_counters(
