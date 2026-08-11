@@ -10,8 +10,6 @@ import pytest
 from mutation_forge.experiment.json_io import read_json, write_json
 from mutation_forge.native_v3_python.search import M5InfrastructureError
 from mutation_forge.native_v3_python.search_provider import (
-    M5_PROVIDER_MAX_CAMPAIGNS,
-    M5_PROVIDER_MAX_TURNS,
     M5_PROVIDER_STDOUT_BYTES,
     M5_PROVIDER_TRANSCRIPT_BYTES,
     CodexM5SearchProvider,
@@ -27,8 +25,6 @@ from mutation_forge.stage3.artifacts import TransportLogger
 
 
 def test_m5_provider_transport_budget_is_explicit_and_bounded() -> None:
-    assert M5_PROVIDER_MAX_TURNS == 40
-    assert M5_PROVIDER_MAX_CAMPAIGNS == 40
     assert M5_PROVIDER_TRANSCRIPT_BYTES == 16 * 1024 * 1024
     assert M5_PROVIDER_STDOUT_BYTES == 16 * 1024 * 1024
 

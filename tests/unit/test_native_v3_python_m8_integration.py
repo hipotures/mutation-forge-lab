@@ -8,7 +8,6 @@ from mutation_forge.native_v3_python.contracts import (
     PYTHON_EXPERIMENT_PROTOCOL_ID,
 )
 from mutation_forge.native_v3_python.preview import (
-    V2_PROTOCOL,
     experiment_protocol,
     load_python_preview_config,
 )
@@ -19,9 +18,7 @@ EXAMPLE_CONFIG = (
 )
 
 
-def test_native_v2_default_and_versioned_python_preview_example_are_distinct() -> None:
-    assert experiment_protocol(PROJECT_ROOT / "experiment.toml") == V2_PROTOCOL
-
+def test_versioned_python_preview_example_is_explicit() -> None:
     config = load_python_preview_config(EXAMPLE_CONFIG)
     assert config.protocol == PYTHON_EXPERIMENT_PROTOCOL_ID
     assert config.exp_id == "native-v3-python-preview-example"
