@@ -268,6 +268,7 @@ class CodexAppServerAdapter:
         self._turns = 0
         self._campaigns = 0
         self._failed = False
+        self._closed = False
         self._event_count = 0
         self._transcript_size = 0
         self._stdout_size = 0
@@ -331,6 +332,8 @@ class CodexAppServerAdapter:
             self._diag.append(cast(Mapping[str, Any], safe_value({"event": event, **fields})))
 
     def start(self) -> None:
+        if self._closed:
+            raise AppServerError("closed adapter cannot be reused")
         if self._failed:
             raise AppServerError("failed adapter cannot be reused")
         if self._process is not None:
@@ -1909,10 +1912,16 @@ class CodexAppServerAdapter:
             if self._stdout_overflow:
                 raise ProtocolError("incoming message exceeds limit")
             raise ProtocolError("output limit exceeded")
-        try:
-            v = self._queue.get(timeout=max(0.0, end - time.monotonic()))
-        except queue.Empty:
-            return None
+        while True:
+            if self._stop.is_set():
+                return None
+            remaining = max(0.0, end - time.monotonic())
+            try:
+                v = self._queue.get(timeout=min(0.1, remaining))
+                break
+            except queue.Empty:
+                if time.monotonic() >= end:
+                    return None
         if v is not None and not isinstance(v, BaseException):
             size = len(v.encode() if isinstance(v, str) else bytes(v))
             with self._queue_lock:
@@ -1997,6 +2006,7 @@ class CodexAppServerAdapter:
                 self._process.stdin.flush()
 
     def close(self, *, force: bool = False) -> None:
+        self._closed = True
         if self.logger is not None:
             self.logger.finalize()
         p, self._process = self._process, None

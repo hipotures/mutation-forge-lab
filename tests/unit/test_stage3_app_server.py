@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -600,6 +601,46 @@ def test_timeout_interrupts_and_failed_adapter_is_not_reused(tmp_path: Path) -> 
         adapter.generate("prompt", "codex/gpt-5.6-luna:high")
     assert process.returncode in {-15, -9}
     with pytest.raises(AppServerError, match="failed adapter cannot be reused"):
+        adapter.start()
+
+
+def test_force_close_unblocks_turn_after_shutdown_drains_reader_queue(
+    tmp_path: Path,
+) -> None:
+    adapter, _ = _adapter(
+        tmp_path,
+        limits=AppServerLimits(turn_timeout=5),
+    )
+    adapter.start_thread("codex/gpt-5.6-luna:high")
+    original_read_message = adapter._read_message
+    read_started = threading.Event()
+    allow_read = threading.Event()
+    errors: list[Exception] = []
+
+    def delayed_read_message(end: float) -> Any:
+        read_started.set()
+        assert allow_read.wait(timeout=1)
+        return original_read_message(end)
+
+    adapter._read_message = delayed_read_message  # type: ignore[method-assign]
+
+    def generate() -> None:
+        try:
+            adapter.generate("prompt", "codex/gpt-5.6-luna:high")
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=generate)
+    thread.start()
+    assert read_started.wait(timeout=1)
+    adapter.close(force=True)
+    allow_read.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], TurnError)
+    with pytest.raises(AppServerError, match="closed adapter cannot be reused"):
         adapter.start()
 
 
