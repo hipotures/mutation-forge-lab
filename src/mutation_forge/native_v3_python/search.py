@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import os
 import re
 import tempfile
@@ -82,6 +83,80 @@ class _EvaluationTelemetryItem:
     selector_wall_seconds: float
     action_wall_seconds: float
     scoring_wall_time_ns: tuple[int, ...]
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        return {
+            "starts": self.starts,
+            "rotations": self.rotations,
+            "failures": self.failures,
+            "timeouts": self.timeouts,
+            "maximum_rss_kib": self.maximum_rss_kib,
+            "policy_invocations": self.policy_invocations,
+            "graph_score_attempts": self.graph_score_attempts,
+            "unique_graph_scores": self.unique_graph_scores,
+            "sandbox_wall_seconds": self.sandbox_wall_seconds,
+            "selector_wall_seconds": self.selector_wall_seconds,
+            "action_wall_seconds": self.action_wall_seconds,
+            "scoring_wall_time_ns": list(self.scoring_wall_time_ns),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> _EvaluationTelemetryItem:
+        integer_fields = (
+            "starts",
+            "rotations",
+            "failures",
+            "timeouts",
+            "maximum_rss_kib",
+            "policy_invocations",
+            "graph_score_attempts",
+            "unique_graph_scores",
+        )
+        integers: dict[str, int] = {}
+        for field in integer_fields:
+            raw = value.get(field)
+            if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+                raise ValueError(f"aggregation telemetry {field} is malformed")
+            integers[field] = raw
+        floats: dict[str, float] = {}
+        for field in (
+            "sandbox_wall_seconds",
+            "selector_wall_seconds",
+            "action_wall_seconds",
+        ):
+            raw = value.get(field)
+            if (
+                not isinstance(raw, int | float)
+                or isinstance(raw, bool)
+                or raw < 0
+                or not math.isfinite(raw)
+            ):
+                raise ValueError(f"aggregation telemetry {field} is malformed")
+            floats[field] = float(raw)
+        raw_scoring = value.get("scoring_wall_time_ns")
+        if not isinstance(raw_scoring, Sequence) or isinstance(
+            raw_scoring, str | bytes
+        ):
+            raise ValueError("aggregation scoring telemetry is malformed")
+        scoring: list[int] = []
+        for raw in raw_scoring:
+            if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+                raise ValueError("aggregation scoring telemetry is malformed")
+            scoring.append(raw)
+        return cls(
+            starts=integers["starts"],
+            rotations=integers["rotations"],
+            failures=integers["failures"],
+            timeouts=integers["timeouts"],
+            maximum_rss_kib=integers["maximum_rss_kib"],
+            policy_invocations=integers["policy_invocations"],
+            graph_score_attempts=integers["graph_score_attempts"],
+            unique_graph_scores=integers["unique_graph_scores"],
+            sandbox_wall_seconds=floats["sandbox_wall_seconds"],
+            selector_wall_seconds=floats["selector_wall_seconds"],
+            action_wall_seconds=floats["action_wall_seconds"],
+            scoring_wall_time_ns=tuple(scoring),
+        )
 
 
 def _nonnegative_int(value: object) -> int:
@@ -585,6 +660,36 @@ def _component_map(evidence: object) -> dict[int, Mapping[str, Any]]:
     return result
 
 
+def _checkpoint_counter(
+    value: object,
+    name: str,
+    *,
+    allow_negative: bool = False,
+) -> Counter[str]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"aggregation {name} counter is malformed")
+    result: Counter[str] = Counter()
+    for key, raw in value.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(raw, int)
+            or isinstance(raw, bool)
+            or (raw < 0 and not allow_negative)
+        ):
+            raise ValueError(f"aggregation {name} counter is malformed")
+        result[key] = raw
+    return result
+
+
+def _checkpoint_fraction(value: object, name: str) -> Fraction:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"aggregation {name} fraction is malformed")
+    try:
+        return _fraction(value)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
+        raise ValueError(f"aggregation {name} fraction is malformed") from error
+
+
 class _BehaviorAccumulator:
     """Compact, order-preserving aggregation of complete evaluation payloads."""
 
@@ -771,6 +876,222 @@ class _BehaviorAccumulator:
             )
         self._completed[index] = 1
 
+    def checkpoint_state(self) -> dict[str, JsonValue]:
+        return {
+            "selector_counts": dict(self._selector_counts),
+            "action_counts": dict(self._action_counts),
+            "outcome_counts": dict(self._outcome_counts),
+            "no_plan_reasons": dict(self._no_plan_reasons),
+            "behavior_signatures": cast(JsonValue, self._behavior_signatures),
+            "semantic_hashes": cast(JsonValue, self._semantic_hashes),
+            "statuses": cast(JsonValue, self._statuses),
+            "witness_totals": cast(
+                JsonValue,
+                {
+                    str(length): values
+                    for length, values in self._witness_totals.items()
+                },
+            ),
+            "accepted": self._accepted,
+            "rejected": self._rejected,
+            "illegal": self._illegal,
+            "failures": self._failures,
+            "propose_calls": self._propose_calls,
+            "api_calls": self._api_calls,
+            "lower": cast(JsonValue, _fraction_dict(self._lower)),
+            "upper": cast(JsonValue, _fraction_dict(self._upper)),
+            "verified": self._verified,
+            "verifier_submissions": self._verifier_submissions,
+            "verifier_records": self._verifier_records,
+            "external_activity": dict(self._external_activity),
+            "initial_only_valid": self._initial_only_valid,
+            "initial_lower_by_order": cast(
+                JsonValue,
+                [
+                    [
+                        order,
+                        _fraction_dict(total),
+                        count,
+                    ]
+                    for order, (total, count) in sorted(
+                        self._initial_lower_by_order.items()
+                    )
+                ],
+            ),
+        }
+
+    @classmethod
+    def from_checkpoint_state(
+        cls,
+        *,
+        case_count: int,
+        completed: bytearray,
+        value: Mapping[str, Any],
+    ) -> _BehaviorAccumulator:
+        accumulator = cls(case_count)
+        accumulator._completed = bytearray(completed)
+        accumulator._selector_counts = _checkpoint_counter(
+            value.get("selector_counts"),
+            "selector",
+        )
+        accumulator._action_counts = _checkpoint_counter(
+            value.get("action_counts"),
+            "action",
+        )
+        accumulator._outcome_counts = _checkpoint_counter(
+            value.get("outcome_counts"),
+            "outcome",
+        )
+        accumulator._no_plan_reasons = _checkpoint_counter(
+            value.get("no_plan_reasons"),
+            "no-plan",
+        )
+        accumulator._external_activity = _checkpoint_counter(
+            value.get("external_activity"),
+            "external-activity",
+            allow_negative=True,
+        )
+
+        def ordered_optional_strings(name: str) -> list[str | None]:
+            raw = value.get(name)
+            if (
+                not isinstance(raw, Sequence)
+                or isinstance(raw, str | bytes)
+                or len(raw) != case_count
+                or any(item is not None and not isinstance(item, str) for item in raw)
+            ):
+                raise ValueError(f"aggregation {name} is malformed")
+            return list(raw)
+
+        accumulator._behavior_signatures = ordered_optional_strings(
+            "behavior_signatures"
+        )
+        accumulator._semantic_hashes = ordered_optional_strings("semantic_hashes")
+        accumulator._statuses = ordered_optional_strings("statuses")
+        for index, is_completed in enumerate(completed):
+            if bool(is_completed) != isinstance(
+                accumulator._statuses[index],
+                str,
+            ):
+                raise ValueError("aggregation completion metadata is inconsistent")
+
+        raw_witness = value.get("witness_totals")
+        if not isinstance(raw_witness, Mapping):
+            raise ValueError("aggregation witness totals are malformed")
+        witness_totals: dict[int, list[int]] = {}
+        for raw_length, raw_values in raw_witness.items():
+            if (
+                not isinstance(raw_length, str)
+                or not raw_length.isdigit()
+                or not isinstance(raw_values, Sequence)
+                or isinstance(raw_values, str | bytes)
+                or len(raw_values) != 4
+                or any(
+                    not isinstance(item, int) or isinstance(item, bool)
+                    for item in raw_values
+                )
+            ):
+                raise ValueError("aggregation witness totals are malformed")
+            witness_totals[int(raw_length)] = list(raw_values)
+        accumulator._witness_totals = witness_totals
+
+        for field, attribute in (
+            ("accepted", "_accepted"),
+            ("rejected", "_rejected"),
+            ("illegal", "_illegal"),
+            ("failures", "_failures"),
+            ("propose_calls", "_propose_calls"),
+            ("api_calls", "_api_calls"),
+            ("verifier_submissions", "_verifier_submissions"),
+            ("verifier_records", "_verifier_records"),
+        ):
+            raw = value.get(field)
+            if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+                raise ValueError(f"aggregation {field} is malformed")
+            setattr(accumulator, attribute, raw)
+        accumulator._lower = _checkpoint_fraction(value.get("lower"), "lower")
+        accumulator._upper = _checkpoint_fraction(value.get("upper"), "upper")
+        raw_verified = value.get("verified")
+        raw_initial_valid = value.get("initial_only_valid")
+        if not isinstance(raw_verified, bool) or not isinstance(
+            raw_initial_valid,
+            bool,
+        ):
+            raise ValueError("aggregation boolean state is malformed")
+        accumulator._verified = raw_verified
+        accumulator._initial_only_valid = raw_initial_valid
+
+        raw_initial = value.get("initial_lower_by_order")
+        if not isinstance(raw_initial, Sequence) or isinstance(
+            raw_initial,
+            str | bytes,
+        ):
+            raise ValueError("aggregation initial-only state is malformed")
+        initial_by_order: dict[int, tuple[Fraction, int]] = {}
+        for item in raw_initial:
+            if (
+                not isinstance(item, Sequence)
+                or isinstance(item, str | bytes)
+                or len(item) != 3
+                or not isinstance(item[0], int)
+                or isinstance(item[0], bool)
+                or not isinstance(item[2], int)
+                or isinstance(item[2], bool)
+                or item[2] < 1
+                or item[0] in initial_by_order
+            ):
+                raise ValueError("aggregation initial-only state is malformed")
+            initial_by_order[item[0]] = (
+                _checkpoint_fraction(item[1], "initial-only"),
+                item[2],
+            )
+        accumulator._initial_lower_by_order = initial_by_order
+        return accumulator
+
+    def merge_single(
+        self,
+        index: int,
+        item: _BehaviorAccumulator,
+    ) -> None:
+        if item._case_count != 1 or item.completed_count != 1:
+            raise ValueError("compact aggregation item is incomplete")
+        if self._completed[index]:
+            raise M5InfrastructureError("development evaluation was aggregated twice")
+        self._selector_counts.update(item._selector_counts)
+        self._action_counts.update(item._action_counts)
+        self._outcome_counts.update(item._outcome_counts)
+        self._no_plan_reasons.update(item._no_plan_reasons)
+        self._behavior_signatures[index] = item._behavior_signatures[0]
+        self._semantic_hashes[index] = item._semantic_hashes[0]
+        self._statuses[index] = item._statuses[0]
+        for length, raw_values in item._witness_totals.items():
+            values = self._witness_totals.setdefault(length, [0, 0, 0, 0])
+            for offset, raw in enumerate(raw_values):
+                values[offset] += raw
+        self._accepted += item._accepted
+        self._rejected += item._rejected
+        self._illegal += item._illegal
+        self._failures += item._failures
+        self._propose_calls += item._propose_calls
+        self._api_calls += item._api_calls
+        self._lower += item._lower
+        self._upper += item._upper
+        self._verified |= item._verified
+        self._verifier_submissions += item._verifier_submissions
+        self._verifier_records += item._verifier_records
+        self._external_activity.update(item._external_activity)
+        self._initial_only_valid &= item._initial_only_valid
+        for order, (raw_total, raw_count) in item._initial_lower_by_order.items():
+            total, count = self._initial_lower_by_order.get(
+                order,
+                (Fraction(), 0),
+            )
+            self._initial_lower_by_order[order] = (
+                total + raw_total,
+                count + raw_count,
+            )
+        self._completed[index] = 1
+
     def result(self) -> dict[str, JsonValue]:
         count = self.completed_count
         if count == 0:
@@ -874,6 +1195,21 @@ class _EvaluationAccumulator:
         self._completed = bytearray(case_count)
         self._behavior_errors: list[Exception | None] = [None] * case_count
 
+    @property
+    def case_count(self) -> int:
+        return len(self._completed)
+
+    @property
+    def completed_count(self) -> int:
+        return sum(self._completed)
+
+    def is_completed(self, index: int) -> bool:
+        return bool(self._completed[index])
+
+    @property
+    def can_checkpoint(self) -> bool:
+        return all(error is None for error in self._behavior_errors)
+
     def add(self, index: int, evaluation: Mapping[str, Any]) -> None:
         if not 0 <= index < len(self._completed):
             raise IndexError("evaluation index is outside the development panel")
@@ -887,6 +1223,91 @@ class _EvaluationAccumulator:
         self._telemetry[index] = telemetry
         self._completed[index] = 1
 
+    def checkpoint_state(self) -> dict[str, JsonValue]:
+        if not self.can_checkpoint:
+            raise ValueError("malformed evaluations cannot be checkpointed")
+        return {
+            "case_count": self.case_count,
+            "completion_bitmap": self._completed.hex(),
+            "completed_count": self.completed_count,
+            "behavior": self._behavior.checkpoint_state(),
+            "telemetry": [
+                item.as_dict() if item is not None else None
+                for item in self._telemetry
+            ],
+        }
+
+    @classmethod
+    def from_checkpoint_state(
+        cls,
+        value: Mapping[str, Any],
+    ) -> _EvaluationAccumulator:
+        raw_case_count = value.get("case_count")
+        raw_completed_count = value.get("completed_count")
+        raw_bitmap = value.get("completion_bitmap")
+        if (
+            not isinstance(raw_case_count, int)
+            or isinstance(raw_case_count, bool)
+            or raw_case_count < 1
+            or not isinstance(raw_completed_count, int)
+            or isinstance(raw_completed_count, bool)
+            or raw_completed_count < 0
+            or not isinstance(raw_bitmap, str)
+        ):
+            raise ValueError("aggregation completion metadata is malformed")
+        try:
+            completed = bytearray.fromhex(raw_bitmap)
+        except ValueError as error:
+            raise ValueError("aggregation completion bitmap is malformed") from error
+        if (
+            len(completed) != raw_case_count
+            or any(item not in (0, 1) for item in completed)
+            or sum(completed) != raw_completed_count
+        ):
+            raise ValueError("aggregation completion metadata is inconsistent")
+        raw_behavior = value.get("behavior")
+        raw_telemetry = value.get("telemetry")
+        if not isinstance(raw_behavior, Mapping) or (
+            not isinstance(raw_telemetry, Sequence)
+            or isinstance(raw_telemetry, str | bytes)
+            or len(raw_telemetry) != raw_case_count
+        ):
+            raise ValueError("aggregation checkpoint state is malformed")
+        accumulator = cls(raw_case_count)
+        accumulator._completed = completed
+        accumulator._behavior = _BehaviorAccumulator.from_checkpoint_state(
+            case_count=raw_case_count,
+            completed=completed,
+            value=raw_behavior,
+        )
+        telemetry: list[_EvaluationTelemetryItem | None] = []
+        for index, raw_item in enumerate(raw_telemetry):
+            if raw_item is None:
+                item = None
+            elif isinstance(raw_item, Mapping):
+                item = _EvaluationTelemetryItem.from_dict(raw_item)
+            else:
+                raise ValueError("aggregation telemetry state is malformed")
+            if bool(completed[index]) != (item is not None):
+                raise ValueError("aggregation telemetry completion is inconsistent")
+            telemetry.append(item)
+        accumulator._telemetry = telemetry
+        return accumulator
+
+    def add_checkpoint_item(
+        self,
+        index: int,
+        value: Mapping[str, Any],
+    ) -> None:
+        item = self.from_checkpoint_state(value)
+        if item.case_count != 1 or item.completed_count != 1:
+            raise ValueError("compact aggregation item is malformed")
+        if self._completed[index]:
+            raise M5InfrastructureError("development evaluation was aggregated twice")
+        self._behavior.merge_single(index, item._behavior)
+        self._telemetry[index] = item._telemetry[0]
+        self._completed[index] = 1
+
     def behavior_profile(self) -> dict[str, JsonValue]:
         for error in self._behavior_errors:
             if error is not None:
@@ -895,6 +1316,13 @@ class _EvaluationAccumulator:
 
     def telemetry_summary(self) -> dict[str, JsonValue]:
         return _summarize_telemetry_items(self._telemetry)
+
+
+def _load_evaluation_checkpoint_item(path: str | Path) -> dict[str, JsonValue]:
+    payload = _load_mapping(Path(path))
+    accumulator = _EvaluationAccumulator(1)
+    accumulator.add(0, payload)
+    return accumulator.checkpoint_state()
 
 
 def aggregate_behavior(

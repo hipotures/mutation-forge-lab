@@ -1149,7 +1149,7 @@ def test_fresh_commit_uses_compact_outcome_and_resume_loads_durable_panel(
 
     assert resumed.evaluation_case_count == 320
     assert resumed.behavior_profile == outcome.behavior_profile
-    assert loads == 320
+    assert loads == 0
 
 
 def test_large_panel_releases_full_payloads_before_panel_finishes(
@@ -1159,7 +1159,7 @@ def test_large_panel_releases_full_payloads_before_panel_finishes(
     class FatList(list[int]):
         pass
 
-    panel = _panel_of_size(64)
+    panel = _panel_of_size(66)
     final_started = threading.Event()
     release_final = threading.Event()
     retained: list[weakref.ReferenceType[FatList]] = []
@@ -1212,6 +1212,12 @@ def test_large_panel_releases_full_payloads_before_panel_finishes(
     assert len(retained) == len(panel) - 1
     assert all(reference() is None for reference in retained)
     assert progress == list(range(1, len(panel)))
+    checkpoint = read_json(
+        tmp_path
+        / "slot-00"
+        / search_module.M10_AGGREGATION_CHECKPOINT_FILENAME
+    )
+    assert checkpoint["accumulator"]["completed_count"] == 64
 
     release_final.set()
     outcome = future.result(timeout=10)
@@ -1234,14 +1240,315 @@ def test_streaming_accumulator_matches_ordered_reference_aggregation() -> None:
             "action_wall_seconds": 0.0001 * (index + 1),
         }
 
-    reference_profile = search_module.core.aggregate_behavior(payloads)
-    reference_telemetry = search_module.core._evaluation_telemetry_summary(payloads)
+    expected_profile = {
+        "behavior_signature": (
+            "2edeaae0666a4a7a1f561ed98203fb602f8456d801d6c59acf4a8e79119717dc"
+        ),
+        "fitness_interval": {
+            "lower": {"numerator": 1, "denominator": 2},
+            "upper": {"numerator": 1, "denominator": 2},
+        },
+        "initial_only_fitness_lower": {"numerator": 2, "denominator": 5},
+        "episode_statuses": ["COMPLETE"] * 4,
+        "propose_calls": 4,
+        "rewrite_plan_count": 4,
+        "no_plan_count": 0,
+        "program_failure_count": 0,
+        "accepted_rewrite_count": 4,
+        "rejected_rewrite_count": 0,
+        "illegal_final_state_count": 0,
+        "selector_frequencies": {"non_edges_legal": 4, "pick": 4},
+        "action_frequencies": {"add_edge": 4},
+        "no_plan_reasons": {},
+        "mean_api_calls": {"numerator": 16, "denominator": 4},
+        "witness_deltas": {
+            "4": {
+                "initial_lower": 8,
+                "initial_upper": 8,
+                "terminal_lower": 4,
+                "terminal_upper": 4,
+                "proved_reduction": 4,
+            }
+        },
+        "semantic_trace_summary": {
+            "methods": [
+                ["add_edge", 4],
+                ["non_edges_legal", 4],
+                ["pick", 4],
+            ],
+            "semantic_trace_hashes": [
+                "bfaf68f3501af6f523d4960eb18ae9a17709dba0ea74ff425adff99c80ea4f39",
+                "37e418002a1f2f51f47b315e7dadef4760c09231d03bd73e64e70808a02d2ccb",
+                "5f4e4d25488e9ee2c243f8188025e10e968ef2977e3ba8b4674eab75d5fc1d6a",
+                "a6134037471d4419d7faee94e0d10d85d47dc664007d66cd782ce8dd10ef0321",
+            ],
+        },
+        "exact_verified": False,
+        "exact_verifier_submissions": 0,
+        "exact_verifier_records": 0,
+        "scientific_external_activity": {},
+    }
+    expected_telemetry = {
+        "starts": 4,
+        "rotations": 0,
+        "failures": 0,
+        "timeouts": 0,
+        "maximum_rss_kib": 1,
+        "policy_invocations": 4,
+        "graph_score_attempts": 0,
+        "unique_graph_scores": 0,
+        "sandbox_wall_seconds": 0.01,
+        "selector_wall_seconds": 0.005,
+        "action_wall_seconds": 0.001,
+        "scoring_wall_seconds": 0.0,
+    }
     accumulator = search_module.core._EvaluationAccumulator(len(payloads))
     for index in reversed(range(len(payloads))):
         accumulator.add(index, payloads[index])
 
-    assert accumulator.behavior_profile() == reference_profile
-    assert accumulator.telemetry_summary() == reference_telemetry
+    assert accumulator.behavior_profile() == expected_profile
+    assert accumulator.telemetry_summary() == expected_telemetry
+
+
+def test_accumulator_checkpoint_round_trip_preserves_noncontiguous_order() -> None:
+    panel = _panel_of_size(5)
+    payloads = [
+        _result(source=_source(f"checkpoint-{index}"), case=case)
+        for index, case in enumerate(panel)
+    ]
+    partial = search_module.core._EvaluationAccumulator(len(panel))
+    for index in (4, 1, 3):
+        partial.add(index, payloads[index])
+
+    restored_partial = search_module.core._EvaluationAccumulator.from_checkpoint_state(
+        partial.checkpoint_state()
+    )
+
+    assert [
+        restored_partial.is_completed(index)
+        for index in range(len(panel))
+    ] == [False, True, False, True, True]
+
+    for index in (0, 2):
+        partial.add(index, payloads[index])
+        restored_partial.add(index, payloads[index])
+
+    assert restored_partial.behavior_profile() == partial.behavior_profile()
+    assert restored_partial.telemetry_summary() == partial.telemetry_summary()
+    assert restored_partial.checkpoint_state() == partial.checkpoint_state()
+
+
+def test_checkpoint_resume_loads_only_post_checkpoint_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel_of_size(220)
+    slot_dir = tmp_path / "slot-00"
+    evaluation_dir = slot_dir / "evaluations"
+    accumulator = search_module.core._EvaluationAccumulator(len(panel))
+    for index, case in enumerate(panel[:200]):
+        payload = _result(source=_source("checkpoint-tail"), case=case)
+        write_json(evaluation_dir / f"{case.case_id}.json.gz", payload)
+        if index < 192:
+            accumulator.add(index, payload)
+    write_json(
+        slot_dir / search_module.M10_AGGREGATION_CHECKPOINT_FILENAME,
+        search_module._aggregation_checkpoint_payload(
+            key="candidate:g0000-slot-00",
+            panel=panel,
+            accumulator=accumulator,
+        ),
+    )
+
+    loads = 0
+    original_load = search_module.core._load_mapping
+
+    def counted_load(path: Path) -> dict[str, Any]:
+        nonlocal loads
+        if path.parent.name == "evaluations":
+            loads += 1
+        return original_load(path)
+
+    monkeypatch.setattr(search_module.core, "_load_mapping", counted_load)
+    evaluated: list[str] = []
+
+    class TailEvaluator:
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            del candidate_id
+            evaluated.append(case.case_id)
+            return _result(source=source, case=case)
+
+        def close(self) -> None:
+            pass
+
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options(workers=2))
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=2,
+        queue_capacity=4,
+        evaluator_factory=TailEvaluator,
+        telemetry=telemetry,
+    )
+    outcome = pool.submit(
+        source=_source("checkpoint-tail"),
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=slot_dir,
+    ).result(timeout=10)
+    pool.close()
+
+    assert outcome.evaluation_case_count == len(panel)
+    assert outcome.failure_type is None
+    assert loads == 8
+    assert sorted(evaluated) == sorted(case.case_id for case in panel[200:])
+
+
+def test_corrupt_checkpoint_rebuilds_from_authoritative_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel_of_size(32)
+    slot_dir = tmp_path / "slot-00"
+    for case in panel:
+        write_json(
+            slot_dir / "evaluations" / f"{case.case_id}.json.gz",
+            _result(source=_source("corrupt-checkpoint"), case=case),
+        )
+    write_json(
+        slot_dir / search_module.M10_AGGREGATION_CHECKPOINT_FILENAME,
+        {"protocol_id": "corrupt", "accumulator": {"case_count": 999}},
+    )
+    loads = 0
+    original_load = search_module.core._load_mapping
+
+    def counted_load(path: Path) -> dict[str, Any]:
+        nonlocal loads
+        loads += 1
+        return original_load(path)
+
+    monkeypatch.setattr(search_module.core, "_load_mapping", counted_load)
+
+    class UnexpectedEvaluator:
+        def evaluate(self, **_: Any) -> Mapping[str, JsonValue]:
+            raise AssertionError("complete durable panel must not be evaluated")
+
+        def close(self) -> None:
+            pass
+
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options(workers=2))
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=2,
+        queue_capacity=4,
+        evaluator_factory=UnexpectedEvaluator,
+        telemetry=telemetry,
+    )
+    outcome = pool.submit(
+        source=_source("corrupt-checkpoint"),
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=slot_dir,
+    ).result(timeout=10)
+    pool.close()
+
+    repaired = read_json(
+        slot_dir / search_module.M10_AGGREGATION_CHECKPOINT_FILENAME
+    )
+    assert outcome.failure_type is None
+    assert loads == len(panel)
+    assert (
+        repaired["protocol_id"]
+        == search_module.M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID
+    )
+
+
+def test_legacy_parallel_bootstrap_is_compact_and_not_repeated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel_of_size(160)
+    slot_dir = tmp_path / "slot-00"
+    for case in panel:
+        payload = _result(source=_source("legacy-bootstrap"), case=case)
+        payload["fat_payload"] = cast(JsonValue, [1] * 4096)
+        write_json(
+            slot_dir / "evaluations" / f"{case.case_id}.json.gz",
+            payload,
+        )
+
+    real_executor = search_module.ProcessPoolExecutor
+    executor_calls = 0
+
+    def tracked_executor(*args: Any, **kwargs: Any) -> Any:
+        nonlocal executor_calls
+        executor_calls += 1
+        return real_executor(*args, **kwargs)
+
+    monkeypatch.setattr(search_module, "ProcessPoolExecutor", tracked_executor)
+
+    class UnexpectedEvaluator:
+        def evaluate(self, **_: Any) -> Mapping[str, JsonValue]:
+            raise AssertionError("complete legacy panel must not be evaluated")
+
+        def close(self) -> None:
+            pass
+
+    options = _options(workers=4)
+    telemetry = search_module._RuntimeTelemetry(tmp_path, options)
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=4,
+        queue_capacity=4,
+        evaluator_factory=UnexpectedEvaluator,
+        telemetry=telemetry,
+    )
+    first = pool.submit(
+        source=_source("legacy-bootstrap"),
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=slot_dir,
+    ).result(timeout=30)
+    pool.close()
+
+    checkpoint_path = (
+        slot_dir / search_module.M10_AGGREGATION_CHECKPOINT_FILENAME
+    )
+    checkpoint = read_json(checkpoint_path)
+    encoded_checkpoint = json.dumps(checkpoint)
+    assert first.failure_type is None
+    assert executor_calls == 1
+    assert checkpoint["accumulator"]["completed_count"] == len(panel)
+    assert "fat_payload" not in encoded_checkpoint
+    assert "scientific_result" not in encoded_checkpoint
+
+    def unexpected_bootstrap(**_: Any) -> Any:
+        raise AssertionError("checkpointed resume must not bootstrap")
+
+    monkeypatch.setattr(
+        search_module,
+        "_bootstrap_aggregation_accumulator",
+        unexpected_bootstrap,
+    )
+    resumed_telemetry = search_module._RuntimeTelemetry(tmp_path, options)
+    resumed_pool = search_module._ConcurrentEvaluatorPool(
+        workers=4,
+        queue_capacity=4,
+        evaluator_factory=UnexpectedEvaluator,
+        telemetry=resumed_telemetry,
+    )
+    second = resumed_pool.submit(
+        source=_source("legacy-bootstrap"),
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=slot_dir,
+    ).result(timeout=10)
+    resumed_pool.close()
+
+    assert second.behavior_profile == first.behavior_profile
+    assert second.evaluation_telemetry == first.evaluation_telemetry
 
 
 def test_resume_streams_existing_fat_payloads_without_retaining_them(

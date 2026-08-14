@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import re
 import threading
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from dataclasses import dataclass
@@ -45,7 +52,13 @@ M10_BASELINE_RESULT_FILENAME = "baseline-result.json.gz"
 M10_BASELINE_RESULT_PROTOCOL_ID = "mforge.native.python_generation_baseline.v1"
 M10_PARENT_REFERENCE_RESULT_FILENAME = "parent-reference-result.json.gz"
 M10_PARENT_REFERENCE_RESULT_PROTOCOL_ID = "mforge.native.python_parent_reference.v1"
+M10_AGGREGATION_CHECKPOINT_FILENAME = "aggregation-checkpoint.json.gz"
+M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID = (
+    "mforge.native.python_scientific_aggregation_checkpoint.v1"
+)
 _RUNTIME_TELEMETRY_FLUSH_INTERVAL_SECONDS = 0.25
+_AGGREGATION_CHECKPOINT_CASE_INTERVAL = 64
+_LEGACY_BOOTSTRAP_PARALLEL_THRESHOLD = 128
 
 
 class _ProviderTurnBudgetExhausted(core.M5SearchError):
@@ -1106,15 +1119,126 @@ class _EvaluationOutcome:
     failure_case_id: str | None = None
 
 
+def _aggregation_checkpoint_payload(
+    *,
+    key: str,
+    panel: Sequence[core.DevelopmentCaseV1],
+    accumulator: core._EvaluationAccumulator,
+) -> dict[str, JsonValue]:
+    return {
+        "protocol_id": M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID,
+        "panel_key": key,
+        "panel_hash": core.panel_hash(panel),
+        "panel_case_ids": [case.case_id for case in panel],
+        "accumulator": accumulator.checkpoint_state(),
+    }
+
+
+def _restore_aggregation_checkpoint(
+    *,
+    path: Path,
+    key: str,
+    panel: tuple[core.DevelopmentCaseV1, ...],
+    evaluation_paths: tuple[Path, ...],
+) -> core._EvaluationAccumulator | None:
+    if not path.is_file():
+        return None
+    try:
+        raw = read_json(path)
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("protocol_id")
+            != M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID
+            or raw.get("panel_key") != key
+            or raw.get("panel_hash") != core.panel_hash(panel)
+            or raw.get("panel_case_ids")
+            != [case.case_id for case in panel]
+            or not isinstance(raw.get("accumulator"), Mapping)
+        ):
+            return None
+        accumulator = core._EvaluationAccumulator.from_checkpoint_state(
+            cast(Mapping[str, Any], raw["accumulator"])
+        )
+        if accumulator.case_count != len(panel):
+            return None
+        if any(
+            accumulator.is_completed(index) and not evaluation_paths[index].is_file()
+            for index in range(len(panel))
+        ):
+            return None
+        return accumulator
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _bootstrap_aggregation_accumulator(
+    *,
+    case_count: int,
+    completed_indices: Sequence[int],
+    evaluation_paths: tuple[Path, ...],
+    workers: int,
+    accumulator: core._EvaluationAccumulator | None = None,
+) -> core._EvaluationAccumulator:
+    if accumulator is None:
+        accumulator = core._EvaluationAccumulator(case_count)
+    elif accumulator.case_count != case_count:
+        raise ValueError("aggregation bootstrap case count changed")
+    if (
+        len(completed_indices) < _LEGACY_BOOTSTRAP_PARALLEL_THRESHOLD
+        or workers == 1
+    ):
+        for index in completed_indices:
+            item = core._load_evaluation_checkpoint_item(
+                evaluation_paths[index]
+            )
+            accumulator.add_checkpoint_item(index, item)
+        return accumulator
+
+    worker_count = min(workers, len(completed_indices))
+    window = worker_count * 2
+    indices = iter(completed_indices)
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
+        pending: dict[Future[dict[str, JsonValue]], int] = {}
+
+        def submit_one() -> bool:
+            try:
+                index = next(indices)
+            except StopIteration:
+                return False
+            future = executor.submit(
+                core._load_evaluation_checkpoint_item,
+                evaluation_paths[index],
+            )
+            pending[future] = index
+            return True
+
+        for _ in range(window):
+            if not submit_one():
+                break
+        while pending:
+            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in done:
+                index = pending.pop(future)
+                accumulator.add_checkpoint_item(index, future.result())
+                submit_one()
+    return accumulator
+
+
 @dataclass(slots=True)
 class _PanelWork:
     key: str
+    checkpoint_key: str
     panel: tuple[core.DevelopmentCaseV1, ...]
     evaluation_paths: tuple[Path, ...]
     operation: Callable[[M10ScientificEvaluator, core.DevelopmentCaseV1], Mapping[str, JsonValue]]
     future: Future[_EvaluationOutcome]
     accumulator: core._EvaluationAccumulator
     aggregation_lock: threading.Lock
+    checkpoint_path: Path
+    checkpoint_dirty_cases: int
     queued_at: float
     remaining_indices: deque[int]
     finalize: Callable[[_EvaluationOutcome], None] | None = None
@@ -1153,6 +1277,7 @@ class _ConcurrentEvaluatorPool:
         telemetry: _RuntimeTelemetry,
     ) -> None:
         self._factory = evaluator_factory
+        self._workers = workers
         self._telemetry = telemetry
         self._owned: list[M10ScientificEvaluator] = []
         self._owned_lock = threading.Lock()
@@ -1188,6 +1313,7 @@ class _ConcurrentEvaluatorPool:
                     self._runnable.append(work)
                 case = work.panel[index]
             failed = False
+            case_completed = False
             payload: dict[str, Any] | None = None
             try:
                 if evaluator is None:
@@ -1233,6 +1359,9 @@ class _ConcurrentEvaluatorPool:
                     )
                     with work.aggregation_lock:
                         work.accumulator.add(index, payload)
+                        case_completed = True
+                        work.checkpoint_dirty_cases += 1
+                        self._persist_aggregation_checkpoint(work)
                 except Exception:
                     failed = True
                     raise
@@ -1261,7 +1390,7 @@ class _ConcurrentEvaluatorPool:
                         )
             finish_work = False
             with self._condition:
-                if payload is not None and not failed:
+                if case_completed:
                     work.completed_count += 1
                     self._telemetry.evaluation_case_completed(
                         key=work.key,
@@ -1279,6 +1408,29 @@ class _ConcurrentEvaluatorPool:
             payload = None
             del work
 
+    def _persist_aggregation_checkpoint(
+        self,
+        work: _PanelWork,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not force and (
+            work.checkpoint_dirty_cases
+            < _AGGREGATION_CHECKPOINT_CASE_INTERVAL
+        ):
+            return
+        if not work.accumulator.can_checkpoint:
+            return
+        payload = _aggregation_checkpoint_payload(
+            key=work.checkpoint_key,
+            panel=work.panel,
+            accumulator=work.accumulator,
+        )
+        self._telemetry.timed_persist(
+            partial(write_json, work.checkpoint_path, payload)
+        )
+        work.checkpoint_dirty_cases = 0
+
     def _finish_work(self, work: _PanelWork) -> None:
         behavior_profile: dict[str, JsonValue] | None = None
         evaluation_telemetry = work.accumulator.telemetry_summary()
@@ -1287,6 +1439,8 @@ class _ConcurrentEvaluatorPool:
             work.failure_message = "evaluator returned an incomplete development panel"
         if work.failure_type is None and work.completed_count == len(work.panel):
             try:
+                with work.aggregation_lock:
+                    self._persist_aggregation_checkpoint(work, force=True)
                 behavior_profile = work.accumulator.behavior_profile()
                 outcome = _EvaluationOutcome(
                     evaluation_case_count=work.completed_count,
@@ -1298,6 +1452,14 @@ class _ConcurrentEvaluatorPool:
             except Exception as error:
                 work.failure_type = type(error).__name__
                 work.failure_message = str(error)[:1024]
+        elif work.checkpoint_dirty_cases:
+            try:
+                with work.aggregation_lock:
+                    self._persist_aggregation_checkpoint(work, force=True)
+            except Exception as error:
+                if work.failure_type is None:
+                    work.failure_type = type(error).__name__
+                    work.failure_message = str(error)[:1024]
         self._telemetry.evaluation_finished(key=work.key)
         if work.failure_type is not None:
             outcome = _EvaluationOutcome(
@@ -1322,19 +1484,65 @@ class _ConcurrentEvaluatorPool:
             Mapping[str, JsonValue],
         ],
         finalize: Callable[[_EvaluationOutcome], None] | None = None,
+        checkpoint_key: str | None = None,
     ) -> Future[_EvaluationOutcome]:
         self._panel_capacity.acquire()
         future: Future[_EvaluationOutcome] = Future()
-        accumulator = core._EvaluationAccumulator(len(panel))
         missing: deque[int] = deque()
         try:
+            if not evaluation_paths:
+                raise core.M5InfrastructureError(
+                    "development evaluation panel is empty"
+                )
+            completed_indices: list[int] = []
             for index, path in enumerate(evaluation_paths):
                 if path.is_file():
-                    payload = core._load_mapping(path)
-                    accumulator.add(index, payload)
-                    del payload
+                    completed_indices.append(index)
                 else:
                     missing.append(index)
+            checkpoint_path = (
+                evaluation_paths[0].parent.parent
+                / M10_AGGREGATION_CHECKPOINT_FILENAME
+            )
+            accumulator = _restore_aggregation_checkpoint(
+                path=checkpoint_path,
+                key=checkpoint_key or key,
+                panel=panel,
+                evaluation_paths=evaluation_paths,
+            )
+            checkpoint_loaded = accumulator is not None
+            if accumulator is None:
+                accumulator = _bootstrap_aggregation_accumulator(
+                    case_count=len(panel),
+                    completed_indices=completed_indices,
+                    evaluation_paths=evaluation_paths,
+                    workers=self._workers,
+                )
+                replayed = len(completed_indices)
+            else:
+                tail = [
+                    index
+                    for index in completed_indices
+                    if not accumulator.is_completed(index)
+                ]
+                if tail:
+                    _bootstrap_aggregation_accumulator(
+                        case_count=len(panel),
+                        completed_indices=tail,
+                        evaluation_paths=evaluation_paths,
+                        workers=1,
+                        accumulator=accumulator,
+                    )
+                replayed = len(tail)
+            if replayed or (completed_indices and not checkpoint_loaded):
+                payload = _aggregation_checkpoint_payload(
+                    key=checkpoint_key or key,
+                    panel=panel,
+                    accumulator=accumulator,
+                )
+                self._telemetry.timed_persist(
+                    partial(write_json, checkpoint_path, payload)
+                )
             completed_count = len(panel) - len(missing)
             self._telemetry.evaluation_started(
                 key=key,
@@ -1345,12 +1553,15 @@ class _ConcurrentEvaluatorPool:
             self._telemetry.evaluator_queued(len(missing))
             work = _PanelWork(
                 key=key,
+                checkpoint_key=checkpoint_key or key,
                 panel=panel,
                 evaluation_paths=evaluation_paths,
                 operation=operation,
                 future=future,
                 accumulator=accumulator,
                 aggregation_lock=threading.Lock(),
+                checkpoint_path=checkpoint_path,
+                checkpoint_dirty_cases=0,
                 queued_at=time.monotonic(),
                 remaining_indices=missing,
                 finalize=finalize,
@@ -1424,6 +1635,7 @@ class _ConcurrentEvaluatorPool:
 
         return self._submit_panel(
             key=f"baseline:{baseline}",
+            checkpoint_key=f"baseline:{generation}:{baseline}",
             panel=panel,
             evaluation_paths=paths,
             operation=lambda evaluator, case: evaluator.evaluate_baseline(
@@ -1482,6 +1694,7 @@ class _ConcurrentEvaluatorPool:
             )
         return self._submit_panel(
             key=f"parent_reference:{generation}:{parent_id}",
+            checkpoint_key=f"parent_reference:{generation}:{parent_id}",
             panel=panel,
             evaluation_paths=paths,
             operation=lambda evaluator, case: evaluator.evaluate(
