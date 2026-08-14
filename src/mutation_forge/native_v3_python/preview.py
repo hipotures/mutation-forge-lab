@@ -1836,6 +1836,7 @@ def _progress(
             provider_turn_key: str | None = None
             provider_turn: Mapping[str, Any] | None = None
             related_turns: list[tuple[str, Mapping[str, Any]]] = []
+            current_related_turns: list[tuple[str, Mapping[str, Any]]] = []
             if isinstance(request_key, str):
                 request_prefix = f"{request_key}-"
                 related_turns = [
@@ -1845,12 +1846,18 @@ def _progress(
                     or key.startswith(f"{request_key}-initial-resume-")
                     or key.startswith(f"{request_prefix}repair-")
                 ]
-                if related_turns:
+                current_related_turns = [
+                    (key, turn)
+                    for key, turn in related_turns
+                    if resume_started_epoch is None
+                    or provider_turn_started(turn) >= resume_started_epoch
+                ]
+                if current_related_turns:
                     # An active repair belongs to the same slot as its
                     # completed initial turn.  Prefer it over the retained
                     # initial record, then prefer the newest turn.
                     provider_turn_key, provider_turn = min(
-                        related_turns,
+                        current_related_turns,
                         key=lambda item: (
                             item[0] not in active_provider_keys,
                             -provider_turn_started(item[1]),
@@ -1859,7 +1866,7 @@ def _progress(
             lifecycle_started_epoch = min(
                 (
                     provider_turn_started(turn)
-                    for _key, turn in related_turns
+                    for _key, turn in current_related_turns
                     if provider_turn_started(turn) > 0
                 ),
                 default=0.0,
@@ -1869,8 +1876,15 @@ def _progress(
                 isinstance(raw_slot_started, int | float)
                 and not isinstance(raw_slot_started, bool)
                 and raw_slot_started > 0
+                and (
+                    resume_started_epoch is None
+                    or float(raw_slot_started) >= resume_started_epoch
+                    or candidate is not None
+                )
             ):
                 lifecycle_started_epoch = float(raw_slot_started)
+            elif candidate is None and resume_started_epoch is not None:
+                lifecycle_started_epoch = resume_started_epoch
             current_provider_turn = (
                 provider_turn
                 if provider_turn is not None

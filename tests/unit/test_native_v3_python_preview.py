@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -1412,6 +1413,66 @@ def test_status_reconstructs_cumulative_evaluation_progress_after_resume(
         assert snapshot["baseline"]["completed"] <= snapshot["baseline"]["total"]
         assert snapshot["candidate"]["completed"] <= snapshot["candidate"]["total"]
         assert snapshot["completed"] <= snapshot["total"]
+
+
+def test_status_does_not_project_old_provider_failure_as_current_retry(
+    tmp_path: Path,
+) -> None:
+    config_path = _scientific_status_config(tmp_path, exp_id="current-retry-status")
+    config = load_python_preview_config(config_path)
+    state = preview_module._initialize_workspace(config)
+    root = config.experiment_root
+    now = time.time()
+    state.update(
+        {
+            "state": "running",
+            "resumable": True,
+            "run_terminal": False,
+        }
+    )
+    write_json(root / "python-preview-state.json.gz", state)
+    write_json(
+        root / "generations" / "generation-0000" / "manifest.json.gz",
+        {
+            "generation": 0,
+            "panel": [],
+            "slots": [
+                {
+                    "slot": "slot-00",
+                    "kind": "root",
+                    "request_key": "request-00",
+                }
+            ],
+        },
+    )
+    write_json(
+        root / search_module.M10_RUNTIME_FILENAME,
+        {
+            "resume_started_epoch_seconds": now - 10,
+            "current_run_elapsed_seconds": 10,
+            "active_provider_turns": 0,
+            "queued_provider_keys": [],
+            "waiting_provider_keys": [],
+            "slot_started_epoch_seconds": {"g0000-slot-00": now - 1_000},
+            "provider_concurrency_timeline": [
+                {
+                    "key": "request-00-initial",
+                    "started_epoch_seconds": now - 1_000,
+                    "finished_epoch_seconds": now - 900,
+                    "failed": True,
+                    "error": "TurnError: old failure",
+                }
+            ],
+        },
+    )
+
+    slot = python_preview_status(config_path)["slots"][0]
+
+    assert slot["state"] == "queued"
+    assert slot["error"] is None
+    assert slot["elapsed_seconds"] == pytest.approx(10, abs=1)
+
+
 def test_blocked_preview_preserves_owned_capsule_for_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
