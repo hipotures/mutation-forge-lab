@@ -2708,6 +2708,11 @@ def test_baseline_only_recovery_skips_terminal_candidates(
         def prepare_generation(self, **_: Any) -> None:
             raise AssertionError("baseline-only recovery must not prepare provider lanes")
 
+        def release_primary_slot(self, **_: Any) -> None:
+            raise AssertionError(
+                "baseline-only recovery has no frozen provider owners"
+            )
+
     resumed_provider = RecoveryProvider()
     report = _run(
         tmp_path,

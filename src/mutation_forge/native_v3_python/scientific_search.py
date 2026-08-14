@@ -3458,10 +3458,11 @@ def run_sustained_search(
                     )
                     exact_verified |= retained.get("exact_verified") is True
                     pending.retained_terminal = True
-                    provider.release_primary_slot(
-                        generation=generation,
-                        slot=slot_plan.slot,
-                    )
+                    if needs_provider_preparation:
+                        provider.release_primary_slot(
+                            generation=generation,
+                            slot=slot_plan.slot,
+                        )
                     commit_ready(block=False)
                     continue
                 if prepared_path.is_file():
@@ -3479,10 +3480,11 @@ def run_sustained_search(
                         candidate_id=pending.candidate_id,
                         slot_dir=pending.slot_dir,
                     )
-                    provider.release_primary_slot(
-                        generation=generation,
-                        slot=slot_plan.slot,
-                    )
+                    if needs_provider_preparation:
+                        provider.release_primary_slot(
+                            generation=generation,
+                            slot=slot_plan.slot,
+                        )
                     commit_ready(block=False)
                     continue
 
