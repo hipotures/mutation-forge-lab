@@ -68,8 +68,109 @@ _UUID = re.compile(
 _PRIVATE_PATH = re.compile(r"(?:/home/|/Users/|[A-Za-z]:\\Users\\)")
 
 
-def _evaluation_telemetry_summary(
-    evaluations: Sequence[Mapping[str, Any]],
+@dataclass(frozen=True, slots=True)
+class _EvaluationTelemetryItem:
+    starts: int
+    rotations: int
+    failures: int
+    timeouts: int
+    maximum_rss_kib: int
+    policy_invocations: int
+    graph_score_attempts: int
+    unique_graph_scores: int
+    sandbox_wall_seconds: float
+    selector_wall_seconds: float
+    action_wall_seconds: float
+    scoring_wall_time_ns: tuple[int, ...]
+
+
+def _nonnegative_int(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _evaluation_telemetry_item(
+    evaluation: Mapping[str, Any],
+) -> _EvaluationTelemetryItem:
+    sandbox_wall_seconds = 0.0
+    selector_wall_seconds = 0.0
+    action_wall_seconds = 0.0
+    runtime_profile = evaluation.get("runtime_profile")
+    if isinstance(runtime_profile, Mapping):
+        for key in (
+            "sandbox_wall_seconds",
+            "selector_wall_seconds",
+            "action_wall_seconds",
+        ):
+            raw = runtime_profile.get(key)
+            if isinstance(raw, int | float) and not isinstance(raw, bool) and raw >= 0:
+                if key == "sandbox_wall_seconds":
+                    sandbox_wall_seconds = float(raw)
+                elif key == "selector_wall_seconds":
+                    selector_wall_seconds = float(raw)
+                else:
+                    action_wall_seconds = float(raw)
+    starts = rotations = failures = maximum_rss_kib = 0
+    worker = evaluation.get("worker_telemetry")
+    if isinstance(worker, Mapping):
+        starts = 1
+        rotations = _nonnegative_int(worker.get("rotations"))
+        failures = _nonnegative_int(worker.get("failures"))
+        maximum_rss_kib = _nonnegative_int(worker.get("worker_rss_kib"))
+    scientific = evaluation.get("scientific_result")
+    if not isinstance(scientific, Mapping):
+        return _EvaluationTelemetryItem(
+            starts=starts,
+            rotations=rotations,
+            failures=failures,
+            timeouts=0,
+            maximum_rss_kib=maximum_rss_kib,
+            policy_invocations=0,
+            graph_score_attempts=0,
+            unique_graph_scores=0,
+            sandbox_wall_seconds=sandbox_wall_seconds,
+            selector_wall_seconds=selector_wall_seconds,
+            action_wall_seconds=action_wall_seconds,
+            scoring_wall_time_ns=(),
+        )
+    steps = scientific.get("steps")
+    policy_invocations = (
+        len(steps) if isinstance(steps, Sequence) and not isinstance(steps, str | bytes) else 0
+    )
+    scoring_wall_time_ns: list[int] = []
+    stack: list[object] = [scientific]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, Mapping):
+            wall_time_ns = item.get("wall_time_ns")
+            if (
+                isinstance(wall_time_ns, int)
+                and not isinstance(wall_time_ns, bool)
+                and wall_time_ns >= 0
+                and isinstance(item.get("forbidden_length"), int)
+            ):
+                scoring_wall_time_ns.append(wall_time_ns)
+            stack.extend(item.values())
+        elif isinstance(item, Sequence) and not isinstance(item, str | bytes):
+            stack.extend(item)
+    failure = scientific.get("failure")
+    return _EvaluationTelemetryItem(
+        starts=starts,
+        rotations=rotations,
+        failures=failures,
+        timeouts=int(isinstance(failure, Mapping) and failure.get("code") == "PROPOSE_TIMEOUT"),
+        maximum_rss_kib=maximum_rss_kib,
+        policy_invocations=policy_invocations,
+        graph_score_attempts=_nonnegative_int(scientific.get("score_attempts")),
+        unique_graph_scores=_nonnegative_int(scientific.get("unique_graph_scores")),
+        sandbox_wall_seconds=sandbox_wall_seconds,
+        selector_wall_seconds=selector_wall_seconds,
+        action_wall_seconds=action_wall_seconds,
+        scoring_wall_time_ns=tuple(scoring_wall_time_ns),
+    )
+
+
+def _summarize_telemetry_items(
+    items: Sequence[_EvaluationTelemetryItem | None],
 ) -> dict[str, JsonValue]:
     totals: dict[str, int | float] = {
         "starts": 0,
@@ -85,78 +186,34 @@ def _evaluation_telemetry_summary(
         "action_wall_seconds": 0.0,
         "scoring_wall_seconds": 0.0,
     }
-
-    def nonnegative_int(value: object) -> int:
-        return (
-            value
-            if isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 0
-            else 0
-        )
-
-    for evaluation in evaluations:
-        runtime_profile = evaluation.get("runtime_profile")
-        if isinstance(runtime_profile, Mapping):
-            for key in (
-                "sandbox_wall_seconds",
-                "selector_wall_seconds",
-                "action_wall_seconds",
-            ):
-                raw = runtime_profile.get(key)
-                if (
-                    isinstance(raw, int | float)
-                    and not isinstance(raw, bool)
-                    and raw >= 0
-                ):
-                    totals[key] += float(raw)
-        worker = evaluation.get("worker_telemetry")
-        if isinstance(worker, Mapping):
-            totals["starts"] += 1
-            totals["rotations"] += nonnegative_int(worker.get("rotations"))
-            totals["failures"] += nonnegative_int(worker.get("failures"))
-            totals["maximum_rss_kib"] = max(
-                totals["maximum_rss_kib"],
-                nonnegative_int(worker.get("worker_rss_kib")),
-            )
-        scientific = evaluation.get("scientific_result")
-        if not isinstance(scientific, Mapping):
+    for item in items:
+        if item is None:
             continue
-        steps = scientific.get("steps")
-        if isinstance(steps, Sequence) and not isinstance(steps, str | bytes):
-            totals["policy_invocations"] += len(steps)
-        totals["graph_score_attempts"] += nonnegative_int(
-            scientific.get("score_attempts")
+        totals["starts"] += item.starts
+        totals["rotations"] += item.rotations
+        totals["failures"] += item.failures
+        totals["timeouts"] += item.timeouts
+        totals["maximum_rss_kib"] = max(
+            totals["maximum_rss_kib"],
+            item.maximum_rss_kib,
         )
-        totals["unique_graph_scores"] += nonnegative_int(
-            scientific.get("unique_graph_scores")
-        )
-        stack: list[object] = [scientific]
-        while stack:
-            item = stack.pop()
-            if isinstance(item, Mapping):
-                wall_time_ns = item.get("wall_time_ns")
-                if (
-                    isinstance(wall_time_ns, int)
-                    and not isinstance(wall_time_ns, bool)
-                    and wall_time_ns >= 0
-                    and isinstance(item.get("forbidden_length"), int)
-                ):
-                    totals["scoring_wall_seconds"] += (
-                        wall_time_ns / 1_000_000_000
-                    )
-                stack.extend(item.values())
-            elif isinstance(item, Sequence) and not isinstance(
-                item, str | bytes
-            ):
-                stack.extend(item)
-        failure = scientific.get("failure")
-        if (
-            isinstance(failure, Mapping)
-            and failure.get("code") == "PROPOSE_TIMEOUT"
-        ):
-            totals["timeouts"] += 1
+        totals["policy_invocations"] += item.policy_invocations
+        totals["graph_score_attempts"] += item.graph_score_attempts
+        totals["unique_graph_scores"] += item.unique_graph_scores
+        totals["sandbox_wall_seconds"] += item.sandbox_wall_seconds
+        totals["selector_wall_seconds"] += item.selector_wall_seconds
+        totals["action_wall_seconds"] += item.action_wall_seconds
+        for wall_time_ns in item.scoring_wall_time_ns:
+            totals["scoring_wall_seconds"] += wall_time_ns / 1_000_000_000
     return cast(dict[str, JsonValue], totals)
+
+
+def _evaluation_telemetry_summary(
+    evaluations: Sequence[Mapping[str, Any]],
+) -> dict[str, JsonValue]:
+    return _summarize_telemetry_items(
+        tuple(_evaluation_telemetry_item(evaluation) for evaluation in evaluations)
+    )
 
 
 class M5SearchError(RuntimeError):
@@ -528,74 +585,68 @@ def _component_map(evidence: object) -> dict[int, Mapping[str, Any]]:
     return result
 
 
-def _initial_only_fitness_lower(
-    evaluations: Sequence[Mapping[str, Any]],
-) -> Fraction | None:
-    """Project the frozen panel's no-policy lower bound from in-memory results."""
+class _BehaviorAccumulator:
+    """Compact, order-preserving aggregation of complete evaluation payloads."""
 
-    values_by_order: dict[int, list[Fraction]] = {}
-    for evaluation in evaluations:
-        scientific = _scientific_result(evaluation)
-        config = scientific.get("config")
-        trajectory = scientific.get("utility_trajectory")
-        if (
-            not isinstance(config, Mapping)
-            or not isinstance(config.get("order"), int)
-            or isinstance(config.get("order"), bool)
-            or not isinstance(trajectory, Sequence)
-            or isinstance(trajectory, str | bytes)
-            or not trajectory
-            or not isinstance(trajectory[0], Mapping)
-        ):
-            return None
-        initial = cast(Mapping[str, Any], trajectory[0]).get("lower")
-        if not isinstance(initial, Mapping):
-            return None
-        values_by_order.setdefault(int(config["order"]), []).append(_fraction(initial))
-    if not values_by_order:
-        return None
-    per_order = [
-        sum(values_by_order[order], Fraction()) / len(values_by_order[order])
-        for order in sorted(values_by_order)
-    ]
-    return sum(per_order, Fraction()) / len(per_order)
+    def __init__(self, case_count: int) -> None:
+        self._case_count = case_count
+        self._completed = bytearray(case_count)
+        self._selector_counts: Counter[str] = Counter()
+        self._action_counts: Counter[str] = Counter()
+        self._outcome_counts: Counter[str] = Counter()
+        self._no_plan_reasons: Counter[str] = Counter()
+        self._behavior_signatures: list[str | None] = [None] * case_count
+        self._semantic_hashes: list[str | None] = [None] * case_count
+        self._statuses: list[str | None] = [None] * case_count
+        self._witness_totals: dict[int, list[int]] = {}
+        self._accepted = 0
+        self._rejected = 0
+        self._illegal = 0
+        self._failures = 0
+        self._propose_calls = 0
+        self._api_calls = 0
+        self._lower = Fraction()
+        self._upper = Fraction()
+        self._verified = False
+        self._verifier_submissions = 0
+        self._verifier_records = 0
+        self._external_activity: Counter[str] = Counter()
+        self._initial_only_valid = True
+        self._initial_lower_by_order: dict[int, tuple[Fraction, int]] = {}
 
+    @property
+    def completed_count(self) -> int:
+        return sum(self._completed)
 
-def aggregate_behavior(
-    evaluations: Sequence[Mapping[str, Any]],
-) -> dict[str, JsonValue]:
-    """Aggregate only measured panel behavior and scientific outcomes."""
+    def add(self, index: int, evaluation: Mapping[str, Any]) -> None:
+        if not 0 <= index < self._case_count:
+            raise IndexError("evaluation index is outside the development panel")
+        if self._completed[index]:
+            raise M5InfrastructureError("development evaluation was aggregated twice")
 
-    selector_counts: Counter[str] = Counter()
-    action_counts: Counter[str] = Counter()
-    outcome_counts: Counter[str] = Counter()
-    no_plan_reasons: Counter[str] = Counter()
-    behavior_signatures: list[str] = []
-    semantic_hashes: list[str] = []
-    witness_totals: dict[int, list[int]] = {}
-    accepted = rejected = illegal = failures = propose_calls = api_calls = 0
-    lower = Fraction()
-    upper = Fraction()
-    verified = False
-    verifier_submissions = 0
-    verifier_records = 0
-    external_activity: Counter[str] = Counter()
-    statuses: list[str] = []
+        selector_counts: Counter[str] = Counter()
+        action_counts: Counter[str] = Counter()
+        outcome_counts: Counter[str] = Counter()
+        no_plan_reasons: Counter[str] = Counter()
+        witness_totals: dict[int, list[int]] = {}
+        external_activity: Counter[str] = Counter()
+        accepted = rejected = illegal = api_calls = 0
+        verified = False
+        verifier_submissions = verifier_records = 0
 
-    for evaluation in evaluations:
         raw_external = evaluation.get("external_activity")
         if isinstance(raw_external, Mapping):
             for key, value in raw_external.items():
                 if isinstance(value, int) and not isinstance(value, bool):
                     external_activity[str(key)] += value
+        behavior_signature: str | None = None
         behavior = evaluation.get("behavior_identity")
         if isinstance(behavior, Mapping):
-            signature = behavior.get("behavior_signature")
-            if isinstance(signature, str):
-                behavior_signatures.append(signature)
+            raw_signature = behavior.get("behavior_signature")
+            if isinstance(raw_signature, str):
+                behavior_signature = raw_signature
         scientific = _scientific_result(evaluation)
         status = str(scientific.get("status", ""))
-        statuses.append(status)
         fitness = scientific.get("fitness_interval")
         if not isinstance(fitness, Mapping):
             raise M5InfrastructureError("evaluation omitted fitness interval")
@@ -603,17 +654,13 @@ def aggregate_behavior(
         raw_upper = fitness.get("upper")
         if not isinstance(raw_lower, Mapping) or not isinstance(raw_upper, Mapping):
             raise M5InfrastructureError("evaluation fitness interval is malformed")
-        lower += _fraction(raw_lower)
-        upper += _fraction(raw_upper)
-        semantic = scientific.get("semantic_trace_hash")
-        if isinstance(semantic, str):
-            semantic_hashes.append(semantic)
-        if status == SerialEvaluationStatus.PROGRAM_FAILURE.value:
-            failures += 1
+        lower = _fraction(raw_lower)
+        upper = _fraction(raw_upper)
+        raw_semantic = scientific.get("semantic_trace_hash")
+        semantic_hash = raw_semantic if isinstance(raw_semantic, str) else None
         steps = scientific.get("steps", ())
         if not isinstance(steps, Sequence) or isinstance(steps, str | bytes):
             raise M5InfrastructureError("evaluation steps are malformed")
-        propose_calls += len(steps)
         for step in steps:
             if not isinstance(step, Mapping):
                 raise M5InfrastructureError("evaluation step is malformed")
@@ -663,92 +710,202 @@ def aggregate_behavior(
         for length in sorted(initial.keys() | terminal.keys()):
             before = initial.get(length, {})
             after = terminal.get(length, {})
-            values = witness_totals.setdefault(length, [0, 0, 0, 0])
-            values[0] += int(before.get("lower_bound", 0))
-            values[1] += int(before.get("upper_bound", 0))
-            values[2] += int(after.get("lower_bound", 0))
-            values[3] += int(after.get("upper_bound", 0))
+            witness_totals[length] = [
+                int(before.get("lower_bound", 0)),
+                int(before.get("upper_bound", 0)),
+                int(after.get("lower_bound", 0)),
+                int(after.get("upper_bound", 0)),
+            ]
 
-    count = len(evaluations)
-    if count == 0:
-        raise M5InfrastructureError("candidate received no development evaluations")
-    initial_only_lower = _initial_only_fitness_lower(evaluations)
-    aggregate_signature = domain_hash(
-        _BEHAVIOR_DOMAIN,
-        canonical_json_bytes(
-            {
-                "episode_behavior_signatures": behavior_signatures,
-                "semantic_trace_hashes": semantic_hashes,
-                "selectors": dict(sorted(selector_counts.items())),
-                "actions": dict(sorted(action_counts.items())),
-                "outcomes": dict(sorted(outcome_counts.items())),
-            }
-        ),
-    )
-    return {
-        "behavior_signature": aggregate_signature,
-        "fitness_interval": cast(
-            JsonValue,
-            {
-                "lower": _fraction_dict(lower / count),
-                "upper": _fraction_dict(upper / count),
-            },
-        ),
-        **(
-            {
-                "initial_only_fitness_lower": cast(
-                    JsonValue,
-                    _fraction_dict(initial_only_lower),
-                )
-            }
-            if initial_only_lower is not None
-            else {}
-        ),
-        "episode_statuses": cast(JsonValue, statuses),
-        "propose_calls": propose_calls,
-        "rewrite_plan_count": outcome_counts["rewrite"],
-        "no_plan_count": outcome_counts["no_plan"],
-        "program_failure_count": failures,
-        "accepted_rewrite_count": accepted,
-        "rejected_rewrite_count": rejected,
-        "illegal_final_state_count": illegal,
-        "selector_frequencies": dict(sorted(selector_counts.items())),
-        "action_frequencies": dict(sorted(action_counts.items())),
-        "no_plan_reasons": dict(sorted(no_plan_reasons.items())),
-        "mean_api_calls": {
-            "numerator": api_calls,
-            "denominator": max(1, propose_calls),
-        },
-        "witness_deltas": {
-            str(length): {
-                "initial_lower": values[0],
-                "initial_upper": values[1],
-                "terminal_lower": values[2],
-                "terminal_upper": values[3],
-                "proved_reduction": values[0] - values[3],
-            }
-            for length, values in sorted(witness_totals.items())
-        },
-        "semantic_trace_summary": cast(
-            JsonValue,
-            {
-                "methods": [
-                    [name, item_count]
-                    for name, item_count in (
-                        sorted(
-                            (selector_counts + action_counts).items(),
-                            key=lambda item: (-item[1], item[0]),
-                        )[:MAX_TRACE_METHODS]
+        initial_order: int | None = None
+        initial_lower: Fraction | None = None
+        config = scientific.get("config")
+        trajectory = scientific.get("utility_trajectory")
+        if (
+            isinstance(config, Mapping)
+            and isinstance(config.get("order"), int)
+            and not isinstance(config.get("order"), bool)
+            and isinstance(trajectory, Sequence)
+            and not isinstance(trajectory, str | bytes)
+            and trajectory
+            and isinstance(trajectory[0], Mapping)
+        ):
+            raw_initial = cast(Mapping[str, Any], trajectory[0]).get("lower")
+            if isinstance(raw_initial, Mapping):
+                initial_order = int(config["order"])
+                initial_lower = _fraction(raw_initial)
+
+        self._selector_counts.update(selector_counts)
+        self._action_counts.update(action_counts)
+        self._outcome_counts.update(outcome_counts)
+        self._no_plan_reasons.update(no_plan_reasons)
+        self._external_activity.update(external_activity)
+        self._behavior_signatures[index] = behavior_signature
+        self._semantic_hashes[index] = semantic_hash
+        self._statuses[index] = status
+        self._accepted += accepted
+        self._rejected += rejected
+        self._illegal += illegal
+        self._failures += int(status == SerialEvaluationStatus.PROGRAM_FAILURE.value)
+        self._propose_calls += len(steps)
+        self._api_calls += api_calls
+        self._lower += lower
+        self._upper += upper
+        self._verified |= verified
+        self._verifier_submissions += verifier_submissions
+        self._verifier_records += verifier_records
+        for length, item in witness_totals.items():
+            values = self._witness_totals.setdefault(length, [0, 0, 0, 0])
+            for offset, value in enumerate(item):
+                values[offset] += value
+        if initial_order is None or initial_lower is None:
+            self._initial_only_valid = False
+        else:
+            total, count = self._initial_lower_by_order.get(
+                initial_order,
+                (Fraction(), 0),
+            )
+            self._initial_lower_by_order[initial_order] = (
+                total + initial_lower,
+                count + 1,
+            )
+        self._completed[index] = 1
+
+    def result(self) -> dict[str, JsonValue]:
+        count = self.completed_count
+        if count == 0:
+            raise M5InfrastructureError("candidate received no development evaluations")
+        if count != self._case_count:
+            raise M5InfrastructureError("candidate received an incomplete development panel")
+        behavior_signatures = [item for item in self._behavior_signatures if item is not None]
+        semantic_hashes = [item for item in self._semantic_hashes if item is not None]
+        statuses = [item for item in self._statuses if item is not None]
+        initial_only_lower: Fraction | None = None
+        if self._initial_only_valid and self._initial_lower_by_order:
+            per_order = [
+                total / item_count
+                for _, (total, item_count) in sorted(self._initial_lower_by_order.items())
+            ]
+            initial_only_lower = sum(per_order, Fraction()) / len(per_order)
+        aggregate_signature = domain_hash(
+            _BEHAVIOR_DOMAIN,
+            canonical_json_bytes(
+                {
+                    "episode_behavior_signatures": behavior_signatures,
+                    "semantic_trace_hashes": semantic_hashes,
+                    "selectors": dict(sorted(self._selector_counts.items())),
+                    "actions": dict(sorted(self._action_counts.items())),
+                    "outcomes": dict(sorted(self._outcome_counts.items())),
+                }
+            ),
+        )
+        return {
+            "behavior_signature": aggregate_signature,
+            "fitness_interval": cast(
+                JsonValue,
+                {
+                    "lower": _fraction_dict(self._lower / count),
+                    "upper": _fraction_dict(self._upper / count),
+                },
+            ),
+            **(
+                {
+                    "initial_only_fitness_lower": cast(
+                        JsonValue,
+                        _fraction_dict(initial_only_lower),
                     )
-                ],
-                "semantic_trace_hashes": semantic_hashes,
+                }
+                if initial_only_lower is not None
+                else {}
+            ),
+            "episode_statuses": cast(JsonValue, statuses),
+            "propose_calls": self._propose_calls,
+            "rewrite_plan_count": self._outcome_counts["rewrite"],
+            "no_plan_count": self._outcome_counts["no_plan"],
+            "program_failure_count": self._failures,
+            "accepted_rewrite_count": self._accepted,
+            "rejected_rewrite_count": self._rejected,
+            "illegal_final_state_count": self._illegal,
+            "selector_frequencies": dict(sorted(self._selector_counts.items())),
+            "action_frequencies": dict(sorted(self._action_counts.items())),
+            "no_plan_reasons": dict(sorted(self._no_plan_reasons.items())),
+            "mean_api_calls": {
+                "numerator": self._api_calls,
+                "denominator": max(1, self._propose_calls),
             },
-        ),
-        "exact_verified": verified,
-        "exact_verifier_submissions": verifier_submissions,
-        "exact_verifier_records": verifier_records,
-        "scientific_external_activity": dict(sorted(external_activity.items())),
-    }
+            "witness_deltas": {
+                str(length): {
+                    "initial_lower": values[0],
+                    "initial_upper": values[1],
+                    "terminal_lower": values[2],
+                    "terminal_upper": values[3],
+                    "proved_reduction": values[0] - values[3],
+                }
+                for length, values in sorted(self._witness_totals.items())
+            },
+            "semantic_trace_summary": cast(
+                JsonValue,
+                {
+                    "methods": [
+                        [name, item_count]
+                        for name, item_count in (
+                            sorted(
+                                (self._selector_counts + self._action_counts).items(),
+                                key=lambda item: (-item[1], item[0]),
+                            )[:MAX_TRACE_METHODS]
+                        )
+                    ],
+                    "semantic_trace_hashes": semantic_hashes,
+                },
+            ),
+            "exact_verified": self._verified,
+            "exact_verifier_submissions": self._verifier_submissions,
+            "exact_verifier_records": self._verifier_records,
+            "scientific_external_activity": dict(sorted(self._external_activity.items())),
+        }
+
+
+class _EvaluationAccumulator:
+    """Bounded coordinator state for one ordered development panel."""
+
+    def __init__(self, case_count: int) -> None:
+        self._behavior = _BehaviorAccumulator(case_count)
+        self._telemetry: list[_EvaluationTelemetryItem | None] = [None] * case_count
+        self._completed = bytearray(case_count)
+        self._behavior_errors: list[Exception | None] = [None] * case_count
+
+    def add(self, index: int, evaluation: Mapping[str, Any]) -> None:
+        if not 0 <= index < len(self._completed):
+            raise IndexError("evaluation index is outside the development panel")
+        if self._completed[index]:
+            raise M5InfrastructureError("development evaluation was aggregated twice")
+        telemetry = _evaluation_telemetry_item(evaluation)
+        try:
+            self._behavior.add(index, evaluation)
+        except Exception as error:
+            self._behavior_errors[index] = error.with_traceback(None)
+        self._telemetry[index] = telemetry
+        self._completed[index] = 1
+
+    def behavior_profile(self) -> dict[str, JsonValue]:
+        for error in self._behavior_errors:
+            if error is not None:
+                raise error
+        return self._behavior.result()
+
+    def telemetry_summary(self) -> dict[str, JsonValue]:
+        return _summarize_telemetry_items(self._telemetry)
+
+
+def aggregate_behavior(
+    evaluations: Sequence[Mapping[str, Any]],
+) -> dict[str, JsonValue]:
+    """Aggregate only measured panel behavior and scientific outcomes."""
+
+    accumulator = _BehaviorAccumulator(len(evaluations))
+    for index, evaluation in enumerate(evaluations):
+        accumulator.add(index, evaluation)
+    return accumulator.result()
 
 
 def python_control_flow_summary(source: str) -> dict[str, JsonValue]:

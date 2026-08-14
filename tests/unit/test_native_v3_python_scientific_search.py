@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import shutil
 import threading
 import time
+import weakref
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -1148,6 +1150,201 @@ def test_fresh_commit_uses_compact_outcome_and_resume_loads_durable_panel(
     assert resumed.evaluation_case_count == 320
     assert resumed.behavior_profile == outcome.behavior_profile
     assert loads == 320
+
+
+def test_large_panel_releases_full_payloads_before_panel_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatList(list[int]):
+        pass
+
+    panel = _panel_of_size(64)
+    final_started = threading.Event()
+    release_final = threading.Event()
+    retained: list[weakref.ReferenceType[FatList]] = []
+
+    class FatEvaluator:
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            del candidate_id
+            if case == panel[-1]:
+                final_started.set()
+                assert release_final.wait(timeout=5)
+            payload = _result(source=source, case=case)
+            fat = FatList([1] * 32_768)
+            retained.append(weakref.ref(fat))
+            payload["fat_payload"] = cast(JsonValue, fat)
+            return payload
+
+        def close(self) -> None:
+            pass
+
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options(workers=1))
+    progress: list[int] = []
+    original_completed = telemetry.evaluation_case_completed
+
+    def record_completed(*, key: str, completed: int) -> None:
+        progress.append(completed)
+        original_completed(key=key, completed=completed)
+
+    monkeypatch.setattr(telemetry, "evaluation_case_completed", record_completed)
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=1,
+        queue_capacity=4,
+        evaluator_factory=FatEvaluator,
+        telemetry=telemetry,
+    )
+    future = pool.submit(
+        source=_source("fat-panel"),
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=tmp_path / "slot-00",
+    )
+
+    assert final_started.wait(timeout=10)
+    gc.collect()
+    assert len(retained) == len(panel) - 1
+    assert all(reference() is None for reference in retained)
+    assert progress == list(range(1, len(panel)))
+
+    release_final.set()
+    outcome = future.result(timeout=10)
+    pool.close()
+
+    assert outcome.evaluation_case_count == len(panel)
+    assert outcome.failure_type is None
+    assert progress == list(range(1, len(panel) + 1))
+
+
+def test_streaming_accumulator_matches_ordered_reference_aggregation() -> None:
+    panel = _panel_of_size(4)
+    payloads = [
+        _result(source=_source(f"stream-{index}"), case=case) for index, case in enumerate(panel)
+    ]
+    for index, payload in enumerate(payloads):
+        payload["runtime_profile"] = {
+            "sandbox_wall_seconds": 0.001 * (index + 1),
+            "selector_wall_seconds": 0.0005 * (index + 1),
+            "action_wall_seconds": 0.0001 * (index + 1),
+        }
+
+    reference_profile = search_module.core.aggregate_behavior(payloads)
+    reference_telemetry = search_module.core._evaluation_telemetry_summary(payloads)
+    accumulator = search_module.core._EvaluationAccumulator(len(payloads))
+    for index in reversed(range(len(payloads))):
+        accumulator.add(index, payloads[index])
+
+    assert accumulator.behavior_profile() == reference_profile
+    assert accumulator.telemetry_summary() == reference_telemetry
+
+
+def test_resume_streams_existing_fat_payloads_without_retaining_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatList(list[int]):
+        pass
+
+    panel = _panel_of_size(48)
+    slot_dir = tmp_path / "slot-00"
+    evaluation_dir = slot_dir / "evaluations"
+    for case in panel:
+        write_json(
+            evaluation_dir / f"{case.case_id}.json.gz",
+            _result(source=_source("resume-fat"), case=case),
+        )
+    retained: list[weakref.ReferenceType[FatList]] = []
+    original_load = search_module.core._load_mapping
+
+    def load_with_fat_payload(path: Path) -> dict[str, Any]:
+        payload = original_load(path)
+        fat = FatList([1] * 32_768)
+        retained.append(weakref.ref(fat))
+        payload["fat_payload"] = fat
+        return payload
+
+    monkeypatch.setattr(search_module.core, "_load_mapping", load_with_fat_payload)
+
+    class UnexpectedEvaluator:
+        def evaluate(self, **_: Any) -> Mapping[str, JsonValue]:
+            raise AssertionError("complete resumed panel must not be evaluated")
+
+        def close(self) -> None:
+            pass
+
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options(workers=1))
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=1,
+        queue_capacity=4,
+        evaluator_factory=UnexpectedEvaluator,
+        telemetry=telemetry,
+    )
+    outcome = pool.submit(
+        source=_source("resume-fat"),
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=slot_dir,
+    ).result(timeout=10)
+    pool.close()
+    gc.collect()
+
+    assert outcome.evaluation_case_count == len(panel)
+    assert outcome.failure_type is None
+    assert len(retained) == len(panel)
+    assert all(reference() is None for reference in retained)
+
+
+def test_panel_failure_reports_only_durably_aggregated_cases(
+    tmp_path: Path,
+) -> None:
+    panel = _panel_of_size(5)
+    calls = 0
+
+    class FailingEvaluator:
+        def evaluate(
+            self,
+            *,
+            source: str,
+            case: DevelopmentCaseV1,
+            candidate_id: str,
+        ) -> Mapping[str, JsonValue]:
+            nonlocal calls
+            del candidate_id
+            calls += 1
+            if calls == 3:
+                raise RuntimeError("fixture evaluator failed")
+            return _result(source=source, case=case)
+
+        def close(self) -> None:
+            pass
+
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options(workers=1))
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=1,
+        queue_capacity=4,
+        evaluator_factory=FailingEvaluator,
+        telemetry=telemetry,
+    )
+    outcome = pool.submit(
+        source=_source("failure"),
+        panel=panel,
+        candidate_id="g0000-slot-00",
+        slot_dir=tmp_path / "slot-00",
+    ).result(timeout=10)
+    pool.close()
+
+    assert outcome.evaluation_case_count == 2
+    assert outcome.behavior_profile is None
+    assert outcome.failure_type == "RuntimeError"
+    assert outcome.failure_message == "fixture evaluator failed"
+    assert outcome.failure_case_id == panel[2].case_id
+    assert calls == 3
 
 
 def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(

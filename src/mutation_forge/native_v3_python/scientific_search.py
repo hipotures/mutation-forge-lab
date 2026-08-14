@@ -1113,11 +1113,13 @@ class _PanelWork:
     evaluation_paths: tuple[Path, ...]
     operation: Callable[[M10ScientificEvaluator, core.DevelopmentCaseV1], Mapping[str, JsonValue]]
     future: Future[_EvaluationOutcome]
-    payloads: list[dict[str, Any] | None]
+    accumulator: core._EvaluationAccumulator
+    aggregation_lock: threading.Lock
     queued_at: float
     remaining_indices: deque[int]
     finalize: Callable[[_EvaluationOutcome], None] | None = None
     running: int = 0
+    completed_count: int = 0
     failure_type: str | None = None
     failure_message: str | None = None
     failure_case_id: str | None = None
@@ -1229,6 +1231,8 @@ class _ConcurrentEvaluatorPool:
                     self._telemetry.timed_persist(
                         partial(_write_or_verify, work.evaluation_paths[index], payload)
                     )
+                    with work.aggregation_lock:
+                        work.accumulator.add(index, payload)
                 except Exception:
                     failed = True
                     raise
@@ -1257,11 +1261,11 @@ class _ConcurrentEvaluatorPool:
                         )
             finish_work = False
             with self._condition:
-                if payload is not None:
-                    work.payloads[index] = payload
+                if payload is not None and not failed:
+                    work.completed_count += 1
                     self._telemetry.evaluation_case_completed(
                         key=work.key,
-                        completed=sum(item is not None for item in work.payloads),
+                        completed=work.completed_count,
                     )
                 work.running -= 1
                 if (
@@ -1276,17 +1280,16 @@ class _ConcurrentEvaluatorPool:
             del work
 
     def _finish_work(self, work: _PanelWork) -> None:
-        payloads = tuple(item for item in work.payloads if item is not None)
         behavior_profile: dict[str, JsonValue] | None = None
-        evaluation_telemetry = core._evaluation_telemetry_summary(payloads)
-        if work.failure_type is None and len(payloads) != len(work.panel):
+        evaluation_telemetry = work.accumulator.telemetry_summary()
+        if work.failure_type is None and work.completed_count != len(work.panel):
             work.failure_type = core.M5InfrastructureError.__name__
             work.failure_message = "evaluator returned an incomplete development panel"
-        if work.failure_type is None and len(payloads) == len(work.panel):
+        if work.failure_type is None and work.completed_count == len(work.panel):
             try:
-                behavior_profile = core.aggregate_behavior(payloads)
+                behavior_profile = work.accumulator.behavior_profile()
                 outcome = _EvaluationOutcome(
-                    evaluation_case_count=len(payloads),
+                    evaluation_case_count=work.completed_count,
                     behavior_profile=behavior_profile,
                     evaluation_telemetry=evaluation_telemetry,
                 )
@@ -1298,7 +1301,7 @@ class _ConcurrentEvaluatorPool:
         self._telemetry.evaluation_finished(key=work.key)
         if work.failure_type is not None:
             outcome = _EvaluationOutcome(
-                evaluation_case_count=len(payloads),
+                evaluation_case_count=work.completed_count,
                 behavior_profile=None,
                 evaluation_telemetry=evaluation_telemetry,
                 failure_type=work.failure_type,
@@ -1306,7 +1309,6 @@ class _ConcurrentEvaluatorPool:
                 failure_case_id=work.failure_case_id,
             )
         work.future.set_result(outcome)
-        work.payloads.clear()
         self._panel_capacity.release()
 
     def _submit_panel(
@@ -1323,18 +1325,21 @@ class _ConcurrentEvaluatorPool:
     ) -> Future[_EvaluationOutcome]:
         self._panel_capacity.acquire()
         future: Future[_EvaluationOutcome] = Future()
-        payloads: list[dict[str, Any] | None] = [None] * len(panel)
+        accumulator = core._EvaluationAccumulator(len(panel))
         missing: deque[int] = deque()
         try:
             for index, path in enumerate(evaluation_paths):
                 if path.is_file():
-                    payloads[index] = core._load_mapping(path)
+                    payload = core._load_mapping(path)
+                    accumulator.add(index, payload)
+                    del payload
                 else:
                     missing.append(index)
+            completed_count = len(panel) - len(missing)
             self._telemetry.evaluation_started(
                 key=key,
                 total=len(panel),
-                completed=len(panel) - len(missing),
+                completed=completed_count,
                 queued=len(missing),
             )
             self._telemetry.evaluator_queued(len(missing))
@@ -1344,10 +1349,12 @@ class _ConcurrentEvaluatorPool:
                 evaluation_paths=evaluation_paths,
                 operation=operation,
                 future=future,
-                payloads=payloads,
+                accumulator=accumulator,
+                aggregation_lock=threading.Lock(),
                 queued_at=time.monotonic(),
                 remaining_indices=missing,
                 finalize=finalize,
+                completed_count=completed_count,
             )
             with self._condition:
                 if self._closing:
