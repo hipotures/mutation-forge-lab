@@ -2676,9 +2676,12 @@ def run_sustained_search(
         if not callable(close):
             return
         try:
-            close(force=True)
+            close(cleanup_capsule=False, force=True)
         except TypeError:
-            close()
+            try:
+                close(force=True)
+            except TypeError:
+                close()
 
     def check_force_stop() -> None:
         if force_stop is None or not force_stop():

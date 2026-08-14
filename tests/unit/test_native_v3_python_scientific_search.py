@@ -488,6 +488,7 @@ def _run(
     concurrency: _Concurrency,
     options: ScientificSearchOptionsV2,
     operator_stop: Any = None,
+    force_stop: Any = None,
     boundary_hook: Any = None,
     resume_budget: ScientificResumeBudgetV1 | None = None,
     evaluator_factory: Callable[[], _Evaluator] | None = None,
@@ -505,8 +506,35 @@ def _run(
         provider_turn_timeout_seconds=1,
         resume_budget=resume_budget,
         operator_stop=operator_stop,
+        force_stop=force_stop,
         boundary_hook=boundary_hook,
     )
+
+
+def test_immediate_stop_force_closes_provider_without_deleting_capsule(
+    tmp_path: Path,
+) -> None:
+    close_calls: list[tuple[bool, bool]] = []
+
+    class RecordingProvider(_Provider):
+        def close(
+            self,
+            *,
+            cleanup_capsule: bool = True,
+            force: bool = False,
+        ) -> None:
+            close_calls.append((cleanup_capsule, force))
+
+    with pytest.raises(M5OperatorStop, match="immediate operator stop requested"):
+        _run(
+            tmp_path,
+            provider=RecordingProvider(),
+            concurrency=_Concurrency(parties=1),
+            options=_options(workers=1),
+            force_stop=lambda: True,
+        )
+
+    assert close_calls == [(False, True)]
 
 
 def _scientific_config(
