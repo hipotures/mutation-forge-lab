@@ -1338,6 +1338,67 @@ def test_accumulator_checkpoint_round_trip_preserves_noncontiguous_order() -> No
     assert restored_partial.checkpoint_state() == partial.checkpoint_state()
 
 
+def test_accumulator_add_fails_immediately_without_marking_case_complete() -> None:
+    case = _panel_of_size(1)[0]
+    payload = _result(source=_source("invalid-aggregate"), case=case)
+    scientific = cast(dict[str, Any], payload["scientific_result"])
+    scientific.pop("fitness_interval")
+    accumulator = search_module.core._EvaluationAccumulator(1)
+
+    with pytest.raises(
+        M5InfrastructureError,
+        match="evaluation omitted fitness interval",
+    ):
+        accumulator.add(0, payload)
+
+    assert accumulator.completed_count == 0
+    assert accumulator.is_completed(0) is False
+    assert accumulator.checkpoint_state()["completed_count"] == 0
+
+
+def test_scoring_telemetry_checkpoint_is_one_scalar_per_case() -> None:
+    case = _panel_of_size(1)[0]
+    payload = _result(source=_source("compact-telemetry"), case=case)
+    scientific = cast(dict[str, Any], payload["scientific_result"])
+    scientific["scoring_events"] = [
+        {"forbidden_length": 4, "wall_time_ns": index + 1} for index in range(10_000)
+    ]
+
+    accumulator = search_module.core._EvaluationAccumulator(1)
+    accumulator.add(0, payload)
+    telemetry = cast(
+        list[Mapping[str, Any]],
+        accumulator.checkpoint_state()["telemetry"],
+    )[0]
+
+    assert "scoring_wall_time_ns" not in telemetry
+    assert telemetry["scoring_wall_seconds"] == sum(
+        (index + 1) / 1_000_000_000 for index in reversed(range(10_000))
+    )
+    assert len(json.dumps(telemetry)) < 512
+
+
+def test_legacy_checkpoint_scoring_events_restore_to_compact_scalar() -> None:
+    case = _panel_of_size(1)[0]
+    payload = _result(source=_source("legacy-telemetry"), case=case)
+    accumulator = search_module.core._EvaluationAccumulator(1)
+    accumulator.add(0, payload)
+    state = accumulator.checkpoint_state()
+    telemetry = cast(list[dict[str, Any]], state["telemetry"])[0]
+    telemetry.pop("scoring_wall_seconds")
+    telemetry["scoring_wall_time_ns"] = [100, 200, 300]
+
+    restored = search_module.core._EvaluationAccumulator.from_checkpoint_state(state)
+    restored_telemetry = cast(
+        list[Mapping[str, Any]],
+        restored.checkpoint_state()["telemetry"],
+    )[0]
+
+    assert restored.telemetry_summary()["scoring_wall_seconds"] == 0.0000006
+    assert restored_telemetry["scoring_wall_seconds"] == 0.0000006
+    assert "scoring_wall_time_ns" not in restored_telemetry
+
+
 def test_checkpoint_resume_loads_only_post_checkpoint_tail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1408,6 +1469,68 @@ def test_checkpoint_resume_loads_only_post_checkpoint_tail(
     assert sorted(evaluated) == sorted(case.case_id for case in panel[200:])
 
 
+def test_checkpoint_tail_failure_is_exact_and_does_not_advance_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel_of_size(3)
+    slot_dir = tmp_path / "slot-00"
+    evaluation_dir = slot_dir / "evaluations"
+    checkpointed = search_module.core._EvaluationAccumulator(len(panel))
+    first = _result(source=_source("tail-failure"), case=panel[0])
+    checkpointed.add(0, first)
+    write_json(evaluation_dir / f"{panel[0].case_id}.json.gz", first)
+    invalid = _result(source=_source("tail-failure"), case=panel[1])
+    cast(dict[str, Any], invalid["scientific_result"]).pop("fitness_interval")
+    invalid_path = evaluation_dir / f"{panel[1].case_id}.json.gz"
+    write_json(invalid_path, invalid)
+    last_path = evaluation_dir / f"{panel[2].case_id}.json.gz"
+    write_json(
+        last_path,
+        _result(source=_source("tail-failure"), case=panel[2]),
+    )
+    checkpoint_path = slot_dir / search_module.M10_AGGREGATION_CHECKPOINT_FILENAME
+    checkpoint_payload = search_module._aggregation_checkpoint_payload(
+        key="candidate:g0000-slot-00",
+        panel=panel,
+        accumulator=checkpointed,
+    )
+    write_json(checkpoint_path, checkpoint_payload)
+    loaded: list[Path] = []
+    original_load = search_module.core._load_mapping
+
+    def tracked_load(path: Path) -> dict[str, Any]:
+        loaded.append(path)
+        return original_load(path)
+
+    monkeypatch.setattr(search_module.core, "_load_mapping", tracked_load)
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options(workers=1))
+    pool = search_module._ConcurrentEvaluatorPool(
+        workers=1,
+        queue_capacity=4,
+        evaluator_factory=lambda: cast(Any, None),
+        telemetry=telemetry,
+    )
+
+    with pytest.raises(M5InfrastructureError) as raised:
+        pool.submit(
+            source=_source("tail-failure"),
+            panel=panel,
+            candidate_id="g0000-slot-00",
+            slot_dir=slot_dir,
+        )
+    pool.close()
+
+    message = str(raised.value)
+    assert "panel=candidate:g0000-slot-00" in message
+    assert "case_index=1" in message
+    assert f"case_id={panel[1].case_id}" in message
+    assert f"path={invalid_path}" in message
+    assert "cause=M5InfrastructureError: evaluation omitted fitness interval" in message
+    assert last_path not in loaded
+    assert read_json(checkpoint_path) == checkpoint_payload
+
+
 def test_corrupt_checkpoint_rebuilds_from_authoritative_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1464,6 +1587,55 @@ def test_corrupt_checkpoint_rebuilds_from_authoritative_artifacts(
         repaired["protocol_id"]
         == search_module.M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID
     )
+
+
+def test_legacy_bootstrap_cancels_bounded_window_after_first_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel_of_size(160)
+    evaluation_paths = tuple(tmp_path / "evaluations" / f"{case.case_id}.json.gz" for case in panel)
+    for index, (case, path) in enumerate(zip(panel, evaluation_paths, strict=True)):
+        payload = _result(source=_source("bootstrap-failure"), case=case)
+        if index == 0:
+            cast(dict[str, Any], payload["scientific_result"]).pop("fitness_interval")
+        write_json(path, payload)
+    loads = 0
+    original_load = search_module.core._load_evaluation_checkpoint_item
+
+    def tracked_load(path: Path) -> dict[str, JsonValue]:
+        nonlocal loads
+        loads += 1
+        return original_load(path)
+
+    monkeypatch.setattr(
+        search_module.core,
+        "_load_evaluation_checkpoint_item",
+        tracked_load,
+    )
+
+    def thread_executor(
+        *,
+        max_workers: int,
+        mp_context: Any,
+    ) -> Any:
+        del mp_context
+        return search_module.ThreadPoolExecutor(max_workers=max_workers)
+
+    monkeypatch.setattr(search_module, "ProcessPoolExecutor", thread_executor)
+
+    with pytest.raises(M5InfrastructureError) as raised:
+        search_module._bootstrap_aggregation_accumulator(
+            key="baseline:0:random",
+            panel=panel,
+            case_count=len(panel),
+            completed_indices=tuple(range(len(panel))),
+            evaluation_paths=evaluation_paths,
+            workers=4,
+        )
+
+    assert "case_index=0" in str(raised.value)
+    assert loads <= 8
 
 
 def test_legacy_parallel_bootstrap_is_compact_and_not_repeated(
@@ -1652,6 +1824,136 @@ def test_panel_failure_reports_only_durably_aggregated_cases(
     assert outcome.failure_message == "fixture evaluator failed"
     assert outcome.failure_case_id == panel[2].case_id
     assert calls == 3
+
+
+def test_baseline_failure_preserves_original_aggregation_message(
+    tmp_path: Path,
+) -> None:
+    panel = _panel_of_size(1)
+    future: search_module.Future[search_module._EvaluationOutcome] = search_module.Future()
+    detail = (
+        "evaluation aggregation failed: panel=baseline:0:random "
+        f"case_index=0 case_id={panel[0].case_id} "
+        f"path={tmp_path}/evaluations/{panel[0].case_id}.json.gz "
+        "cause=M5InfrastructureError: evaluation omitted fitness interval"
+    )
+    future.set_result(
+        search_module._EvaluationOutcome(
+            evaluation_case_count=0,
+            behavior_profile=None,
+            evaluation_telemetry={},
+            failure_type="M5InfrastructureError",
+            failure_message=detail,
+            failure_case_id=panel[0].case_id,
+        )
+    )
+    telemetry = search_module._RuntimeTelemetry(tmp_path, _options(workers=1))
+
+    with pytest.raises(M5InfrastructureError) as raised:
+        search_module._commit_generation_baselines(
+            generation=0,
+            generation_dir=tmp_path / "generations" / "generation-0000",
+            panel=panel,
+            options=_options(workers=1).evaluation,
+            futures={"random": future},
+            telemetry=telemetry,
+            boundary_hook=None,
+        )
+
+    assert detail in str(raised.value)
+
+
+def test_m10_stop_preserves_exact_baseline_aggregation_failure(
+    tmp_path: Path,
+) -> None:
+    concurrency = _Concurrency(parties=1)
+
+    class InvalidBaselineEvaluator(_Evaluator):
+        def evaluate_baseline(
+            self,
+            *,
+            baseline: str,
+            case: DevelopmentCaseV1,
+            generation: int,
+        ) -> Mapping[str, JsonValue]:
+            payload = dict(
+                super().evaluate_baseline(
+                    baseline=baseline,
+                    case=case,
+                    generation=generation,
+                )
+            )
+            if baseline == "random" and case.case_id == _PANEL[0].case_id:
+                cast(
+                    dict[str, Any],
+                    payload["scientific_result"],
+                ).pop("fitness_interval")
+            return payload
+
+    with pytest.raises(M5InfrastructureError):
+        _run(
+            tmp_path,
+            provider=_Provider(),
+            concurrency=concurrency,
+            options=_options(workers=2),
+            evaluator_factory=lambda: InvalidBaselineEvaluator(concurrency),
+        )
+
+    stop = read_json(tmp_path / M10_STOP_FILENAME)
+    error = str(stop["error"])
+    expected_path = (
+        tmp_path
+        / "generations"
+        / "generation-0000"
+        / "baselines"
+        / "random"
+        / "evaluations"
+        / f"{_PANEL[0].case_id}.json.gz"
+    )
+    assert stop["error_type"] == "M5InfrastructureError"
+    assert "baseline evaluation failed: generation=0 baseline=random" in error
+    assert "panel=baseline:random" in error
+    assert "case_index=0" in error
+    assert f"case_id={_PANEL[0].case_id}" in error
+    assert f"path={expected_path}" in error
+    assert "cause=M5InfrastructureError: evaluation omitted fitness interval" in error
+
+
+def test_legacy_aggregation_result_accepts_only_scoring_roundoff(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "baseline-result.json.gz"
+    retained = {
+        "protocol_id": "fixture",
+        "profile": {"behavior_signature": "same"},
+        "evaluation_telemetry": {
+            "starts": 1,
+            "scoring_wall_seconds": 12.000000000006,
+        },
+    }
+    write_json(path, retained)
+    current = {
+        **retained,
+        "evaluation_telemetry": {
+            "starts": 1,
+            "scoring_wall_seconds": 12.0,
+        },
+    }
+
+    search_module._write_or_verify_aggregation_result(path, current)
+
+    changed = {
+        **current,
+        "evaluation_telemetry": {
+            "starts": 2,
+            "scoring_wall_seconds": 12.0,
+        },
+    }
+    with pytest.raises(
+        M5InfrastructureError,
+        match="immutable M10 metadata changed",
+    ):
+        search_module._write_or_verify_aggregation_result(path, changed)
 
 
 def test_provider_supply_reaches_four_and_uses_one_frozen_snapshot(
@@ -2200,7 +2502,7 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
     tmp_path: Path,
 ) -> None:
     durable: dict[str, M5ProviderResultV1] = {}
-    options = _options(generations=4, repairs=24)
+    options = _options(generations=5, repairs=24)
     initial_provider = _Provider(durable)
     with pytest.raises(M5OperatorStop):
         _run(
@@ -2334,16 +2636,26 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
         ),
     )
 
-    assert sorted(resumed.calls) == [(2, f"slot-{index:02d}") for index in range(1, 8)]
-    assert resumed.repair_slots == ["slot-01", "slot-02"]
-    assert report["stop_reason"] == "resume_generation_complete"
-    assert report["candidate_count"] == 24
+    assert sorted(resumed.calls) == [
+        *[(2, f"slot-{index:02d}") for index in range(1, 8)],
+        *[(3, f"slot-{index:02d}") for index in range(8)],
+    ]
+    assert resumed.repair_slots == [
+        "slot-01",
+        "slot-02",
+        "slot-01",
+        "slot-02",
+        "slot-03",
+    ]
+    assert report["stop_reason"] == "provider_turn_budget"
+    assert report["candidate_count"] == 32
     assert report["pending_candidate_count"] == 0
-    assert not (tmp_path / "generations" / "generation-0003" / "manifest.json.gz").exists()
+    assert (tmp_path / "generations" / "generation-0003" / "manifest.json.gz").exists()
     final_runtime = cast(dict[str, Any], read_json(runtime_path))
-    assert final_runtime["primary_turns_submitted"] == 28
-    assert final_runtime["repair_turns_submitted"] == 3
-    assert final_runtime["provider_turns_submitted"] == 31
+    assert final_runtime["primary_turns_submitted"] == 36
+    assert final_runtime["repair_turns_submitted"] == 6
+    assert final_runtime["provider_turns_submitted"] == 42
+    assert final_runtime["resume_budget_guard"] is None
     assert (
         len(
             cast(
@@ -2353,6 +2665,62 @@ def test_current_generation_resume_retries_pending_and_caps_new_repairs(
         )
         == 4
     )
+
+
+def test_baseline_only_recovery_skips_terminal_candidates(
+    tmp_path: Path,
+) -> None:
+    options = _options(generations=1)
+    initial_concurrency = _Concurrency(parties=1)
+    _run(
+        tmp_path,
+        provider=_Provider(),
+        concurrency=initial_concurrency,
+        options=options,
+    )
+    generation_dir = tmp_path / "generations" / "generation-0000"
+    (generation_dir / search_module.M10_BASELINE_FILENAME).unlink()
+
+    recovery = search_module._generation_recovery_state(
+        root=tmp_path,
+        generation=0,
+        options=options,
+    )
+
+    assert recovery.candidates_complete is True
+    assert recovery.baselines_complete is False
+    assert recovery.parent_references_complete is True
+    assert recovery.fully_committed is False
+    assert recovery.pending_primary_ids == ()
+    assert search_module._next_generation_to_run(tmp_path, options) == 0
+
+    class UnexpectedEvaluator(_Evaluator):
+        def evaluate(self, **_: Any) -> Mapping[str, JsonValue]:
+            raise AssertionError("terminal candidates must not be reevaluated")
+
+        def evaluate_baseline(self, **_: Any) -> Mapping[str, JsonValue]:
+            raise AssertionError("durable baseline cases must not be reevaluated")
+
+    class RecoveryProvider(_Provider):
+        def ensure_specification_anchor(self, **_: Any) -> M5ProviderResultV1:
+            raise AssertionError("durable anchor must be reused")
+
+        def prepare_generation(self, **_: Any) -> None:
+            raise AssertionError("baseline-only recovery must not prepare provider lanes")
+
+    resumed_provider = RecoveryProvider()
+    report = _run(
+        tmp_path,
+        provider=resumed_provider,
+        concurrency=_Concurrency(parties=1),
+        options=options,
+        evaluator_factory=lambda: UnexpectedEvaluator(_Concurrency(parties=1)),
+    )
+
+    assert resumed_provider.calls == []
+    assert report["stop_reason"] == "generation_budget"
+    assert report["candidate_count"] == 8
+    assert (generation_dir / search_module.M10_BASELINE_FILENAME).is_file()
 
 
 def test_resume_budget_remains_cumulative_across_process_restarts(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import multiprocessing
 import re
 import threading
@@ -53,7 +54,8 @@ M10_BASELINE_RESULT_PROTOCOL_ID = "mforge.native.python_generation_baseline.v1"
 M10_PARENT_REFERENCE_RESULT_FILENAME = "parent-reference-result.json.gz"
 M10_PARENT_REFERENCE_RESULT_PROTOCOL_ID = "mforge.native.python_parent_reference.v1"
 M10_AGGREGATION_CHECKPOINT_FILENAME = "aggregation-checkpoint.json.gz"
-M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID = (
+M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID = "mforge.native.python_scientific_aggregation_checkpoint.v2"
+_LEGACY_AGGREGATION_CHECKPOINT_PROTOCOL_ID = (
     "mforge.native.python_scientific_aggregation_checkpoint.v1"
 )
 _RUNTIME_TELEMETRY_FLUSH_INTERVAL_SECONDS = 0.25
@@ -1108,6 +1110,12 @@ class _RuntimeTelemetry:
             self._state["terminal_reason"] = None
             self._persist_locked(force=True)
 
+    def complete_resume_generation(self) -> None:
+        with self._lock:
+            self._resume_budget = None
+            self._state["resume_budget_guard"] = None
+            self._persist_locked(force=True)
+
 
 @dataclass(frozen=True, slots=True)
 class _EvaluationOutcome:
@@ -1148,11 +1156,13 @@ def _restore_aggregation_checkpoint(
         if (
             not isinstance(raw, Mapping)
             or raw.get("protocol_id")
-            != M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID
+            not in {
+                M10_AGGREGATION_CHECKPOINT_PROTOCOL_ID,
+                _LEGACY_AGGREGATION_CHECKPOINT_PROTOCOL_ID,
+            }
             or raw.get("panel_key") != key
             or raw.get("panel_hash") != core.panel_hash(panel)
-            or raw.get("panel_case_ids")
-            != [case.case_id for case in panel]
+            or raw.get("panel_case_ids") != [case.case_id for case in panel]
             or not isinstance(raw.get("accumulator"), Mapping)
         ):
             return None
@@ -1171,8 +1181,46 @@ def _restore_aggregation_checkpoint(
         return None
 
 
+def _aggregation_case_error(
+    *,
+    key: str,
+    index: int,
+    case_id: str,
+    path: Path,
+    error: BaseException,
+) -> core.M5InfrastructureError:
+    return core.M5InfrastructureError(
+        "evaluation aggregation failed: "
+        f"panel={key} case_index={index} case_id={case_id} path={path} "
+        f"cause={type(error).__name__}: {error}"
+    )
+
+
+def _add_evaluation_payload(
+    *,
+    accumulator: core._EvaluationAccumulator,
+    key: str,
+    index: int,
+    case_id: str,
+    path: Path,
+    payload: Mapping[str, Any],
+) -> None:
+    try:
+        accumulator.add(index, payload)
+    except Exception as error:
+        raise _aggregation_case_error(
+            key=key,
+            index=index,
+            case_id=case_id,
+            path=path,
+            error=error,
+        ) from error
+
+
 def _bootstrap_aggregation_accumulator(
     *,
+    key: str,
+    panel: tuple[core.DevelopmentCaseV1, ...],
     case_count: int,
     completed_indices: Sequence[int],
     evaluation_paths: tuple[Path, ...],
@@ -1183,25 +1231,30 @@ def _bootstrap_aggregation_accumulator(
         accumulator = core._EvaluationAccumulator(case_count)
     elif accumulator.case_count != case_count:
         raise ValueError("aggregation bootstrap case count changed")
-    if (
-        len(completed_indices) < _LEGACY_BOOTSTRAP_PARALLEL_THRESHOLD
-        or workers == 1
-    ):
+    if len(completed_indices) < _LEGACY_BOOTSTRAP_PARALLEL_THRESHOLD or workers == 1:
         for index in completed_indices:
-            item = core._load_evaluation_checkpoint_item(
-                evaluation_paths[index]
-            )
-            accumulator.add_checkpoint_item(index, item)
+            try:
+                item = core._load_evaluation_checkpoint_item(evaluation_paths[index])
+                accumulator.add_checkpoint_item(index, item)
+            except Exception as error:
+                raise _aggregation_case_error(
+                    key=key,
+                    index=index,
+                    case_id=panel[index].case_id,
+                    path=evaluation_paths[index],
+                    error=error,
+                ) from error
         return accumulator
 
     worker_count = min(workers, len(completed_indices))
     window = worker_count * 2
     indices = iter(completed_indices)
-    with ProcessPoolExecutor(
+    executor = ProcessPoolExecutor(
         max_workers=worker_count,
         mp_context=multiprocessing.get_context("spawn"),
-    ) as executor:
-        pending: dict[Future[dict[str, JsonValue]], int] = {}
+    )
+    pending: dict[Future[dict[str, JsonValue]], int] = {}
+    try:
 
         def submit_one() -> bool:
             try:
@@ -1220,10 +1273,29 @@ def _bootstrap_aggregation_accumulator(
                 break
         while pending:
             done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
-            for future in done:
-                index = pending.pop(future)
-                accumulator.add_checkpoint_item(index, future.result())
+            completed_batch = sorted(
+                ((pending.pop(future), future) for future in done),
+                key=lambda item: item[0],
+            )
+            for index, future in completed_batch:
+                try:
+                    accumulator.add_checkpoint_item(index, future.result())
+                except Exception as error:
+                    raise _aggregation_case_error(
+                        key=key,
+                        index=index,
+                        case_id=panel[index].case_id,
+                        path=evaluation_paths[index],
+                        error=error,
+                    ) from error
+            for _ in completed_batch:
                 submit_one()
+    except BaseException:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    executor.shutdown(wait=True)
     return accumulator
 
 
@@ -1358,7 +1430,14 @@ class _ConcurrentEvaluatorPool:
                         partial(_write_or_verify, work.evaluation_paths[index], payload)
                     )
                     with work.aggregation_lock:
-                        work.accumulator.add(index, payload)
+                        _add_evaluation_payload(
+                            accumulator=work.accumulator,
+                            key=work.key,
+                            index=index,
+                            case_id=case.case_id,
+                            path=work.evaluation_paths[index],
+                            payload=payload,
+                        )
                         case_completed = True
                         work.checkpoint_dirty_cases += 1
                         self._persist_aggregation_checkpoint(work)
@@ -1418,8 +1497,6 @@ class _ConcurrentEvaluatorPool:
             work.checkpoint_dirty_cases
             < _AGGREGATION_CHECKPOINT_CASE_INTERVAL
         ):
-            return
-        if not work.accumulator.can_checkpoint:
             return
         payload = _aggregation_checkpoint_payload(
             key=work.checkpoint_key,
@@ -1513,6 +1590,8 @@ class _ConcurrentEvaluatorPool:
             checkpoint_loaded = accumulator is not None
             if accumulator is None:
                 accumulator = _bootstrap_aggregation_accumulator(
+                    key=checkpoint_key or key,
+                    panel=panel,
                     case_count=len(panel),
                     completed_indices=completed_indices,
                     evaluation_paths=evaluation_paths,
@@ -1527,6 +1606,8 @@ class _ConcurrentEvaluatorPool:
                 ]
                 if tail:
                     _bootstrap_aggregation_accumulator(
+                        key=checkpoint_key or key,
+                        panel=panel,
                         case_count=len(panel),
                         completed_indices=tail,
                         evaluation_paths=evaluation_paths,
@@ -1627,7 +1708,7 @@ class _ConcurrentEvaluatorPool:
             }
             self._telemetry.timed_persist(
                 partial(
-                    _write_or_verify,
+                    _write_or_verify_aggregation_result,
                     baseline_dir / M10_BASELINE_RESULT_FILENAME,
                     result,
                 )
@@ -1681,7 +1762,7 @@ class _ConcurrentEvaluatorPool:
             }
             self._telemetry.timed_persist(
                 partial(
-                    _write_or_verify,
+                    _write_or_verify_aggregation_result,
                     reference_dir / M10_PARENT_REFERENCE_RESULT_FILENAME,
                     result,
                 )
@@ -1748,6 +1829,54 @@ def _write_or_verify(path: Path, value: Mapping[str, Any]) -> None:
             raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
         return
     write_json(path, value, exclusive=True)
+
+
+def _write_or_verify_aggregation_result(
+    path: Path,
+    value: Mapping[str, Any],
+) -> None:
+    if not path.exists():
+        write_json(path, value, exclusive=True)
+        return
+    retained = read_json(path)
+    if retained == dict(value):
+        return
+    if not isinstance(retained, Mapping):
+        raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
+    retained_telemetry = retained.get("evaluation_telemetry")
+    current_telemetry = value.get("evaluation_telemetry")
+    if not isinstance(retained_telemetry, Mapping) or not isinstance(
+        current_telemetry,
+        Mapping,
+    ):
+        raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
+    retained_scoring = retained_telemetry.get("scoring_wall_seconds")
+    current_scoring = current_telemetry.get("scoring_wall_seconds")
+    if (
+        not isinstance(retained_scoring, int | float)
+        or isinstance(retained_scoring, bool)
+        or not isinstance(current_scoring, int | float)
+        or isinstance(current_scoring, bool)
+        or not math.isclose(
+            float(retained_scoring),
+            float(current_scoring),
+            rel_tol=0.0,
+            # Per-case compaction reassociates the legacy naive float sum.
+            # Accept less than one nanosecond of telemetry-only roundoff.
+            abs_tol=1e-9,
+        )
+    ):
+        raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
+    retained_comparable = dict(retained)
+    retained_comparable["evaluation_telemetry"] = {
+        key: item for key, item in retained_telemetry.items() if key != "scoring_wall_seconds"
+    }
+    current_comparable = dict(value)
+    current_comparable["evaluation_telemetry"] = {
+        key: item for key, item in current_telemetry.items() if key != "scoring_wall_seconds"
+    }
+    if retained_comparable != current_comparable:
+        raise core.M5InfrastructureError(f"immutable M10 metadata changed: {path}")
 
 
 def _write_or_verify_protocol(path: Path, value: Mapping[str, Any]) -> None:
@@ -2005,9 +2134,10 @@ def _commit_parent_references(
             outcome = future.result()
             if outcome.failure_type is not None:
                 raise core.M5InfrastructureError(
-                    "parent reference evaluation failed for "
-                    f"generation {generation}/{parent_id}/"
-                    f"{outcome.failure_case_id}: {outcome.failure_type}"
+                    "parent reference evaluation failed: "
+                    f"generation={generation} parent={parent_id} "
+                    f"case_id={outcome.failure_case_id} "
+                    f"cause={outcome.failure_type}: {outcome.failure_message}"
                 )
         _verify_parent_reference(
             path=path,
@@ -2289,7 +2419,7 @@ def _commit_pending(
             core.M5InfrastructureError(
                 "development evaluation failed for "
                 f"{pending.candidate_id}/{outcome.failure_case_id}: "
-                f"{outcome.failure_type}"
+                f"{outcome.failure_type}: {outcome.failure_message}"
             ),
         )
     if (
@@ -2353,9 +2483,10 @@ def _commit_generation_baselines(
         outcome = future.result()
         if outcome.failure_type is not None:
             raise core.M5InfrastructureError(
-                "baseline evaluation failed for "
-                f"generation {generation}/{baseline}/"
-                f"{outcome.failure_case_id}: {outcome.failure_type}"
+                "baseline evaluation failed: "
+                f"generation={generation} baseline={baseline} "
+                f"case_id={outcome.failure_case_id} "
+                f"cause={outcome.failure_type}: {outcome.failure_message}"
             )
         baseline_result = core._load_mapping(
             generation_dir
@@ -2739,12 +2870,97 @@ def _report(
     return report
 
 
+@dataclass(frozen=True, slots=True)
+class _GenerationRecoveryState:
+    generation: int
+    pending_primary_ids: tuple[str, ...]
+    candidates_complete: bool
+    baselines_complete: bool
+    parent_references_complete: bool
+
+    @property
+    def fully_committed(self) -> bool:
+        return (
+            self.candidates_complete and self.baselines_complete and self.parent_references_complete
+        )
+
+
+def _generation_recovery_state(
+    *,
+    root: Path,
+    generation: int,
+    options: ScientificSearchOptionsV2,
+) -> _GenerationRecoveryState:
+    generation_dir = root / "generations" / f"generation-{generation:04d}"
+    manifest = core._load_mapping(generation_dir / "manifest.json.gz")
+    slots = manifest.get("slots")
+    if (
+        manifest.get("generation") != generation
+        or not isinstance(slots, Sequence)
+        or isinstance(slots, str | bytes)
+        or len(slots) != core.POPULATION_SIZE
+    ):
+        raise core.M5InfrastructureError(f"generation {generation} manifest is malformed")
+    pending: list[str] = []
+    candidates_complete = True
+    parent_ids: set[str] = set()
+    manifest_panel_hash: str | None = None
+    for slot_index, raw_slot in enumerate(slots):
+        if not isinstance(raw_slot, Mapping):
+            raise core.M5InfrastructureError(f"generation {generation} manifest slot is malformed")
+        slot = f"slot-{slot_index:02d}"
+        if raw_slot.get("slot") != slot:
+            raise core.M5InfrastructureError(
+                f"generation {generation} manifest slots are not canonical"
+            )
+        raw_panel_hash = raw_slot.get("panel_hash")
+        if not isinstance(raw_panel_hash, str):
+            raise core.M5InfrastructureError(
+                f"generation {generation} manifest panel hash is malformed"
+            )
+        if manifest_panel_hash is None:
+            manifest_panel_hash = raw_panel_hash
+        elif raw_panel_hash != manifest_panel_hash:
+            raise core.M5InfrastructureError(f"generation {generation} manifest panel hash changed")
+        raw_parent_id = raw_slot.get("parent_candidate_id")
+        if isinstance(raw_parent_id, str):
+            parent_ids.add(raw_parent_id)
+        slot_dir = core._candidate_path(root, generation, slot)
+        if (slot_dir / "candidate.json.gz").is_file():
+            continue
+        candidates_complete = False
+        if not _prepared_path(slot_dir).is_file():
+            pending.append(core._candidate_id(generation, slot))
+
+    baseline_path = generation_dir / M10_BASELINE_FILENAME
+    baselines_complete = False
+    if baseline_path.is_file():
+        baseline_summary = core._load_mapping(baseline_path)
+        raw_baselines = baseline_summary.get("baselines")
+        baselines_complete = (
+            baseline_summary.get("protocol_id") == M10_BASELINE_PROTOCOL_ID
+            and baseline_summary.get("generation") == generation
+            and baseline_summary.get("panel_hash") == manifest_panel_hash
+            and isinstance(raw_baselines, Mapping)
+            and set(raw_baselines) == set(options.evaluation.baselines)
+        )
+    parent_references_complete = all(
+        _parent_reference_path(generation_dir, parent_id).is_file() for parent_id in parent_ids
+    )
+    return _GenerationRecoveryState(
+        generation=generation,
+        pending_primary_ids=tuple(pending),
+        candidates_complete=candidates_complete,
+        baselines_complete=baselines_complete,
+        parent_references_complete=parent_references_complete,
+    )
+
+
 def _resume_generation_boundary(
     *,
     root: Path,
     options: ScientificSearchOptionsV2,
 ) -> tuple[int, tuple[str, ...]] | None:
-    del options
     manifests: list[int] = []
     incomplete: list[int] = []
     pending_primary: dict[int, tuple[str, ...]] = {}
@@ -2757,18 +2973,14 @@ def _resume_generation_boundary(
         if not (generation_dir / "manifest.json.gz").is_file():
             continue
         manifests.append(generation)
-        terminal = 0
-        pending: list[str] = []
-        for slot_index in range(core.POPULATION_SIZE):
-            slot = f"slot-{slot_index:02d}"
-            slot_dir = core._candidate_path(root, generation, slot)
-            if (slot_dir / "candidate.json.gz").is_file():
-                terminal += 1
-            elif not _prepared_path(slot_dir).is_file():
-                pending.append(core._candidate_id(generation, slot))
-        if terminal < core.POPULATION_SIZE:
+        recovery = _generation_recovery_state(
+            root=root,
+            generation=generation,
+            options=options,
+        )
+        if not recovery.fully_committed:
             incomplete.append(generation)
-            pending_primary[generation] = tuple(pending)
+            pending_primary[generation] = recovery.pending_primary_ids
     if not manifests or not incomplete:
         return None
     if len(incomplete) != 1:
@@ -2866,7 +3078,10 @@ def resolve_resume_generation(
     return generation, pending_ids
 
 
-def _next_generation_to_run(root: Path) -> int:
+def _next_generation_to_run(
+    root: Path,
+    options: ScientificSearchOptionsV2,
+) -> int:
     generations = sorted(
         int(path.parent.name.removeprefix("generation-"))
         for path in root.glob("generations/generation-*/manifest.json.gz")
@@ -2876,10 +3091,12 @@ def _next_generation_to_run(root: Path) -> int:
     if generations != list(range(generations[-1] + 1)):
         raise core.M5InfrastructureError("generation manifest history is incomplete")
     for generation in generations:
-        generation_dir = root / "generations" / f"generation-{generation:04d}"
-        terminal = len(core._generation_candidates(root, generation))
-        baselines_complete = (generation_dir / M10_BASELINE_FILENAME).is_file()
-        if terminal < core.POPULATION_SIZE or not baselines_complete:
+        recovery = _generation_recovery_state(
+            root=root,
+            generation=generation,
+            options=options,
+        )
+        if not recovery.fully_committed:
             if generation != generations[-1]:
                 raise core.M5InfrastructureError(
                     "a later generation exists after an incomplete generation"
@@ -3020,28 +3237,31 @@ def run_sustained_search(
 
     try:
         check_force_stop()
-        anchor_future = provider_executor.submit(
-            provider.ensure_specification_anchor,
-            prompt=specification_prompt,
-            system_prompt=system_prompt,
-            output_schema=specification_ack_schema,
-            artifact_dir=root / "provider" / "specification-anchor",
-        )
-        anchor_result = wait_for_provider_result(anchor_future)
-        check_force_stop()
-        core._assert_provider_turn_boundary(anchor_result, expected_history=())
+        anchor_path = root / "anchor.json.gz"
+        if anchor_path.is_file():
+            anchor_result = core.M5ProviderResultV1.from_dict(core._load_mapping(anchor_path))
+        else:
+            anchor_future = provider_executor.submit(
+                provider.ensure_specification_anchor,
+                prompt=specification_prompt,
+                system_prompt=system_prompt,
+                output_schema=specification_ack_schema,
+                artifact_dir=root / "provider" / "specification-anchor",
+            )
+            anchor_result = wait_for_provider_result(anchor_future)
+            check_force_stop()
+            core._assert_provider_turn_boundary(anchor_result, expected_history=())
         anchor = anchor_result.context
-        core._write_exclusive_or_verify(root / "anchor.json.gz", anchor_result.as_dict())
+        core._write_exclusive_or_verify(anchor_path, anchor_result.as_dict())
         if boundary_hook is not None:
             boundary_hook("anchor_persisted")
 
-        next_generation = _next_generation_to_run(root)
+        next_generation = _next_generation_to_run(root, options)
+        start_generation = resume_generation if resume_generation is not None else next_generation
         generations = (
-            range(resume_generation, resume_generation + 1)
-            if resume_generation is not None
-            else count(next_generation)
+            count(start_generation)
             if options.generation_limit is None
-            else range(next_generation, options.generation_limit)
+            else range(start_generation, options.generation_limit)
         )
         for generation in generations:
             panel = panel_factory(generation)
@@ -3155,23 +3375,32 @@ def run_sustained_search(
                 options=options,
             )
             _write_or_verify(generation_dir / "generation-snapshot.json.gz", snapshot)
-            # Forking/resuming the provider lanes performs app-server
-            # protocol calls too.  Keep it on the bounded provider executor;
-            # otherwise the dashboard thread cannot observe q/force_stop and
-            # a stalled fork can outlive the configured 300 s turn timeout.
-            check_force_stop()
-            prepare_started_at = time.monotonic()
-            prepare_future = provider_executor.submit(
-                provider.prepare_generation,
-                snapshot=snapshot,
-                anchor=anchor,
-                artifact_dir=generation_dir / "provider",
+            needs_provider_preparation = any(
+                not (
+                    core._candidate_path(root, generation, slot_plan.slot) / "candidate.json.gz"
+                ).is_file()
+                and not _prepared_path(
+                    core._candidate_path(root, generation, slot_plan.slot)
+                ).is_file()
+                for slot_plan in manifest.slots
             )
-            wait_for_provider_result(
-                prepare_future,
-                submitted_at=prepare_started_at,
-            )
-            check_force_stop()
+            if needs_provider_preparation:
+                # Forking/resuming the provider lanes performs app-server
+                # protocol calls too. Keep it on the bounded provider executor
+                # so the dashboard can interrupt a stalled fork.
+                check_force_stop()
+                prepare_started_at = time.monotonic()
+                prepare_future = provider_executor.submit(
+                    provider.prepare_generation,
+                    snapshot=snapshot,
+                    anchor=anchor,
+                    artifact_dir=generation_dir / "provider",
+                )
+                wait_for_provider_result(
+                    prepare_future,
+                    submitted_at=prepare_started_at,
+                )
+                check_force_stop()
             telemetry.boundary(f"generation_{generation}_snapshot")
             if boundary_hook is not None:
                 boundary_hook(f"generation_{generation}_snapshot")
@@ -3264,6 +3493,7 @@ def run_sustained_search(
                 durable_result_path = artifact_dir / "m5-provider-result.json.gz"
                 if (
                     resume_budget is not None
+                    and generation == resume_generation
                     and telemetry.primary_was_started(initial_key)
                     and not durable_result_path.is_file()
                 ):
@@ -3346,6 +3576,7 @@ def run_sustained_search(
 
             if (
                 resume_budget is not None
+                and generation == resume_generation
                 and len(provider_task_list) > resume_budget.expected_pending_primary_slots
             ):
                 raise core.M5InfrastructureError(
@@ -3655,9 +3886,8 @@ def run_sustained_search(
             if exact_verified:
                 stop_reason = "exact_verified_counterexample"
                 break
-            if resume_generation is not None:
-                stop_reason = "resume_generation_complete"
-                break
+            if generation == resume_generation:
+                telemetry.complete_resume_generation()
         else:
             stop_reason = "generation_budget"
         telemetry.boundary("report_pending")

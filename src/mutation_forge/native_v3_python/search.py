@@ -82,7 +82,7 @@ class _EvaluationTelemetryItem:
     sandbox_wall_seconds: float
     selector_wall_seconds: float
     action_wall_seconds: float
-    scoring_wall_time_ns: tuple[int, ...]
+    scoring_wall_seconds: float
 
     def as_dict(self) -> dict[str, JsonValue]:
         return {
@@ -97,7 +97,7 @@ class _EvaluationTelemetryItem:
             "sandbox_wall_seconds": self.sandbox_wall_seconds,
             "selector_wall_seconds": self.selector_wall_seconds,
             "action_wall_seconds": self.action_wall_seconds,
-            "scoring_wall_time_ns": list(self.scoring_wall_time_ns),
+            "scoring_wall_seconds": self.scoring_wall_seconds,
         }
 
     @classmethod
@@ -133,16 +133,25 @@ class _EvaluationTelemetryItem:
             ):
                 raise ValueError(f"aggregation telemetry {field} is malformed")
             floats[field] = float(raw)
-        raw_scoring = value.get("scoring_wall_time_ns")
-        if not isinstance(raw_scoring, Sequence) or isinstance(
-            raw_scoring, str | bytes
+        raw_scoring_seconds = value.get("scoring_wall_seconds")
+        if raw_scoring_seconds is None:
+            raw_scoring = value.get("scoring_wall_time_ns")
+            if not isinstance(raw_scoring, Sequence) or isinstance(raw_scoring, str | bytes):
+                raise ValueError("aggregation scoring telemetry is malformed")
+            scoring_wall_seconds = 0.0
+            for raw in raw_scoring:
+                if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+                    raise ValueError("aggregation scoring telemetry is malformed")
+                scoring_wall_seconds += raw / 1_000_000_000
+        elif (
+            not isinstance(raw_scoring_seconds, int | float)
+            or isinstance(raw_scoring_seconds, bool)
+            or raw_scoring_seconds < 0
+            or not math.isfinite(raw_scoring_seconds)
         ):
             raise ValueError("aggregation scoring telemetry is malformed")
-        scoring: list[int] = []
-        for raw in raw_scoring:
-            if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
-                raise ValueError("aggregation scoring telemetry is malformed")
-            scoring.append(raw)
+        else:
+            scoring_wall_seconds = float(raw_scoring_seconds)
         return cls(
             starts=integers["starts"],
             rotations=integers["rotations"],
@@ -155,7 +164,7 @@ class _EvaluationTelemetryItem:
             sandbox_wall_seconds=floats["sandbox_wall_seconds"],
             selector_wall_seconds=floats["selector_wall_seconds"],
             action_wall_seconds=floats["action_wall_seconds"],
-            scoring_wall_time_ns=tuple(scoring),
+            scoring_wall_seconds=scoring_wall_seconds,
         )
 
 
@@ -205,13 +214,13 @@ def _evaluation_telemetry_item(
             sandbox_wall_seconds=sandbox_wall_seconds,
             selector_wall_seconds=selector_wall_seconds,
             action_wall_seconds=action_wall_seconds,
-            scoring_wall_time_ns=(),
+            scoring_wall_seconds=0.0,
         )
     steps = scientific.get("steps")
     policy_invocations = (
         len(steps) if isinstance(steps, Sequence) and not isinstance(steps, str | bytes) else 0
     )
-    scoring_wall_time_ns: list[int] = []
+    scoring_wall_seconds = 0.0
     stack: list[object] = [scientific]
     while stack:
         item = stack.pop()
@@ -223,7 +232,7 @@ def _evaluation_telemetry_item(
                 and wall_time_ns >= 0
                 and isinstance(item.get("forbidden_length"), int)
             ):
-                scoring_wall_time_ns.append(wall_time_ns)
+                scoring_wall_seconds += wall_time_ns / 1_000_000_000
             stack.extend(item.values())
         elif isinstance(item, Sequence) and not isinstance(item, str | bytes):
             stack.extend(item)
@@ -240,7 +249,7 @@ def _evaluation_telemetry_item(
         sandbox_wall_seconds=sandbox_wall_seconds,
         selector_wall_seconds=selector_wall_seconds,
         action_wall_seconds=action_wall_seconds,
-        scoring_wall_time_ns=tuple(scoring_wall_time_ns),
+        scoring_wall_seconds=scoring_wall_seconds,
     )
 
 
@@ -278,8 +287,7 @@ def _summarize_telemetry_items(
         totals["sandbox_wall_seconds"] += item.sandbox_wall_seconds
         totals["selector_wall_seconds"] += item.selector_wall_seconds
         totals["action_wall_seconds"] += item.action_wall_seconds
-        for wall_time_ns in item.scoring_wall_time_ns:
-            totals["scoring_wall_seconds"] += wall_time_ns / 1_000_000_000
+        totals["scoring_wall_seconds"] += item.scoring_wall_seconds
     return cast(dict[str, JsonValue], totals)
 
 
@@ -1193,7 +1201,6 @@ class _EvaluationAccumulator:
         self._behavior = _BehaviorAccumulator(case_count)
         self._telemetry: list[_EvaluationTelemetryItem | None] = [None] * case_count
         self._completed = bytearray(case_count)
-        self._behavior_errors: list[Exception | None] = [None] * case_count
 
     @property
     def case_count(self) -> int:
@@ -1206,26 +1213,17 @@ class _EvaluationAccumulator:
     def is_completed(self, index: int) -> bool:
         return bool(self._completed[index])
 
-    @property
-    def can_checkpoint(self) -> bool:
-        return all(error is None for error in self._behavior_errors)
-
     def add(self, index: int, evaluation: Mapping[str, Any]) -> None:
         if not 0 <= index < len(self._completed):
             raise IndexError("evaluation index is outside the development panel")
         if self._completed[index]:
             raise M5InfrastructureError("development evaluation was aggregated twice")
         telemetry = _evaluation_telemetry_item(evaluation)
-        try:
-            self._behavior.add(index, evaluation)
-        except Exception as error:
-            self._behavior_errors[index] = error.with_traceback(None)
+        self._behavior.add(index, evaluation)
         self._telemetry[index] = telemetry
         self._completed[index] = 1
 
     def checkpoint_state(self) -> dict[str, JsonValue]:
-        if not self.can_checkpoint:
-            raise ValueError("malformed evaluations cannot be checkpointed")
         return {
             "case_count": self.case_count,
             "completion_bitmap": self._completed.hex(),
@@ -1309,9 +1307,6 @@ class _EvaluationAccumulator:
         self._completed[index] = 1
 
     def behavior_profile(self) -> dict[str, JsonValue]:
-        for error in self._behavior_errors:
-            if error is not None:
-                raise error
         return self._behavior.result()
 
     def telemetry_summary(self) -> dict[str, JsonValue]:

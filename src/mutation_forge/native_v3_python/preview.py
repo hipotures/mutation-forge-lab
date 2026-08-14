@@ -3068,7 +3068,6 @@ def run_python_preview(
             budget=resume_budget,
         )
     resumable_terminal_reasons = {
-        "resume_generation_complete",
         "hourly_token_limit",
         "wall_clock_budget",
     }
@@ -3246,7 +3245,6 @@ def run_python_preview(
                 force_stop=force_stop,
             )
         resumable_stop = report.get("stop_reason") in {
-            "resume_generation_complete",
             "hourly_token_limit",
             "wall_clock_budget",
         } or (

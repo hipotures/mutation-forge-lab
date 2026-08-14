@@ -534,8 +534,7 @@ def _experiment_run(
         return (
             0
             if result.get("state") == "completed"
-            or result.get("terminal_reason")
-            in {"generation_budget", "resume_generation_complete"}
+            or result.get("terminal_reason") == "generation_budget"
             else 1
         )
     config = load_experiment_config(config_path)
