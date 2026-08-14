@@ -1647,6 +1647,51 @@ def test_interrupted_provider_turn_is_consumed_without_external_repeat(
     assert resumed.calls == []
 
 
+def test_interrupted_provider_resume_budget_is_derived_from_workspace(
+    tmp_path: Path,
+) -> None:
+    class Crash(BaseException):
+        pass
+
+    class CrashingProvider(_Provider):
+        def generate_root(self, **kwargs: Any) -> M5ProviderResultV1:
+            del kwargs
+            raise Crash
+
+    options = _options(repairs=24)
+    with pytest.raises(Crash):
+        _run(
+            tmp_path,
+            provider=CrashingProvider(),
+            concurrency=_Concurrency(parties=1),
+            options=options,
+        )
+
+    budget = search_module.automatic_resume_budget(
+        root=tmp_path,
+        options=options,
+    )
+
+    assert budget == ScientificResumeBudgetV1(
+        expected_pending_primary_slots=8,
+        max_new_repair_turns=8,
+    )
+    search_module._RuntimeTelemetry(
+        tmp_path,
+        options,
+        budget,
+    )
+    runtime = read_json(tmp_path / search_module.M10_RUNTIME_FILENAME)
+    assert isinstance(runtime, Mapping)
+    assert runtime["resume_budget_guard"] == {
+        "protocol_id": "mforge.native.python.resume_budget.v1",
+        "expected_pending_primary_slots": 8,
+        "max_new_repair_turns": 8,
+        "provider_started_baseline": runtime["provider_started_keys"],
+        "repair_turn_baseline": runtime["repair_turn_keys"],
+    }
+
+
 def test_current_generation_resume_retries_pending_and_caps_new_repairs(
     tmp_path: Path,
 ) -> None:

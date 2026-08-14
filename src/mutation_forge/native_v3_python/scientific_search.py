@@ -2519,12 +2519,12 @@ def _report(
     return report
 
 
-def resolve_resume_generation(
+def _resume_generation_boundary(
     *,
     root: Path,
     options: ScientificSearchOptionsV2,
-    budget: ScientificResumeBudgetV1,
-) -> tuple[int, tuple[str, ...]]:
+) -> tuple[int, tuple[str, ...]] | None:
+    del options
     manifests: list[int] = []
     incomplete: list[int] = []
     pending_primary: dict[int, tuple[str, ...]] = {}
@@ -2549,7 +2549,9 @@ def resolve_resume_generation(
         if terminal < core.POPULATION_SIZE:
             incomplete.append(generation)
             pending_primary[generation] = tuple(pending)
-    if not manifests or len(incomplete) != 1:
+    if not manifests or not incomplete:
+        return None
+    if len(incomplete) != 1:
         raise core.M5InfrastructureError(
             "current-generation resume requires exactly one incomplete existing generation"
         )
@@ -2563,11 +2565,82 @@ def resolve_resume_generation(
             raise core.M5InfrastructureError(
                 "generation history is incomplete before the resume boundary"
             )
-    pending_ids = pending_primary[generation]
-    if len(pending_ids) != budget.expected_pending_primary_slots:
+    return generation, pending_primary[generation]
+
+
+def automatic_resume_budget(
+    *,
+    root: Path,
+    options: ScientificSearchOptionsV2,
+) -> ScientificResumeBudgetV1 | None:
+    boundary = _resume_generation_boundary(root=root, options=options)
+    if boundary is None:
+        return None
+    _generation, pending_ids = boundary
+    runtime_path = root / M10_RUNTIME_FILENAME
+    if runtime_path.is_file():
+        raw_runtime = read_json(runtime_path)
+        raw_guard = (
+            raw_runtime.get("resume_budget_guard")
+            if isinstance(raw_runtime, Mapping)
+            else None
+        )
+        if raw_guard is not None:
+            if not isinstance(raw_guard, Mapping):
+                raise core.M5InfrastructureError("M10 resume budget guard is malformed")
+            expected_pending = raw_guard.get("expected_pending_primary_slots")
+            max_repairs = raw_guard.get("max_new_repair_turns")
+            if (
+                not isinstance(expected_pending, int)
+                or isinstance(expected_pending, bool)
+                or not isinstance(max_repairs, int)
+                or isinstance(max_repairs, bool)
+            ):
+                raise core.M5InfrastructureError("M10 resume budget guard is malformed")
+            try:
+                budget = ScientificResumeBudgetV1(
+                    expected_pending_primary_slots=expected_pending,
+                    max_new_repair_turns=max_repairs,
+                )
+            except ValueError as error:
+                raise core.M5InfrastructureError(
+                    "M10 resume budget guard is malformed"
+                ) from error
+            if len(pending_ids) > budget.expected_pending_primary_slots:
+                raise core.M5InfrastructureError(
+                    "pending primary slot count increased after resume admission"
+                )
+            return budget
+    if not pending_ids:
+        return None
+    configured_repairs = options.repair_turn_limit
+    return ScientificResumeBudgetV1(
+        expected_pending_primary_slots=len(pending_ids),
+        max_new_repair_turns=min(
+            core.POPULATION_SIZE,
+            configured_repairs
+            if configured_repairs is not None
+            else core.POPULATION_SIZE,
+        ),
+    )
+
+
+def resolve_resume_generation(
+    *,
+    root: Path,
+    options: ScientificSearchOptionsV2,
+    budget: ScientificResumeBudgetV1,
+) -> tuple[int, tuple[str, ...]]:
+    boundary = _resume_generation_boundary(root=root, options=options)
+    if boundary is None:
+        raise core.M5InfrastructureError(
+            "current-generation resume requires exactly one incomplete existing generation"
+        )
+    generation, pending_ids = boundary
+    if len(pending_ids) > budget.expected_pending_primary_slots:
         raise core.M5InfrastructureError(
             "pending primary slot count changed: "
-            f"expected {budget.expected_pending_primary_slots}, "
+            f"admitted at most {budget.expected_pending_primary_slots}, "
             f"found {len(pending_ids)}"
         )
     return generation, pending_ids
@@ -3053,7 +3126,7 @@ def run_sustained_search(
 
             if (
                 resume_budget is not None
-                and len(provider_task_list) != resume_budget.expected_pending_primary_slots
+                and len(provider_task_list) > resume_budget.expected_pending_primary_slots
             ):
                 raise core.M5InfrastructureError(
                     "pending primary task identities changed after resume validation"
@@ -3429,6 +3502,7 @@ __all__ = [
     "M10ScientificEvaluator",
     "ScientificResumeBudgetV1",
     "ScientificSearchOptionsV2",
+    "automatic_resume_budget",
     "resolve_resume_generation",
     "run_sustained_search",
 ]

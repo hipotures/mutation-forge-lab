@@ -47,9 +47,6 @@ from mutation_forge.native_v3_python.preview import (
     request_python_preview_stop,
     run_python_preview,
 )
-from mutation_forge.native_v3_python.scientific_search import (
-    ScientificResumeBudgetV1,
-)
 from mutation_forge.output.interactive_dashboard import (
     DashboardCapabilities,
     DashboardState,
@@ -312,26 +309,8 @@ def _experiment_run(
     profiling: bool | None = None,
     dashboard: bool = False,
     until_complete: bool = False,
-    resume_current_generation: int | None = None,
-    max_new_repair_turns: int | None = None,
 ) -> int:
     protocol = experiment_protocol(config_path)
-    if (resume_current_generation is None) != (
-        max_new_repair_turns is None
-    ):
-        raise ValueError(
-            "--resume-current-generation and --max-new-repair-turns "
-            "must be supplied together"
-        )
-    resume_budget = (
-        ScientificResumeBudgetV1(
-            expected_pending_primary_slots=resume_current_generation,
-            max_new_repair_turns=max_new_repair_turns,
-        )
-        if resume_current_generation is not None
-        and max_new_repair_turns is not None
-        else None
-    )
     if protocol == PYTHON_EXPERIMENT_PROTOCOL_ID:
         if until_complete or profiling is not None:
             raise ValueError(
@@ -445,19 +424,11 @@ def _experiment_run(
                 )
                 try:
                     reached_generation_limit = False
-                    if resume_budget is None:
-                        future = executor.submit(
-                            run_python_preview,
-                            config_path,
-                            force_stop=immediate_stop.is_set,
-                        )
-                    else:
-                        future = executor.submit(
-                            run_python_preview,
-                            config_path,
-                            resume_budget=resume_budget,
-                            force_stop=immediate_stop.is_set,
-                        )
+                    future = executor.submit(
+                        run_python_preview,
+                        config_path,
+                        force_stop=immediate_stop.is_set,
+                    )
                     try:
                         while True:
                             try:
@@ -498,13 +469,7 @@ def _experiment_run(
                         cancel_futures=immediate_stop.is_set(),
                     )
         else:
-            if resume_budget is None:
-                result = run_python_preview(config_path)
-            else:
-                result = run_python_preview(
-                    config_path,
-                    resume_budget=resume_budget,
-                )
+            result = run_python_preview(config_path)
         encoded = json.dumps(
             result,
             ensure_ascii=False,
@@ -572,11 +537,6 @@ def _experiment_run(
             or result.get("terminal_reason")
             in {"generation_budget", "resume_generation_complete"}
             else 1
-        )
-    if resume_budget is not None:
-        raise ValueError(
-            "current-generation budget is only supported for ordinary-Python "
-            "scientific resumes"
         )
     config = load_experiment_config(config_path)
     control = ExperimentControl()
@@ -1224,23 +1184,6 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
         default=None,
         help="disable native runtime profiling for this invocation",
     )
-    experiment_run.add_argument(
-        "--resume-current-generation",
-        type=int,
-        metavar="EXPECTED_PENDING_PRIMARY_SLOTS",
-        help=(
-            "resume exactly one existing incomplete ordinary-Python "
-            "generation after validating its pending primary-slot count"
-        ),
-    )
-    experiment_run.add_argument(
-        "--max-new-repair-turns",
-        type=int,
-        metavar="COUNT",
-        help=(
-            "cap additional repair calls for --resume-current-generation"
-        ),
-    )
     experiment_status = experiment_commands.add_parser(
         "status",
         help="show read-only operational status",
@@ -1688,23 +1631,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="disable native runtime profiling for this invocation",
     )
-    experiment_run.add_argument(
-        "--resume-current-generation",
-        type=int,
-        metavar="EXPECTED_PENDING_PRIMARY_SLOTS",
-        help=(
-            "resume exactly one existing incomplete ordinary-Python "
-            "generation after validating its pending primary-slot count"
-        ),
-    )
-    experiment_run.add_argument(
-        "--max-new-repair-turns",
-        type=int,
-        metavar="COUNT",
-        help=(
-            "cap additional repair calls for --resume-current-generation"
-        ),
-    )
     experiment_status = experiment_commands.add_parser(
         "status",
         help="show read-only operational status",
@@ -1751,16 +1677,6 @@ def legacy_main(argv: list[str] | None = None) -> int:
                 profiling=getattr(args, "profiling", None),
                 dashboard=getattr(args, "dashboard", False),
                 until_complete=getattr(args, "until_complete", False),
-                resume_current_generation=getattr(
-                    args,
-                    "resume_current_generation",
-                    None,
-                ),
-                max_new_repair_turns=getattr(
-                    args,
-                    "max_new_repair_turns",
-                    None,
-                ),
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(
@@ -1866,16 +1782,6 @@ def main(argv: list[str] | None = None) -> int:
                 profiling=getattr(args, "profiling", None),
                 dashboard=getattr(args, "dashboard", False),
                 until_complete=getattr(args, "until_complete", False),
-                resume_current_generation=getattr(
-                    args,
-                    "resume_current_generation",
-                    None,
-                ),
-                max_new_repair_turns=getattr(
-                    args,
-                    "max_new_repair_turns",
-                    None,
-                ),
             )
         if args.command == "experiment" and args.experiment_command == "status":
             return _experiment_status(

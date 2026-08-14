@@ -50,6 +50,7 @@ from .scientific_search import (
     M10ScientificEvaluator,
     ScientificResumeBudgetV1,
     ScientificSearchOptionsV2,
+    automatic_resume_budget,
     hourly_token_usage,
     resolve_resume_generation,
     run_sustained_search,
@@ -3043,6 +3044,16 @@ def run_python_preview(
         }
         _write_state(config, failed)
         return _progress(config, failed)
+    if (
+        resume_budget is None
+        and existed
+        and config.scientific_search is not None
+        and state.get("resumable") is True
+    ):
+        resume_budget = automatic_resume_budget(
+            root=config.experiment_root,
+            options=config.scientific_search,
+        )
     if resume_budget is not None and (
         not existed or config.scientific_search is None or state.get("resumable") is not True
     ):
