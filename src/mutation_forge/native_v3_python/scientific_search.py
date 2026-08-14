@@ -73,8 +73,6 @@ class ScientificSearchOptionsV2:
     primary_program_slots: int | None
     repair_turn_limit: int | None
     provider_total_turn_limit: int | None
-    validated_queue_target: int
-    validated_queue_capacity: int
     stop_on_verified: bool
     resume_enabled: bool
     replace_terminal_slots: bool
@@ -109,10 +107,6 @@ class ScientificSearchOptionsV2:
             raise ValueError(
                 "provider_total_turn_limit must be omitted when either provider budget is unlimited"
             )
-        if self.validated_queue_target != 2 * self.evaluator_workers:
-            raise ValueError("validated_queue_target must equal twice evaluator_workers")
-        if self.validated_queue_capacity != 4 * self.evaluator_workers:
-            raise ValueError("validated_queue_capacity must equal four times evaluator_workers")
         if not self.stop_on_verified:
             raise ValueError("stop_on_verified must remain enabled")
         if not self.resume_enabled:
@@ -171,6 +165,14 @@ class ScientificSearchOptionsV2:
             if primary is None or self.repair_turn_limit is None
             else primary + self.repair_turn_limit
         )
+
+    @property
+    def validated_queue_target(self) -> int:
+        return 2 * self.evaluator_workers
+
+    @property
+    def validated_queue_capacity(self) -> int:
+        return 4 * self.evaluator_workers
 
 
 @dataclass(frozen=True, slots=True)

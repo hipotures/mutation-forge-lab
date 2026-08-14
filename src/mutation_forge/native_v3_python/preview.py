@@ -371,8 +371,6 @@ def load_python_preview_config(
             "primary_program_slots",
             "repair_turn_limit",
             "provider_total_turn_limit",
-            "validated_queue_target",
-            "validated_queue_capacity",
             "stop_on_verified",
             "resume_enabled",
             "replace_terminal_slots",
@@ -480,14 +478,6 @@ def load_python_preview_config(
                 )
                 if "provider_total_turn_limit" in scientific
                 else None
-            ),
-            validated_queue_target=_positive_integer(
-                scientific["validated_queue_target"],
-                "python_preview.scientific_search.validated_queue_target",
-            ),
-            validated_queue_capacity=_positive_integer(
-                scientific["validated_queue_capacity"],
-                "python_preview.scientific_search.validated_queue_capacity",
             ),
             stop_on_verified=_boolean(
                 scientific["stop_on_verified"],

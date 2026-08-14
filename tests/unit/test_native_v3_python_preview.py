@@ -140,8 +140,6 @@ wall_seconds = 60
 primary_program_slots = 16
 repair_turn_limit = 0
 provider_total_turn_limit = 16
-validated_queue_target = 4
-validated_queue_capacity = 8
 stop_on_verified = true
 resume_enabled = true
 replace_terminal_slots = false
@@ -162,6 +160,16 @@ replay = false
         encoding="utf-8",
     )
     return path
+
+
+def test_validated_queue_limits_follow_evaluator_workers(tmp_path: Path) -> None:
+    loaded = load_python_preview_config(
+        _scientific_status_config(tmp_path, exp_id="derived-queue-limits")
+    )
+
+    assert loaded.scientific_search is not None
+    assert loaded.scientific_search.validated_queue_target == 4
+    assert loaded.scientific_search.validated_queue_capacity == 8
 
 
 def _source(label: str) -> str:

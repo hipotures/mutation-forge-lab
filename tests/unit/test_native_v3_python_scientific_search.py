@@ -462,8 +462,6 @@ def _options(
         primary_program_slots=generations * 8,
         repair_turn_limit=repairs,
         provider_total_turn_limit=generations * 8 + repairs,
-        validated_queue_target=workers * 2,
-        validated_queue_capacity=workers * 4,
         stop_on_verified=True,
         resume_enabled=True,
         replace_terminal_slots=False,
@@ -544,8 +542,6 @@ wall_seconds = {wall_seconds}
 primary_program_slots = {generations * 8}
 repair_turn_limit = {repairs}
 provider_total_turn_limit = {generations * 8 + repairs}
-validated_queue_target = {workers * 2}
-validated_queue_capacity = {workers * 4}
 stop_on_verified = true
 resume_enabled = true
 replace_terminal_slots = false
@@ -2919,8 +2915,6 @@ def test_invocation_controls_do_not_change_scientific_config_identity(
     text = config_path.read_text(encoding="utf-8")
     config_path.write_text(
         text.replace("evaluator_workers = 2", "evaluator_workers = 12")
-        .replace("validated_queue_target = 4", "validated_queue_target = 24")
-        .replace("validated_queue_capacity = 8", "validated_queue_capacity = 48")
         .replace("provider_concurrency = 2", "provider_concurrency = 4")
         .replace("wall_seconds = 2", "wall_seconds = 60")
         .replace("timeout_seconds = 1", "timeout_seconds = 300"),

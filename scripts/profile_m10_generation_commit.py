@@ -44,8 +44,6 @@ def _options() -> search.ScientificSearchOptionsV2:
         primary_program_slots=8,
         repair_turn_limit=0,
         provider_total_turn_limit=8,
-        validated_queue_target=24,
-        validated_queue_capacity=48,
         stop_on_verified=True,
         resume_enabled=True,
         replace_terminal_slots=False,
