@@ -34,38 +34,55 @@ Extreme selectors expose references, not the numeric extreme. `mode="max"` does 
 ```python
 # all tied vertices having minimum or maximum current-overlay degree
 api.vertices_degree_extreme(mode="max")
+
 # vertices having exactly `degree` in the current overlay
 api.vertices_degree_class(degree)
+
 # vertices tied at min/max sampled witness load for active forbidden `length`; missing loads=0, numeric load hidden
 api.vertices_witness_load_extreme(length, mode="max")
+
 # edges tied at min/max sampled witness load for active forbidden `length`; missing loads=0, numeric load hidden
 api.edges_witness_load_extreme(length, mode="max")
+
 # vertices tied at min/max binary articulation indicator: 1 articulation, 0 otherwise
 api.vertices_articulation_risk(mode="max")
+
 # edges tied at min/max binary bridge indicator: 1 bridge, 0 otherwise
 api.edges_bridge_risk(mode="max")
+
 # all current edges; deletion is not guaranteed to preserve connectivity, minimum degree, or final validity
 api.edges_removable()
+
 # vertices at inclusive current-overlay shortest-path distance [minimum,maximum] from `source`, with 0<=minimum<=maximum
 api.vertices_distance_band(source, minimum, maximum)
+
 # absent edges incident to `vertex` in the current overlay
 api.non_edges_from_vertex(vertex)
+
 # all current absent edges; adding one is not guaranteed to improve or preserve forbidden-cycle structure
 api.non_edges_legal()
+
 # absent edges tied at min/max number of common neighbours of their endpoints; numeric count hidden
 api.non_edges_local_cycle_risk(mode="max")
+
 # opaque current paths u-center-v of length two, identifying a possible fold without revealing vertices
 api.paths_length_two()
+
 # bounded host-generated k-switch candidates, k in {2,3,4}: remove k pairwise vertex-disjoint edges, add k different edges reconnecting exactly the same 2k endpoints
 api.matching_k_switch_reconnections(k)
+
 # same, with supplied current `edge` included among removed source edges
 api.matching_k_switch_reconnections_for_edge(edge, k)
+
 # endpoint relocations: current (u,v) -> (u,w) or (v,w), removing (u,v), preserving one endpoint, replacement edge currently absent; choice opaque
 api.relocations_legal()
+
 # same relocation selector restricted to supplied current `edge`
 api.relocations_legal_for_edge(edge)
+
 # fanouts: current (u,v) -> (u,w)+(v,w), removing (u,v); both additions currently absent; choice opaque
 api.edge_fanouts_legal()
+
 # same fanout selector restricted to supplied current `edge`
 api.edge_fanouts_legal_for_edge(edge)
 ```
@@ -85,14 +102,19 @@ Pass `seed` unchanged. `salt` is a printable string or integer chosen by the pol
 ```python
 # add supplied currently absent edge
 api.add_edge(non_edge)
+
 # remove supplied current edge; action alone does not guarantee connectivity or minimum degree
 api.remove_edge(edge)
+
 # selected relocation: remove (u,v), add either (u,w) or (v,w), preserving exactly one endpoint
 api.relocate_endpoint(relocation)
+
 # remove candidate's k source edges and add its k reconnection edges on exactly the same endpoint set
 api.k_switch(matching)
+
 # selected fanout: remove (u,v), add (u,w)+(v,w); degrees u,v unchanged, degree w +2, edge count +1
 api.edge_fanout(fanout)
+
 # selected fold u-center-v: remove (u,center)+(center,v), add absent (u,v); degrees u,v unchanged, center -2, edge count -1
 api.edge_fold(path)
 ```
