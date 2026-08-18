@@ -117,6 +117,7 @@ The host alone evaluates scientific score and acceptance. Do not infer unexposed
 
 - Use only ordinary local variables, conditionals, helper functions, and statically bounded loops.
 - Helper names start with `helper_`; at most 16 helpers.
+- Helper parameters must not be named `ctx`, `graph`, `api`, `seed`, any defined function name, any allowed built-in, `RewritePlan`, or `NoPlan`. Helpers cannot call the Safe Graph API; every `api.*` call must occur directly inside `propose`.
 - Allowed built-ins only: `abs`, `all`, `any`, `bool`, `enumerate`, `int`, `len`, `max`, `min`, `range`, `reversed`, `sum`, `tuple`.
 - No imports, classes, async, generators, exceptions, context managers, lambdas, comprehensions, recursion, reflection, dynamic attribute access, global/nonlocal state, default arguments, variadic arguments, decorators, or type annotations except the optional exact return annotation above.
 - Do not call `eval`, `exec`, `compile`, `open`, `print`, or any undocumented function.
