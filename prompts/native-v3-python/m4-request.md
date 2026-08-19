@@ -143,6 +143,7 @@ The host alone evaluates scientific score and acceptance. Do not infer unexposed
 - Helper names start with `helper_`; at most 16 helpers.
 - Functions may be defined only at module top level: exactly one `propose` plus optional `helper_*` functions. Nested function definitions are forbidden.
 - Helper parameters must not be named `ctx`, `graph`, `api`, `seed`, any defined function name, any allowed built-in, `RewritePlan`, or `NoPlan`. Helpers cannot call the Safe Graph API; every `api.*` call must occur directly inside `propose`.
+- Do not pass `ctx` or `graph` into helpers under alias names and do not read snapshot attributes through helper parameters such as `snapshot.minimum_degree`. Every `ctx.*` and `graph.*` attribute read must occur directly inside `propose`; if a helper needs such information, pass only the already-read scalar or tuple value.
 - Allowed built-ins only: `abs`, `all`, `any`, `bool`, `enumerate`, `int`, `len`, `max`, `min`, `range`, `reversed`, `sum`, `tuple`. In particular, `str()` is forbidden; use integer salts or literal string salts instead of converting values to strings.
 - Every identifier must match `[A-Za-z][A-Za-z0-9_]{0,63}`. Names beginning with `_` are forbidden, including `_` as a throwaway loop variable.
 - Identity-comparison operators `is` and `is not` are forbidden. Use truthiness (`if value:` / `if not value:`) or documented equality/inequality comparisons instead.
