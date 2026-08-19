@@ -123,11 +123,13 @@ Actions update the private overlay. References can become stale after overlay ed
 
 # Terminal result
 
-Finish with exactly one host-minted terminal result:
+Finish every control-flow path by directly returning exactly one host-minted terminal result:
 ```python
-api.emit()
-api.no_plan(reason="EXPLICIT")
+return api.emit()
+return api.no_plan(reason="EXPLICIT")
 ```
+
+Bare terminal calls are invalid at runtime: never write `api.emit()` or `api.no_plan(...)` without `return`, and never call one and then use a separate bare `return`.
 
 `emit()` computes the net rewrite relative to the input graph, rejects no-effect results, requires a connected final graph with minimum degree at least three, and asks the trusted host to validate the candidate. It returns a host-minted `RewritePlan` or `NoPlan("NO_EFFECT" | "ILLEGAL_FINAL_STATE")`.
 
@@ -141,11 +143,13 @@ The host alone evaluates scientific score and acceptance. Do not infer unexposed
 - Helper names start with `helper_`; at most 16 helpers.
 - Functions may be defined only at module top level: exactly one `propose` plus optional `helper_*` functions. Nested function definitions are forbidden.
 - Helper parameters must not be named `ctx`, `graph`, `api`, `seed`, any defined function name, any allowed built-in, `RewritePlan`, or `NoPlan`. Helpers cannot call the Safe Graph API; every `api.*` call must occur directly inside `propose`.
-- Allowed built-ins only: `abs`, `all`, `any`, `bool`, `enumerate`, `int`, `len`, `max`, `min`, `range`, `reversed`, `sum`, `tuple`.
+- Allowed built-ins only: `abs`, `all`, `any`, `bool`, `enumerate`, `int`, `len`, `max`, `min`, `range`, `reversed`, `sum`, `tuple`. In particular, `str()` is forbidden; use integer salts or literal string salts instead of converting values to strings.
+- Every identifier must match `[A-Za-z][A-Za-z0-9_]{0,63}`. Names beginning with `_` are forbidden, including `_` as a throwaway loop variable.
+- Identity-comparison operators `is` and `is not` are forbidden. Use truthiness (`if value:` / `if not value:`) or documented equality/inequality comparisons instead.
 - No imports, classes, async, generators, exceptions, context managers, lambdas, comprehensions, recursion, reflection, dynamic attribute access, global/nonlocal state, default arguments, variadic arguments, decorators, or type annotations except the optional exact return annotation above.
 - Do not call `eval`, `exec`, `compile`, `open`, `print`, or any undocumented function.
 - Use only bounded literal tuples, lists, and dictionaries.
-- Every `for` loop must be statically bounded by a documented selector result, a bounded literal, or `range(...)` with at most 64 trips.
+- Every `for` loop must have a bound the static validator can prove directly. Safe forms include iterating a local assigned directly from a documented selector, iterating a bounded literal tuple/list, or `range(...)` whose trip count is determined entirely by integer literals and is at most 64. Do not iterate `ctx.forbidden_lengths` directly and do not use `range(variable)`, `range(min(...))`, or another dynamically computed range bound even when the runtime value would be small.
 - Do not construct `RewritePlan` or `NoPlan` directly.
 - Do not access files, environment variables, clocks, processes, network resources, scoring, verification, or host state.
 
